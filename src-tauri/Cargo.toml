@@ -1,6 +1,6 @@
 [package]
 name = "porthop"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.89"
 description = "Porthop SSH tunnel manager"
@@ -38,6 +38,7 @@ zeroize = "1"
 russh-sftp = "3.0.0"
 tauri-plugin-dialog = "2.7.3"
 base64 = "0.23.1"
+tauri-plugin-updater = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "3", features = ["OSX_10_15"] }

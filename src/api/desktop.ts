@@ -31,7 +31,26 @@ export interface MetricsCache {
   bytes: number;
   samples: number;
 }
+export interface UpdateStatus {
+  enabled: boolean;
+  currentVersion: string;
+  phase:
+    | "idle"
+    | "checking"
+    | "downloading"
+    | "ready"
+    | "installing"
+    | "current"
+    | "error";
+  version: string | null;
+  downloaded: number;
+  total: number | null;
+  error: string | null;
+}
 interface Commands {
+  update_status: Command<undefined, UpdateStatus>;
+  check_for_updates: Command<undefined, void>;
+  install_update: Command<undefined, void>;
   get_metrics_cache: Command<undefined, MetricsCache>;
   clear_metrics_cache: Command<undefined, MetricsCache>;
   get_startup_settings: Command<undefined, StartupSettings>;

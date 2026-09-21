@@ -1,0 +1,94 @@
+name: macOS release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag (for example v0.3.0)
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: macos-release
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - run: npm ci
+      - name: Verify release version
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import json, os, tomllib
+          version = json.load(open('package.json'))['version']
+          assert os.environ['RELEASE_TAG'] == 'v' + version
+          assert json.load(open('src-tauri/tauri.conf.json'))['version'] == version
+          assert tomllib.load(open('src-tauri/Cargo.toml', 'rb'))['package']['version'] == version
+          PY
+      - name: Configure signing
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+          APPLE_ENTITLEMENTS: ${{ secrets.APPLE_ENTITLEMENTS }}
+        run: |
+          python3 - <<'PY'
+          import base64, os, pathlib, plistlib, secrets, subprocess
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          for name in ['APPLE_CERTIFICATE', 'APPLE_PROVISIONING_PROFILE', 'APPLE_ENTITLEMENTS']:
+              if not os.environ.get(name): raise SystemExit('Missing secret: ' + name)
+          cert = root / 'signing.p12'
+          cert.write_bytes(base64.b64decode(os.environ['APPLE_CERTIFICATE']))
+          profile = root / 'release.provisionprofile'
+          profile.write_bytes(base64.b64decode(os.environ['APPLE_PROVISIONING_PROFILE']))
+          ent = root / 'release.entitlements'
+          ent.write_text(os.environ['APPLE_ENTITLEMENTS'])
+          assert not plistlib.loads(ent.read_bytes()).get('com.apple.security.get-task-allow')
+          kc = str(root / 'release.keychain-db')
+          pw = secrets.token_urlsafe(32)
+          def run(*args):
+              result = subprocess.run(args, stdout=subprocess.DEVNULL)
+              if result.returncode: raise SystemExit("Signing setup failed: " + args[0])
+          run('security', 'create-keychain', '-p', pw, kc)
+          run('security', 'set-keychain-settings', '-lut', '7200', kc)
+          run('security', 'unlock-keychain', '-p', pw, kc)
+          run('security', 'import', str(cert), '-k', kc, '-P', os.environ['APPLE_CERTIFICATE_PASSWORD'], '-T', '/usr/bin/codesign')
+          run('security', 'set-key-partition-list', '-S', 'apple-tool:,apple:,codesign:', '-s', '-k', pw, kc)
+          run('security', 'list-keychains', '-d', 'user', '-s', kc)
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write(f'PORTHOP_PROVISIONING_PROFILE={profile}\nPORTHOP_SIGNING_ENTITLEMENTS={ent}\n')
+          PY
+      - name: Build signed and notarized artifacts
+        env:
+          APPLE_SIGNING_IDENTITY: "Developer ID Application: Ruiyang Ke (X6ZPK45A26)"
+          APPLE_TEAM_ID: X6ZPK45A26
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: scripts/release-macos.sh
+      - name: Attach artifacts to draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          gh release create "$RELEASE_TAG" src-tauri/target/release/update/* \
+            --verify-tag --draft --title "Porthop $RELEASE_TAG" --generate-notes
+      - name: Remove temporary signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/release.keychain-db" || true

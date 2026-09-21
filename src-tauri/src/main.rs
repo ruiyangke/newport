@@ -19,6 +19,7 @@ mod ports;
 mod preferences;
 mod ssh;
 mod terminal;
+mod updates;
 mod vault;
 fn main() {
     if let Err(error) = app::run() {

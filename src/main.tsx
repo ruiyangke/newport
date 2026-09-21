@@ -6,6 +6,7 @@ import { Toaster } from "./components/ui/sonner";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { TooltipProvider } from "./components/ui/tooltip";
+import { UpdateNotice } from "./components/UpdateSettings";
 import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./styles.css";
@@ -22,6 +23,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         <MemoryRouter>
           <ErrorBoundary scope="app">
             <App />
+            <UpdateNotice />
           </ErrorBoundary>
         </MemoryRouter>
       </QueryClientProvider>

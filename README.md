@@ -64,3 +64,15 @@ Browse the [user guides](docs/README.md) for clipboard setup, file transfers, st
 ## License
 
 [MIT](LICENSE) © 2026 Ruiyang Ke (ruiyangke). Third-party dependencies and bundled fonts retain their respective licenses.
+
+## Updates
+
+Installed direct-download builds check for updates on launch and every six hours.
+Updates download in the background and are verified before installation. Open
+**Settings → Updates** to check manually or choose **Restart to update**.
+Restarting disconnects sessions and cancels active transfers; saved servers and
+settings are preserved.
+
+Older builds without the updater need one manual upgrade. Development builds do
+not update themselves. Updates become available when a signed release and its
+update manifest are published.

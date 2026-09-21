@@ -61,3 +61,13 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+
+.update-confirmation {
+  margin-top: 16px;
+}
+.update-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}

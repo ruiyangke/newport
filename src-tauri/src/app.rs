@@ -99,6 +99,7 @@ pub fn run() -> anyhow::Result<()> {
     }
     let app = tauri::Builder::default()
         .plugin(logging)
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_sql::Builder::default()
             .add_migrations(&metrics_url, crate::metrics_db::migrations()).build())
         .plugin(tauri_plugin_dialog::init())
@@ -113,9 +114,13 @@ pub fn run() -> anyhow::Result<()> {
         .plugin(window_state)
         .manage(state.clone())
         .manage(sampler)
+        .manage(crate::updates::Updates::new(env!("CARGO_PKG_VERSION").into()))
         .manage(crate::terminal::Sessions::default())
         .manage(crate::files::Operations::default())
         .invoke_handler(tauri::generate_handler![
+            crate::updates::update_status,
+            crate::updates::check_for_updates,
+            crate::updates::install_update,
             crate::files::files_list,
             crate::files::files_preview,
             crate::files::transfer::files_upload,
@@ -228,6 +233,9 @@ pub fn run() -> anyhow::Result<()> {
             if std::env::args().any(|arg| arg == "--autostart") {
                 if let Some(window) = app.get_webview_window("main") { window.hide()?; }
             }
+            setup_workers.lock().unwrap().push(tauri::async_runtime::spawn(
+                crate::updates::background(app.handle().clone()),
+            ));
             log::info!("Desktop and background workers initialized");
             Ok(())
         })
@@ -239,6 +247,8 @@ pub fn run() -> anyhow::Result<()> {
         })
         .build(context)
         .context("Cannot initialize the desktop app")?;
+    let lock = Arc::new(lock);
+    let restart_lock = lock.clone();
     app.run(move |app, event| {
         if let tauri::RunEvent::ExitRequested { ref api, .. } = event {
             if !shutdown_complete.load(Ordering::SeqCst) {
@@ -249,6 +259,7 @@ pub fn run() -> anyhow::Result<()> {
                     let state = app.state::<Shared>().inner().clone();
                     let workers = std::mem::take(&mut *workers.lock().unwrap());
                     let done = shutdown_complete.clone();
+                    let restart_lock = restart_lock.clone();
                     tauri::async_runtime::spawn(async move {
                         for worker in &workers {
                             worker.abort();
@@ -263,7 +274,25 @@ pub fn run() -> anyhow::Result<()> {
                         state.lock().await.shutdown().await;
                         log::info!("Background workers and SSH sessions stopped");
                         done.store(true, Ordering::SeqCst);
-                        app.exit(0);
+                        if app
+                            .state::<crate::updates::Updates>()
+                            .restart
+                            .load(Ordering::SeqCst)
+                        {
+                            // Tauri spawns the replacement before exiting. Release
+                            // ownership first so the new process cannot lose the lock race.
+                            match FileExt::unlock(&*restart_lock) {
+                                Ok(()) => app.request_restart(),
+                                Err(error) => {
+                                    log::error!(
+                                        "Could not release instance lock for restart: {error}"
+                                    );
+                                    app.exit(0);
+                                }
+                            }
+                        } else {
+                            app.exit(0);
+                        }
                     });
                 }
             }

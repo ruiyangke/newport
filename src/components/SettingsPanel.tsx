@@ -1,3 +1,4 @@
+import { UpdateSettings } from "./UpdateSettings";
 import { useState } from "react";
 import {
   queryOptions,
@@ -191,6 +192,7 @@ export function SettingsPanel() {
           </p>
         )}
       </section>
+      <UpdateSettings />
       <MetricsCacheSettings />
       <section aria-labelledby="window-heading">
         <h2 id="window-heading">Window & menu bar</h2>

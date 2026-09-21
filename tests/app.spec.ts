@@ -79,6 +79,16 @@ test.beforeEach(async ({ page }) => {
       Object.defineProperty(window, "__TAURI_INTERNALS__", {
         value: {
           invoke: async (cmd: string, args: Record<string, any>) => {
+            if (cmd === "update_status")
+              return {
+                enabled: true,
+                currentVersion: "0.2.0",
+                phase: "idle",
+                version: null,
+                downloaded: 0,
+                total: null,
+                error: null,
+              };
             if (cmd === "get_startup_settings")
               return { enabled: false, available: true };
             if (cmd === "get_metrics_cache")
@@ -2117,4 +2127,106 @@ test("modal forms keep actions visible at minimum window size", async ({
     path: "test-results/screenshots/modal-tunnel-compact.png",
   });
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
+});
+
+test("Updates download without installing and require an explicit restart", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const bridge = (window as any).__TAURI_INTERNALS__;
+    const original = bridge.invoke;
+    let phase = "idle";
+    (window as any).__updateInstalls = 0;
+    bridge.invoke = async (cmd: string, args: any) => {
+      if (cmd === "update_status")
+        return {
+          enabled: true,
+          currentVersion: "0.2.0",
+          phase,
+          version: "0.3.0",
+          downloaded: 50,
+          total: 100,
+          error: null,
+        };
+      if (cmd === "check_for_updates") {
+        phase = "downloading";
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        phase = "ready";
+        return;
+      }
+      if (cmd === "install_update") {
+        (window as any).__updateInstalls++;
+        return;
+      }
+      return original(cmd, args);
+    };
+  });
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Check for updates", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Check for updates", exact: true }),
+  ).toBeDisabled();
+  const restart = page.getByRole("button", {
+    name: "Restart to update",
+    exact: true,
+  });
+  await expect(restart).toBeEnabled();
+  expect(await page.evaluate(() => (window as any).__updateInstalls)).toBe(0);
+  await restart.click();
+  await expect(
+    page.getByText(
+      "Restarting disconnects active sessions and cancels transfers.",
+    ),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Later", exact: true }).click();
+  expect(await page.evaluate(() => (window as any).__updateInstalls)).toBe(0);
+  await page.screenshot({ path: "test-results/screenshots/updates-ready.png" });
+  await restart.click();
+  await page.getByRole("button", { name: "Restart now", exact: true }).click();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).__updateInstalls))
+    .toBe(1);
+});
+
+test("Updates recover from a failed check", async ({ page }) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const bridge = (window as any).__TAURI_INTERNALS__;
+    const original = bridge.invoke;
+    let phase = "idle";
+    let attempts = 0;
+    bridge.invoke = async (cmd: string, args: any) => {
+      if (cmd === "update_status")
+        return {
+          enabled: true,
+          currentVersion: "0.2.0",
+          phase,
+          version: null,
+          downloaded: 0,
+          total: null,
+          error: null,
+        };
+      if (cmd === "check_for_updates") {
+        if (++attempts === 1) throw new Error("Update server unavailable");
+        phase = "current";
+        return;
+      }
+      return original(cmd, args);
+    };
+  });
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const check = page.getByRole("button", {
+    name: "Check for updates",
+    exact: true,
+  });
+  await check.click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Update server unavailable",
+  );
+  await check.click();
+  await expect(page.getByText("You’re up to date.")).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
 });
