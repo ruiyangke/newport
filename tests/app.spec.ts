@@ -1010,6 +1010,16 @@ test("sidebar resizes, remembers width, and can be restored with the toolbar", a
 }) => {
   await page.goto("/");
   const divider = page.getByRole("separator", { name: "Sidebar width" });
+  const handle = await divider.boundingBox();
+  if (!handle) throw new Error("Sidebar resize handle is missing");
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + 120);
+  await page.mouse.down();
+  await page.mouse.move(260, handle.y + 180, { steps: 8 });
+  await page.mouse.up();
+  await expect(divider).toHaveAttribute("aria-valuenow", "260");
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("");
+  await divider.dblclick();
+  await expect(divider).toHaveAttribute("aria-valuenow", "204");
   await divider.focus();
   await page.keyboard.press("ArrowRight");
   await expect(divider).toHaveAttribute("aria-valuenow", "214");

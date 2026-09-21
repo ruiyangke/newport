@@ -2008,11 +2008,24 @@ kbd {
   width: 6px;
   cursor: col-resize;
   touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
-.sidebar-resizer:hover,
+.sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 3px;
+  width: 1px;
+}
+.sidebar-resizer:hover::after {
+  background: color-mix(in srgb, var(--muted-foreground) 30%, transparent);
+}
 .sidebar-resizer:focus-visible {
-  background: color-mix(in srgb, var(--primary) 30%, transparent);
   outline: none;
+}
+.sidebar-resizer:focus-visible::after {
+  width: 2px;
+  background: color-mix(in srgb, var(--primary) 60%, transparent);
 }
 .mac-shell .window-toolbar {
   height: 52px;

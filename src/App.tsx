@@ -321,6 +321,8 @@ export default function App() {
           aria-valuenow={sidebar.width}
           tabIndex={0}
           onPointerDown={(event) => {
+            if (event.button !== 0) return;
+            event.preventDefault();
             event.currentTarget.setPointerCapture(event.pointerId);
           }}
           onPointerMove={(event) => {
