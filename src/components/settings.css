@@ -1,0 +1,63 @@
+.settings-panel {
+  max-width: 640px;
+}
+.settings-panel section {
+  padding: 22px 0;
+  border-bottom: 1px solid var(--border);
+}
+.settings-panel section:first-child {
+  padding-top: 4px;
+}
+.settings-panel h2 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 16px;
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  font-size: 12px;
+}
+.settings-row [data-slot="select-trigger"] {
+  width: 160px;
+}
+.settings-row small,
+.settings-panel p {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.settings-row small {
+  display: block;
+  margin-top: 4px;
+}
+.settings-panel p + p {
+  margin-top: 8px;
+}
+.settings-error {
+  margin-top: 20px;
+}
+.settings-error p {
+  color: var(--destructive);
+}
+.sidebar-secondary [aria-current="page"] {
+  background: var(--native-selection);
+}
+
+.settings-cache-row {
+  flex-wrap: wrap;
+  gap: 12px 24px;
+}
+.settings-cache-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+.settings-cache-size {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

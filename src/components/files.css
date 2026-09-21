@@ -1,0 +1,505 @@
+/* Files extends the native workspace: a compact path bar, folder disclosures,
+   and one continuous file list. Preview content owns the larger dialog. */
+.files-workspace {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  color: var(--foreground);
+}
+.files-toolbar,
+.files-filters,
+.files-footer,
+.file-preview-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.files-toolbar {
+  padding: 12px 16px;
+  flex-shrink: 0;
+}
+.files-toolbar form {
+  flex: 1;
+  min-width: 0;
+}
+.files-toolbar input {
+  width: 100%;
+}
+.files-filters {
+  padding: 7px 16px;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+}
+.files-filters input {
+  margin-left: auto;
+  width: 180px;
+  min-width: 80px;
+}
+.files-filters button[aria-pressed="true"] {
+  background: var(--accent);
+}
+.files-layout {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  min-height: 0;
+  flex: 1;
+  border-block: 1px solid var(--border);
+}
+.files-no-tree {
+  grid-template-columns: minmax(0, 1fr);
+}
+.file-tree {
+  overflow: auto;
+  padding: 8px;
+  background: var(--native-toolbar, var(--muted));
+  border-right: 1px solid var(--border);
+}
+.file-tree ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.file-tree ul ul {
+  padding-left: 12px;
+}
+.folder-branch {
+  display: flex;
+  align-items: center;
+  border-radius: 5px;
+}
+.folder-branch[data-current="true"] {
+  background: var(--accent);
+}
+.folder-branch > button:first-child {
+  width: 20px;
+  min-width: 20px;
+  padding: 0;
+}
+.folder-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  text-align: left;
+  height: 28px;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.folder-name span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.folder-name svg {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+}
+.file-tree-note {
+  padding: 6px;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+.file-list {
+  overflow: auto;
+  min-width: 0;
+}
+.file-list [data-slot="table-container"] {
+  overflow: visible;
+}
+.file-list table {
+  width: 100%;
+  table-layout: fixed;
+}
+.file-list th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--native-surface, var(--background));
+  height: 30px;
+  font-size: 11px;
+}
+.file-list th:first-child,
+.file-list td:first-child {
+  padding-left: 12px;
+}
+.file-list td {
+  height: 36px;
+  padding-block: 2px;
+  font-size: 12px;
+}
+.file-list th:last-child,
+.file-list td:last-child {
+  width: 38px;
+  padding-inline: 3px;
+}
+.file-list .file-size {
+  width: 76px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.file-list .file-modified {
+  width: 94px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.file-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: none;
+  border: 0;
+  padding: 5px 0;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.file-name svg {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+}
+.file-name span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-name small {
+  color: var(--muted-foreground);
+}
+.file-name:focus-visible,
+.folder-name:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+  border-radius: 5px;
+}
+.file-empty {
+  padding: 35px 16px;
+  text-align: center;
+  color: var(--muted-foreground);
+}
+.files-footer {
+  justify-content: space-between;
+  padding: 7px 16px;
+  min-height: 36px;
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.files-footer > div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.file-error {
+  color: var(--red);
+  padding: 10px;
+  overflow-wrap: anywhere;
+}
+.file-transfer {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  margin-top: 6px;
+}
+.file-transfer > div {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.file-transfer strong {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-transfer span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.file-transfer progress {
+  width: 100%;
+  height: 5px;
+  accent-color: var(--primary);
+}
+[data-slot="dialog-content"].file-preview-dialog {
+  width: min(1040px, calc(100vw - 48px));
+  max-width: none;
+  height: min(760px, calc(100vh - 48px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 9px;
+}
+.file-preview-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--native-toolbar, var(--muted));
+  flex-shrink: 0;
+}
+.file-preview-header > svg {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+}
+.file-preview-identity {
+  flex: 1;
+  min-width: 0;
+}
+.file-preview-identity [data-slot="dialog-title"] {
+  font-size: 13px;
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-preview-identity [data-slot="dialog-description"] {
+  font-size: 11px;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-preview-content {
+  min-height: 0;
+  overflow: auto;
+  flex: 1;
+}
+.file-preview-content:focus-visible,
+.pdf-page:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+.file-preview-content pre {
+  font:
+    12px/1.7 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  white-space: pre;
+  margin: 0;
+  padding: 20px;
+  tab-size: 4;
+}
+.file-preview-content pre.file-text-wrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.file-preview-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: var(--muted);
+}
+.file-preview-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.file-preview-footer {
+  justify-content: space-between;
+  min-height: 40px;
+  padding: 6px 14px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+.file-preview-footer button[aria-pressed="true"] {
+  background: var(--accent);
+}
+.file-preview-message {
+  margin: auto;
+  padding: 28px;
+  max-width: 65ch;
+  text-align: center;
+  color: var(--muted-foreground);
+}
+.file-preview-message .file-error {
+  padding: 0 0 8px;
+}
+.file-preview-pending {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.file-preview-pdf {
+  overflow: hidden;
+}
+.pdf-preview {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.pdf-navigation {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  background: var(--background);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.pdf-page {
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+  padding: 24px;
+  background: var(--muted);
+}
+.pdf-preview canvas {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: auto;
+  background: white;
+  box-shadow: 0 2px 8px #00000018;
+}
+@media (max-width: 800px) {
+  .files-layout {
+    grid-template-columns: 140px minmax(0, 1fr);
+  }
+  .files-no-tree {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .file-list .file-modified {
+    display: none;
+  }
+  .files-toolbar,
+  .files-filters {
+    gap: 4px;
+  }
+  .files-filters input {
+    width: 120px;
+  }
+  .files-toolbar,
+  .files-filters {
+    padding-inline: 10px;
+  }
+  [data-slot="dialog-content"].file-preview-dialog {
+    width: calc(100vw - 24px);
+    height: calc(100vh - 24px);
+    max-height: calc(100vh - 24px);
+  }
+  .file-preview-header {
+    gap: 8px;
+    padding: 10px;
+  }
+  .pdf-page {
+    padding: 12px;
+  }
+}
+
+.file-list:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.files-pane,
+.files-pane > .detail,
+.files-pane .workspace-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+.mac-shell .files-pane > .detail {
+  padding: 0;
+  margin: 0;
+  max-width: none;
+  width: 100%;
+}
+.files-filters > button:first-child {
+  margin-right: auto;
+}
+.files-filters input {
+  width: min(240px, 45%);
+  margin-left: 0;
+}
+.file-transfer {
+  padding: 10px 16px;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+/* PDF.js TextLayer layout contract (Apache-2.0); keep text inert and selectable. */
+.pdf-sheet {
+  position: relative;
+  margin: auto;
+  background: white;
+}
+.pdf-preview .textLayer {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  text-align: initial;
+  line-height: 1;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-size-adjust: none;
+  -webkit-text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+.pdf-preview .textLayer :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.pdf-preview .textLayer > :not(.markedContent),
+.pdf-preview .textLayer .markedContent span:not(.markedContent) {
+  --font-height: 0;
+  --scale-x: 1;
+  --rotate: 0deg;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x))
+    scale(var(--min-font-size-inv));
+}
+.pdf-preview .textLayer .markedContent {
+  display: contents;
+}
+.pdf-preview .textLayer ::selection {
+  background: #1768d74d;
+}
+.pdf-preview .textLayer[data-main-rotation="90"] {
+  transform: rotate(90deg) translateY(-100%);
+}
+.pdf-preview .textLayer[data-main-rotation="180"] {
+  transform: rotate(180deg) translate(-100%, -100%);
+}
+.pdf-preview .textLayer[data-main-rotation="270"] {
+  transform: rotate(270deg) translateX(-100%);
+}

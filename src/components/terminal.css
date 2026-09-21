@@ -1,0 +1,107 @@
+@font-face {
+  font-family: "Porthop Symbols";
+  src: url("../assets/fonts/SymbolsNerdFontMono-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+.terminal-workspace {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.terminal-workspace > .detail,
+.terminal-workspace .workspace-content,
+.terminal-workspace .cockpit,
+.remote-terminal {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.terminal-workspace > .detail {
+  width: 100%;
+}
+.remote-terminal {
+  margin-top: 0;
+}
+.terminal-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+.terminal-identity {
+  flex: 1;
+  min-width: 80px;
+}
+.terminal-identity h2 {
+  margin: 0;
+}
+.terminal-status {
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+.terminal-frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+  background: var(--background);
+  overflow: hidden;
+}
+.terminal-frame:focus-within {
+  border-top-color: var(--ring);
+}
+.terminal-welcome {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+}
+.terminal-welcome h3,
+.terminal-welcome p {
+  margin: 0;
+}
+.terminal-welcome h3 {
+  font-size: 15px;
+  font-weight: 600;
+}
+.terminal-welcome p {
+  overflow-wrap: anywhere;
+  color: var(--muted-foreground);
+}
+.terminal-welcome small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.terminal-surface {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.remote-terminal .cockpit-footnote {
+  flex-shrink: 0;
+  margin: 8px 0 0;
+}
+.terminal-surface .xterm {
+  height: 100%;
+}
+.terminal-surface .xterm-viewport {
+  /* xterm's default black shows below the last whole character row. */
+  background-color: var(--background);
+  overscroll-behavior: contain;
+}

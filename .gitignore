@@ -1,0 +1,27 @@
+.DS_Store
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+*.log
+.impeccable/
+test-results/
+playwright-report/
+
+.venv/
+__pycache__/
+
+# Machine-specific development signing
+.cargo/config.toml
+
+.cargo/*.provisionprofile
+.cargo/*.entitlements
+
+# Local environment and signing material
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile

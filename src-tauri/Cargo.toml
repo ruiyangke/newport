@@ -1,0 +1,53 @@
+[package]
+name = "porthop"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Porthop SSH tunnel manager"
+license = "MIT"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time", "net", "io-util", "rt-multi-thread", "macros", "signal", "fs"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+fs2 = "0.4"
+tempfile = "3"
+dirs = "7"
+url = "2"
+russh = "0.63.3"
+anyhow = "1"
+tar = "0.4"
+hmac = "0.13"
+sha1 = "0.11"
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio", "migrate"] }
+tauri-plugin-window-state = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-log = "2"
+log = "0.4"
+tauri-plugin-autostart = "2"
+tauri-plugin-store = "2"
+tauri-plugin-stronghold = "2"
+sha2 = "0.11"
+zeroize = "1"
+russh-sftp = "3.0.0"
+tauri-plugin-dialog = "2.7.3"
+base64 = "0.23.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3", features = ["OSX_10_15"] }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSImage", "NSBitmapImageRep"] }
+
+# Stronghold snapshot KDF is prohibitively slow without optimization in debug builds.
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }

@@ -1,0 +1,123 @@
+/* Shared modal surfaces. Feature styles own content, not dialog chrome. */
+[data-slot="dialog-overlay"] {
+  background: rgb(0 0 0 / 22%);
+  backdrop-filter: none;
+}
+.dark [data-slot="dialog-overlay"] {
+  background: rgb(0 0 0 / 42%);
+}
+[data-slot="dialog-content"] {
+  border: 0;
+  border-radius: 14px;
+  background: var(--native-surface);
+  color: var(--foreground);
+  box-shadow: 0 16px 56px rgb(0 0 0 / 18%);
+  max-height: calc(100dvh - 32px);
+}
+[data-slot="dialog-content"] [data-slot="dialog-title"] {
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.editor-dialog .dialog-header {
+  background: transparent;
+  border: 0;
+  padding: 20px 24px 12px;
+  gap: 12px;
+}
+.editor-dialog .dialog-header h2 {
+  font-size: 17px;
+  font-weight: 600;
+}
+.editor-dialog .dialog-header > button {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+}
+.editor-dialog .form-body {
+  padding: 8px 24px 20px;
+  gap: 20px;
+}
+.editor-dialog .form-section {
+  gap: 14px;
+}
+.editor-dialog .form-section > legend {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+  margin-bottom: 12px;
+}
+.editor-dialog .field > span {
+  font-weight: 500;
+}
+.editor-dialog .field input,
+.editor-dialog .field [data-slot="select-trigger"] {
+  height: 34px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--native-toolbar) 45%, var(--background));
+  border-color: var(--border);
+  box-shadow: none;
+  font-size: 12px;
+}
+.editor-dialog .field input:focus-visible,
+.editor-dialog .field [data-slot="select-trigger"]:focus-visible {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring) 25%, transparent);
+}
+.editor-dialog .dialog-footer {
+  background: transparent;
+  border: 0;
+  padding: 12px 24px 20px;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.editor-dialog .dialog-footer > button {
+  border-radius: 7px;
+  min-height: 32px;
+  min-width: 76px;
+}
+:root [data-slot="dialog-content"].file-preview-dialog {
+  border-radius: 14px;
+}
+.file-preview-dialog .file-preview-header {
+  padding: 16px 20px;
+  background: transparent;
+}
+.file-preview-dialog .file-preview-footer {
+  padding: 10px 20px;
+  background: transparent;
+}
+[data-slot="dialog-content"].command-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: 520px;
+  max-width: calc(100vw - 32px);
+}
+.command-dialog [data-slot="command"] {
+  min-height: 0;
+}
+.command-dialog [data-slot="command-list"] {
+  overflow-y: auto;
+  min-height: 0;
+}
+@media (max-height: 560px), (max-width: 540px) {
+  .editor-dialog .dialog-header {
+    padding: 14px 18px 8px;
+  }
+  .editor-dialog .form-body {
+    padding: 8px 18px 14px;
+    gap: 16px;
+  }
+  .editor-dialog .dialog-footer {
+    padding: 10px 18px 14px;
+  }
+  .file-preview-dialog .file-preview-header {
+    padding: 12px;
+    gap: 8px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="dialog-overlay"],
+  [data-slot="dialog-content"] {
+    animation: none !important;
+  }
+}

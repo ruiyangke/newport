@@ -1,0 +1,9 @@
+{
+  "hostname": "fixture-linux", "os": "Fixture Linux", "kernel": "6.8",
+  "cores": 8, "uptime": 1234.5, "load": [1.0, 2.0, 3.0], "cpu": 12.5,
+  "memoryTotal": 8192, "memoryUsed": 4096, "swapTotal": 0, "swapUsed": 0,
+  "disks": [{"mount":"/","device":"/dev/test","total":100000,"used":40000,"available":50000}],
+  "network": [{"name":"eth0","received":1000,"sent":2000}],
+  "processes": [{"pid":12,"user":"tester","cpu":4.2,"memory":524288,"state":"S","name":"worker"}],
+  "processCount": 1, "processCpuMode": "lifetime"
+}
