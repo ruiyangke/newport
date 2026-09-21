@@ -44,6 +44,11 @@ def main():
     # archive would make the updater signature invalid after repackaging.
     with tarfile.open(archive, "w:gz") as tar:
         tar.add(app, arcname="Porthop.app")
+    # The standalone signer distinguishes key contents from a key file path.
+    key = os.environ["TAURI_SIGNING_PRIVATE_KEY"]
+    if "\n" not in key and len(key) < 1024 and Path(key).is_file():
+        os.environ["TAURI_SIGNING_PRIVATE_KEY_PATH"] = key
+        del os.environ["TAURI_SIGNING_PRIVATE_KEY"]
     os.environ.setdefault("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", "")
     run(str(root / "node_modules/.bin/tauri"), "signer", "sign", "--app-version", version, str(archive))
     zip_path = args.output / (name + ".zip")
