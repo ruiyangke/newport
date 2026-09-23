@@ -9,6 +9,7 @@ export interface Process {
 export interface Overview {
   sampledAt?: number;
   historyError?: string;
+  collectionError?: string;
   hostname: string;
   os: string;
   kernel: string;

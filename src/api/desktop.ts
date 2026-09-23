@@ -82,6 +82,11 @@ interface Commands {
   set_tunnel_connected: Command<{ id: string; connected: boolean }, void>;
   open_tunnel: Command<{ id: string }, void>;
   discover_ports: Command<{ id: string }, DiscoveredPort[]>;
+  set_integration_enabled: Command<
+    { id: string; feature: "clipboard" | "browser"; enabled: boolean },
+    void
+  >;
+  reinstall_agent: Command<{ id: string }, void>;
   set_clipboard_enabled: Command<{ id: string; enabled: boolean }, void>;
   cockpit_history: Command<{ id: string }, SavedSample[]>;
   cockpit_logs: Command<
@@ -122,6 +127,7 @@ export function desktop<K extends keyof Commands>(
 export function collect<S extends CollectionSection>(
   id: string,
   section: S,
+  refresh = false,
 ): Promise<CollectionData[S]> {
-  return invoke<CollectionData[S]>("cockpit_collect", { id, section });
+  return invoke<CollectionData[S]>("cockpit_collect", { id, section, refresh });
 }

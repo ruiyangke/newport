@@ -24,6 +24,8 @@ test.beforeEach(async ({ page }) => {
               sshPort: 22,
               identityFile: null,
               authMethod: "publicKey",
+              browserEnabled:
+                sessionStorage.getItem("fixture-browser-enabled") === "true",
               clipboardEnabled:
                 sessionStorage.getItem("fixture-clipboard-enabled") === "true",
             },
@@ -189,6 +191,22 @@ test.beforeEach(async ({ page }) => {
                 },
               }));
             }
+            if (
+              cmd === "cockpit_collect" &&
+              args.section === "overview" &&
+              location.search.includes("fixture=ssh-timeout")
+            ) {
+              const attempts = (window as any).__manualMetricAttempts ?? 0;
+              if (args.refresh)
+                (window as any).__manualMetricAttempts = attempts + 1;
+              if (!args.refresh || attempts === 0)
+                throw new Error(
+                  "SSH connection or authentication timed out after 20 seconds: deadline has elapsed",
+                );
+              await new Promise<void>((resolve) => {
+                (window as any).__completeMetricRefresh = resolve;
+              });
+            }
             if (cmd === "cockpit_collect") {
               if (args.section === "overview") {
                 metricCalls++;
@@ -352,17 +370,33 @@ test.beforeEach(async ({ page }) => {
                 errorMessage: null,
                 reconnectAttempt: 0,
               };
-            if (cmd === "set_clipboard_enabled") {
+            if (cmd === "reinstall_agent") {
+              (window as any).__reinstallCount =
+                ((window as any).__reinstallCount ?? 0) + 1;
+              await new Promise<void>((resolve, reject) => {
+                (window as any).__finishReinstall = (fail = false) =>
+                  fail ? reject(new Error("Agent upload failed")) : resolve();
+              });
+              return;
+            }
+            if (cmd === "set_integration_enabled") {
               const server = data.config.servers.find(
                 (server) => server.id === args.id,
               );
-              if (server) server.clipboardEnabled = args.enabled;
+              if (server) {
+                if (args.feature === "browser")
+                  server.browserEnabled = args.enabled;
+                else server.clipboardEnabled = args.enabled;
+              }
               sessionStorage.setItem(
-                "fixture-clipboard-enabled",
+                `fixture-${args.feature}-enabled`,
                 String(args.enabled),
               );
               data.runtime.clipboard[args.id] = {
-                status: args.enabled ? "connected" : "disconnected",
+                status:
+                  server?.clipboardEnabled || server?.browserEnabled
+                    ? "connected"
+                    : "disconnected",
                 errorMessage: null,
                 reconnectAttempt: 0,
               };
@@ -403,6 +437,24 @@ test.beforeEach(async ({ page }) => {
                   containerName: null,
                 },
               ];
+            if (
+              cmd === "discover_ports" &&
+              location.search.includes("fixture=node-ports")
+            )
+              return [
+                {
+                  port: 5174,
+                  address: "0.0.0.0",
+                  processName: "MainThread",
+                  pid: 126945,
+                  user: "ruiyang",
+                  applicationName: "Vite · webcontainers-demo",
+                  executable: "/nix/store/node/bin/node",
+                  workingDirectory: "/home/ruiyang/Projects/webcontainers-demo",
+                  command:
+                    "node /home/ruiyang/Projects/webcontainers-demo/node_modules/.bin/vite --host 0.0.0.0",
+                },
+              ];
             if (cmd === "discover_ports")
               return [
                 {
@@ -410,6 +462,9 @@ test.beforeEach(async ({ page }) => {
                   address: "127.0.0.1",
                   processName: "postgres",
                   pid: 812,
+                  executable: "/usr/lib/postgresql/bin/postgres",
+                  workingDirectory: "/var/lib/postgresql",
+                  command: "postgres -D /var/lib/postgresql",
                 },
               ];
           },
@@ -419,24 +474,27 @@ test.beforeEach(async ({ page }) => {
     { serverId, tunnelId },
   );
 });
-test("clipboard sync enables automatically and shows the remote command", async ({
+test("integration switches are independent and setup is copyable", async ({
   page,
 }) => {
   await page.goto("/");
-  await page.getByRole("tab", { name: "Connections", exact: true }).click();
-  const section = page.locator(".clipboard-section");
-  await expect(
-    section.getByRole("heading", { name: "Clipboard sync" }),
-  ).toBeVisible();
-  await section
-    .getByRole("button", { name: "Enable sync", exact: true })
-    .click();
+  await page.getByRole("tab", { name: "Integration", exact: true }).click();
+  const section = page.locator(".integration-panel");
+  const clipboard = section.getByRole("switch", {
+    name: "Clipboard",
+    exact: true,
+  });
+  const browser = section.getByRole("switch", { name: "Browser", exact: true });
+  await expect(clipboard).not.toBeChecked();
+  await expect(browser).not.toBeChecked();
+  await page.screenshot({
+    path: "test-results/screenshots/integration-off.png",
+  });
+  await browser.click();
   await expect(section.getByText("Connected", { exact: true })).toBeVisible();
-  await expect(
-    section.getByRole("heading", { name: "Set up xclip on your server" }),
-  ).toBeVisible();
+  await expect(clipboard).not.toBeChecked();
   await expect(section.locator(".setup-code-block code")).toHaveText(
-    'export PATH="$HOME/.local/bin:$PATH"',
+    'eval "$("$HOME/.local/bin/porthop-agent" env)"',
   );
   await page.evaluate(() =>
     Object.defineProperty(navigator, "clipboard", {
@@ -450,34 +508,30 @@ test("clipboard sync enables automatically and shows the remote command", async 
   );
   await section.getByRole("button", { name: "Copy", exact: true }).click();
   expect(await page.evaluate(() => (window as any).__copiedSetup)).toBe(
-    'export PATH="$HOME/.local/bin:$PATH"',
+    'eval "$("$HOME/.local/bin/porthop-agent" env)"',
   );
-  await section.locator(".clipboard-path-setup").scrollIntoViewIfNeeded();
-  await page.screenshot({
-    path: "test-results/screenshots/clipboard-path.png",
-  });
-  await section
-    .getByRole("button", { name: "Disable sync", exact: true })
-    .click();
-  await expect(
-    section.getByText("Disconnected", { exact: true }),
-  ).toBeVisible();
-  await expect(
-    section.getByRole("heading", { name: "Set up xclip on your server" }),
-  ).toHaveCount(0);
-});
-test("clipboard PATH guidance is hidden when the shim resolves", async ({
-  page,
-}) => {
-  await page.goto("/?fixture=shim-ready");
-  await page.getByRole("tab", { name: "Connections", exact: true }).click();
-  const section = page.locator(".clipboard-section");
-  await section
-    .getByRole("button", { name: "Enable sync", exact: true })
-    .click();
+  await clipboard.click();
+  await browser.click();
+  await expect(clipboard).toBeChecked();
+  await expect(browser).not.toBeChecked();
   await expect(section.getByText("Connected", { exact: true })).toBeVisible();
-  await expect(section.locator(".clipboard-path-setup")).toHaveCount(0);
+  await page.screenshot({
+    path: "test-results/screenshots/integration-on.png",
+  });
+  await page.setViewportSize({ width: 640, height: 480 });
+  await page.screenshot({
+    path: "test-results/screenshots/integration-small.png",
+  });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await clipboard.click();
+  await expect(section.getByText("Off", { exact: true })).toBeVisible();
+  await expect(section.locator(".setup-code-block")).toHaveCount(0);
 });
+
 test("connect, disconnect, discover and add a forwarded port", async ({
   page,
 }) => {
@@ -501,6 +555,26 @@ test("connect, disconnect, discover and add a forwarded port", async ({
   await expect(
     page.getByRole("heading", { name: "postgres", exact: true }),
   ).toBeVisible();
+  const remote = page.getByRole("table", { name: "Remote ports" });
+  await expect(remote.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(
+    remote.getByText("127.0.0.1:5432", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    remote.getByRole("button", { name: "Forward", exact: true }),
+  ).toHaveCount(0);
+  await page
+    .getByRole("listitem")
+    .filter({
+      has: page.getByRole("heading", { name: "postgres", exact: true }),
+    })
+    .getByRole("button", { name: "Connect", exact: true })
+    .click();
+  await expect(remote.getByText("Connected", { exact: true })).toBeVisible();
+  await remote
+    .getByRole("button", { name: "Edit forward for port 5432" })
+    .click();
+  await expect(page.getByLabel("Local port or range")).toHaveValue("5432");
 });
 test("invalid ranges stay editable and server deletion cascades", async ({
   page,
@@ -1161,7 +1235,14 @@ test("lists expose context, sort state and filtered results", async ({
     .getByRole("button", { name: "Discover ports", exact: true })
     .click();
   const ports = page.getByRole("table", { name: "Remote ports", exact: true });
-  await expect(ports.getByRole("columnheader")).toHaveCount(3);
+  await expect(ports.getByRole("columnheader")).toHaveText([
+    "Port",
+    "Application / address",
+    "PID",
+    "User",
+    "Forwarding",
+    "Actions",
+  ]);
   await expect(
     ports.getByRole("button", { name: "Forward", exact: true }),
   ).toHaveAccessibleDescription(/\d+/);
@@ -1583,39 +1664,31 @@ test("server picker distinguishes accounts, restores focus and offers add after 
   ).toBeVisible();
 });
 
-test("remembered clipboard sharing can be disabled while disconnected", async ({
+test("remembered integrations can retry or be disabled while disconnected", async ({
   page,
 }) => {
   await page.goto("/");
-  await page.getByRole("tab", { name: "Connections", exact: true }).click();
-  const section = page.locator(".clipboard-section");
-  await section
-    .getByRole("button", { name: "Enable sync", exact: true })
-    .click();
-  await expect(
-    section.getByRole("button", { name: "Disable sync", exact: true }),
-  ).toBeVisible();
+  await page.getByRole("tab", { name: "Integration", exact: true }).click();
+  const section = page.locator(".integration-panel");
+  const browser = section.getByRole("switch", { name: "Browser", exact: true });
+  await browser.click();
   await page.reload();
-  await page.getByRole("tab", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Integration", exact: true }).click();
+  await expect(browser).toBeChecked();
   await expect(
     section.getByText("Disconnected", { exact: true }),
   ).toBeVisible();
-  await expect(
-    section.getByRole("button", { name: "Retry sync", exact: true }),
-  ).toBeVisible();
-  await section
-    .getByRole("button", { name: "Disable sync", exact: true })
-    .click();
-  await expect(
-    section.getByRole("button", { name: "Enable sync", exact: true }),
-  ).toBeVisible();
+  await section.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(section.getByText("Connected", { exact: true })).toBeVisible();
   await page.reload();
-  await page.getByRole("tab", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Integration", exact: true }).click();
+  await browser.click();
+  await expect(section.getByText("Off", { exact: true })).toBeVisible();
+  await page.reload();
+  await page.getByRole("tab", { name: "Integration", exact: true }).click();
+  await expect(browser).not.toBeChecked();
   await expect(
-    section.getByRole("button", { name: "Enable sync", exact: true }),
-  ).toBeVisible();
-  await expect(
-    section.getByRole("button", { name: "Retry sync", exact: true }),
+    section.getByRole("button", { name: "Retry", exact: true }),
   ).toHaveCount(0);
 });
 
@@ -1919,6 +1992,8 @@ test("changing a host clears its old metrics and discovered ports", async ({
         return result;
       }
       if (changed && command === "cockpit_history") return [];
+      if (changed && command === "discover_ports")
+        throw new Error("New endpoint is offline");
       if (
         changed &&
         command === "cockpit_collect" &&
@@ -2229,4 +2304,451 @@ test("Updates recover from a failed check", async ({ page }) => {
   await check.click();
   await expect(page.getByText("You’re up to date.")).toBeVisible();
   await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+test("discovered Node applications show useful project context without system details", async ({
+  page,
+}) => {
+  await page.goto("/?fixture=node-ports");
+  await page.getByRole("tab", { name: "Connections", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Discover ports", exact: true })
+    .click();
+  const table = page.getByRole("table", { name: "Remote ports" });
+  await expect(
+    table.getByText("Vite · webcontainers-demo", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    table.getByRole("cell", { name: "126945", exact: true }),
+  ).toBeVisible();
+  await expect(
+    table.getByRole("cell", { name: "ruiyang", exact: true }),
+  ).toBeVisible();
+  await expect(
+    table.getByText("Project directory", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    table.getByText("/home/ruiyang/Projects/webcontainers-demo", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    table.getByText("/nix/store/node/bin/node", { exact: true }),
+  ).toHaveCount(0);
+  await expect(table.locator("summary")).toHaveCount(0);
+  for (const width of [960, 640]) {
+    await page.setViewportSize({ width, height: 680 });
+    await table.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `/tmp/porthop-ports-${width}.png` });
+  }
+  await table.getByRole("button", { name: "Forward", exact: true }).click();
+  await expect(
+    page
+      .getByRole("dialog")
+      .locator('input[value="Vite · webcontainers-demo"]'),
+  ).toBeVisible();
+});
+
+test("ports discover automatically and refresh while Connections is open", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await page.goto("/?fixture=node-ports");
+  await page.getByRole("tab", { name: "Connections", exact: true }).click();
+  await expect(page.getByRole("table", { name: "Remote ports" })).toContainText(
+    "Vite · webcontainers-demo",
+  );
+  await page.evaluate(() => {
+    const bridge = (window as any).__TAURI_INTERNALS__;
+    const original = bridge.invoke;
+    (window as any).__portPolls = 0;
+    bridge.invoke = (cmd: string, args: any) => {
+      if (cmd === "discover_ports") (window as any).__portPolls++;
+      return original(cmd, args);
+    };
+  });
+  await page.clock.fastForward(31_000);
+  await expect
+    .poll(() => page.evaluate(() => (window as any).__portPolls))
+    .toBe(1);
+  await page.getByRole("tab", { name: "Overview", exact: true }).click();
+  await page.clock.fastForward(31_000);
+  expect(await page.evaluate(() => (window as any).__portPolls)).toBe(1);
+});
+test("automatic discovery failure keeps a retry available", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const bridge = (window as any).__TAURI_INTERNALS__;
+    const original = bridge.invoke;
+    (window as any).__portDiscoveryFail = true;
+    bridge.invoke = (cmd: string, args: any) => {
+      if (cmd === "discover_ports" && (window as any).__portDiscoveryFail) {
+        return Promise.reject(new Error("SSH unavailable"));
+      }
+      return original(cmd, args);
+    };
+  });
+  await page.getByRole("tab", { name: "Connections", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Could not refresh ports",
+  );
+  await page.evaluate(() => {
+    (window as any).__portDiscoveryFail = false;
+  });
+  await page
+    .getByRole("button", { name: "Discover ports", exact: true })
+    .click();
+  await expect(page.getByRole("table", { name: "Remote ports" })).toContainText(
+    "postgres",
+  );
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+test("system listeners remain visible without verbose process details", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Connections", exact: true }).click();
+  const table = page.getByRole("table", { name: "Remote ports" });
+  await expect(table).toContainText("postgres");
+  await expect(
+    table.getByText("Project directory", { exact: true }),
+  ).toHaveCount(0);
+  await expect(table).not.toContainText("/var/lib/postgresql");
+  await expect(table).not.toContainText("/usr/lib/postgresql/bin/postgres");
+  await expect(
+    table.getByRole("button", { name: "Forward", exact: true }),
+  ).toBeVisible();
+});
+
+test("process context highlights application and service details across runtimes", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const bridge = (window as any).__TAURI_INTERNALS__;
+    const original = bridge.invoke;
+    bridge.invoke = (cmd: string, args: any) =>
+      cmd === "discover_ports"
+        ? Promise.resolve([
+            {
+              port: 8000,
+              address: "0.0.0.0",
+              pid: 101,
+              user: "deploy",
+              processName: "python3",
+              executable: "/usr/bin/python3",
+              workingDirectory: "/srv/orders",
+              arguments: ["python3", "-m", "uvicorn", "orders:app"],
+            },
+            {
+              port: 8080,
+              address: "0.0.0.0",
+              pid: 102,
+              user: "deploy",
+              processName: "java",
+              executable: "/usr/bin/java",
+              workingDirectory: "/",
+              arguments: ["java", "-jar", "/opt/orders app.jar"],
+            },
+            {
+              port: 5432,
+              address: "127.0.0.1",
+              pid: 103,
+              user: "postgres",
+              processName: "postgres",
+              executable: "/usr/bin/postgres",
+              workingDirectory: "/",
+              arguments: ["postgres", "-D", "/var/lib/postgresql/orders"],
+            },
+            {
+              port: 22,
+              address: "0.0.0.0",
+              pid: 104,
+              user: "root",
+              processName: "sshd",
+              executable: "/usr/sbin/sshd",
+              workingDirectory: "/",
+              arguments: ["sshd", "-D"],
+            },
+          ])
+        : original(cmd, args);
+  });
+  await page.getByRole("tab", { name: "Connections", exact: true }).click();
+  const table = page.getByRole("table", { name: "Remote ports" });
+  await expect(table).toContainText("Module");
+  await expect(table).toContainText("uvicorn");
+  await expect(table).toContainText("/srv/orders");
+  await expect(table).toContainText("/opt/orders app.jar");
+  await expect(table).toContainText("/var/lib/postgresql/orders");
+  const ssh = table.getByRole("row").filter({ hasText: "sshd" });
+  await expect(ssh.locator(".port-project-directory")).toHaveCount(0);
+  for (const width of [960, 640]) {
+    await page.setViewportSize({ width, height: 680 });
+    await table.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `/tmp/porthop-context-${width}.png` });
+  }
+});
+
+test("connected tunnels show destination failure and recovery independently", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const bridge = (window as any).__TAURI_INTERNALS__;
+    const original = bridge.invoke;
+    const callbacks = new Map<number, (event: any) => void>();
+    bridge.transformCallback = (callback: (event: any) => void) => {
+      const id = callbacks.size + 1;
+      callbacks.set(id, callback);
+      return id;
+    };
+    bridge.invoke = (cmd: string, args: any) => {
+      if (cmd === "plugin:event|listen") {
+        if (args.event === "state-changed")
+          (window as any).__stateChanged = callbacks.get(args.handler);
+        return Promise.resolve(args.handler);
+      }
+      if (cmd === "plugin:event|unlisten") return Promise.resolve();
+      return original(cmd, args);
+    };
+  });
+  await page.goto("/");
+  await page.evaluate(() => {
+    const bridge = (window as any).__TAURI_INTERNALS__;
+    const original = bridge.invoke;
+    (window as any).__destination = "unavailable";
+    bridge.invoke = async (cmd: string, args: any) => {
+      const result = await original(cmd, args);
+      if (cmd === "snapshot") {
+        const tunnel = result.config.tunnels[0];
+        result.runtime.tunnels[tunnel.id] = {
+          status: "connected",
+          errorMessage: null,
+          reconnectAttempt: 0,
+        };
+        result.runtime.tunnelHealth = {
+          [tunnel.id]: [
+            {
+              localPort: 3000,
+              remotePort: 3000,
+              status: (window as any).__destination,
+              message:
+                (window as any).__destination === "unavailable"
+                  ? "The server could not connect to this destination."
+                  : null,
+              checkedAt: 1700000000,
+            },
+          ],
+        };
+      }
+      if (cmd === "discover_ports")
+        return [
+          { port: 3000, address: "0.0.0.0", pid: null, processName: null },
+        ];
+      return result;
+    };
+  });
+  await page.waitForFunction(() => !!(window as any).__stateChanged);
+  await page.evaluate(() =>
+    (window as any).__stateChanged({
+      payload: { instanceId: "fixture", revision: 1 },
+    }),
+  );
+  await page.getByRole("tab", { name: "Connections", exact: true }).click();
+  const tunnels = page.getByRole("list", { name: "Tunnels" });
+  const table = page.getByRole("table", { name: "Remote ports" });
+  await expect(tunnels.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(
+    tunnels.getByText("Destination unavailable", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    table.getByText("Destination unavailable", { exact: true }),
+  ).toBeVisible();
+  await tunnels.locator("summary").click();
+  await expect(tunnels).toContainText("The server could not connect");
+  for (const width of [960, 640]) {
+    await page.setViewportSize({ width, height: 680 });
+    await page.screenshot({ path: `/tmp/porthop-health-${width}.png` });
+  }
+  await page.evaluate(() => {
+    (window as any).__destination = "reachable";
+    (window as any).__stateChanged({
+      payload: { instanceId: "fixture", revision: 2 },
+    });
+  });
+  await expect(
+    tunnels.getByText("Destination reachable", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    table.getByText("Destination reachable", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    tunnels.getByText("Destination unavailable", { exact: true }),
+  ).toHaveCount(0);
+});
+
+test("Overview Refresh retries SSH after a cached timeout and remains retryable", async ({
+  page,
+}) => {
+  await page.goto("/?fixture=ssh-timeout");
+  const timeout = page.getByText(
+    /SSH connection or authentication timed out after 20 seconds/,
+  );
+  await expect(timeout).toBeVisible();
+  await page
+    .getByRole("checkbox", { name: "Auto-refresh", exact: true })
+    .uncheck();
+  const refresh = page.getByRole("button", { name: "Refresh", exact: true });
+  await refresh.click();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).__manualMetricAttempts))
+    .toBe(1);
+  await expect(timeout).toBeVisible();
+  await expect(refresh).toBeEnabled();
+  await refresh.click();
+  await expect(
+    page.getByRole("button", { name: "Refreshing…", exact: true }),
+  ).toBeDisabled();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).__manualMetricAttempts))
+    .toBe(2);
+  await page.evaluate(() => (window as any).__completeMetricRefresh());
+  await expect(timeout).toHaveCount(0);
+  await expect(
+    page.getByRole("table", { name: "Processes", exact: true }),
+  ).toBeVisible();
+  await expect(refresh).toBeEnabled();
+});
+
+test("agent reinstall preserves switches, prevents repeat clicks and allows retry", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Integration", exact: true }).click();
+  const clipboard = page.getByRole("switch", {
+    name: "Clipboard",
+    exact: true,
+  });
+  const browser = page.getByRole("switch", { name: "Browser", exact: true });
+  await browser.click();
+  const reinstall = page.getByRole("button", {
+    name: "Reinstall agent",
+    exact: true,
+  });
+  await reinstall.click();
+  await expect(reinstall).toBeDisabled();
+  await expect(reinstall).toHaveAttribute("aria-busy", "true");
+  await expect(browser).toBeDisabled();
+  await expect(clipboard).toBeDisabled();
+  await page.evaluate(() => (window as any).__finishReinstall(true));
+  await expect(
+    page.getByText("Agent upload failed", { exact: false }),
+  ).toBeVisible();
+  await expect(reinstall).toBeEnabled();
+  await expect(browser).toBeChecked();
+  await expect(clipboard).not.toBeChecked();
+  await reinstall.click();
+  await page.evaluate(() => (window as any).__finishReinstall());
+  await expect(
+    page.getByText("Agent reinstalled", { exact: true }),
+  ).toBeVisible();
+  await expect(browser).toBeChecked();
+  await expect(clipboard).not.toBeChecked();
+  await browser.click();
+  await reinstall.click();
+  await page.evaluate(() => (window as any).__finishReinstall());
+  await expect(reinstall).toBeEnabled();
+  await expect(browser).not.toBeChecked();
+  await expect(clipboard).not.toBeChecked();
+  expect(await page.evaluate(() => (window as any).__reinstallCount)).toBe(3);
+});
+
+test("runtime notifications update health and focus reconciles a missed event", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const bridge = (window as any).__TAURI_INTERNALS__;
+    const original = bridge.invoke;
+    const callbacks = new Map<number, (event: any) => void>();
+    bridge.transformCallback = (callback: (event: any) => void) => {
+      const id = callbacks.size + 1;
+      callbacks.set(id, callback);
+      return id;
+    };
+    (window as any).__health = "reachable";
+    (window as any).__revision = 1;
+    bridge.invoke = async (cmd: string, args: any) => {
+      if (cmd === "plugin:event|listen") {
+        if (args.event === "state-changed")
+          (window as any).__stateChanged = callbacks.get(args.handler);
+        return args.handler;
+      }
+      if (cmd === "plugin:event|unlisten") return;
+      const result = await original(cmd, args);
+      if (cmd === "snapshot") {
+        const value = structuredClone(result);
+        value.instanceId = "test-instance";
+        value.revision = (window as any).__revision;
+        for (const id of Object.keys(value.runtime.health))
+          value.runtime.health[id] = (window as any).__health;
+        return value;
+      }
+      return result;
+    };
+  });
+  await page.goto("/");
+  await expect(page.locator(".toolbar-health")).toHaveText("Reachable");
+  await page.waitForFunction(() => !!(window as any).__stateChanged);
+  await page.evaluate(() => {
+    (window as any).__health = "error";
+    (window as any).__revision = 2;
+    (window as any).__stateChanged({
+      payload: { instanceId: "test-instance", revision: 2 },
+    });
+  });
+  await expect(page.locator(".toolbar-health")).toHaveText("Connection failed");
+  await page.evaluate(() => {
+    (window as any).__health = "reachable";
+    (window as any).__revision = 3;
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect(page.locator(".toolbar-health")).toHaveText("Reachable");
+});
+
+test("Overview retains an old reading with its refresh error and clears it on recovery", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const bridge = (window as any).__TAURI_INTERNALS__;
+    const original = bridge.invoke;
+    bridge.invoke = async (cmd: string, args: any) => {
+      const result = await original(cmd, args);
+      if (
+        cmd === "cockpit_collect" &&
+        args.section === "overview" &&
+        !args.refresh
+      )
+        return {
+          ...result,
+          sampledAt: Date.now() - 60_000,
+          collectionError: "Connection interrupted",
+        };
+      return result;
+    };
+  });
+  await page.goto("/");
+  await expect(
+    page.getByText("Connection interrupted", { exact: false }),
+  ).toBeVisible();
+  await expect(page.locator(".overview-refresh")).toContainText("Last reading");
+  await expect(
+    page.getByRole("heading", { name: "System health" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(
+    page.getByText("Connection interrupted", { exact: false }),
+  ).toHaveCount(0);
+  await expect(page.locator(".overview-refresh")).toContainText("Updated");
 });

@@ -1,16 +1,22 @@
-import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { desktop } from "../api/desktop";
 import { keys, useServerScope } from "../query/keys";
-import { readIPC, refreshQuery } from "../query/client";
+import { readIPC } from "../query/client";
+
 export function usePorts(id: string) {
   const scope = useServerScope(id);
-  const client = useQueryClient();
-  const options = queryOptions({
+  const query = useQuery({
     queryKey: keys.ports(scope),
     queryFn: ({ signal }) =>
       readIPC(signal, () => desktop("discover_ports", { id })),
-    staleTime: Infinity,
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   });
-  const query = useQuery({ ...options, enabled: false });
-  return { data: query.data, discover: () => refreshQuery(client, options) };
+  return {
+    data: query.data,
+    error: query.error,
+    isFetching: query.isFetching,
+    discover: () => query.refetch({ cancelRefetch: false, throwOnError: true }),
+  };
 }

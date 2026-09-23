@@ -8,6 +8,7 @@ import {
   useWorkspaceNavigation,
   workspaceViews,
 } from "./hooks/useWorkspaceNavigation";
+import { IntegrationPanel } from "./components/IntegrationPanel";
 import { ConnectionsPanel } from "./components/ConnectionsPanel";
 import { useSnapshot } from "./hooks/useSnapshot";
 import { desktop } from "./api/desktop";
@@ -48,6 +49,7 @@ import {
 import { isTauri } from "@tauri-apps/api/core";
 import {
   FolderOpen,
+  Plug,
   PanelLeft,
   Ellipsis,
   Activity,
@@ -160,6 +162,7 @@ export default function App() {
   const [actionError, setError] = useState("");
   const error = actionError || snapshotError;
   const [editor, setEditor] = useState<Editor | null>(null);
+  const inFlight = useRef(new Set<string>());
   const [pending, setPending] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState<{
     kind: "server" | "tunnel";
@@ -171,6 +174,8 @@ export default function App() {
     task: () => Promise<unknown>,
     message?: string,
   ) => {
+    if (inFlight.current.has(key)) return;
+    inFlight.current.add(key);
     setPending((p) => new Set(p).add(key));
     setError("");
     try {
@@ -184,6 +189,7 @@ export default function App() {
     } catch (e) {
       if (!isCancelledError(e)) setError(String(e));
     } finally {
+      inFlight.current.delete(key);
       setPending((p) => {
         const next = new Set(p);
         next.delete(key);
@@ -265,6 +271,7 @@ export default function App() {
             { value: "containers", label: "Containers", icon: Boxes },
             { value: "commands", label: "Commands", icon: Terminal },
             { value: "files", label: "Files", icon: FolderOpen },
+            { value: "integration", label: "Integration", icon: Plug },
           ].map(({ value, label, icon: Icon }) => (
             <TabsTrigger
               key={value}
@@ -373,12 +380,17 @@ export default function App() {
               </h1>
               {server && !settings && (
                 <span
-                  className={`status toolbar-health ${health === "reachable" ? "connected" : health === "unreachable" ? "error" : ""}`}
+                  title={
+                    data.runtime.connectivity?.[server.id]?.error ?? undefined
+                  }
+                  className={`status toolbar-health ${health === "reachable" ? "connected" : health === "unreachable" || health === "error" ? "error" : ""}`}
                 >
                   <span className="status-dot" />
                   {health === "unknown"
-                    ? "Not checked"
-                    : health[0].toUpperCase() + health.slice(1)}
+                    ? "Connection unknown"
+                    : health === "error"
+                      ? "Connection failed"
+                      : health[0].toUpperCase() + health.slice(1)}
                 </span>
               )}
             </div>
@@ -523,7 +535,8 @@ export default function App() {
                   <Network size={42} strokeWidth={1.25} />
                   <h1>Your servers, one hop away.</h1>
                   <p>
-                    Connect a server to manage its services, files, and SSH tunnels.
+                    Connect a server to manage its services, files, and SSH
+                    tunnels.
                   </p>
                   <Button
                     variant="default"
@@ -548,6 +561,13 @@ export default function App() {
                         <FilesPanel
                           key={`${serverConnectionKey(server)}:${data.runtime.connectionRevisions?.[server.id] ?? 0}`}
                           server={server}
+                        />
+                      ) : view === "integration" ? (
+                        <IntegrationPanel
+                          server={server}
+                          runtime={data.runtime}
+                          pending={pending}
+                          act={act}
                         />
                       ) : view !== "connections" ? (
                         <Cockpit

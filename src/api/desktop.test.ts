@@ -13,6 +13,13 @@ it("preserves the backend wire names and argument shapes", async () => {
   expect(invoke).toHaveBeenLastCalledWith("cockpit_collect", {
     id: "server",
     section: "services",
+    refresh: false,
+  });
+  await collect("server", "overview", true);
+  expect(invoke).toHaveBeenLastCalledWith("cockpit_collect", {
+    id: "server",
+    section: "overview",
+    refresh: true,
   });
 });
 // Compiled by tsc, never executed: invalid IPC requests must remain type errors.

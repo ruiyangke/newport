@@ -143,7 +143,7 @@ export function OverviewPanel({ id }: { id: string }) {
           </div>
           <span className="muted">
             {state.updated
-              ? `${error ? "Last reading" : "Updated"} ${state.updated.toLocaleTimeString()}`
+              ? `${state.stale || !auto ? "Last reading" : "Updated"} ${state.updated.toLocaleTimeString()}`
               : auto
                 ? "Every 10 seconds"
                 : "Auto-refresh paused"}

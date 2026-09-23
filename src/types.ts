@@ -9,6 +9,7 @@ export interface Server {
   agentKeyFingerprint?: string | null;
   authMethod: "publicKey" | "password";
   clipboardEnabled?: boolean;
+  browserEnabled?: boolean;
 }
 // Match Rust Server::same_connection: presentation and clipboard preferences
 // must not reset mounted SSH resources when a snapshot changes.
@@ -39,24 +40,41 @@ export interface Tunnel {
 }
 export type Status =
   "disconnected" | "connecting" | "connected" | "reconnecting" | "error";
+export interface DestinationHealth {
+  localPort: number;
+  remotePort: number;
+  status: "checking" | "reachable" | "unavailable" | "blocked" | "unknown";
+  message: string | null;
+  checkedAt: number | null;
+}
 export interface ConnectionState {
   status: Status;
   errorMessage: string | null;
   reconnectAttempt: number;
 }
 export interface Snapshot {
+  instanceId?: string;
+  revision?: number;
   config: { servers: Server[]; tunnels: Tunnel[] };
   runtime: {
     tunnels: Record<string, ConnectionState>;
+    tunnelHealth?: Record<string, DestinationHealth[]>;
     clipboard: Record<string, ConnectionState>;
     clipboardMessages?: Record<string, string>;
     clipboardPathNeeded?: Record<string, boolean>;
     health: Record<string, string>;
+    connectivity?: Record<string, { status: string; error: string | null }>;
     connectionRevisions?: Record<string, number>;
   };
   loadError: string | null;
 }
 export interface DiscoveredPort {
+  executable?: string | null;
+  workingDirectory?: string | null;
+  command?: string | null;
+  arguments?: string[];
+  user?: string | null;
+  applicationName?: string | null;
   port: number;
   address: string;
   processName: string | null;

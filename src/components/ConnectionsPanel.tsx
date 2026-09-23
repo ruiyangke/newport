@@ -1,4 +1,6 @@
-import { CodeBlock } from "./CodeBlock";
+import { DestinationStatus } from "./DestinationStatus";
+import { processDetails } from "../portDetails";
+import { forwardingHost, forwardsForPort } from "../forwarding";
 import { usePorts } from "../hooks/usePorts";
 import {
   Table,
@@ -18,7 +20,6 @@ import { Button } from "./controls";
 import { StatusLabel } from "./StatusLabel";
 import {
   ArrowRight,
-  Clipboard,
   ExternalLink,
   MoreHorizontal,
   Pencil,
@@ -71,7 +72,6 @@ export function ConnectionsPanel({
 }: Props) {
   const selected = server.id;
   const ports = usePorts(selected);
-  const clip = runtime.clipboard[selected] ?? disconnected;
   return (
     <div className="connections-panel">
       <div className="workspace-masthead">
@@ -165,6 +165,11 @@ export function ConnectionsPanel({
                           .join(" · ")}
                       </small>
                     )}
+                    {state.status === "connected" && (
+                      <DestinationStatus
+                        health={runtime.tunnelHealth?.[t.id]}
+                      />
+                    )}
                     {state.errorMessage && (
                       <p className="connection-error">{state.errorMessage}</p>
                     )}
@@ -257,7 +262,7 @@ export function ConnectionsPanel({
         <div className="section-heading">
           <h2>Remote ports</h2>
           <Button
-            loading={pending.has(`ports-${selected}`)}
+            loading={ports.isFetching}
             onClick={() => {
               const id = selected;
               void act(`ports-${id}`, async () => {
@@ -266,11 +271,22 @@ export function ConnectionsPanel({
             }}
           >
             <Search size={15} />
-            {pending.has(`ports-${selected}`)
-              ? "Discovering…"
-              : "Discover ports"}
+            {ports.isFetching ? "Discovering…" : "Discover ports"}
           </Button>
         </div>
+        <p className="section-description">
+          Refreshes automatically every 30 seconds while this page is open.
+        </p>
+        {ports.error && (
+          <p role="alert" className="section-empty">
+            Could not refresh ports: {ports.error.message}
+          </p>
+        )}
+        {ports.isFetching && !ports.data && (
+          <p role="status" className="section-empty">
+            Discovering listening ports…
+          </p>
+        )}
         {ports.data ? (
           ports.data.length ? (
             <Table
@@ -280,143 +296,127 @@ export function ConnectionsPanel({
               <TableHeader>
                 <TableRow>
                   <TableHead scope="col">Port</TableHead>
-                  <TableHead scope="col">Process / address</TableHead>
+                  <TableHead scope="col">Application / address</TableHead>
+                  <TableHead scope="col" className="numeric">
+                    PID
+                  </TableHead>
+                  <TableHead scope="col">User</TableHead>
+                  <TableHead scope="col">Forwarding</TableHead>
                   <TableHead scope="col">
                     <span className="sr-only">Actions</span>
                   </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {ports.data.map((p) => (
-                  <TableRow key={`${p.address}:${p.port}`}>
-                    <TableCell>
-                      <code id={`remote-port-${p.address}-${p.port}`}>
-                        {p.port}
-                      </code>
-                    </TableCell>
-                    <TableCell>
-                      {p.containerName
-                        ? `${p.containerName} · Docker`
-                        : p.processName || "Owner not reported"}
-                      <small>
-                        {p.address}
-                        {p.pid ? ` · PID ${p.pid}` : ""}
-                      </small>
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        variant="ghost"
-                        className="text-button"
-                        aria-describedby={`remote-port-${p.address}-${p.port}`}
-                        onClick={() =>
-                          setEditor({
-                            kind: "tunnel",
-                            value: {
-                              ...newTunnel(selected, p.port),
-                              remoteHost:
-                                p.address === "::"
-                                  ? "::1"
-                                  : ["0.0.0.0", "*"].includes(p.address)
-                                    ? "127.0.0.1"
-                                    : p.address,
-                              name: p.containerName || p.processName || "",
-                            },
-                            existing: false,
-                          })
-                        }
-                      >
-                        <Plus size={14} />
-                        Forward
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {ports.data.map((p) => {
+                  const forwards = forwardsForPort(tunnels, selected, p);
+                  const details = processDetails(p);
+                  return (
+                    <TableRow key={`${p.address}:${p.port}`}>
+                      <TableCell>
+                        <code id={`remote-port-${p.address}-${p.port}`}>
+                          {p.port}
+                        </code>
+                      </TableCell>
+                      <TableCell>
+                        <span>
+                          {p.containerName
+                            ? `${p.containerName} · Docker`
+                            : p.applicationName ||
+                              p.processName ||
+                              "Owner not reported"}
+                        </span>
+                        <small>{p.address}</small>
+                        {details.map((detail) => (
+                          <div
+                            className="port-project-directory"
+                            key={detail.label}
+                          >
+                            <span>{detail.label}</span>
+                            <code>{detail.value}</code>
+                          </div>
+                        ))}
+                      </TableCell>
+                      <TableCell className="numeric">{p.pid ?? "—"}</TableCell>
+                      <TableCell>{p.user || "—"}</TableCell>
+                      <TableCell>
+                        {forwards.length ? (
+                          forwards.map((t) => (
+                            <div key={t.id} className="port-forward-state">
+                              <StatusLabel
+                                state={runtime.tunnels[t.id] ?? disconnected}
+                              />
+                              <small>
+                                127.0.0.1:{t.localPort + p.port - t.remotePort}
+                              </small>
+                              {runtime.tunnels[t.id]?.status ===
+                                "connected" && (
+                                <DestinationStatus
+                                  health={runtime.tunnelHealth?.[t.id]?.filter(
+                                    (h) => h.remotePort === p.port,
+                                  )}
+                                />
+                              )}
+                              {runtime.tunnels[t.id]?.errorMessage && (
+                                <small>
+                                  {runtime.tunnels[t.id].errorMessage}
+                                </small>
+                              )}
+                              <Button
+                                variant="ghost"
+                                onClick={() =>
+                                  setEditor({
+                                    kind: "tunnel",
+                                    value: t,
+                                    existing: true,
+                                  })
+                                }
+                                aria-label={`Edit forward for port ${p.port}`}
+                              >
+                                Edit
+                              </Button>
+                            </div>
+                          ))
+                        ) : (
+                          <span className="muted">Not forwarded</span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {!forwards.length && (
+                          <Button
+                            variant="ghost"
+                            className="text-button"
+                            aria-describedby={`remote-port-${p.address}-${p.port}`}
+                            onClick={() =>
+                              setEditor({
+                                kind: "tunnel",
+                                value: {
+                                  ...newTunnel(selected, p.port),
+                                  remoteHost: forwardingHost(p.address),
+                                  name:
+                                    p.containerName ||
+                                    p.applicationName ||
+                                    p.processName ||
+                                    "",
+                                },
+                                existing: false,
+                              })
+                            }
+                          >
+                            <Plus size={14} />
+                            Forward
+                          </Button>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           ) : (
             <p className="section-empty">No listening TCP ports found.</p>
           )
         ) : null}
-      </section>
-      <section className="clipboard-section">
-        <div className="section-heading">
-          <h2>
-            <Clipboard size={17} />
-            Clipboard sync
-          </h2>
-          <StatusLabel state={clip} />
-        </div>
-        <p className="section-description">
-          Read your Mac clipboard on this server with{" "}
-          <code>xclip -selection clipboard -o</code>.
-        </p>
-        <p className="clipboard-note">
-          Sends clipboard changes over SSH and resumes on app launch. Use only
-          trusted servers; clipboard files may remain after a lost connection.
-        </p>
-        <div className="clipboard-actions">
-          <Button
-            loading={pending.has(`clip-${selected}`)}
-            onClick={() =>
-              void act(`clip-${selected}`, () =>
-                desktop("set_clipboard_enabled", {
-                  id: selected,
-                  enabled: !server.clipboardEnabled,
-                }),
-              )
-            }
-          >
-            {server.clipboardEnabled ? (
-              <Square size={13} />
-            ) : (
-              <Play size={13} />
-            )}
-            {server.clipboardEnabled ? "Disable sync" : "Enable sync"}
-          </Button>
-          {server.clipboardEnabled && !active(clip.status) && (
-            <Button
-              loading={pending.has(`clip-${selected}`)}
-              onClick={() =>
-                void act(`clip-${selected}`, () =>
-                  desktop("set_clipboard_enabled", {
-                    id: selected,
-                    enabled: true,
-                  }),
-                )
-              }
-            >
-              Retry sync
-            </Button>
-          )}
-        </div>
-        {active(clip.status) && runtime.clipboardMessages?.[selected] && (
-          <p className="clipboard-note">
-            {runtime.clipboardMessages[selected]}
-          </p>
-        )}
-        {clip.status === "connected" &&
-          runtime.clipboardPathNeeded?.[selected] && (
-            <div className="clipboard-path-setup">
-              <h3>Set up xclip on your server</h3>
-              <p className="clipboard-note">
-                SSH can’t find the clipboard shim first. Add this line to
-                ~/.bashrc (Bash) or ~/.zshrc (Zsh) on the server. Run it in your
-                terminal to apply it now.
-              </p>
-              <CodeBlock
-                label="Shell configuration"
-                code={'export PATH="$HOME/.local/bin:$PATH"'}
-              />
-              <p className="clipboard-note">
-                Until then, use{" "}
-                <code>~/.local/bin/xclip -selection clipboard -o</code>. Disable
-                and enable sync to check the SSH PATH again.
-              </p>
-            </div>
-          )}
-        {clip.errorMessage && (
-          <p className="connection-error">{clip.errorMessage}</p>
-        )}
       </section>
     </div>
   );

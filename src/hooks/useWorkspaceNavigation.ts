@@ -8,6 +8,7 @@ export const workspaceViews = [
   "containers",
   "commands",
   "files",
+  "integration",
 ] as const;
 export type WorkspaceView = (typeof workspaceViews)[number];
 
