@@ -4,12 +4,12 @@ A macOS workspace for your remote servers. Manage SSH tunnels, monitor Linux hos
 
 ## What you can do
 
-- **Connect:** save servers, forward local ports, and discover listening services.
+- **Connect:** save servers, forward local ports, and discover listening services with process details and destination status.
 - **Monitor:** inspect CPU, memory, storage, network activity, and recent usage history.
 - **Manage containers:** browse Docker containers and Compose projects, read logs, and start, stop, or restart existing project containers.
 - **Inspect services:** browse systemd services and their logs.
 - **Work remotely:** open an interactive SSH terminal and browse, preview, upload, or download files over SFTP.
-- **Share your clipboard:** send clipboard changes from your Mac to a trusted server, with X11, Wayland, and headless support.
+- **Integrate:** share your Mac clipboard with a trusted server and open its web links on your Mac, with X11, Wayland, and headless clipboard support.
 
 Porthop works as a regular Mac app, with a Dock icon, a menu-bar entry, light and dark themes, and optional launch at login. Closing the window keeps connections running; quitting disconnects them.
 
@@ -27,7 +27,7 @@ Press **⌘K** to find a server or switch workspaces. Open **Settings** to chang
 
 ## Clipboard sync
 
-Enable **Clipboard sync** in Connections to share your Mac clipboard with that server. Sharing is one-way, remembers your choice, and automatically reconnects after temporary connection failures.
+Enable **Clipboard** in Integration to share your Mac clipboard with that server. Sharing is one-way, remembers your choice, and automatically reconnects after temporary connection failures.
 
 On the server, read text with:
 
@@ -35,13 +35,13 @@ On the server, read text with:
 xclip -selection clipboard -o
 ```
 
-Porthop can publish through native `wl-copy` or `xclip`. When no desktop clipboard is available, it installs a read-only `xclip` shim and shows PATH setup instructions if needed. Headless servers do not need an X display.
+Porthop installs one agent for clipboard sharing, headless X11/Wayland image paste, and opening server links on your Mac. It also supports native `wl-copy` and `xclip`. Clipboard and Browser can be enabled independently in Integration. The agent runs over SSH while either is enabled; no separate service is required.
 
 Only enable sharing for servers you trust: copied passwords and other sensitive content are included, and remote clipboard files may remain after a lost connection. See [clipboard setup and behavior](docs/clipboard.md).
 
 ## Compatibility and limits
 
-- Monitoring requires Linux and standard system utilities. Service inspection requires systemd; container features require Docker access. Monitoring does not install agents. Port discovery may use existing non-interactive sudo permission to identify processes.
+- Monitoring requires Linux and standard system utilities. Service inspection requires systemd; container features require Docker access. Monitoring does not install agents. Port discovery may use existing non-interactive sudo permission to identify processes; restricted details remain unavailable.
 - SSH supports key files, system and 1Password agents, and passwords. SSH configuration aliases, ProxyJump, host certificates, and interactive MFA are not supported.
 - Leaving the terminal workspace closes its SSH session. Detached remote jobs may continue; use a session manager such as tmux when you need persistence.
 - Container actions operate on existing containers. They do not deploy Compose files or recreate projects.

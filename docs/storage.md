@@ -6,7 +6,7 @@ Porthop saves its data in `~/Library/Application Support/Porthop`.
 
 | Data | Location and protection |
 | --- | --- |
-| Servers, tunnels, SSH passwords and clipboard preferences | `profiles.stronghold`, encrypted together |
+| Servers, tunnels, SSH passwords and integration preferences | `profiles.stronghold`, encrypted together |
 | Vault unlock key | Device-local macOS Data Protection Keychain |
 | Appearance and sidebar preferences | `preferences.json` |
 | Metric history | `metrics.sqlite3`, not encrypted; endpoint identifiers use keyed fingerprints |
@@ -28,12 +28,12 @@ Older installations may retain a login-Keychain key after transfer to the Data P
 
 ## Saved connection preferences
 
-Clipboard sharing is remembered per server. Temporary connection failures do not clear that preference, and Porthop retries automatically. **Disable sync** saves the off state. Changing a server's host, port or username clears clipboard consent for the new destination.
+Clipboard and Browser preferences are remembered separately for each server. Temporary connection failures do not clear them. Turn either switch off in **Integration** to disable it. Changing a server's host, port or username clears both permissions for the new destination.
 
 Renaming a server preserves active sessions. Connection and authentication changes restart affected sessions. Deleting a server removes its saved profile and passwords, stops its sessions and requests metric-history cleanup. Cleanup errors are reported separately.
 
 ## Protection limits
 
-Profile saves are verified before atomic replacement. Stronghold protects saved profiles, not everything on the Mac or server. Metric measurements, external SSH files, old backups and legacy `SSHTunnelBar` files remain outside the vault.
+Profile saves are verified before atomic replacement. The encrypted vault protects saved profiles, not everything on the Mac or server. Metric measurements, external SSH files, old backups and legacy `SSHTunnelBar` files remain outside the vault.
 
 Remote clipboard files may remain after a lost connection. Database migrations cannot erase filesystem snapshots or old backups. See [clipboard cleanup](clipboard.md#reconnection-and-cleanup) and [security notes](security.md).

@@ -1,8 +1,8 @@
-# Clipboard sync
+# Clipboard sync and the Porthop agent
 
-Clipboard sync sends your Mac's clipboard to a selected server over SSH. It is one-way and opt-in for each server. Enable it in **Connections → Clipboard sync**; the setting is remembered across app launches.
+Enable **Integration → Clipboard** to share your Mac's clipboard with a Linux server. Porthop installs one `porthop-agent` binary for x86_64 or ARM64 and starts it over SSH. The agent handles clipboard storage, headless X11 and Wayland clipboards, and requests to open links on your Mac.
 
-Only share with servers you trust. Clipboard contents can include passwords, tokens and personal information. The server account and privileged users can read the remote copy.
+Sharing is one-way and remembered across app launches. Only enable it for trusted servers: copied passwords and other sensitive content are included, and enabling **Browser** lets processes running as the server account request browser tabs. Clipboard and Browser have independent switches; the shared agent stays connected while either is on.
 
 ## Read the clipboard
 
@@ -10,45 +10,86 @@ On the server:
 
 ```sh
 xclip -selection clipboard -o
-```
-
-To save a PNG image or list available formats:
-
-```sh
 xclip -selection clipboard -o -t image/png > image.png
 xclip -o -t TARGETS
 ```
 
-Porthop installs a small receiver and a read-only `xclip` shim in `~/.local/bin`. The server needs Bash, tar, flock and standard file utilities. Existing executables are preserved; conflicts are reported instead of overwritten.
-
-If the app reports a PATH issue, add this to your server shell's startup file, such as `~/.bashrc` or `~/.zshrc`, then open a new shell:
+The agent installs `xclip`, `wl-paste`, `xdg-open`, and `porthop-browser` aliases in `~/.local/bin`. Existing unrelated commands are preserved. If needed, put that directory first on PATH:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-You can also run `~/.local/bin/xclip -selection clipboard -o` directly. The app checks PATH in the SSH execution environment, which may differ from your interactive shell.
+You can bypass a preserved command with `~/.local/bin/porthop-agent clipboard -o`. The aliases support clipboard reads, not clipboard writes or primary selection.
 
-## Desktop and headless servers
+## Headless image paste
 
-| Environment | Behavior |
-| --- | --- |
-| Wayland | Uses `wl-copy` when installed and a Wayland session is accessible. Read with `wl-paste`. |
-| X11 | Uses native `xclip`, preserving `DISPLAY` and `XAUTHORITY`. If DISPLAY is unset, it tries `:0`. |
-| Headless or inaccessible desktop | The shim reads the stored snapshot without a display. |
+Applications such as Codex read display protocols directly. While sharing is active, the agent serves both X11 and Wayland without a graphical desktop.
 
-Wayland needs the appropriate `WAYLAND_DISPLAY` or `WAYLAND_SOCKET` environment and, for relative sockets, `XDG_RUNTIME_DIR`. With only `XDG_RUNTIME_DIR`, the default socket is `wayland-0`. Porthop does not guess runtime directories or install desktop clipboard tools.
+Add this to your headless shell's startup file:
 
-Desktop publishing falls back from Wayland to X11, then to the stored snapshot. Each native call has a two-second deadline plus a one-second kill grace period. Set `PORTHOP_CLIPBOARD_NATIVE=0` in the remote execution environment to force snapshot-only behavior.
+```sh
+eval "$("$HOME/.local/bin/porthop-agent" env)"
+```
 
-The snapshot holds all captured formats, up to 32 MiB total. Desktop publishing selects one format per update: text, PNG, HTML, then URLs. The shim can read additional snapshot formats, but it does not implement every xclip option or accept clipboard writes. Its primary and secondary selections also refer to the shared clipboard.
+This sets PATH and the environment for currently enabled integrations: the browser command for Browser, and a fixed Wayland socket plus the active X11 display and authority file for Clipboard. Run it once in the current shell too, then start a new Codex process or tmux pane. An existing process keeps its previous environment.
+
+The Wayland socket is always `~/.cache/porthop/clipboard/wayland.sock`. If a reconnect changes the X11 display number, rerun the environment command before starting another X11-only application. These are clipboard-only displays; do not use their environment for graphical applications.
+
+For an isolated command, the same binary can create a temporary display:
+
+```sh
+porthop-agent display --backend x11 -- codex
+porthop-agent display --backend wayland -- codex
+```
+
+Porthop manages the agent's lifetime; no systemd service is needed. If you previously installed the standalone Wayland service, stop it once so the agent can own the fixed socket:
+
+```sh
+systemctl --user disable --now porthop-clipboard-wayland.service
+```
+
+## Open links on your Mac
+
+Enable **Integration → Browser**, then run the shell configuration shown in the app.
+
+```sh
+xdg-open https://example.com
+```
+
+On headless sessions, the alias sends the URL over SSH to your Mac's default browser. On graphical desktops, it delegates to the next native `xdg-open` on PATH. Use `porthop-agent open URL` to explicitly choose your Mac.
+
+The environment command above also configures tools that use `BROWSER`. To configure browser opening alone:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+export BROWSER="$HOME/.local/bin/porthop-browser"
+```
+
+For AWS SSO on the server:
+
+```sh
+aws sso login --profile NAME --use-device-code
+```
+
+AWS's default PKCE flow expects a browser on the same machine; device authorization supports a browser on your Mac. Leave browser opening enabled. See [AWS's SSO guide](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sso.html).
+
+Only HTTP and HTTPS URLs without embedded credentials are accepted. Requests are sent immediately, with no stored queue or browser polling. A successful opener command means the request was forwarded, not that authorization completed. If sharing is disconnected or a request is rate-limited, reconnect or retry.
+
+## Desktop clipboards
+
+When available in the SSH session, the agent publishes through native `wl-copy` or `xclip`. Wayland needs the user's session environment. X11 uses `DISPLAY`, falling back to `:0` when unset, and preserves `XAUTHORITY`. Native tools are optional; headless reads always use the stored snapshot. Each native call has a two-second deadline.
+
+The snapshot holds up to 32 MiB, prioritizing text, PNG, HTML, and URLs. Extra representations that do not fit are skipped. If no format fits, the remote snapshot is cleared. Native desktop publishing selects one format; the agent's clipboard services expose all stored formats.
 
 ## Reconnection and cleanup
 
-Temporary transport failures reconnect automatically after 2, 4, 8, 16, then at most 30 seconds between attempts. Permission and ownership errors stop with an error message. **Disable sync** stops retries and saves the off state.
+One agent owns each server account's clipboard. A single persistent SSH channel carries clipboard updates to Linux and browser requests back to your Mac. Private Unix sockets serve local clients; no network listener or inbound Mac SSH access is needed.
 
-One client owns a server account's snapshot at a time. A persistent client identity lets the same profile reconnect; a new connection token prevents late writes or cleanup from an older connection. Another client cannot take over a live session. Older sessions without a matching client identity may take two minutes to expire.
+Temporary SSH failures retry after 2, 4, 8, 16, then at most 30 seconds. Permission, protocol, and ownership errors stop with an error message. Temporary Mac clipboard-read timeouts retry without dropping the agent connection. Turning an integration off cancels in-flight work immediately. Disabling both integrations stops retries and the agent. Disabling one restarts the agent with only the remaining permission.
 
-Snapshots are stored at `~/.cache/porthop/clipboard/snapshot.tar`, with owner-only directory and file permissions. A heartbeat keeps unchanged content available. The shim refuses stale content two minutes after the last update or heartbeat.
+Snapshots and sockets live in the account-only `~/.cache/porthop/clipboard` directory. The agent removes its snapshot and sockets on normal shutdown or SSH EOF, and stops after 45 seconds without incoming data from Porthop. Upload progress keeps it alive; clipboard uploads have a two-minute deadline, and stalled output is bounded to five seconds. A force-killed agent may leave files; clipboard readers reject snapshots older than two minutes. Native desktop clipboard content is not cleared on disconnect.
 
-Disabling sync or quitting attempts to remove the snapshot. Expiration does not guarantee file deletion after a lost connection. Installed helpers remain for reuse, and native desktop clipboard content is not cleared on disconnect. Changing the profile's host, port or username turns sharing off until you enable it for the new destination.
+Installed binaries and aliases remain for reuse. Porthop compares the bundled binary's checksum before uploading an update and verifies each upload before activation. Changing a profile's host, port, or username turns both integrations off until enabled for the new destination.
+
+To repair the installation, choose **Integration → Reinstall agent**. Porthop replaces its binary, repairs its aliases, and reconnects the integrations you enabled. Your switches remain unchanged.
