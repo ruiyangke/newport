@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
+cargo build --manifest-path tools/agent/Cargo.toml --locked
 fixture_dir="$(mktemp -d /tmp/porthop-ssh-test.XXXXXX)"
 fixture_pid=''
 cleanup() { if [ -n "$fixture_pid" ]; then kill "$fixture_pid" 2>/dev/null || true; wait "$fixture_pid" 2>/dev/null || true; fi; rm -rf "$fixture_dir"; }

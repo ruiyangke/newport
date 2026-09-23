@@ -12,28 +12,42 @@ use uuid::Uuid;
 #[serde(rename_all = "camelCase")]
 pub struct Runtime {
     pub tunnels: HashMap<Uuid, ConnectionState>,
+    pub tunnel_health: HashMap<Uuid, Vec<DestinationHealth>>,
     pub clipboard: HashMap<Uuid, ConnectionState>,
     pub clipboard_messages: HashMap<Uuid, String>,
     pub clipboard_path_needed: HashMap<Uuid, bool>,
     pub health: HashMap<Uuid, String>,
+    pub connectivity: HashMap<Uuid, crate::connectivity::Health>,
     pub connection_revisions: HashMap<Uuid, u64>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
+    pub instance_id: Uuid,
+    pub revision: u64,
     pub config: Config,
     pub runtime: Runtime,
     pub load_error: Option<String>,
 }
 pub type Shared = Arc<tokio::sync::Mutex<Manager>>;
+// Acquire before the manager lock. History I/O must not block snapshots or unrelated commands.
+pub async fn history_guard(state: &Shared) -> tokio::sync::OwnedMutexGuard<()> {
+    let barrier = state.lock().await.history_barrier.clone();
+    barrier.lock_owned().await
+}
 pub struct Manager {
     pub store: Arc<Store>,
     pub config: Config,
     pub runtime: Arc<Mutex<Runtime>>,
     pub load_error: Option<String>,
+    pub history_barrier: Arc<tokio::sync::Mutex<()>>,
     tunnels: HashMap<Uuid, Running>,
     clipboard: HashMap<Uuid, Running>,
     next_connection_revision: u64,
+    connectivity: Mutex<HashMap<Uuid, crate::connectivity::Connectivity>>,
+    version: Mutex<(u64, serde_json::Value)>,
+    instance_id: Uuid,
+    connection_changed_at: HashMap<Uuid, Instant>,
 }
 struct Running {
     cancel: watch::Sender<bool>,
@@ -58,7 +72,12 @@ impl Manager {
             runtime: Arc::new(Mutex::new(Runtime::default())),
             tunnels: HashMap::new(),
             clipboard: HashMap::new(),
+            history_barrier: Arc::default(),
             next_connection_revision: 0,
+            connectivity: Mutex::new(HashMap::new()),
+            version: Mutex::new((0, serde_json::Value::Null)),
+            instance_id: Uuid::new_v4(),
+            connection_changed_at: HashMap::new(),
         }
     }
     pub fn connection_revision(&self, id: Uuid) -> u64 {
@@ -71,6 +90,8 @@ impl Manager {
             .unwrap_or(0)
     }
     pub fn advance_connection_revision(&mut self, id: Uuid) {
+        self.connection_changed_at.insert(id, Instant::now());
+        self.connectivity.lock().unwrap().remove(&id);
         self.next_connection_revision += 1;
         self.runtime
             .lock()
@@ -86,12 +107,51 @@ impl Manager {
                 .iter()
                 .any(|current| current.id == server.id && current.same_connection(server))
     }
-    pub fn snapshot(&self) -> Snapshot {
-        Snapshot {
-            config: self.config.clone(),
-            runtime: self.runtime.lock().unwrap().clone(),
-            load_error: self.load_error.clone(),
+    pub fn observe_connection(
+        &self,
+        server: &Server,
+        revision: u64,
+        started: Instant,
+        result: Result<(), String>,
+    ) {
+        if self.matches_connection(server, revision) {
+            self.connectivity
+                .lock()
+                .unwrap()
+                .entry(server.id)
+                .or_default()
+                .observe(started, result);
         }
+    }
+    pub fn snapshot(&self) -> Snapshot {
+        let mut runtime = self.runtime.lock().unwrap().clone();
+        let mut connectivity = self.connectivity.lock().unwrap();
+        connectivity.retain(|id, _| self.config.servers.iter().any(|s| s.id == *id));
+        runtime.health.clear();
+        for server in &self.config.servers {
+            let health = connectivity
+                .entry(server.id)
+                .or_default()
+                .health(Instant::now());
+            runtime.health.insert(server.id, health.status.into());
+            runtime.connectivity.insert(server.id, health);
+        }
+        let mut snapshot = Snapshot {
+            instance_id: self.instance_id,
+            revision: 0,
+            config: self.config.clone(),
+            runtime,
+            load_error: self.load_error.clone(),
+        };
+        // Object equality ignores map order; only public state changes advance the revision.
+        let payload = serde_json::to_value(&snapshot).expect("snapshot serializes");
+        let mut version = self.version.lock().unwrap();
+        if version.1 != payload {
+            version.0 += 1;
+            version.1 = payload;
+        }
+        snapshot.revision = version.0;
+        snapshot
     }
     pub async fn save(&mut self, config: Config) -> Result<(), String> {
         self.save_with_password(config, None).await
@@ -167,7 +227,11 @@ impl Manager {
         }
         self.set_state(id, false, ConnectionState::default());
     }
-    pub async fn start_clipboard(&mut self, id: Uuid, app: tauri::AppHandle) -> Result<(), String> {
+    pub async fn start_integration(
+        &mut self,
+        id: Uuid,
+        app: tauri::AppHandle,
+    ) -> Result<(), String> {
         if self
             .clipboard
             .get(&id)
@@ -176,6 +240,9 @@ impl Manager {
             return Ok(());
         }
         let server = self.server(id)?;
+        if !server.clipboard_enabled && !server.browser_enabled {
+            return Ok(());
+        }
         let client = crate::clipboard::client_identity(&self.store.directory, id)?;
         self.set_state(id, true, ConnectionState::new(Status::Connecting));
         self.runtime.lock().unwrap().clipboard_messages.remove(&id);
@@ -224,7 +291,7 @@ impl Manager {
         self.clipboard.insert(id, running);
         Ok(())
     }
-    pub async fn stop_clipboard(&mut self, id: Uuid) {
+    pub async fn stop_integration(&mut self, id: Uuid) {
         if let Some(r) = self.clipboard.remove(&id) {
             r.stop().await;
         } else {
@@ -247,16 +314,29 @@ impl Manager {
             .collect()
     }
     pub async fn remember_clipboard(&mut self, id: Uuid, enabled: bool) -> Result<(), String> {
+        self.remember_integration(id, false, enabled).await
+    }
+    pub async fn remember_integration(
+        &mut self,
+        id: Uuid,
+        browser: bool,
+        enabled: bool,
+    ) -> Result<(), String> {
         let mut config = self.config.clone();
         let server = config
             .servers
             .iter_mut()
             .find(|server| server.id == id)
             .ok_or("Server no longer exists.")?;
-        if server.clipboard_enabled == enabled {
+        let preference = if browser {
+            &mut server.browser_enabled
+        } else {
+            &mut server.clipboard_enabled
+        };
+        if *preference == enabled {
             return Ok(());
         }
-        server.clipboard_enabled = enabled;
+        *preference = enabled;
         self.save(config).await
     }
     pub async fn shutdown(&mut self) {
@@ -266,7 +346,7 @@ impl Manager {
         }
         let ids: Vec<_> = self.clipboard.keys().copied().collect();
         for id in ids {
-            self.stop_clipboard(id).await;
+            self.stop_integration(id).await;
         }
     }
     fn set_state(&self, id: Uuid, clipboard: bool, state: ConnectionState) {
@@ -278,6 +358,9 @@ fn set_state(runtime: &Arc<Mutex<Runtime>>, id: Uuid, clipboard: bool, state: Co
     if clipboard {
         r.clipboard.insert(id, state);
     } else {
+        if state.status != Status::Connected {
+            r.tunnel_health.remove(&id);
+        }
         r.tunnels.insert(id, state);
     }
 }
@@ -299,7 +382,7 @@ fn spawn(
                 _ = rx.changed() => break,
                 result = ssh::Forwarding::start(&server, tunnel.as_ref()) => result,
             };
-            let message = match connected {
+            let (message, retryable) = match connected {
                 Ok(forwarding) => {
                     set_state(
                         &runtime,
@@ -313,6 +396,7 @@ fn spawn(
                             _ = rx.changed() => break None,
                             _ = tokio::time::sleep(Duration::from_millis(250)) => {
                                 if let Some(error) = forwarding.error() { break Some(error); }
+                                runtime.lock().unwrap().tunnel_health.insert(id, forwarding.destination_health());
                                 if started.elapsed() > Duration::from_secs(60) { attempt = 0; }
                             }
                         }
@@ -321,14 +405,17 @@ fn spawn(
                     let Some(message) = failure else {
                         break;
                     };
-                    message
+                    (message, true)
                 }
-                Err(error) => format!("{error:#}"),
+                Err(error) => (
+                    format!("{error:#}"),
+                    ssh::is_transient_connection_error(&error),
+                ),
             };
             if *rx.borrow() {
                 break;
             }
-            if !tunnel.as_ref().is_some_and(|t| t.auto_reconnect) || attempt >= 10 {
+            if !retryable || !tunnel.as_ref().is_some_and(|t| t.auto_reconnect) || attempt >= 10 {
                 set_state(
                     &runtime,
                     id,
@@ -358,16 +445,51 @@ fn spawn(
     });
     Ok(Running { cancel, task })
 }
+pub async fn connection_events(
+    state: Shared,
+    mut events: tokio::sync::broadcast::Receiver<crate::connectivity::Observation>,
+) {
+    loop {
+        match events.recv().await {
+            Ok(event) => {
+                let m = state.lock().await;
+                if m.connection_changed_at
+                    .get(&event.server.id)
+                    .is_some_and(|at| *at > event.started)
+                {
+                    continue;
+                }
+                if m.matches_connection(&event.server, m.connection_revision(event.server.id)) {
+                    m.connectivity
+                        .lock()
+                        .unwrap()
+                        .entry(event.server.id)
+                        .or_default()
+                        .observe_at(
+                            event.started,
+                            event.finished,
+                            event.finished_wall,
+                            event.result,
+                        );
+                }
+            }
+            // Probes and future operations reconcile after an overflow.
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
 pub async fn background(state: Shared, app: tauri::AppHandle) {
     {
         let mut m = state.lock().await;
-        let clipboard_ids = m.config.clipboard_servers();
+        let clipboard_ids = m.config.integration_servers();
         log::info!(
             "Restoring clipboard sharing for {} saved profiles",
             clipboard_ids.len()
         );
         for id in clipboard_ids {
-            if let Err(error) = m.start_clipboard(id, app.clone()).await {
+            if let Err(error) = m.start_integration(id, app.clone()).await {
                 m.set_state(id, true, ConnectionState::error(error));
             }
         }
@@ -384,42 +506,32 @@ pub async fn background(state: Shared, app: tauri::AppHandle) {
             }
         }
     }
+    let mut timer = tokio::time::interval(Duration::from_secs(30));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        let servers = { state.lock().await.config.servers.clone() };
-        for server in servers {
-            {
-                let m = state.lock().await;
-                if m.active_tunnels(server.id).iter().any(|id| {
-                    m.runtime
-                        .lock()
-                        .unwrap()
-                        .tunnels
-                        .get(id)
-                        .is_some_and(|s| s.status == Status::Connected)
-                }) {
-                    m.runtime
-                        .lock()
-                        .unwrap()
-                        .health
-                        .insert(server.id, "reachable".into());
-                    continue;
-                }
-                m.runtime
-                    .lock()
-                    .unwrap()
-                    .health
-                    .insert(server.id, "checking".into());
-            }
-            let healthy = ssh::execute(&server, "printf ok", None).await.is_ok();
+        timer.tick().await;
+        let servers = {
             let m = state.lock().await;
-            if m.config.servers.contains(&server) {
-                m.runtime.lock().unwrap().health.insert(
-                    server.id,
-                    if healthy { "reachable" } else { "unreachable" }.into(),
-                );
-            }
+            m.config
+                .servers
+                .iter()
+                .map(|s| (s.clone(), m.connection_revision(s.id)))
+                .collect::<Vec<_>>()
+        };
+        // Independent probes prevent a slow server from delaying every other server.
+        let mut probes = tokio::task::JoinSet::new();
+        for (server, revision) in servers {
+            let state = state.clone();
+            probes.spawn(async move {
+                let started = Instant::now();
+                let result = ssh::execute(&server, "printf ok", None).await.map(|_| ());
+                state
+                    .lock()
+                    .await
+                    .observe_connection(&server, revision, started, result);
+            });
         }
-        tokio::time::sleep(Duration::from_secs(45)).await;
+        while probes.join_next().await.is_some() {}
     }
 }
 
@@ -475,6 +587,7 @@ mod integration_tests {
             agent_key_fingerprint: None,
             auth_method: AuthMethod::PublicKey,
             clipboard_enabled: false,
+            browser_enabled: false,
         };
         let port = free_port();
         let tunnel = Tunnel {
@@ -553,6 +666,45 @@ mod configuration_tests {
         serde_json::from_value(serde_json::json!({"id":Uuid::new_v4(),"name":"Saved","sshHost":"fixture.example","sshUser":"fixture","sshPort":22})).unwrap()
     }
     #[test]
+    fn snapshots_are_versioned_and_obsolete_observations_are_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut manager = Manager::new(Store::for_test(directory.path().into()));
+        let server = server();
+        manager.config.servers.push(server.clone());
+        let initial = manager.snapshot();
+        assert_eq!(initial.revision, manager.snapshot().revision);
+        manager.observe_connection(&server, 0, Instant::now(), Ok(()));
+        let online = manager.snapshot();
+        assert!(online.revision > initial.revision);
+        assert_eq!(online.runtime.health[&server.id], "reachable");
+        manager.advance_connection_revision(server.id);
+        manager.observe_connection(&server, 0, Instant::now(), Ok(()));
+        assert_eq!(manager.snapshot().runtime.health[&server.id], "unknown");
+        manager.config.servers.clear();
+        manager.observe_connection(
+            &server,
+            manager.connection_revision(server.id),
+            Instant::now(),
+            Ok(()),
+        );
+        assert!(!manager.snapshot().runtime.health.contains_key(&server.id));
+        let restarted = Manager::new(Store::for_test(directory.path().into()));
+        assert_ne!(restarted.snapshot().instance_id, initial.instance_id);
+    }
+    #[tokio::test]
+    async fn history_io_does_not_hold_the_manager_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(tokio::sync::Mutex::new(Manager::new(Store::for_test(
+            directory.path().into(),
+        ))));
+        let _history = history_guard(&state).await;
+        tokio::time::timeout(Duration::from_millis(100), async {
+            state.lock().await.snapshot();
+        })
+        .await
+        .expect("snapshot must not wait for history I/O");
+    }
+    #[test]
     fn connection_revisions_keep_metadata_and_reject_obsolete_credentials() {
         let directory = tempfile::tempdir().unwrap();
         let mut manager = Manager::new(Store::for_test(directory.path().into()));
@@ -585,14 +737,14 @@ mod configuration_tests {
             })
             .await
             .unwrap();
-        assert!(manager.config.clipboard_servers().is_empty());
+        assert!(manager.config.integration_servers().is_empty());
         manager.remember_clipboard(id, true).await.unwrap();
         manager.shutdown().await;
         let mut reopened = Manager::new(Store::for_test(directory.path().into()));
-        assert_eq!(reopened.config.clipboard_servers(), vec![id]);
+        assert_eq!(reopened.config.integration_servers(), vec![id]);
         reopened.remember_clipboard(id, false).await.unwrap();
         let reopened = Manager::new(Store::for_test(directory.path().into()));
-        assert!(reopened.config.clipboard_servers().is_empty());
+        assert!(reopened.config.integration_servers().is_empty());
         assert!(reopened.load_error.is_none());
     }
     #[tokio::test]
@@ -613,7 +765,8 @@ mod configuration_tests {
         std::fs::rename(&vault, &backup).unwrap();
         std::fs::create_dir(&vault).unwrap();
         assert!(manager.remember_clipboard(id, true).await.is_err());
-        assert!(manager.config.clipboard_servers().is_empty());
+        assert!(manager.remember_integration(id, true, true).await.is_err());
+        assert!(manager.config.integration_servers().is_empty());
         assert!(manager
             .remember_clipboard(Uuid::new_v4(), true)
             .await
@@ -621,6 +774,34 @@ mod configuration_tests {
         std::fs::remove_dir(&vault).unwrap();
         std::fs::rename(&backup, &vault).unwrap();
         let reopened = Manager::new(Store::for_test(directory.path().into()));
-        assert!(reopened.config.clipboard_servers().is_empty());
+        assert!(reopened.config.integration_servers().is_empty());
+    }
+    #[tokio::test]
+    async fn integration_preferences_are_independent_and_browser_only_resumes() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut manager = Manager::new(Store::for_test(directory.path().into()));
+        let server = server();
+        let id = server.id;
+        manager
+            .save(Config {
+                servers: vec![server],
+                tunnels: vec![],
+            })
+            .await
+            .unwrap();
+        manager.remember_integration(id, true, true).await.unwrap();
+        manager.remember_clipboard(id, true).await.unwrap();
+        manager.remember_clipboard(id, false).await.unwrap();
+        manager.shutdown().await;
+        let mut reopened = Manager::new(Store::for_test(directory.path().into()));
+        assert_eq!(reopened.config.integration_servers(), vec![id]);
+        assert!(!reopened.server(id).unwrap().clipboard_enabled);
+        assert!(reopened.server(id).unwrap().browser_enabled);
+        reopened
+            .remember_integration(id, true, false)
+            .await
+            .unwrap();
+        let reopened = Manager::new(Store::for_test(directory.path().into()));
+        assert!(reopened.config.integration_servers().is_empty());
     }
 }

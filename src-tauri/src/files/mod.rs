@@ -296,6 +296,7 @@ mod integration_tests {
             agent_key_fingerprint: None,
             auth_method: AuthMethod::PublicKey,
             clipboard_enabled: false,
+            browser_enabled: false,
         };
         let sftp = Arc::new(Sftp::connect(&server).await.unwrap());
         let root = list(&sftp, ".").await.unwrap();

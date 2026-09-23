@@ -26,6 +26,8 @@ pub struct Server {
     pub auth_method: AuthMethod,
     #[serde(default)]
     pub clipboard_enabled: bool,
+    #[serde(default)]
+    pub browser_enabled: bool,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -51,6 +53,24 @@ fn yes() -> bool {
 pub struct Config {
     pub servers: Vec<Server>,
     pub tunnels: Vec<Tunnel>,
+}
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum DestinationStatus {
+    Checking,
+    Reachable,
+    Unavailable,
+    Blocked,
+    Unknown,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DestinationHealth {
+    pub local_port: u16,
+    pub remote_port: u16,
+    pub status: DestinationStatus,
+    pub message: Option<String>,
+    pub checked_at: Option<u64>,
 }
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -145,7 +165,41 @@ impl Server {
         Ok(())
     }
 }
+fn forwarding_host(host: &str) -> String {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let host = host
+        .parse::<std::net::IpAddr>()
+        .map(|ip| ip.to_string())
+        .unwrap_or(host);
+    match host.as_str() {
+        "localhost" | "0.0.0.0" => "127.0.0.1".into(),
+        "::" => "::1".into(),
+        _ => host,
+    }
+}
 impl Tunnel {
+    /// Validate new/edited forwards without invalidating older saved profiles.
+    pub fn validate_unique(&self, saved: &[Tunnel]) -> Result<(), String> {
+        self.pairs()?;
+        for other in saved.iter().filter(|t| t.id != self.id) {
+            let local_overlap = self.local_port <= other.local_port_end.unwrap_or(other.local_port)
+                && other.local_port <= self.local_port_end.unwrap_or(self.local_port);
+            if local_overlap {
+                return Err(format!("Local port range overlaps the saved tunnel '{}'. Edit that tunnel or choose another local port.", other.name));
+            }
+            let remote_overlap = self.remote_port
+                <= other.remote_port_end.unwrap_or(other.remote_port)
+                && other.remote_port <= self.remote_port_end.unwrap_or(self.remote_port);
+            if self.server_id == other.server_id
+                && forwarding_host(&self.remote_host) == forwarding_host(&other.remote_host)
+                && remote_overlap
+            {
+                return Err(format!("This remote port is already forwarded by '{}'. Edit the existing tunnel instead.", other.name));
+            }
+        }
+        Ok(())
+    }
+
     pub fn pairs(&self) -> Result<Vec<(u16, u16)>, String> {
         let le = self.local_port_end.unwrap_or(self.local_port);
         let re = self.remote_port_end.unwrap_or(self.remote_port);
@@ -174,16 +228,18 @@ impl Config {
         if let Some(existing) = self.servers.iter_mut().find(|s| s.id == server.id) {
             server.clipboard_enabled =
                 existing.clipboard_enabled && existing.same_destination(&server);
+            server.browser_enabled = existing.browser_enabled && existing.same_destination(&server);
             *existing = server;
         } else {
             server.clipboard_enabled = false;
+            server.browser_enabled = false;
             self.servers.push(server);
         }
     }
-    pub fn clipboard_servers(&self) -> Vec<Uuid> {
+    pub fn integration_servers(&self) -> Vec<Uuid> {
         self.servers
             .iter()
-            .filter(|server| server.clipboard_enabled)
+            .filter(|server| server.clipboard_enabled || server.browser_enabled)
             .map(|server| server.id)
             .collect()
     }
@@ -216,6 +272,51 @@ mod tests {
         serde_json::from_value(serde_json::json!({"id":Uuid::new_v4(),"serverId":Uuid::new_v4(),"name":"test","localPort":8000,"remotePort":80,"remoteHost":"127.0.0.1"})).unwrap()
     }
     #[test]
+    fn prevents_duplicate_destinations_and_local_overlap_but_allows_edits() {
+        let original = tunnel();
+        assert!(original
+            .validate_unique(std::slice::from_ref(&original))
+            .is_ok());
+        let mut candidate = original.clone();
+        candidate.id = Uuid::new_v4();
+        candidate.local_port = 9000;
+        candidate.remote_host = "LOCALHOST.".into();
+        assert!(candidate
+            .validate_unique(std::slice::from_ref(&original))
+            .unwrap_err()
+            .contains("already forwarded"));
+        candidate.server_id = Uuid::new_v4();
+        assert!(candidate
+            .validate_unique(std::slice::from_ref(&original))
+            .is_ok());
+        candidate.local_port = original.local_port;
+        assert!(candidate
+            .validate_unique(std::slice::from_ref(&original))
+            .unwrap_err()
+            .contains("Local port"));
+    }
+    #[test]
+    fn prevents_partial_range_duplicates() {
+        let mut original = tunnel();
+        original.local_port_end = Some(8002);
+        original.remote_port_end = Some(82);
+        let mut candidate = original.clone();
+        candidate.id = Uuid::new_v4();
+        candidate.local_port = 9000;
+        candidate.local_port_end = None;
+        candidate.remote_port = 81;
+        candidate.remote_port_end = None;
+        assert!(candidate
+            .validate_unique(std::slice::from_ref(&original))
+            .is_err());
+        candidate.remote_port = 83;
+        assert!(candidate
+            .validate_unique(std::slice::from_ref(&original))
+            .is_ok());
+        assert_eq!(forwarding_host("0:0:0:0:0:0:0:0"), forwarding_host("::1"));
+        assert_ne!(forwarding_host("::1"), forwarding_host("127.0.0.1"));
+    }
+    #[test]
     fn ranges_are_equal_and_bounded() {
         let mut t = tunnel();
         assert_eq!(t.pairs().unwrap(), vec![(8000, 80)]);
@@ -238,22 +339,25 @@ mod tests {
     }
     #[test]
     fn server_edits_preserve_consent_only_for_the_same_destination() {
-        let server: Server = serde_json::from_value(serde_json::json!({"id":Uuid::new_v4(),"name":"Saved","sshHost":"host","sshUser":"user","sshPort":22,"clipboardEnabled":true})).unwrap();
+        let server: Server = serde_json::from_value(serde_json::json!({"id":Uuid::new_v4(),"name":"Saved","sshHost":"host","sshUser":"user","sshPort":22,"clipboardEnabled":true,"browserEnabled":true})).unwrap();
         let mut config = Config {
             servers: vec![server.clone()],
             tunnels: vec![],
         };
         let mut renamed = server.clone();
         renamed.name = "Renamed".into();
+        renamed.browser_enabled = false;
         renamed.clipboard_enabled = false; // a stale editor must not reset consent
         assert!(renamed.same_connection(&server));
         config.upsert_server(renamed.clone());
         assert!(config.servers[0].clipboard_enabled);
+        assert!(config.servers[0].browser_enabled);
         let mut auth_change = renamed.clone();
         auth_change.identity_file = Some("/new/key".into());
         assert!(!auth_change.same_connection(&server));
         config.upsert_server(auth_change);
         assert!(config.servers[0].clipboard_enabled);
+        assert!(config.servers[0].browser_enabled);
         for field in ["host", "user", "port"] {
             let mut changed = server.clone();
             match field {
@@ -264,15 +368,18 @@ mod tests {
             config.servers = vec![server.clone()];
             config.upsert_server(changed);
             assert!(!config.servers[0].clipboard_enabled);
+            assert!(!config.servers[0].browser_enabled);
         }
         config.servers.clear();
         config.upsert_server(server);
-        assert!(!config.servers[0].clipboard_enabled); // only the explicit toggle opts in
+        assert!(!config.servers[0].clipboard_enabled);
+        assert!(!config.servers[0].browser_enabled); // only the explicit toggle opts in
     }
     #[test]
     fn swift_server_missing_auth_defaults_to_key() {
         let s:Server=serde_json::from_value(serde_json::json!({"id":Uuid::new_v4(),"name":"","sshUser":"user","sshHost":"host","sshPort":22})).unwrap();
         assert_eq!(s.auth_method, AuthMethod::PublicKey);
         assert!(!s.clipboard_enabled);
+        assert!(!s.browser_enabled);
     }
 }

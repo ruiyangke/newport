@@ -1,9 +1,11 @@
+mod agent;
 mod agent_keys;
 mod app;
 mod clipboard;
 mod cockpit;
 mod commands;
 mod config;
+mod connectivity;
 mod credentials;
 mod desktop;
 mod files;

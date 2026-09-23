@@ -4,9 +4,9 @@
   "version": "0.2.1",
   "identifier": "ke.ry.porthop",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run build:agent && npm run dev",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build:agent && npm run build",
     "frontendDist": "../dist"
   },
   "app": {

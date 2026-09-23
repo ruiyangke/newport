@@ -18,8 +18,7 @@ pub(crate) async fn clear_metrics_cache(
     db: State<'_, crate::metrics_db::MetricsDb>,
     sampler: State<'_, crate::metrics_sampler::Sampler>,
 ) -> Result<crate::metrics_db::MetricsCache, String> {
-    // Serialize against sample persistence and profile changes, not collection.
-    let _manager = state.lock().await;
+    let _history = crate::manager::history_guard(&state).await;
     let result = db.clear_cache().await;
     sampler.clear_cache().await;
     result
@@ -41,6 +40,8 @@ pub(crate) async fn cockpit_history(
 pub(crate) async fn cockpit_collect(
     state: State<'_, Shared>,
     sampler: State<'_, crate::metrics_sampler::Sampler>,
+    db: State<'_, crate::metrics_db::MetricsDb>,
+    refresh: Option<bool>,
     id: Uuid,
     section: crate::cockpit::Section,
 ) -> Result<serde_json::Value, String> {
@@ -49,9 +50,21 @@ pub(crate) async fn cockpit_collect(
         (manager.server(id)?, manager.connection_revision(id))
     };
     if matches!(section, crate::cockpit::Section::Overview) {
-        sampler.first_reading(&server, revision).await
+        if refresh.unwrap_or(false) {
+            sampler.sample(&state, &db, &server, revision).await
+        } else {
+            sampler.first_reading(&server, revision).await
+        }
     } else {
-        crate::cockpit::collect(&server, section).await
+        let started = std::time::Instant::now();
+        let result = crate::cockpit::collect(&server, section).await;
+        if result.is_ok() {
+            state
+                .lock()
+                .await
+                .observe_connection(&server, revision, started, Ok(()));
+        }
+        result
     }
 }
 
@@ -138,6 +151,7 @@ pub(crate) async fn save_server(
     password: Option<String>,
 ) -> Result<(), String> {
     server.validate()?;
+    let _history = crate::manager::history_guard(&state).await;
     let mut m = state.lock().await;
     let mut config = m.config.clone();
     let is_new = !m.config.servers.iter().any(|s| s.id == server.id);
@@ -162,13 +176,13 @@ pub(crate) async fn save_server(
         files.cancel_server(Some(server.id));
         terminals.close_server(Some(server.id)).await;
         let active = m.active_tunnels(server.id);
-        m.stop_clipboard(server.id).await;
+        m.stop_integration(server.id).await;
         for id in active {
             m.disconnect(id).await;
             m.connect(id).await?;
         }
-        if m.server(server.id)?.clipboard_enabled {
-            m.start_clipboard(server.id, app).await?;
+        if m.server(server.id)?.clipboard_enabled || m.server(server.id)?.browser_enabled {
+            m.start_integration(server.id, app).await?;
         }
         m.runtime.lock().unwrap().health.remove(&server.id);
     }
@@ -182,6 +196,7 @@ pub(crate) async fn delete_server(
     db: State<'_, crate::metrics_db::MetricsDb>,
     id: Uuid,
 ) -> Result<(), String> {
+    let _history = crate::manager::history_guard(&state).await;
     let mut m = state.lock().await;
     m.server(id)?;
     let db = db.inner().clone();
@@ -202,7 +217,7 @@ pub(crate) async fn delete_server(
     }
     files.cancel_server(Some(id));
     terminals.close_server(Some(id)).await;
-    m.stop_clipboard(id).await;
+    m.stop_integration(id).await;
     m.runtime.lock().unwrap().clipboard.remove(&id);
     m.runtime.lock().unwrap().clipboard_messages.remove(&id);
     m.runtime.lock().unwrap().health.remove(&id);
@@ -218,6 +233,7 @@ pub(crate) async fn save_tunnel(state: State<'_, Shared>, tunnel: Tunnel) -> Res
     tunnel.pairs()?;
     let mut m = state.lock().await;
     m.server(tunnel.server_id)?;
+    tunnel.validate_unique(&m.config.tunnels)?;
     let active = m
         .runtime
         .lock()
@@ -274,18 +290,49 @@ pub(crate) async fn set_clipboard_enabled(
     id: Uuid,
     enabled: bool,
 ) -> Result<(), String> {
+    set_integration_enabled(state, app, id, IntegrationFeature::Clipboard, enabled).await
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum IntegrationFeature {
+    Clipboard,
+    Browser,
+}
+#[tauri::command]
+pub(crate) async fn set_integration_enabled(
+    state: State<'_, Shared>,
+    app: tauri::AppHandle,
+    id: Uuid,
+    feature: IntegrationFeature,
+    enabled: bool,
+) -> Result<(), String> {
     let mut m = state.lock().await;
-    m.remember_clipboard(id, enabled).await?;
-    if enabled {
-        m.start_clipboard(id, app).await
+    let before = m.server(id)?;
+    match feature {
+        IntegrationFeature::Clipboard => m.remember_clipboard(id, enabled).await?,
+        IntegrationFeature::Browser => m.remember_integration(id, true, enabled).await?,
+    }
+    let after = m.server(id)?;
+    if before.clipboard_enabled != after.clipboard_enabled
+        || before.browser_enabled != after.browser_enabled
+    {
+        m.stop_integration(id).await;
+    }
+    if after.clipboard_enabled || after.browser_enabled {
+        m.start_integration(id, app).await
     } else {
-        m.stop_clipboard(id).await;
+        m.stop_integration(id).await;
         Ok(())
     }
 }
+
 #[tauri::command]
 pub(crate) async fn test_connection(state: State<'_, Shared>, id: Uuid) -> Result<(), String> {
-    let server = { state.lock().await.server(id)? };
+    let (server, revision) = {
+        let m = state.lock().await;
+        (m.server(id)?, m.connection_revision(id))
+    };
+    let started = std::time::Instant::now();
     let result = ssh::execute(&server, "printf ok", None)
         .await
         .and_then(|text| {
@@ -295,18 +342,10 @@ pub(crate) async fn test_connection(state: State<'_, Shared>, id: Uuid) -> Resul
                 Err("Unexpected connection test response".into())
             }
         });
-    let m = state.lock().await;
-    if m.config.servers.contains(&server) {
-        m.runtime.lock().unwrap().health.insert(
-            id,
-            if result.is_ok() {
-                "reachable"
-            } else {
-                "unreachable"
-            }
-            .into(),
-        );
-    }
+    state
+        .lock()
+        .await
+        .observe_connection(&server, revision, started, result.clone());
     result
 }
 #[tauri::command]
@@ -314,9 +353,53 @@ pub(crate) async fn discover_ports(
     state: State<'_, Shared>,
     id: Uuid,
 ) -> Result<Vec<crate::ports::DiscoveredPort>, String> {
-    let server = { state.lock().await.server(id)? };
-    crate::ports::discover(&server).await
+    let (server, revision) = {
+        let m = state.lock().await;
+        (m.server(id)?, m.connection_revision(id))
+    };
+    let started = std::time::Instant::now();
+    let result = crate::ports::discover(&server).await;
+    if result.is_ok() {
+        state
+            .lock()
+            .await
+            .observe_connection(&server, revision, started, Ok(()));
+    }
+    result
 }
+#[tauri::command]
+pub(crate) async fn reinstall_agent(
+    state: State<'_, Shared>,
+    app: tauri::AppHandle,
+    id: Uuid,
+) -> Result<(), String> {
+    let (server, revision) = {
+        let mut manager = state.lock().await;
+        let server = manager.server(id)?;
+        let revision = manager.connection_revision(id);
+        manager.stop_integration(id).await;
+        (server, revision)
+    };
+    // Upload without holding the app-wide lock: other servers remain usable.
+    let installed = async {
+        let session = ssh::ExecSession::connect(&server).await?;
+        let result = crate::agent::reinstall(&session).await;
+        session.close().await;
+        result.map(|_| ())
+    }
+    .await;
+    let mut manager = state.lock().await;
+    // Never revive a removed profile or reconnect using edited credentials.
+    let resumed = if manager.matches_connection(&server, revision) {
+        manager.start_integration(id, app).await
+    } else {
+        Ok(())
+    };
+    // Keep preferences and resume even after a failed upload; the atomic
+    // installer leaves the previous binary available when verification fails.
+    installed.and(resumed)
+}
+
 #[tauri::command]
 pub(crate) async fn install_clipboard_helper(
     state: State<'_, Shared>,
@@ -324,7 +407,7 @@ pub(crate) async fn install_clipboard_helper(
 ) -> Result<String, String> {
     let server = { state.lock().await.server(id)? };
     let session = ssh::ExecSession::connect(&server).await?;
-    let result = crate::clipboard::install(&session).await;
+    let result = crate::agent::install(&session).await;
     session.close().await;
     result
 }

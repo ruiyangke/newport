@@ -136,6 +136,7 @@ mod tests {
             agent_key_fingerprint: None,
             auth_method: crate::model::AuthMethod::PublicKey,
             clipboard_enabled: false,
+            browser_enabled: false,
         }
     }
     async fn until(sessions: &Sessions, id: Uuid, needle: &str) {

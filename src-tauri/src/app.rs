@@ -17,7 +17,7 @@ use std::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager as _,
+    Emitter, Manager as _,
 };
 
 pub(crate) fn show(app: &tauri::AppHandle) {
@@ -150,9 +150,11 @@ pub fn run() -> anyhow::Result<()> {
             commands::delete_tunnel,
             commands::set_tunnel_connected,
             commands::set_clipboard_enabled,
+            commands::set_integration_enabled,
             commands::test_connection,
             commands::discover_ports,
             commands::install_clipboard_helper,
+            commands::reinstall_agent,
             commands::open_tunnel
         ])
         .setup(move |app| {
@@ -180,6 +182,10 @@ pub fn run() -> anyhow::Result<()> {
                     _ => {}
                 })
                 .build(app)?;
+            let observations = crate::connectivity::subscribe();
+            setup_workers.lock().unwrap().push(tauri::async_runtime::spawn(
+                manager::connection_events(state.clone(), observations),
+            ));
             setup_workers
                 .lock()
                 .unwrap()
@@ -202,8 +208,15 @@ pub fn run() -> anyhow::Result<()> {
                 .lock()
                 .unwrap()
                 .push(tauri::async_runtime::spawn(async move {
+                    let mut published = 0;
                     loop {
                         let snapshot = status_state.lock().await.snapshot();
+                        if snapshot.revision != published {
+                            published = snapshot.revision;
+                            let _ = handle.emit("state-changed", serde_json::json!({
+                                "instanceId": snapshot.instance_id, "revision": snapshot.revision
+                            }));
+                        }
                         let connected = snapshot
                             .runtime
                             .tunnels

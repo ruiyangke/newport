@@ -1,6 +1,7 @@
 //! SSH transport, forwarding and interactive shell lifecycle.
 mod auth;
 mod exec;
+mod health;
 pub mod sftp;
 #[cfg(test)]
 use exec::execute_result;
@@ -72,40 +73,105 @@ impl Drop for Connection {
         let _ = self.transport.0.shutdown(Shutdown::Both);
     }
 }
+pub(crate) fn is_transient_connection_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        if let Some(error) = cause.downcast_ref::<std::io::Error>() {
+            return matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::UnexpectedEof
+            );
+        }
+        cause.is::<tokio::time::error::Elapsed>()
+            || matches!(
+                cause.downcast_ref::<russh::Error>(),
+                Some(
+                    russh::Error::Disconnect
+                        | russh::Error::HUP
+                        | russh::Error::ConnectionTimeout
+                        | russh::Error::KeepaliveTimeout
+                        | russh::Error::InactivityTimeout
+                        | russh::Error::SendError
+                )
+            )
+            || cause.is::<russh::SendError>()
+    }) || error
+        .chain()
+        .any(|cause| cause.to_string() == "Cannot connect to SSH server")
+}
+
+async fn retry_connection<F, Fut, T>(mut attempt: F, delay: Duration) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    for retry in 0..3 {
+        match attempt().await {
+            Ok(connection) => return Ok(connection),
+            Err(error) if retry < 2 && is_transient_connection_error(&error) => {
+                log::warn!(
+                    "SSH connection interrupted; retrying setup ({}/3)",
+                    retry + 2
+                );
+                tokio::time::sleep(delay * (1 << retry)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
 impl Connection {
     async fn connect(server: &Server) -> Result<Self> {
         server.validate().map_err(anyhow::Error::msg)?;
-        tokio::time::timeout(CONNECT_TIMEOUT, async {
-            let socket = TcpStream::connect((server.ssh_host.as_str(), server.ssh_port))
-                .await
-                .context("Cannot connect to SSH server")?;
-            socket.set_nodelay(true)?;
-            let socket = socket.into_std()?;
-            let transport = Transport(socket.try_clone()?);
-            let error = Arc::new(Mutex::new(None));
-            let handler = Handler {
-                host: server.ssh_host.clone(),
-                port: server.ssh_port,
-                error: error.clone(),
-            };
-            let config = Arc::new(client::Config {
-                keepalive_interval: Some(Duration::from_secs(15)),
-                keepalive_max: 2,
-                nodelay: true,
-                ..Default::default()
-            });
-            let mut handle = client::connect_stream(config, TcpStream::from_std(socket)?, handler)
-                .await
-                .context("SSH handshake or host-key verification failed")?;
-            auth::authenticate(&mut handle, server).await?;
-            Ok::<_, anyhow::Error>(Self {
-                handle,
-                transport,
-                error,
-            })
-        })
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            retry_connection(|| Self::connect_once(server), Duration::from_secs(2)),
+        )
         .await
-        .context("SSH connection or authentication timed out after 20 seconds")?
+        .context("SSH connection or authentication timed out after 20 seconds")
+        .and_then(|result| result);
+        crate::connectivity::report(
+            server,
+            started,
+            result.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")),
+        );
+        result
+    }
+    async fn connect_once(server: &Server) -> Result<Self> {
+        let socket = TcpStream::connect((server.ssh_host.as_str(), server.ssh_port))
+            .await
+            .context("Cannot connect to SSH server")?;
+        socket.set_nodelay(true)?;
+        let socket = socket.into_std()?;
+        let transport = Transport(socket.try_clone()?);
+        let error = Arc::new(Mutex::new(None));
+        let handler = Handler {
+            host: server.ssh_host.clone(),
+            port: server.ssh_port,
+            error: error.clone(),
+        };
+        let config = Arc::new(client::Config {
+            keepalive_interval: Some(Duration::from_secs(15)),
+            keepalive_max: 2,
+            nodelay: true,
+            ..Default::default()
+        });
+        let mut handle = client::connect_stream(config, TcpStream::from_std(socket)?, handler)
+            .await
+            .context("SSH handshake or host-key verification failed")?;
+        auth::authenticate(&mut handle, server).await?;
+        Ok::<_, anyhow::Error>(Self {
+            handle,
+            transport,
+            error,
+        })
     }
     async fn close(&self) {
         let _ = tokio::time::timeout(
@@ -222,6 +288,7 @@ pub struct Forwarding {
     connection: Arc<Connection>,
     tasks: JoinSet<()>,
     failure: Arc<Mutex<Option<String>>>,
+    health: health::Health,
 }
 impl Forwarding {
     pub async fn start(server: &Server, tunnel: Option<&Tunnel>) -> Result<Self> {
@@ -238,7 +305,26 @@ impl Forwarding {
         let connection = Arc::new(Connection::connect(server).await?);
         let failure = Arc::new(Mutex::new(None));
         let mut tasks = JoinSet::new();
+        let health: health::Health = Arc::new(Mutex::new(Vec::new()));
+        let slots = Arc::new(tokio::sync::Semaphore::new(4));
         for (listener, host, remote) in listeners {
+            health
+                .lock()
+                .unwrap()
+                .push(crate::model::DestinationHealth {
+                    local_port: listener.local_addr()?.port(),
+                    remote_port: remote,
+                    status: crate::model::DestinationStatus::Checking,
+                    message: None,
+                    checked_at: None,
+                });
+            tasks.spawn(health::monitor(
+                connection.clone(),
+                host.clone(),
+                remote,
+                health.clone(),
+                slots.clone(),
+            ));
             let conn = connection.clone();
             let failure = failure.clone();
             tasks.spawn(async move {
@@ -275,7 +361,11 @@ impl Forwarding {
             connection,
             tasks,
             failure,
+            health,
         })
+    }
+    pub fn destination_health(&self) -> Vec<crate::model::DestinationHealth> {
+        self.health.lock().unwrap().clone()
     }
     pub fn error(&self) -> Option<String> {
         self.failure.lock().unwrap().clone().or_else(|| {
@@ -326,6 +416,54 @@ mod integration_tests {
             agent_key_fingerprint: None,
             auth_method: AuthMethod::PublicKey,
             clipboard_enabled: false,
+            browser_enabled: false,
+        }
+    }
+    #[tokio::test]
+    #[ignore = "Run with scripts/test-ssh.sh"]
+    async fn destination_checks_preserve_transport_and_release_ports() {
+        use crate::model::DestinationStatus;
+        for (remote, expected) in [
+            (1, DestinationStatus::Unavailable),
+            (2, DestinationStatus::Blocked),
+            (3, DestinationStatus::Reachable),
+        ] {
+            let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let local = reservation.local_addr().unwrap().port();
+            drop(reservation);
+            let s = server();
+            let t = Tunnel {
+                id: Uuid::new_v4(),
+                name: "health".into(),
+                server_id: s.id,
+                local_port: local,
+                local_port_end: None,
+                remote_host: "health.fixture".into(),
+                remote_port: remote,
+                remote_port_end: None,
+                auto_connect: false,
+                auto_reconnect: false,
+            };
+            let forwarding = Forwarding::start(&s, Some(&t)).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let health = forwarding.destination_health();
+                    if health[0].status != DestinationStatus::Checking {
+                        assert_eq!(health[0].status, expected);
+                        assert!(health[0].checked_at.is_some());
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                forwarding.error().is_none(),
+                "Destination failure must not reconnect SSH"
+            );
+            forwarding.shutdown().await;
+            let _released = TcpListener::bind(("127.0.0.1", local)).await.unwrap();
         }
     }
     #[tokio::test]
@@ -424,6 +562,7 @@ mod integration_tests {
             agent_key_fingerprint: None,
             auth_method: AuthMethod::PublicKey,
             clipboard_enabled: false,
+            browser_enabled: false,
         };
         let t = Tunnel {
             id: Uuid::new_v4(),
@@ -454,5 +593,81 @@ mod integration_tests {
             .await
             .expect("Cancelled handshake must close SSH transport")
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod connection_retry_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn handshake_reset_recovers_before_any_command_runs() {
+        let mut attempts = 0;
+        let result = retry_connection(
+            || {
+                attempts += 1;
+                std::future::ready(if attempts == 1 {
+                    Err(anyhow::Error::new(std::io::Error::from(
+                        std::io::ErrorKind::ConnectionReset,
+                    ))
+                    .context("SSH handshake or host-key verification failed"))
+                } else {
+                    Ok("connected")
+                })
+            },
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, "connected");
+        assert_eq!(attempts, 2);
+    }
+
+    #[tokio::test]
+    async fn permanent_failures_are_not_retried_and_resets_are_bounded() {
+        for (message, expected) in [
+            ("Host key changed", 1),
+            ("Authentication rejected", 1),
+            ("Permission denied", 1),
+            ("reset", 3),
+        ] {
+            let mut attempts = 0;
+            let result: Result<()> = retry_connection(
+                || {
+                    attempts += 1;
+                    std::future::ready(Err(if message == "reset" {
+                        anyhow::Error::new(std::io::Error::from(
+                            std::io::ErrorKind::ConnectionReset,
+                        ))
+                    } else {
+                        anyhow::anyhow!(message)
+                    }))
+                },
+                Duration::ZERO,
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(attempts, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_deadline_cancels_backoff() {
+        let mut attempts = 0;
+        let result = tokio::time::timeout(
+            Duration::from_millis(10),
+            retry_connection(
+                || {
+                    attempts += 1;
+                    std::future::ready(Err::<(), _>(anyhow::Error::new(std::io::Error::from(
+                        std::io::ErrorKind::ConnectionReset,
+                    ))))
+                },
+                Duration::from_secs(60),
+            ),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
     }
 }

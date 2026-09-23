@@ -113,33 +113,7 @@ impl Connection {
 
 // Preserve transport failure identity before turning errors into UI strings.
 fn session_error(error: anyhow::Error) -> String {
-    let transient = error.chain().any(|cause| {
-        if let Some(error) = cause.downcast_ref::<std::io::Error>() {
-            return matches!(
-                error.kind(),
-                std::io::ErrorKind::ConnectionRefused
-                    | std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::ConnectionAborted
-                    | std::io::ErrorKind::NotConnected
-                    | std::io::ErrorKind::BrokenPipe
-                    | std::io::ErrorKind::TimedOut
-                    | std::io::ErrorKind::UnexpectedEof
-            );
-        }
-        matches!(
-            cause.downcast_ref::<russh::Error>(),
-            Some(
-                russh::Error::Disconnect
-                    | russh::Error::HUP
-                    | russh::Error::ConnectionTimeout
-                    | russh::Error::KeepaliveTimeout
-                    | russh::Error::InactivityTimeout
-                    | russh::Error::SendError
-            )
-        ) || cause.is::<russh::SendError>()
-    }) || error
-        .chain()
-        .any(|cause| cause.to_string() == "Cannot connect to SSH server");
+    let transient = super::is_transient_connection_error(&error);
     if transient {
         format!("SSH transport interrupted: {error:#}")
     } else {
@@ -147,7 +121,7 @@ fn session_error(error: anyhow::Error) -> String {
     }
 }
 
-/// Reuse an authenticated transport for successive clipboard snapshot uploads.
+/// Reuse an authenticated transport for setup commands and streaming channels.
 pub struct ExecSession(Connection);
 impl ExecSession {
     pub async fn connect(server: &Server) -> Result<Self, String> {
@@ -162,6 +136,20 @@ impl ExecSession {
             .map_err(|_| "SSH command timed out after 25 seconds".to_owned())?
             .map_err(session_error)?;
         result.into_stdout()
+    }
+
+    pub async fn stream(
+        &self,
+        command: &str,
+    ) -> Result<russh::ChannelStream<russh::client::Msg>, String> {
+        tokio::time::timeout(COMMAND_TIMEOUT, async {
+            let channel = self.0.handle.channel_open_session().await?;
+            channel.exec(true, command).await?;
+            Ok::<_, russh::Error>(channel.into_stream())
+        })
+        .await
+        .map_err(|_| "SSH command timed out starting agent".to_owned())?
+        .map_err(|e| session_error(e.into()))
     }
 
     pub async fn close(&self) {

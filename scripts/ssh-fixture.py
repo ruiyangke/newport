@@ -2,8 +2,8 @@
 """Local-only SSH/agent fixture. No real credentials.
 
 Uses paramiko + cryptography to generate keys and serve protocol requests.
-The server implements fixed test commands. Clipboard tests additionally run only
-the repository's installer and allowlisted helper operations with an isolated HOME.
+The server implements fixed test commands. Agent tests run the repository's
+locally built agent with an isolated HOME and a real SSH stream.
 """
 import argparse
 import base64
@@ -32,19 +32,8 @@ directory = pathlib.Path(parser.parse_args().directory)
 remote_home = directory / 'remote-home'
 remote_home.mkdir()
 source = pathlib.Path(__file__).resolve().parents[1] / 'src-tauri/src'
-installer = (source / 'clipboard-install.sh').read_text().replace("'", "'\"'\"'")
-install_command = ("sh -c '" + installer + "'").encode()
-helper_command = re.compile(rb'bash "\$HOME/\.local/bin/porthop-clip" --(?:begin|receive|heartbeat|clear) [0-9a-f-]{36}')
-# macOS lacks util-linux's flock executable. This test-only adapter exercises the
-# same inherited-fd kernel lock; actual Linux servers use their installed flock.
+agent_binary = source.parents[1] / 'tools/agent/target/debug/porthop-agent'
 fixture_path = os.environ['PATH']
-if not shutil.which('flock'):
-    test_bin = directory / 'test-bin'
-    test_bin.mkdir()
-    lock_tool = test_bin / 'flock'
-    lock_tool.write_text('#!/usr/bin/env python3\nimport fcntl, sys\nfcntl.flock(int(sys.argv[2]), fcntl.LOCK_SH if sys.argv[1] == "-s" else fcntl.LOCK_EX)\n')
-    lock_tool.chmod(0o700)
-    fixture_path = str(test_bin) + os.pathsep + fixture_path
 private = Ed25519PrivateKey.generate()
 public = private.public_key().public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
 client = directory / 'client'
@@ -179,6 +168,11 @@ class Server(paramiko.ServerInterface):
     def check_channel_request(self, kind, chanid):
         return paramiko.OPEN_SUCCEEDED if kind == 'session' else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
     def check_channel_direct_tcpip_request(self, chanid, origin, destination):
+        if destination[0] == 'health.fixture':
+            if destination[1] == 1:
+                return paramiko.OPEN_FAILED_CONNECT_FAILED
+            if destination[1] == 2:
+                return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
         self.direct.add(chanid)
         return paramiko.OPEN_SUCCEEDED
     def check_port_forward_request(self, address, port):
@@ -228,23 +222,29 @@ class Server(paramiko.ServerInterface):
                     return
                 elif command == b'large':
                     channel.sendall(b'x' * (5 * 1024 * 1024))
-                elif command == install_command or helper_command.fullmatch(command) or command in (
-                    b'"$HOME/.local/bin/xclip" -selection clipboard -o',
-                    b'"$HOME/.local/bin/xclip" -o -t TARGETS',
-                ):
-                    payload = bytearray()
-                    while data := channel.recv(32768):
-                        payload.extend(data)
-                        if len(payload) > 48 * 1024 * 1024:
-                            raise ValueError('Fixture input too large')
-                    result = subprocess.run(command.decode(), shell=True, executable='/bin/sh',
-                        input=payload, capture_output=True, timeout=10,
+                elif command in (b'fixture-agent', b'fixture-clipboard', b'fixture-open'):
+                    args = {b'fixture-agent': ['serve', 'ssh-fixture', '--clipboard', '--browser'],
+                            b'fixture-clipboard': ['clipboard', '-o'],
+                            b'fixture-open': ['open', 'https://example.com/login?code=fixture']}[command]
+                    process = subprocess.Popen([str(agent_binary), *args], stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                         env=dict(os.environ, HOME=str(remote_home), PATH=fixture_path, PORTHOP_CLIPBOARD_NATIVE="0"))
-                    if result.stdout:
-                        channel.sendall(result.stdout)
-                    if result.stderr:
-                        channel.sendall_stderr(result.stderr)
-                    channel.send_exit_status(result.returncode)
+                    def feed():
+                        try:
+                            while data := channel.recv(32768):
+                                process.stdin.write(data)
+                                process.stdin.flush()
+                        except (OSError, EOFError):
+                            pass
+                        finally:
+                            process.stdin.close()
+                    threading.Thread(target=feed, daemon=True).start()
+                    try:
+                        while data := os.read(process.stdout.fileno(), 32768):
+                            channel.sendall(data)
+                        channel.send_exit_status(process.wait(timeout=5))
+                    finally:
+                        process.kill()
                     return
                 else:
                     channel.sendall(b'LISTEN 0 128 127.0.0.1:5432 0.0.0.0:* users:(("postgres",pid=812,fd=3))\n')
