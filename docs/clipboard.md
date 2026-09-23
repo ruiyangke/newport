@@ -72,9 +72,13 @@ For AWS SSO on the server:
 aws sso login --profile NAME --use-device-code
 ```
 
-AWS's default PKCE flow expects a browser on the same machine; device authorization supports a browser on your Mac. Leave browser opening enabled. See [AWS's SSO guide](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sso.html).
+Device authorization works without a callback listener. Leave browser opening enabled. See [AWS's SSO guide](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sso.html).
 
-Only HTTP and HTTPS URLs without embedded credentials are accepted. Requests are sent immediately, with no stored queue or browser polling. A successful opener command means the request was forwarded, not that authorization completed. If sharing is disconnected or a request is rate-limited, reconnect or retry.
+Browser login URLs with an explicit HTTP loopback `redirect_uri` automatically get a temporary SSH forward from the Mac callback address and port to the server. Porthop binds both IPv4 and IPv6 for `localhost`. The forward expires after 5 minutes or when Integration disconnects. If forwarding cannot be set up, the browser still opens and the helper prints a warning. Use the CLI's device-code or paste-code fallback if needed.
+
+Porthop does not guess hidden callback ports. HTTPS callbacks and listeners inside a separate container network require another setup or the CLI's remote-login fallback.
+
+Only HTTP and HTTPS URLs without embedded credentials are accepted. Requests are sent immediately, with no stored queue or browser polling. A successful opener command means the Mac accepted the browser open request; it does not mean authorization completed. If sharing is disconnected or a request is rate-limited, reconnect or retry.
 
 ## Desktop clipboards
 
@@ -84,7 +88,7 @@ The snapshot holds up to 32 MiB, prioritizing text, PNG, HTML, and URLs. Extra r
 
 ## Reconnection and cleanup
 
-One agent owns each server account's clipboard. A single persistent SSH channel carries clipboard updates to Linux and browser requests back to your Mac. Private Unix sockets serve local clients; no network listener or inbound Mac SSH access is needed.
+One agent owns each server account's clipboard. A single persistent SSH channel carries clipboard updates to Linux and browser requests back to your Mac. Private Unix sockets serve local agent clients. Browser authentication may create temporary Mac loopback listeners; inbound Mac SSH access is not needed.
 
 Temporary SSH failures retry after 2, 4, 8, 16, then at most 30 seconds. Permission, protocol, and ownership errors stop with an error message. Temporary Mac clipboard-read timeouts retry without dropping the agent connection. Turning an integration off cancels in-flight work immediately. Disabling both integrations stops retries and the agent. Disabling one restarts the agent with only the remaining permission.
 

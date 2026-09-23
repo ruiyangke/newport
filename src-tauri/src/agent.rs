@@ -59,6 +59,7 @@ pub struct Agent<W> {
     reader: tokio::task::JoinHandle<()>,
     app: tauri::AppHandle,
     browser_enabled: bool,
+    callbacks: crate::ssh::callback::Callbacks,
 }
 impl<W> Drop for Agent<W> {
     fn drop(&mut self) {
@@ -69,7 +70,7 @@ async fn read_event(input: &mut (impl AsyncRead + Unpin)) -> Result<(u8, Vec<u8>
     let mut header = [0; 5];
     input.read_exact(&mut header).await.map_err(transport)?;
     let len = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
-    if len > 8192 {
+    if len > 8224 {
         return Err("Invalid agent event length.".into());
     }
     let mut data = vec![0; len];
@@ -97,6 +98,7 @@ impl Agent<tokio::io::Sink> {
         stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
         app: tauri::AppHandle,
         browser_enabled: bool,
+        callbacks: crate::ssh::callback::Callbacks,
     ) -> Result<Agent<impl AsyncWrite + Unpin>, String> {
         let (mut reader, writer) = tokio::io::split(stream);
         let (tx, events) = mpsc::channel(8);
@@ -115,6 +117,7 @@ impl Agent<tokio::io::Sink> {
             reader,
             app,
             browser_enabled,
+            callbacks,
         };
         let (kind, data) = tokio::time::timeout(Duration::from_secs(25), agent.event())
             .await
@@ -134,20 +137,53 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
             .ok_or_else(|| transport("agent exited"))??;
         checked_event(kind, data)
     }
-    pub async fn open(&self, data: &[u8]) {
+    pub async fn open(&mut self, data: &[u8]) -> Result<(), String> {
+        let (id, request) = std::str::from_utf8(data)
+            .ok()
+            .and_then(|v| v.split_once('\n'))
+            .filter(|(id, _)| id.parse::<u64>().is_ok())
+            .ok_or("Invalid browser request.")?;
+        let result = self.open_request(request).await;
+        let reply = match result {
+            Ok(Some(warning)) => format!("ok\n{warning}"),
+            Ok(None) => "ok".to_owned(),
+            Err(error) => error,
+        };
+        let frame =
+            wire::encode(b'B', format!("{id}\n{reply}").as_bytes()).map_err(|e| e.to_string())?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            self.writer.write_all(&frame).await.map_err(transport)?;
+            self.writer.flush().await.map_err(transport)
+        })
+        .await
+        .map_err(|_| transport("browser reply timed out"))?
+    }
+    async fn open_request(&mut self, request: &str) -> Result<Option<String>, String> {
         if !self.browser_enabled {
-            return;
+            return Err("Browser sync is disabled.".into());
         }
-        let Some(url) = std::str::from_utf8(data).ok().and_then(wire::web_url) else {
-            return;
+        let url = wire::web_url(request).ok_or("Invalid browser URL.")?;
+        let (prepared, warning) = match crate::ssh::callback::endpoint(&url) {
+            Ok(Some(endpoint)) => match self.callbacks.prepare(endpoint).await {
+                Ok(()) => (true, None),
+                Err(error) => (false, Some(error)),
+            },
+            Ok(None) => (false, None),
+            Err(error) => (false, Some(error)),
         };
         let app = self.app.clone();
+        // Preserve the original URL, including its fragment and escaped parameters.
+        let original = request.to_owned();
         let result =
-            tokio::task::spawn_blocking(move || app.opener().open_url(url.as_str(), None::<&str>))
+            tokio::task::spawn_blocking(move || app.opener().open_url(original, None::<&str>))
                 .await;
         if !matches!(result, Ok(Ok(()))) {
-            log::warn!("Could not open a server browser request.");
+            if prepared {
+                self.callbacks.rollback_last();
+            }
+            return Err("Could not open the browser on your Mac.".into());
         }
+        Ok(warning.map(|reason| format!("Browser opened without callback forwarding. {reason}")))
     }
     pub async fn request(&mut self, kind: u8, data: &[u8]) -> Result<String, String> {
         let frame = wire::encode(kind, data).map_err(|e| e.to_string())?;
@@ -158,7 +194,7 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
                 let (kind, data) = self.event().await?;
                 match kind {
                     b'A' => return Ok(String::from_utf8_lossy(&data).into_owned()),
-                    b'O' => self.open(&data).await,
+                    b'O' => self.open(&data).await?,
                     _ => return Err("Unexpected agent event.".into()),
                 }
             }
@@ -211,7 +247,7 @@ mod tests {
             .await
             .unwrap_err()
             .starts_with("SSH transport interrupted:"));
-        let oversized = [b'O', 0, 0, 32, 1];
+        let oversized = [b'O', 0, 0, 33, 0];
         assert!(read_event(&mut oversized.as_slice())
             .await
             .unwrap_err()

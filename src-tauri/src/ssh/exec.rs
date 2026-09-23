@@ -122,12 +122,12 @@ fn session_error(error: anyhow::Error) -> String {
 }
 
 /// Reuse an authenticated transport for setup commands and streaming channels.
-pub struct ExecSession(Connection);
+pub struct ExecSession(std::sync::Arc<Connection>);
 impl ExecSession {
     pub async fn connect(server: &Server) -> Result<Self, String> {
         Connection::connect(server)
             .await
-            .map(Self)
+            .map(|connection| Self(std::sync::Arc::new(connection)))
             .map_err(session_error)
     }
     pub async fn execute(&self, command: &str, input: Option<&[u8]>) -> Result<String, String> {
@@ -150,6 +150,10 @@ impl ExecSession {
         .await
         .map_err(|_| "SSH command timed out starting agent".to_owned())?
         .map_err(|e| session_error(e.into()))
+    }
+
+    pub fn callbacks(&self) -> super::callback::Callbacks {
+        super::callback::Callbacks::new(self.0.clone())
     }
 
     pub async fn close(&self) {

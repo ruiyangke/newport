@@ -1,7 +1,9 @@
 //! SSH transport, forwarding and interactive shell lifecycle.
 mod auth;
+pub mod callback;
 mod exec;
 mod health;
+mod relay;
 pub mod sftp;
 #[cfg(test)]
 use exec::execute_result;
@@ -328,32 +330,10 @@ impl Forwarding {
             let conn = connection.clone();
             let failure = failure.clone();
             tasks.spawn(async move {
-                let mut clients = JoinSet::new();
-                loop {
-                    tokio::select! {
-                        accepted = listener.accept() => {
-                            let (mut socket, origin) = match accepted {
-                                Ok(pair) => pair,
-                                Err(error) => {
-                                    *failure.lock().unwrap() = Some(format!("Local listener failed: {error}"));
-                                    break;
-                                }
-                            };
-                            if clients.len() >= 128 { continue; }
-                            let conn = conn.clone();
-                            let host = host.clone();
-                            clients.spawn(async move {
-                                let open = conn.handle.channel_open_direct_tcpip(
-                                    host, u32::from(remote), origin.ip().to_string(), u32::from(origin.port()),
-                                );
-                                if let Ok(Ok(channel)) = tokio::time::timeout(Duration::from_secs(10), open).await {
-                                    let mut stream = channel.into_stream();
-                                    let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
-                                }
-                            });
-                        }
-                        _ = clients.join_next(), if !clients.is_empty() => {}
-                    }
+                if let Err(error) =
+                    relay::serve(listener, conn, host, remote, relay::Policy::TUNNEL).await
+                {
+                    *failure.lock().unwrap() = Some(format!("Local listener failed: {error}"));
                 }
             });
         }
@@ -401,7 +381,7 @@ mod integration_tests {
     use crate::model::AuthMethod;
     use tokio::io::AsyncReadExt;
     use uuid::Uuid;
-    fn server() -> Server {
+    pub(super) fn server() -> Server {
         Server {
             id: Uuid::new_v4(),
             name: "Fixture".into(),

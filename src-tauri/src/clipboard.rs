@@ -313,8 +313,13 @@ async fn run_once(
                 }
             ))
             .await?;
-        let mut agent =
-            crate::agent::Agent::start(stream, app.clone(), server.browser_enabled).await?;
+        let mut agent = crate::agent::Agent::start(
+            stream,
+            app.clone(),
+            server.browser_enabled,
+            session.callbacks(),
+        )
+        .await?;
         if !server.clipboard_enabled {
             ready("Agent connected.".into(), path_needed);
         }
@@ -338,7 +343,7 @@ async fn run_once(
                     event = agent.event() => {
                         let (kind, data) = event?;
                         if kind != b'O' { return Err("Unexpected agent event.".into()); }
-                        if server.browser_enabled { agent.open(&data).await; }
+                        agent.open(&data).await?;
                         continue;
                     }
                     _ = timer.tick() => {}
@@ -646,7 +651,7 @@ mod tests {
             stream.read_exact(&mut data).await.unwrap();
             data
         }
-        assert_eq!(event(&mut stream, b'R').await, b"porthop-agent/1");
+        assert_eq!(event(&mut stream, b'R').await, b"porthop-agent/3");
         let bytes = archive(BTreeMap::from([(
             "text/plain".into(),
             "SSH clipboard 世界\n".as_bytes().to_vec(),
@@ -661,11 +666,17 @@ mod tests {
             session.execute("fixture-clipboard", None).await.unwrap(),
             "SSH clipboard 世界\n"
         );
-        session.execute("fixture-open", None).await.unwrap();
-        assert_eq!(
-            event(&mut stream, b'O').await,
-            b"https://example.com/login?code=fixture"
-        );
+        let (opened, ()) = tokio::join!(session.execute("fixture-open", None), async {
+            assert_eq!(
+                event(&mut stream, b'O').await,
+                b"1\nhttps://example.com/login?code=fixture"
+            );
+            stream
+                .write_all(&[b'B', 0, 0, 0, 4, b'1', b'\n', b'o', b'k'])
+                .await
+                .unwrap();
+        });
+        opened.unwrap();
         stream.write_all(&[b'Q', 0, 0, 0, 0]).await.unwrap();
         let mut end = Vec::new();
         stream.read_to_end(&mut end).await.unwrap();

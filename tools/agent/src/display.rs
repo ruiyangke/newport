@@ -1,3 +1,4 @@
+//! Standalone X11 or Wayland display launcher.
 use crate::{wl_server, x_server};
 use std::{
     env, io,
@@ -17,18 +18,10 @@ pub enum Backend {
     Wayland,
 }
 
-pub fn main() {
-    match run() {
-        Ok(code) => std::process::exit(code),
-        Err(e) => {
-            eprintln!("clipboard bridge: {e}");
-            std::process::exit(1);
-        }
-    }
-}
-fn run() -> io::Result<i32> {
+/// Run the display subcommand, returning the wrapped process's exit status.
+pub fn run(args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<i32> {
     let mut backend = Backend::X11;
-    let mut args = env::args_os().skip(2);
+    let mut args = args;
     let mut display = None;
     let mut service = false;
     let mut socket = None;

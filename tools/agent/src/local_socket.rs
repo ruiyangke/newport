@@ -1,4 +1,4 @@
-//! Ownership and recovery of private Wayland socket paths.
+//! Ownership and recovery of private Unix socket paths.
 use fs2::FileExt;
 use socket2::{Domain, SockAddr, Socket, Type};
 use std::{

@@ -33,7 +33,9 @@ porthop-agent install
 - `install`: install aliases, preserving unrelated commands.
 - `env`: print the headless shell environment.
 - `clipboard -o [-t FORMAT]`: read a snapshot format.
-- `open URL`: forward an HTTP(S) URL to the connected Mac.
+- `open URL`: open an HTTP(S) URL on your Mac, optionally forwarding a login callback.
 - `display --backend x11|wayland -- COMMAND`: run a command with an isolated clipboard display.
 
-The persistent transport is versioned and size-bounded. It uses atomic snapshots, private local sockets, exclusive ownership, and a heartbeat timeout. No TCP listener is created.
+The persistent transport is versioned and size-bounded. It uses atomic snapshots, private local sockets, exclusive ownership, and a heartbeat timeout. Browser logins with an explicit HTTP loopback `redirect_uri` get a temporary listener on the same Mac address and port, forwarded over the existing SSH connection. `localhost` binds both IPv4 and IPv6. Listeners expire after 5 minutes or when Integration disconnects. Forwarding failures produce a warning while allowing the browser to open.
+
+Device-code URLs need no forwarding. Other callback schemes and container-private listeners are not supported automatically. Porthop preserves the login URL and leaves token exchange to the remote CLI.

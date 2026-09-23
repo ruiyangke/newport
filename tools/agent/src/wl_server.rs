@@ -1,5 +1,5 @@
 //! Wayland socket and connection lifecycle.
-use crate::{wl_protocol::State, wl_socket::Endpoint};
+use crate::{local_socket::Endpoint, wl_protocol::State};
 use std::{
     io,
     os::unix::net::UnixListener,

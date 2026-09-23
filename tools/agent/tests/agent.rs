@@ -124,13 +124,22 @@ fn single_agent_clipboard_browser_displays_and_disconnect_cleanup() {
     let mut pixels = Vec::new();
     std::io::Read::read_to_end(&mut png, &mut pixels).unwrap();
     assert_eq!(pixels, include_bytes!("pixel.png"));
-    let opened = cmd(home.path(), &["open", "https://example.com/login?code=123"]);
+    let mut opener = Command::new(BIN)
+        .args(["open", "https://example.com/login?code=123"])
+        .env("HOME", home.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    assert_eq!(agent.event(b'O'), b"1\nhttps://example.com/login?code=123");
+    assert!(opener.try_wait().unwrap().is_none());
+    agent.send(b'B', b"1\nok");
+    let opened = opener.wait_with_output().unwrap();
     assert!(
         opened.status.success(),
         "{}",
         String::from_utf8_lossy(&opened.stderr)
     );
-    assert_eq!(agent.event(b'O'), b"https://example.com/login?code=123");
     assert!(!cmd(home.path(), &["open", "file:///tmp/private"])
         .status
         .success());
@@ -388,13 +397,21 @@ fn browser_only_does_not_create_clipboard_services_or_accept_snapshots() {
     for name in ["snapshot.tar", "wayland.sock", "display", "Xauthority"] {
         assert!(!root.join(name).exists(), "{name}");
     }
-    let opener = Command::new(BIN)
-        .args(["open", "https://example.com"])
+    let mut opener = Command::new(BIN)
+        .args(["open", "https://example.com/#fragment"])
         .env("HOME", home.path())
-        .output()
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
-    assert!(opener.status.success());
-    assert_eq!(agent.event(b'O'), b"https://example.com");
+    assert_eq!(agent.event(b'O'), b"1\nhttps://example.com/#fragment");
+    agent.send(b'B', b"999\nok");
+    agent.send(b'H', b"");
+    agent.event(b'A');
+    assert!(opener.try_wait().unwrap().is_none());
+    agent.send(b'B', b"1\nCannot listen on callback port");
+    let result = opener.wait_with_output().unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Cannot listen on callback port"));
     let env = Command::new(BIN)
         .arg("env")
         .env("HOME", home.path())
@@ -432,4 +449,26 @@ fn clipboard_only_rejects_browser_requests_without_interrupting_clipboard() {
     assert!(!env.contains("BROWSER"));
     agent.send(b'Q', &[]);
     agent.stopped();
+}
+
+#[test]
+fn browser_warning_is_nonfatal_and_original_url_is_preserved() {
+    let home = tempfile::tempdir().unwrap();
+    let mut agent = Agent::features(home.path(), false, &["--browser"]);
+    agent.event(b'R');
+    let url =
+        "https://example.com/login?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fcallback#keep";
+    let opener = Command::new(BIN)
+        .args(["open", url])
+        .env("HOME", home.path())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    assert_eq!(agent.event(b'O'), format!("1\n{url}").as_bytes());
+    agent.send(b'B', b"1\nok\nBrowser opened without callback forwarding.");
+    let output = opener.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("without callback forwarding"));
+    agent.send(b'H', b"");
+    agent.event(b'A');
 }

@@ -60,3 +60,19 @@ pub fn read(path: &Path) -> io::Result<BTreeMap<String, Vec<u8>>> {
     }
     Ok(result)
 }
+
+/// Validate a private temporary snapshot before atomically replacing the live copy.
+pub(crate) fn publish(path: &Path, data: &[u8]) -> io::Result<()> {
+    use std::{io::Write, os::unix::fs::PermissionsExt};
+    let mut pending = tempfile::NamedTempFile::new_in(
+        path.parent()
+            .ok_or_else(|| io::Error::other("snapshot needs a parent directory"))?,
+    )?;
+    pending
+        .as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    pending.write_all(data)?;
+    read(pending.path())?;
+    pending.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
