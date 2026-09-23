@@ -1,0 +1,30 @@
+name: Agent compatibility
+on:
+  push:
+    paths: ['tools/agent/**', '.github/workflows/agent.yml']
+  pull_request:
+    paths: ['tools/agent/**', '.github/workflows/agent.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: tools/agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install native Xlib clipboard client
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xclip
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked

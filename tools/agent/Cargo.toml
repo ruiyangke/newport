@@ -1,0 +1,33 @@
+[package]
+name = "porthop-agent"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+default-run = "porthop-agent"
+description = "Remote clipboard and browser agent for Porthop"
+
+[[bin]]
+name = "porthop-agent"
+path = "src/main.rs"
+
+[dependencies]
+tar = "0.4"
+url = "2"
+getrandom = "0.3"
+libc = "0.2"
+ctrlc = { version = "3", features = ["termination"] }
+tempfile = "3"
+fs2 = "0.4"
+socket2 = "0.6"
+wayland-server = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["server"] }
+
+[dev-dependencies]
+x11rb = "0.13"
+wl-clipboard-rs = "0.9"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client", "server"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
