@@ -10,7 +10,7 @@
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
     "test": "vitest run src --exclude '**/src-tauri/**'",
-    "check": "npm run check:frontend && npm run check:rust && python3 scripts/test-cockpit.py && cargo test --manifest-path tools/agent/Cargo.toml --locked",
+    "check": "npm run check:frontend && npm run check:rust && python3 scripts/test-cockpit.py && cargo test --manifest-path tools/agent/Cargo.toml --locked && python3 scripts/test-update-manifests.py",
     "test:ui": "playwright test",
     "format": "prettier --write src tests *.ts *.json && cargo fmt --manifest-path src-tauri/Cargo.toml",
     "ui": "shadcn",

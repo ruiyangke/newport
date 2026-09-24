@@ -1,4 +1,4 @@
-name: macOS release
+name: Desktop release
 on:
   workflow_dispatch:
     inputs:
@@ -9,7 +9,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: macos-release
+  group: desktop-release
   cancel-in-progress: false
 jobs:
   build:
@@ -82,13 +82,121 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: scripts/release-macos.sh
-      - name: Attach artifacts to draft release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: src-tauri/target/release/update/*
+          if-no-files-found: error
+      - name: Remove temporary signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/release.keychain-db" || true
+
+  agents:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: bash scripts/build-agent.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-agents
+          path: src-tauri/agents/porthop-agent-*
+          if-no-files-found: error
+
+  windows:
+    needs: agents
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x86_64
+          - runner: windows-11-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-linux-agents
+          path: src-tauri/agents
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/setup-nasm@v1
+        if: matrix.arch == 'x86_64'
+      - name: Locate LLVM for ARM64 dependencies
+        if: matrix.arch == 'aarch64'
+        shell: pwsh
+        run: |
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (!(Test-Path "$llvm\clang.exe")) { throw 'LLVM is required for ARM64' }
+          $llvm >> $env:GITHUB_PATH
+      - run: npm ci
+      - name: Verify release version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -ne "v$version" -or $tauriVersion -ne $version) { throw 'Release version mismatch' }
+      - run: npm run build
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - run: npm run tauri build -- --bundles nsis
+      - name: Sign updater package
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          UPDATE_ARCH: ${{ matrix.arch }}
+        run: |
+          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe)
+          if ($installers.Count -ne 1) { throw 'Expected exactly one NSIS installer' }
+          python scripts/package-windows-update.py $installers[0].FullName --arch $env:UPDATE_ARCH --output src-tauri/target/release/update
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-${{ matrix.arch }}
+          path: src-tauri/target/release/update/*
+          if-no-files-found: error
+
+  draft:
+    needs: [build, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-macos
+          path: release
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-windows-*
+          path: release
+          merge-multiple: true
+      - run: sudo apt-get update && sudo apt-get install -y minisign
+      - name: Merge all update targets and create draft
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          gh release create "$RELEASE_TAG" src-tauri/target/release/update/* \
-            --verify-tag --draft --title "Porthop $RELEASE_TAG" --generate-notes
-      - name: Remove temporary signing keychain
-        if: always()
-        run: security delete-keychain "$RUNNER_TEMP/release.keychain-db" || true
+          python3 scripts/test-update-manifests.py
+          python3 scripts/merge-update-manifests.py release/latest.json release/windows-*.json --version "${RELEASE_TAG#v}" --output release/latest.json
+          rm release/windows-*.json
+          gh release create "$RELEASE_TAG" release/* --verify-tag --draft --title "Porthop $RELEASE_TAG" --generate-notes

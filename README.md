@@ -15,7 +15,7 @@ Porthop works as a regular Mac app, with a Dock icon, a menu-bar entry, light an
 
 ## Get started
 
-Porthop requires **macOS 14 or later**. The project currently requires a local build, including a signed, provisioned app bundle for Keychain access. Distribution signing and notarization are not configured yet.
+Porthop requires **macOS 14 or later**. Download the app from [GitHub Releases](https://github.com/ruiyangke/porthop/releases). Windows builds are experimental; see the compatibility notes below.
 
 Once running:
 
@@ -45,11 +45,11 @@ Only enable sharing for servers you trust: copied passwords and other sensitive 
 - SSH supports key files, system and 1Password agents, and passwords. SSH configuration aliases, ProxyJump, host certificates, and interactive MFA are not supported.
 - Leaving the terminal workspace closes its SSH session. Detached remote jobs may continue; use a session manager such as tmux when you need persistence.
 - Container actions operate on existing containers. They do not deploy Compose files or recreate projects.
-- Linux and Windows desktop builds are not supported. Distribution signing and notarization are not configured yet.
+- Windows desktop support is experimental. The Windows build workflow produces an unsigned installer; installer upgrade testing and Authenticode signing are still pending. Installed Windows releases support verified automatic updates. Linux desktop builds are not supported.
 
 ## Data and security
 
-Server profiles and saved SSH passwords are encrypted locally, with the vault key stored in the macOS Data Protection Keychain. Metric history is stored separately and is not encrypted. A profile backup requires its original Keychain key to restore.
+Server profiles and saved SSH passwords are encrypted locally, with the vault key stored in the macOS Data Protection Keychain or Windows Credential Manager. Metric history is stored separately and is not encrypted. A profile backup requires its original vault key to restore.
 
 Metrics retain 10-second readings for 24 hours, then one-minute summaries for the rest of the seven-day history. Older readings are removed automatically. Clear recorded history in Settings → Cache.
 
@@ -69,7 +69,7 @@ Browse the [user guides](docs/README.md) for clipboard setup, file transfers, st
 
 ## Updates
 
-Installed direct-download builds check for updates on launch and every six hours.
+Installed macOS and Windows direct-download builds check for updates on launch and every six hours.
 Updates download in the background and are verified before installation. Open
 **Settings → Updates** to check manually or choose **Restart to update**.
 Restarting disconnects sessions and cancels active transfers; saved servers and

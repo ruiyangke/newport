@@ -54,7 +54,7 @@ export function UpdateSettings() {
   const problem = install.error || check.error || data?.error || error;
   const message =
     !isTauri() || (data && !data.enabled)
-      ? "Available in the installed app."
+      ? "Updates are unavailable in this build."
       : phase === "downloading"
         ? data?.total
           ? `Downloading… ${Math.min(100, Math.round((data.downloaded / data.total) * 100))}%`

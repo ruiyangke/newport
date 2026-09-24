@@ -23,13 +23,15 @@ pub struct Updates {
     status: Mutex<Status>,
     pending: tokio::sync::Mutex<Option<(Update, Vec<u8>)>>,
     pub restart: AtomicBool,
+    #[cfg(target_os = "windows")]
+    services_stopped: AtomicBool,
 }
 impl Updates {
     pub fn new(version: String) -> Self {
         Self {
             status: Mutex::new(Status {
                 enabled: !cfg!(debug_assertions)
-                    && cfg!(target_os = "macos")
+                    && cfg!(any(target_os = "macos", target_os = "windows"))
                     && option_env!("PORTHOP_APP_STORE").is_none()
                     && std::env::var_os("PORTHOP_DATA_DIR").is_none(),
                 current_version: version,
@@ -41,6 +43,8 @@ impl Updates {
             }),
             pending: Default::default(),
             restart: AtomicBool::new(false),
+            #[cfg(target_os = "windows")]
+            services_stopped: AtomicBool::new(false),
         }
     }
     fn change(&self, f: impl FnOnce(&mut Status)) {
@@ -72,8 +76,18 @@ async fn check(app: &tauri::AppHandle) -> Result<(), String> {
         s.total = None;
     });
     let result = async {
-        let updater = app
-            .updater_builder()
+        let builder = app.updater_builder();
+        #[cfg(target_os = "windows")]
+        let builder = {
+            let app = app.clone();
+            builder.on_before_exit(move || {
+                app.state::<Updates>()
+                    .services_stopped
+                    .store(true, Ordering::SeqCst);
+                tauri::async_runtime::block_on(crate::app::stop_services(&app));
+            })
+        };
+        let updater = builder
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| e.to_string())?;
@@ -140,6 +154,13 @@ pub async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
             s.phase = "ready".into();
             s.error = Some("Could not install the update. Try again.".into());
         });
+        #[cfg(target_os = "windows")]
+        if state.services_stopped.load(Ordering::SeqCst) {
+            // A failed installer launch may follow the shutdown hook. Restart
+            // the existing app so the user is not left with stopped workers.
+            state.restart.store(true, Ordering::SeqCst);
+            app.exit(0);
+        }
         return Err("Could not install the update. Try again.".into());
     }
     *pending = None;
@@ -166,13 +187,17 @@ mod tests {
     use tauri::test::{mock_builder, mock_context, noop_assets};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    async fn download_fixture(version: &str, tamper: bool) -> Result<Vec<u8>, String> {
+    async fn download_fixture(
+        target: &str,
+        version: &str,
+        tamper: bool,
+    ) -> Result<Vec<u8>, String> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let endpoint = format!("http://{address}/latest.json");
         let manifest = serde_json::json!({
             "version": version,
-            "platforms": {"darwin-aarch64": {
+            "platforms": {(target): {
                 "url": format!("http://{address}/payload"),
                 "signature": include_str!("../tests/fixtures/updater/payload.txt.sig").trim(),
             }},
@@ -221,7 +246,7 @@ mod tests {
             .executable_path(std::path::PathBuf::from(
                 "/tmp/Porthop.app/Contents/MacOS/porthop",
             ))
-            .target("darwin-aarch64")
+            .target(target)
             .timeout(Duration::from_secs(3))
             .build()
             .unwrap();
@@ -236,17 +261,31 @@ mod tests {
     #[tokio::test]
     async fn accepts_signed_update_bytes() {
         assert_eq!(
-            download_fixture("2.0.0", false).await.unwrap(),
+            download_fixture("darwin-aarch64", "2.0.0", false)
+                .await
+                .unwrap(),
             include_bytes!("../tests/fixtures/updater/payload.txt")
         );
     }
     #[tokio::test]
     async fn rejects_modified_update_bytes() {
-        assert!(download_fixture("2.0.0", true).await.is_err());
+        assert!(download_fixture("darwin-aarch64", "2.0.0", true)
+            .await
+            .is_err());
     }
     #[tokio::test]
     async fn rejects_manifest_version_not_bound_to_signature() {
-        assert!(download_fixture("3.0.0", false).await.is_err());
+        assert!(download_fixture("darwin-aarch64", "3.0.0", false)
+            .await
+            .is_err());
+    }
+    #[tokio::test]
+    async fn windows_architectures_verify_signed_updates() {
+        for target in ["windows-x86_64", "windows-aarch64"] {
+            assert!(download_fixture(target, "2.0.0", false).await.is_ok());
+            assert!(download_fixture(target, "2.0.0", true).await.is_err());
+            assert!(download_fixture(target, "3.0.0", false).await.is_err());
+        }
     }
     #[test]
     fn production_requires_https_and_version_bound_signatures() {
