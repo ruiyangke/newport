@@ -20,6 +20,25 @@ use tauri::{
     Emitter, Manager as _,
 };
 
+struct Workers(Arc<std::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>>);
+
+/// Shared by normal shutdown and Windows' updater, which exits outside Tauri's event loop.
+pub(crate) async fn stop_services(app: &tauri::AppHandle) {
+    let workers = std::mem::take(&mut *app.state::<Workers>().0.lock().unwrap());
+    for worker in &workers {
+        worker.abort();
+    }
+    for worker in workers {
+        let _ = worker.await;
+    }
+    app.state::<crate::terminal::Sessions>()
+        .close_server(None)
+        .await;
+    app.state::<crate::files::Operations>().shutdown().await;
+    app.state::<Shared>().lock().await.shutdown().await;
+    log::info!("Background workers and SSH sessions stopped");
+}
+
 pub(crate) fn show(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
@@ -31,6 +50,8 @@ pub fn run() -> anyhow::Result<()> {
     let store = Store::open()
         .map_err(anyhow::Error::msg)
         .context("Cannot open Porthop profile directory")?;
+    #[cfg(target_os = "windows")]
+    let activation = crate::platform::activation::Activation::new(&store.directory)?;
     // Same lock location as the Swift app, unless running an isolated test profile.
     let lock_path = if std::env::var_os("PORTHOP_DATA_DIR").is_some() {
         store.directory.join("porthop.lock")
@@ -46,8 +67,10 @@ pub fn run() -> anyhow::Result<()> {
         .context("Cannot open Porthop instance lock")?;
     match lock.try_lock_exclusive() {
         Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-            eprintln!("Porthop is already running. Open it from the Dock or menu bar.");
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            #[cfg(target_os = "windows")]
+            activation.request()?;
+            eprintln!("Porthop is already running.");
             return Ok(());
         }
         Err(error) => return Err(error).context("Cannot acquire Porthop instance lock"),
@@ -98,6 +121,7 @@ pub fn run() -> anyhow::Result<()> {
         }
     }
     let app = tauri::Builder::default()
+        .manage(Workers(workers.clone()))
         .plugin(logging)
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
@@ -166,6 +190,13 @@ pub fn run() -> anyhow::Result<()> {
             commands::open_tunnel
         ])
         .setup(move |app| {
+            #[cfg(target_os = "windows")]
+            setup_workers
+                .lock()
+                .unwrap()
+                .push(tauri::async_runtime::spawn(
+                    activation.listen(app.handle().clone()),
+                ));
             let sampling_db = tauri::async_runtime::block_on(
                 crate::metrics_db::MetricsDb::from_plugin(app.handle(), &metrics_url, key),
             )
@@ -298,23 +329,10 @@ pub fn run() -> anyhow::Result<()> {
                 if !shutdown_started.swap(true, Ordering::SeqCst) {
                     log::info!("Graceful shutdown started");
                     let app = app.clone();
-                    let state = app.state::<Shared>().inner().clone();
-                    let workers = std::mem::take(&mut *workers.lock().unwrap());
                     let done = shutdown_complete.clone();
                     let restart_lock = restart_lock.clone();
                     tauri::async_runtime::spawn(async move {
-                        for worker in &workers {
-                            worker.abort();
-                        }
-                        for worker in workers {
-                            let _ = worker.await;
-                        }
-                        app.state::<crate::terminal::Sessions>()
-                            .close_server(None)
-                            .await;
-                        app.state::<crate::files::Operations>().cancel_server(None);
-                        state.lock().await.shutdown().await;
-                        log::info!("Background workers and SSH sessions stopped");
+                        stop_services(&app).await;
                         done.store(true, Ordering::SeqCst);
                         if app
                             .state::<crate::updates::Updates>()
@@ -343,4 +361,33 @@ pub fn run() -> anyhow::Result<()> {
     });
     drop(lock);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_lock_reports_the_platform_contention_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("instance.lock");
+        let first = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        first.try_lock_exclusive().unwrap();
+        let second = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let error = second.try_lock_exclusive().unwrap_err();
+        assert_eq!(
+            error.raw_os_error(),
+            fs2::lock_contended_error().raw_os_error()
+        );
+    }
 }

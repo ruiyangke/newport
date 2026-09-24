@@ -580,7 +580,7 @@ export const FilesPanel = memo(function FilesPanel({
             <span>
               {transfer.progress?.name
                 ? `${fileSize(transfer.progress.completed)}${transfer.progress.total !== null ? ` of ${fileSize(transfer.progress.total)}` : ""}`
-                : "Choose a file in the Mac dialog…"}
+                : "Choose a file in the file dialog…"}
             </span>
             <progress
               aria-label="File transfer"

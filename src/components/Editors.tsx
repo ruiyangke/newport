@@ -419,7 +419,7 @@ export function TunnelForm({
           </div>
           <Field
             label="Remote host"
-            hint="Relative to the SSH server. Local ports are accessible only on this Mac."
+            hint="Relative to the SSH server. Local ports are accessible only on this computer."
           >
             <Input
               required

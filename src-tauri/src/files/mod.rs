@@ -325,11 +325,12 @@ mod integration_tests {
         let local = directory.path().join("upload ' 世界.dat");
         let bytes: Vec<u8> = (0..300_000).map(|n| (n % 251) as u8).collect();
         std::fs::write(&local, &bytes).unwrap();
-        let remote = transfer::upload(sftp.clone(), &local, "/Documents", |_, _| {})
+        let operations = Operations::default();
+        let remote = transfer::upload(&operations, sftp.clone(), &local, "/Documents", |_, _| {})
             .await
             .unwrap();
         assert!(
-            transfer::upload(sftp.clone(), &local, "/Documents", |_, _| {})
+            transfer::upload(&operations, sftp.clone(), &local, "/Documents", |_, _| {})
                 .await
                 .unwrap_err()
                 .to_string()
@@ -355,16 +356,21 @@ mod integration_tests {
         std::fs::write(&cancelled, vec![0u8; 1024 * 1024]).unwrap();
         let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
         {
-            let future =
-                transfer::upload(sftp.clone(), &cancelled, "/Documents", move |done, _| {
+            let future = transfer::upload(
+                &operations,
+                sftp.clone(),
+                &cancelled,
+                "/Documents",
+                move |done, _| {
                     if done > 0 {
                         let _ = send.send(());
                     }
-                });
+                },
+            );
             tokio::pin!(future);
             tokio::select! { result = &mut future => panic!("Transfer completed before cancellation: {result:?}"), _ = receive.recv() => {} }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        operations.shutdown().await;
         let folders = list(&sftp, "/Documents").await.unwrap();
         assert!(!folders.entries.iter().any(
             |entry| entry.name.starts_with(".porthop-upload") || entry.name == "cancelled.bin"

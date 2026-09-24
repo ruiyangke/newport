@@ -52,10 +52,10 @@ impl client::Handler for Handler {
         tokio::task::spawn_blocking(move || {
             let path = known_hosts::user_path()?;
             #[cfg(test)]
-            let system = None;
+            let system: Option<std::path::PathBuf> = None;
             #[cfg(not(test))]
             let system = crate::platform::ssh_agent::system_known_hosts();
-            known_hosts::verify(&host, port, &key, &path, system)
+            known_hosts::verify(&host, port, &key, &path, system.as_deref())
         })
         .await??;
         Ok(true)

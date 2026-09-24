@@ -19,7 +19,7 @@
     "check:frontend": "npm run lint && npm run build && npm test && npm run test:ui",
     "test:files": "npm run build && playwright test --config playwright.files.config.ts",
     "test:production": "npm run build && playwright test --config playwright.production.config.ts",
-    "build:agent": "bash scripts/build-agent.sh",
+    "build:agent": "node scripts/build-agent.mjs",
     "test:remote": "python3 scripts/test-remote.py"
   },
   "dependencies": {

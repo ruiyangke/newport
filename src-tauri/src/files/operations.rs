@@ -3,6 +3,7 @@ use anyhow::Result;
 use serde::Serialize;
 use std::{
     collections::{HashMap, VecDeque},
+    future::Future,
     sync::Mutex,
 };
 use tauri::State;
@@ -27,6 +28,8 @@ pub struct Operations(Mutex<Registry>);
 struct Registry {
     entries: HashMap<Uuid, Operation>,
     cancelled: VecDeque<Uuid>,
+    closing: bool,
+    cleanup: Vec<tokio::task::JoinHandle<()>>,
 }
 struct Guard<'a>(&'a Operations, Uuid);
 impl Drop for Guard<'_> {
@@ -50,6 +53,9 @@ impl Operations {
             let manager = state.lock().await;
             let profile = manager.server(server)?;
             let mut registry = self.0.lock().unwrap();
+            if registry.closing {
+                return Err("Porthop is shutting down".into());
+            }
             if let Some(index) = registry
                 .cancelled
                 .iter()
@@ -99,6 +105,39 @@ impl Operations {
             }
         }
     }
+
+    pub(super) fn cleanup(&self, work: impl Future<Output = ()> + Send + 'static) {
+        let mut registry = self.0.lock().unwrap();
+        registry.cleanup.retain(|task| !task.is_finished());
+        registry.cleanup.push(tokio::spawn(work));
+    }
+
+    pub async fn shutdown(&self) {
+        {
+            let mut registry = self.0.lock().unwrap();
+            registry.closing = true;
+            for entry in registry.entries.values() {
+                let _ = entry.cancel.send(true);
+            }
+        }
+        // Dropping each operation registers staging-file cleanup before its
+        // guard removes the registry entry. Reject new work throughout shutdown.
+        let drain = async {
+            while !self.0.lock().unwrap().entries.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            let tasks = std::mem::take(&mut self.0.lock().unwrap().cleanup);
+            for task in tasks {
+                let _ = task.await;
+            }
+        };
+        if tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+            .await
+            .is_err()
+        {
+            log::warn!("File cleanup timed out during shutdown; remote staging files may remain");
+        }
+    }
 }
 #[tauri::command]
 pub fn files_cancel(operations: State<'_, Operations>, operation: Uuid) {
@@ -122,4 +161,52 @@ pub fn files_progress(operations: State<'_, Operations>, operation: Uuid) -> Opt
         .entries
         .get(&operation)
         .map(|entry| entry.progress.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn shutdown_waits_for_cleanup_registered_by_cancelled_operation() {
+        let operations = Arc::new(Operations::default());
+        let id = Uuid::new_v4();
+        let (cancel, mut cancelled) = watch::channel(false);
+        operations.0.lock().unwrap().entries.insert(
+            id,
+            Operation {
+                server: Uuid::new_v4(),
+                cancel,
+                progress: Progress::default(),
+            },
+        );
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let work = operations.clone();
+        let operation = tokio::spawn(async move {
+            let _guard = Guard(&work, id);
+            cancelled.changed().await.unwrap();
+            work.cleanup(async move {
+                started.send(()).unwrap();
+                released.await.unwrap();
+            });
+        });
+        let work = operations.clone();
+        let shutdown = tokio::spawn(async move { work.shutdown().await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(operations.0.lock().unwrap().closing);
+        assert!(!shutdown.is_finished());
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), shutdown)
+            .await
+            .unwrap()
+            .unwrap();
+        operation.await.unwrap();
+        assert!(operations.0.lock().unwrap().entries.is_empty());
+        operations.shutdown().await;
+    }
 }

@@ -84,6 +84,7 @@ test.beforeEach(async ({ page, baseURL }) => {
         __fileCancelled: cancelled,
         __fileTransfers: transfers,
         __TAURI_INTERNALS__: {
+          metadata: { currentWindow: { label: "main" } },
           invoke: async (cmd: string, args: Record<string, any>) => {
             if (cmd === "snapshot") return structuredClone(state);
             if (cmd === "get_sidebar_width") return 200;

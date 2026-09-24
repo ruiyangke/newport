@@ -5,6 +5,10 @@ use std::{
     io,
     path::Path,
 };
+pub fn application_data_directory() -> Option<std::path::PathBuf> {
+    dirs::data_dir()
+}
+
 pub fn private_file_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.mode(0o600);
@@ -24,4 +28,13 @@ pub fn protect_file(path: &Path) -> io::Result<()> {
 }
 pub fn sync_directory(path: &Path) -> io::Result<()> {
     fs::File::open(path)?.sync_all()
+}
+
+pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(source, destination)
+}
+
+pub fn database_url(path: &Path) -> Result<String, String> {
+    let url = url::Url::from_file_path(path).map_err(|_| "Invalid metrics database path")?;
+    Ok(format!("sqlite:{}", &url.as_str()["file://".len()..]))
 }

@@ -80,6 +80,7 @@ test.beforeEach(async ({ page }) => {
       Object.defineProperty(window, "isTauri", { value: true });
       Object.defineProperty(window, "__TAURI_INTERNALS__", {
         value: {
+          metadata: { currentWindow: { label: "main" } },
           invoke: async (cmd: string, args: Record<string, any>) => {
             if (cmd === "update_status")
               return {
@@ -1140,10 +1141,10 @@ test("shadcn dropdowns support keyboard selection and compact long labels", asyn
   ).toBeFocused();
   await page.keyboard.press("End");
   await expect(
-    page.getByRole("option", { name: "Last 15 minutes", exact: true }),
+    page.getByRole("option", { name: "Last 7 days", exact: true }),
   ).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(history).toContainText("Last 15 minutes");
+  await expect(history).toContainText("Last 7 days");
   await expect(history).toBeFocused();
   await history.click();
   await page.screenshot({

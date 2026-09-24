@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build portable Linux agents and embed them in the next Mac build.
+# Build portable Linux agents and embed them in desktop builds.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 envdir="$PWD/tools/agent/target/cross-build-env"

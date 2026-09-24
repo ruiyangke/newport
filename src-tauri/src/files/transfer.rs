@@ -14,15 +14,16 @@ use uuid::Uuid;
 
 // Cancellation drops the operation future. Keep its transport alive just long
 // enough to remove the staging file; never publish an incomplete upload.
-struct RemoteTemp {
+struct RemoteTemp<'a> {
+    operations: &'a Operations,
     sftp: Arc<Sftp>,
     path: Option<String>,
 }
-impl Drop for RemoteTemp {
+impl Drop for RemoteTemp<'_> {
     fn drop(&mut self) {
         if let Some(path) = self.path.take() {
             let sftp = self.sftp.clone();
-            tokio::spawn(async move {
+            self.operations.cleanup(async move {
                 if !matches!(
                     tokio::time::timeout(Duration::from_secs(3), sftp.session.remove(&path)).await,
                     Ok(Ok(_))
@@ -54,6 +55,7 @@ async fn choose(app: &tauri::AppHandle, save: Option<&str>) -> Result<Option<Pat
         .transpose()
 }
 pub async fn upload(
+    operations: &Operations,
     sftp: Arc<Sftp>,
     local: &Path,
     folder: &str,
@@ -92,6 +94,7 @@ pub async fn upload(
         .await?
         .handle;
     let mut cleanup = RemoteTemp {
+        operations,
         sftp: sftp.clone(),
         path: Some(staging.clone()),
     };
@@ -190,7 +193,7 @@ pub async fn files_upload(
                 .to_string_lossy()
                 .into_owned();
             let sftp = Arc::new(Sftp::connect(&server).await?);
-            upload(sftp, &local, &path, |done, total| {
+            upload(&operations, sftp, &local, &path, |done, total| {
                 operations.progress(operation, &name, done, total)
             })
             .await

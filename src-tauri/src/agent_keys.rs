@@ -20,7 +20,7 @@ pub async fn list() -> KeyList {
         keys: vec![],
         warnings: vec![],
     };
-    for (source, name) in [("system", "System agent"), ("onePassword", "1Password")] {
+    for &(source, name) in crate::platform::ssh_agent::SOURCES {
         let read = tokio::time::timeout(Duration::from_secs(3), async {
             let mut agent = connect(Some(source)).await?;
             agent.request_identities().await.map_err(|e| e.to_string())

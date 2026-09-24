@@ -140,7 +140,7 @@ export function ConnectionsPanel({
                     </div>
                     <div className="port-route">
                       <div className="route-endpoint">
-                        <small>On this Mac</small>
+                        <small>On this computer</small>
                         <code>
                           127.0.0.1:
                           <b>{range(t.localPort, t.localPortEnd)}</b>

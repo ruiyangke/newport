@@ -47,3 +47,8 @@ pub fn configure_menu(
     menu.insert(workspace, 4)?;
     Ok(())
 }
+
+pub fn install_menu(app: &tauri::App, menu: tauri::menu::Menu<tauri::Wry>) -> tauri::Result<()> {
+    app.set_menu(menu)?;
+    Ok(())
+}

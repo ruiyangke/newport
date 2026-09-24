@@ -3218,3 +3218,35 @@ html.native-vibrancy,
 .integration-maintenance {
   margin-top: 20px;
 }
+
+/* Windows puts the brand in the toolbar row; only macOS reserves traffic-light space. */
+.windows-shell .sidebar-titlebar {
+  display: none;
+}
+.windows-shell .app-brand {
+  height: 52px;
+}
+.windows-shell .sidebar {
+  background: var(--sidebar);
+}
+.windows-shell.sidebar-hidden .window-toolbar {
+  padding-left: 12px;
+}
+.window-controls {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 2px;
+  margin-left: 6px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+.window-controls button {
+  width: 32px;
+  height: 32px;
+  border-radius: 5px;
+}
+.window-controls .window-close:hover {
+  background: var(--destructive);
+  color: white;
+}

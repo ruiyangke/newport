@@ -6,3 +6,6 @@ pub enum Event {
 }
 #[cfg(target_os = "macos")]
 pub use super::mac::events::install;
+
+#[cfg(target_os = "windows")]
+pub use super::win::events::install;

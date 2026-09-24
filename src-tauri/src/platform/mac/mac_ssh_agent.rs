@@ -17,6 +17,8 @@ pub async fn connect(source: Option<&str>) -> Result<AgentClient<UnixStream>, St
 }
 
 #[cfg(not(test))]
-pub fn system_known_hosts() -> Option<&'static std::path::Path> {
-    Some(std::path::Path::new("/etc/ssh/ssh_known_hosts"))
+pub fn system_known_hosts() -> Option<std::path::PathBuf> {
+    Some(std::path::PathBuf::from("/etc/ssh/ssh_known_hosts"))
 }
+
+pub const SOURCES: &[(&str, &str)] = &[("system", "System agent"), ("onePassword", "1Password")];

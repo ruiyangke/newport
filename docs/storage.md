@@ -1,18 +1,18 @@
 # Storage and recovery
 
-Porthop saves its data in `~/Library/Application Support/Porthop`.
+Porthop saves its data in `~/Library/Application Support/Porthop` on macOS and `%LOCALAPPDATA%\Porthop` on Windows.
 
 ## What is saved
 
 | Data | Location and protection |
 | --- | --- |
 | Servers, tunnels, SSH passwords and integration preferences | `profiles.stronghold`, encrypted together |
-| Vault unlock key | Device-local macOS Data Protection Keychain |
+| Vault unlock key | macOS Data Protection Keychain or Windows Credential Manager |
 | Appearance and sidebar preferences | `preferences.json` |
 | Metric history | `metrics.sqlite3`, not encrypted; endpoint identifiers use keyed fingerprints |
 | SSH private keys | Your existing files or SSH agent; agent private keys are not imported |
 
-The vault key is scoped to the profile directory and signed app's Keychain access group. It is not synced through iCloud. Saved passwords and the vault key are not sent to the web interface.
+The vault key is scoped to the profile directory. On macOS, access also requires the signed app’s Keychain access group. On Windows, the key belongs to the current user on that machine. Keys do not roam or sync through iCloud. Saved passwords and the vault key are not sent to the web interface.
 
 Metrics keep 10-second readings for the latest 24 hours and one-minute summaries for the rest of the seven-day retention period. Background cleanup runs on startup and every 15 minutes.
 
@@ -22,9 +22,9 @@ Open **Settings → Cache** to see metrics storage size and clear recorded histo
 
 ## Backups
 
-A profile backup requires both the encrypted snapshot and its original Keychain key. Copying `profiles.stronghold` alone is insufficient. Porthop has no portable export or key-recovery interface.
+A profile backup requires both the encrypted snapshot and its original vault key. Copying `profiles.stronghold` alone is insufficient. Porthop has no portable export or key-recovery interface.
 
-A missing key or damaged snapshot blocks edits instead of replacing existing data. Unsupported profile versions also block loading. Preserve the files and original Keychain items when troubleshooting; do not delete them to dismiss an error.
+A missing key or damaged snapshot blocks edits instead of replacing existing data. Unsupported profile versions also block loading. Preserve the files and original Keychain or Credential Manager entries when troubleshooting; do not delete them to dismiss an error.
 
 Older installations may retain a login-Keychain key after transfer to the Data Protection Keychain. That item is a recovery copy; ordinary launches use the transferred key.
 
@@ -36,6 +36,6 @@ Renaming a server preserves active sessions. Connection and authentication chang
 
 ## Protection limits
 
-Profile saves are verified before atomic replacement. The encrypted vault protects saved profiles, not everything on the Mac or server. Metric measurements, external SSH files, old backups and legacy `SSHTunnelBar` files remain outside the vault.
+Profile saves are verified before atomic replacement. The encrypted vault protects saved profiles, not everything on your computer or server. Metric measurements, external SSH files, old backups and legacy `SSHTunnelBar` files remain outside the vault.
 
 Remote clipboard files may remain after a lost connection. Database migrations cannot erase filesystem snapshots or old backups. See [clipboard cleanup](clipboard.md#reconnection-and-cleanup) and [security notes](security.md).

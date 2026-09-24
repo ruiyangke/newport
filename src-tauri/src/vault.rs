@@ -64,7 +64,8 @@ pub fn read(path: &Path, key: &[u8]) -> Result<Config, String> {
 }
 fn read_record(path: &Path, key: &[u8]) -> Result<ProfileRecord, String> {
     let vault = Stronghold::new(path, key.to_vec()).map_err(|_| {
-        "Cannot unlock saved profiles. Check the vault key in Keychain.".to_string()
+        "Cannot unlock saved profiles. Check the vault key in your system credential storage."
+            .to_string()
     })?;
     let client = vault.load_client(CLIENT).map_err(|e| e.to_string())?;
     let data = Zeroizing::new(
@@ -147,10 +148,14 @@ pub fn write_with_password(
         return Err("Encrypted profile verification failed; previous snapshot preserved".into());
     }
     crate::platform::filesystem::protect_file(&staged_path).map_err(|e| e.to_string())?;
-    fs::File::open(&staged_path)
+    // Windows FlushFileBuffers requires a handle opened with write access.
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&staged_path)
         .and_then(|f| f.sync_all())
         .map_err(|e| e.to_string())?;
-    fs::rename(staged_path, path).map_err(|e| e.to_string())?;
+    crate::platform::filesystem::replace_file(&staged_path, path).map_err(|e| e.to_string())?;
     crate::platform::filesystem::sync_directory(directory).map_err(|e| e.to_string())?;
     Ok(())
 }

@@ -1,3 +1,4 @@
+import { WindowControls } from "./components/WindowControls";
 import appIcon from "../src-tauri/icons/icon.png";
 import { isCancelledError } from "@tanstack/react-query";
 import { ServerScopeProvider } from "./query/keys";
@@ -97,7 +98,8 @@ export default function App() {
   }, []);
   const [serverMenuOpen, setServerMenuOpen] = useState(false);
   const desktopAction = useRef<(action: string) => void>(() => {});
-  const packagedDesktop = location.protocol === "tauri:";
+  const packagedDesktop =
+    location.protocol === "tauri:" && !navigator.platform.startsWith("Win");
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
@@ -117,11 +119,15 @@ export default function App() {
           ? "app-settings"
           : event.key === "n"
             ? "server-new"
-            : event.shiftKey && event.key.toLowerCase() === "l"
-              ? "sidebar-toggle"
-              : /^[1-6]$/.test(event.key)
-                ? `view-${workspaceViews[Number(event.key) - 1]}`
-                : "";
+            : event.shiftKey && event.key.toLowerCase() === "e"
+              ? "server-edit"
+              : event.shiftKey && event.key.toLowerCase() === "t"
+                ? "server-test"
+                : event.shiftKey && event.key.toLowerCase() === "l"
+                  ? "sidebar-toggle"
+                  : /^[1-6]$/.test(event.key)
+                    ? `view-${workspaceViews[Number(event.key) - 1]}`
+                    : "";
       if (action) {
         event.preventDefault();
         desktopAction.current(action);
@@ -235,7 +241,7 @@ export default function App() {
       value={settings ? "settings" : view}
       onValueChange={selectView}
       orientation="vertical"
-      className={`app-shell native-shell mac-shell ${sidebar.hidden ? "sidebar-hidden" : ""}`}
+      className={`app-shell native-shell mac-shell ${navigator.platform.startsWith("Win") ? "windows-shell" : ""} ${sidebar.hidden ? "sidebar-hidden" : ""}`}
       style={{ "--source-width": `${sidebar.width}px` } as CSSProperties}
     >
       <aside
@@ -476,6 +482,7 @@ export default function App() {
               </DropdownMenu>
             </div>
           )}
+          <WindowControls />
         </header>
         <div
           className={`workspace-scroll${!settings && view === "commands" ? " terminal-workspace" : !settings && view === "files" ? " files-pane" : ""}`}

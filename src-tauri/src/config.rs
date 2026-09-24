@@ -15,8 +15,8 @@ impl Store {
         let directory = if let Some(path) = std::env::var_os("PORTHOP_DATA_DIR") {
             PathBuf::from(path)
         } else {
-            dirs::data_dir()
-                .ok_or("Cannot locate Application Support")?
+            crate::platform::filesystem::application_data_directory()
+                .ok_or("Cannot locate application data directory")?
                 .join("Porthop")
         };
         fs::create_dir_all(&directory).map_err(|e| e.to_string())?;

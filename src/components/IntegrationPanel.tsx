@@ -38,7 +38,7 @@ export function IntegrationPanel({ server, runtime, pending, act }: Props) {
   return (
     <div className="integration-panel">
       <div className="integration-heading">
-        <h2>Connect your Mac and server</h2>
+        <h2>Connect your computer and server</h2>
         <p>Enable only for servers you trust.</p>
       </div>
       {(
@@ -46,13 +46,13 @@ export function IntegrationPanel({ server, runtime, pending, act }: Props) {
           [
             "clipboard",
             "Clipboard",
-            "Share your Mac clipboard with this server.",
+            "Share your computer clipboard with this server.",
             !!server.clipboardEnabled,
           ],
           [
             "browser",
             "Browser",
-            "Open server links on your Mac.",
+            "Open server links on your computer.",
             !!server.browserEnabled,
           ],
         ] as const

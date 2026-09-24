@@ -70,8 +70,7 @@ pub fn database_url(path: &Path) -> Result<String, String> {
         .open(path)
         .map_err(|e| e.to_string())?;
     let path = path.canonicalize().map_err(|e| e.to_string())?;
-    let url = url::Url::from_file_path(path).map_err(|_| "Invalid metrics database path")?;
-    Ok(format!("sqlite:{}", &url.as_str()["file://".len()..]))
+    crate::platform::filesystem::database_url(&path)
 }
 
 impl MetricsDb {
@@ -505,7 +504,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn plugin_reopen_retention_isolation_and_delete() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("metrics with # and %?.sqlite3");
+        let filename = if cfg!(windows) {
+            "metrics with # and %.sqlite3"
+        } else {
+            "metrics with # and %?.sqlite3"
+        };
+        let path = dir.path().join(filename);
         let s = server();
         let other = server();
         let now = RETENTION_MS + 100;
@@ -527,11 +531,14 @@ mod tests {
         db.delete_server(s.id).await.unwrap();
         assert!(db.history(&s, now).await.unwrap().is_empty());
         assert_eq!(db.history(&other, now).await.unwrap().len(), 1);
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
         let applied: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success=1")
                 .fetch_one(db.pool().unwrap())

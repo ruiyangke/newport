@@ -105,7 +105,7 @@ async fn snapshot(
     .map_err(|e| e.to_string())?;
     tokio::time::timeout(Duration::from_secs(5), rx)
         .await
-        .map_err(|_| "Timed out reading the Mac clipboard".to_owned())?
+        .map_err(|_| "Timed out reading the clipboard".to_owned())?
         .map_err(|e| e.to_string())?
 }
 
@@ -280,7 +280,7 @@ async fn run_once(
                             capture_failed = false;
                             snapshot
                         }
-                        Err(error) if error.starts_with("Timed out reading the Mac clipboard") => {
+                        Err(error) if error.starts_with("Timed out reading the clipboard") => {
                             if !capture_failed {
                                 log::warn!("Mac clipboard temporarily unavailable; retrying");
                             }

@@ -46,7 +46,7 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
             .build(app)?,
     )?;
     crate::platform::desktop::configure_menu(app, &menu, &server, &workspace)?;
-    app.set_menu(menu)?;
+    crate::platform::desktop::install_menu(app, menu)?;
     app.on_menu_event(|app, event| {
         let id = event.id.as_ref();
         if id.starts_with("server-")

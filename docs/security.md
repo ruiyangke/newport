@@ -1,6 +1,6 @@
 # Security
 
-- **Saved credentials:** profiles and SSH passwords are encrypted, with the unlock key stored in macOS Keychain. Metric history is not encrypted. See [storage and recovery](storage.md).
+- **Saved credentials:** profiles and SSH passwords are encrypted, with the unlock key stored in macOS Keychain or Windows Credential Manager. Metric history is not encrypted. See [storage and recovery](storage.md).
 - **Server trust:** SSH host keys are trusted on first use. Changed or revoked keys are rejected.
 - **Clipboard sharing:** enable it only for trusted servers. Sensitive content you copy is shared too, and remote files may remain after a lost connection.
 - **Remote access:** actions use your SSH account's permissions. Port discovery may use existing non-interactive sudo access. Forwarded ports are accessible only through local loopback.

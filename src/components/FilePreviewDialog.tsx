@@ -68,7 +68,7 @@ export function FilePreviewDialog({
               <p role="alert" className="file-error">
                 {error}
               </p>
-              <p>Download to open on your Mac.</p>
+              <p>Download to open on your computer.</p>
             </div>
           ) : !data ? (
             <p className="file-preview-message" role="status">
