@@ -194,12 +194,6 @@ export function SettingsPanel() {
       </section>
       <UpdateSettings />
       <MetricsCacheSettings />
-      <section aria-labelledby="window-heading">
-        <h2 id="window-heading">Window & menu bar</h2>
-        <p>
-          Closing the window keeps tunnels running. Quit Porthop to disconnect.
-        </p>
-      </section>
       {error && (
         <div className="settings-error" role="alert">
           <p>{error}</p>

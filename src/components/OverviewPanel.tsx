@@ -86,6 +86,7 @@ function Gauge({
 export function OverviewPanel({ id }: { id: string }) {
   const scopeRef = useRef<HTMLDivElement>(null);
   const [auto, setAuto] = useState(true);
+  const [historyMinutes, setHistoryMinutes] = useState(5);
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState("cpu");
   const state = useCollection(id, "overview", auto, scopeRef);
@@ -94,6 +95,7 @@ export function OverviewPanel({ id }: { id: string }) {
     state.data,
     state.updated?.getTime(),
     auto,
+    historyMinutes,
   );
   const historyError = history.error;
   const refresh = () => {
@@ -226,7 +228,11 @@ export function OverviewPanel({ id }: { id: string }) {
       )}
       {(d || history.samples.length > 0) && (
         <Suspense fallback={<p className="muted">Loading charts…</p>}>
-          <MetricGraphs history={history.samples} />
+          <MetricGraphs
+            history={history.samples}
+            minutes={historyMinutes}
+            onMinutesChange={setHistoryMinutes}
+          />
         </Suspense>
       )}
       {d ? (

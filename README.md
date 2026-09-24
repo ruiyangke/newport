@@ -51,6 +51,8 @@ Only enable sharing for servers you trust: copied passwords and other sensitive 
 
 Server profiles and saved SSH passwords are encrypted locally, with the vault key stored in the macOS Data Protection Keychain. Metric history is stored separately and is not encrypted. A profile backup requires its original Keychain key to restore.
 
+Metrics retain 10-second readings for 24 hours, then one-minute summaries for the rest of the seven-day history. Older readings are removed automatically. Clear recorded history in Settings → Cache.
+
 SSH host keys are recorded on first use; changed or revoked keys are rejected. Clipboard sharing is opt-in for each server.
 
 **Known limitation:** the SSH dependency tree includes an RSA implementation affected by a timing side-channel advisory. RSA compatibility remains enabled. Read the [security notes](docs/security.md) before relying on the app for sensitive workflows.

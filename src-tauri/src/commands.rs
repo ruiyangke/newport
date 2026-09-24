@@ -32,9 +32,11 @@ pub(crate) async fn cockpit_history(
     state: State<'_, Shared>,
     db: State<'_, crate::metrics_db::MetricsDb>,
     id: Uuid,
+    minutes: Option<u32>,
 ) -> Result<Vec<crate::metrics_db::SavedSample>, String> {
     let server = state.lock().await.server(id)?;
-    db.history(&server, crate::metrics_db::now_ms()).await
+    db.history_range(&server, crate::metrics_db::now_ms(), minutes.unwrap_or(15))
+        .await
 }
 #[tauri::command]
 pub(crate) async fn cockpit_collect(

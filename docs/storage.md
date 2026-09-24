@@ -14,6 +14,8 @@ Porthop saves its data in `~/Library/Application Support/Porthop`.
 
 The vault key is scoped to the profile directory and signed app's Keychain access group. It is not synced through iCloud. Saved passwords and the vault key are not sent to the web interface.
 
+Metrics keep 10-second readings for the latest 24 hours and one-minute summaries for the rest of the seven-day retention period. Background cleanup runs on startup and every 15 minutes.
+
 ## Clear metric history
 
 Open **Settings → Cache** to see metrics storage size and clear recorded history for all servers. Sampling continues, and saved servers, passwords and settings are preserved. The size includes database journal files; an empty database still uses a small amount of space.

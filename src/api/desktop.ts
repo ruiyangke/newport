@@ -88,7 +88,7 @@ interface Commands {
   >;
   reinstall_agent: Command<{ id: string }, void>;
   set_clipboard_enabled: Command<{ id: string; enabled: boolean }, void>;
-  cockpit_history: Command<{ id: string }, SavedSample[]>;
+  cockpit_history: Command<{ id: string; minutes?: number }, SavedSample[]>;
   cockpit_logs: Command<
     { id: string; source: Log["source"]; target: string },
     string

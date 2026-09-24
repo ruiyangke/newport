@@ -196,7 +196,10 @@ pub fn run() -> anyhow::Result<()> {
                     background_state, app.handle().clone(),
                 )));
             setup_workers.lock().unwrap().push(tauri::async_runtime::spawn(
-                sampling_worker.run(sampling_state, sampling_db),
+                sampling_worker.run(sampling_state, sampling_db.clone()),
+            ));
+            setup_workers.lock().unwrap().push(tauri::async_runtime::spawn(
+                sampling_db.maintain(),
             ));
             let signal_app = app.handle().clone();
             setup_workers.lock().unwrap().push(tauri::async_runtime::spawn(async move {

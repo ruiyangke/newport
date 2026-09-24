@@ -16,16 +16,17 @@ export function useMetricHistory(
   live: MetricInput | null,
   at: number | undefined,
   auto: boolean,
+  minutes = 15,
 ) {
   const scope = useServerScope(id);
   const client = useQueryClient();
   const visible = useVisible();
   const key = keys.history(scope);
   const options = queryOptions({
-    queryKey: [...key, "saved"],
+    queryKey: [...key, "saved", minutes],
     queryFn: async ({ signal }) => {
       const saved = await readIPC(signal, () =>
-        desktop("cockpit_history", { id }),
+        desktop("cockpit_history", { id, minutes }),
       );
       // Merge at completion so a late database response cannot erase a newer
       // live sample. The destination key prevents merging different hosts.

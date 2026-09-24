@@ -1,4 +1,5 @@
 //! Metric history on the SQL plugin's pool. Sampling and transactions stay in Rust.
+mod rollup;
 use crate::model::Server;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -42,12 +43,20 @@ fn endpoint(server: &Server) -> String {
 }
 
 pub fn migrations() -> Vec<tauri_plugin_sql::Migration> {
-    vec![tauri_plugin_sql::Migration {
-        version: 1,
-        description: "metric history",
-        sql: SCHEMA,
-        kind: tauri_plugin_sql::MigrationKind::Up,
-    }]
+    vec![
+        tauri_plugin_sql::Migration {
+            version: 1,
+            description: "metric history",
+            sql: SCHEMA,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
+        tauri_plugin_sql::Migration {
+            version: 2,
+            description: "minute metric summaries",
+            sql: include_str!("../migrations/002_metrics_resolution.sql"),
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
+    ]
 }
 
 /// Use the existing profile directory (including isolated profiles), not the
@@ -200,7 +209,7 @@ impl MetricsDb {
         let mut connection = self.connection().await?;
         let mut tx = connection.begin().await.map_err(|e| e.to_string())?;
         sqlx::query(
-            "INSERT OR REPLACE INTO samples(server_id,endpoint,at,data) VALUES(?1,?2,?3,?4)",
+            "INSERT OR REPLACE INTO samples(server_id,endpoint,at,data) SELECT ?1,?2,?3,?4 WHERE NOT EXISTS (SELECT 1 FROM samples WHERE server_id=?1 AND endpoint=?2 AND resolution=60000 AND at=(?3/60000)*60000)",
         )
         .bind(server.id.to_string())
         .bind(fingerprint)
@@ -216,7 +225,17 @@ impl MetricsDb {
             .map_err(|e| e.to_string())?;
         tx.commit().await.map_err(|e| e.to_string())
     }
+    #[cfg(test)]
     pub async fn history(&self, server: &Server, now: i64) -> Result<Vec<SavedSample>, String> {
+        self.history_range(server, now, 15).await
+    }
+    pub async fn history_range(
+        &self,
+        server: &Server,
+        now: i64,
+        minutes: u32,
+    ) -> Result<Vec<SavedSample>, String> {
+        let minutes = minutes.clamp(1, 7 * 24 * 60);
         let _guard = self.maintenance.read().await;
         let fingerprint = self.fingerprint(&endpoint(server))?;
         let mut connection = self.connection().await?;
@@ -226,8 +245,8 @@ impl MetricsDb {
             .await
             .map_err(|e| format!("Cannot prune metric history: {e}"))?;
         let rows: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT at, data FROM samples WHERE server_id=?1 AND endpoint=?2 AND at<=?3 ORDER BY at DESC LIMIT 180")
-            .bind(server.id.to_string()).bind(fingerprint).bind(now)
+            "SELECT at, data FROM samples WHERE server_id=?1 AND endpoint=?2 AND at<=?3 AND at>=?4 ORDER BY at DESC LIMIT ?5")
+            .bind(server.id.to_string()).bind(fingerprint).bind(now).bind(now - i64::from(minutes) * 60_000).bind(i64::from(minutes) * 12)
             .fetch_all(&mut *connection).await.map_err(|e| format!("Cannot query metric history: {e}"))?;
         rows.into_iter()
             .rev()
@@ -334,6 +353,115 @@ mod tests {
         MetricsDb::from_plugin(app.handle(), &url, Ok(vec![key; 32])).await
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rollup_preserves_recent_readings_and_is_atomic_and_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir.path().join("metrics.sqlite3"), 7).await.unwrap();
+        let one = server();
+        let two = server();
+        let day = 24 * 60 * 60 * 1000;
+        let now = day * 10 + 25_000;
+        let boundary = day * 9;
+        let minute = boundary - 60_000;
+        for server in [&one, &two] {
+            for i in 0..6 {
+                let mut value = sample();
+                value["cpu"] = serde_json::json!(i * 10);
+                value["uptime"] = serde_json::json!(100 + i * 10);
+                value["network"] =
+                    serde_json::json!([{"name":"eth0","received":i*1000,"sent":i*500}]);
+                db.record(server, minute + i * 10_000, &value)
+                    .await
+                    .unwrap();
+                db.record(server, boundary + i * 10_000, &value)
+                    .await
+                    .unwrap();
+            }
+        }
+        db.compact_history(now).await.unwrap();
+        assert_eq!(db.cache_info().await.unwrap().samples, 14);
+        let history = db.history_range(&one, now, 10080).await.unwrap();
+        assert_eq!(history.len(), 7);
+        assert_eq!(history[0].at, minute);
+        assert_eq!(history[0].data["cpu"], 25.0);
+        assert_eq!(history[0].data["peaks"]["cpu"], 50.0);
+        assert_eq!(history[0].data["resolutionMs"], 60000);
+        assert_eq!(history[0].data["sampleCount"], 6);
+        assert_eq!(history[0].data["network"][0]["rx"], 100.0);
+        assert_eq!(history[0].data["network"][0]["tx"], 50.0);
+        assert_eq!(history[0].data["network"][0]["received"], 5000);
+        assert_eq!(history[0].data["gap"], false);
+        assert!(history[1].data.get("resolutionMs").is_none());
+        let before = serde_json::to_value(&history).unwrap();
+        db.compact_history(now).await.unwrap();
+        // A stale collection cannot replace or reintroduce raw data in a compacted minute.
+        db.record(&one, minute + 10_000, &sample()).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(db.history_range(&one, now, 10080).await.unwrap()).unwrap(),
+            before
+        );
+        assert_eq!(db.cache_info().await.unwrap().samples, 14);
+        db.compact_history(now + RETENTION_MS + 60_000)
+            .await
+            .unwrap();
+        assert_eq!(db.cache_info().await.unwrap().samples, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rollup_failure_keeps_raw_samples_and_endpoint_isolation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir.path().join("metrics.sqlite3"), 7).await.unwrap();
+        let s = server();
+        let mut changed = s.clone();
+        changed.ssh_host = "different-host".into();
+        let minute = 2 * 24 * 60 * 60 * 1000;
+        let now = minute + 2 * 24 * 60 * 60 * 1000;
+        for i in 0..6 {
+            db.record(&s, minute + i * 10_000, &sample()).await.unwrap();
+            db.record(&changed, minute + i * 10_000, &sample())
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO samples(server_id,endpoint,at,data) VALUES('broken','broken',?1,'invalid')")
+            .bind(minute+60_000).execute(db.pool().unwrap()).await.unwrap();
+        assert!(db.compact_history(now).await.is_err());
+        assert_eq!(db.cache_info().await.unwrap().samples, 13);
+        sqlx::query("DELETE FROM samples WHERE server_id='broken'")
+            .execute(db.pool().unwrap())
+            .await
+            .unwrap();
+        db.compact_history(now).await.unwrap();
+        assert_eq!(
+            db.history_range(&s, now, 10080).await.unwrap()[0].data["sampleCount"],
+            6
+        );
+        assert_eq!(
+            db.history_range(&changed, now, 10080).await.unwrap()[0].data["sampleCount"],
+            6
+        );
+        assert_eq!(db.cache_info().await.unwrap().samples, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rollup_drains_multiple_batches_and_reclaims_disk_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir.path().join("metrics.sqlite3"), 7).await.unwrap();
+        let s = server();
+        let start = 2 * 24 * 60 * 60 * 1000;
+        let mut value = sample();
+        value["network"] = serde_json::json!([{"name":"x".repeat(16000),"received":0,"sent":0}]);
+        for i in 0..300 {
+            db.record(&s, start + i * 10_000, &value).await.unwrap();
+        }
+        let before = db.cache_info().await.unwrap();
+        db.compact_history(start + 2 * 24 * 60 * 60 * 1000)
+            .await
+            .unwrap();
+        let after = db.cache_info().await.unwrap();
+        assert_eq!(after.samples, 50);
+        assert!(after.bytes < before.bytes);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn clearing_history_reclaims_space_and_allows_new_samples() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("metrics.sqlite3");
@@ -411,7 +539,7 @@ mod tests {
                 .fetch_one(db.pool().unwrap())
                 .await
                 .unwrap();
-        assert_eq!(applied, 1);
+        assert_eq!(applied, 2);
         db.pool().unwrap().close().await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -511,6 +639,23 @@ mod tests {
         assert!(open(&path, 7).await.is_err());
         assert_eq!(std::fs::read(path).unwrap(), b"broken data");
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn history_ranges_include_older_readings_only_when_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir.path().join("metrics.sqlite3"), 7).await.unwrap();
+        let s = server();
+        let now = RETENTION_MS;
+        for age in [6 * 86400000, 12 * 3600000, 30 * 60000, 60000] {
+            db.record(&s, now - age, &sample()).await.unwrap();
+        }
+        for (minutes, count) in [(5, 1), (15, 1), (60, 2), (1440, 3), (10080, 4)] {
+            assert_eq!(
+                db.history_range(&s, now, minutes).await.unwrap().len(),
+                count
+            );
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn history_is_bounded_ordered_and_pruned_on_reads() {
         let dir = tempfile::tempdir().unwrap();

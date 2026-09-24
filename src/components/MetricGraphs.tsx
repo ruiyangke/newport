@@ -18,7 +18,14 @@ import {
   YAxis,
 } from "recharts";
 import { useState } from "react";
-import { GAP_MS, withHistoryGaps, type MetricSample } from "../metricHistory";
+import {
+  chartPoints,
+  averageChartPoints,
+  historyStart,
+  hasHistoryGap,
+  withHistoryGaps,
+  type MetricSample,
+} from "../metricHistory";
 const percent = (n: number) => `${n.toFixed(1)}%`;
 const rate = (n: number) =>
   n >= 1048576
@@ -26,8 +33,9 @@ const rate = (n: number) =>
     : n >= 1024
       ? `${(n / 1024).toFixed(1)} KiB/s`
       : `${n.toFixed(0)} B/s`;
-const time = (n: number) =>
-  new Date(n).toLocaleTimeString([], {
+const time = (n: number, includeDate = false) =>
+  new Date(n).toLocaleString([], {
+    ...(includeDate ? ({ month: "short", day: "numeric" } as const) : {}),
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
@@ -45,6 +53,7 @@ function Chart({
   format,
   start,
   end,
+  intervalMs,
 }: {
   title: string;
   samples: MetricSample[];
@@ -53,29 +62,50 @@ function Chart({
   format: (n: number) => string;
   start: number;
   end: number;
+  intervalMs: number;
 }) {
   const selected = samples.at(-1);
+  const rows = samples.map((p) =>
+    Object.assign(
+      {
+        at: p.at,
+        resolutionMs: p.resolutionMs ?? 10000,
+        incomplete: p.incomplete ?? 0,
+      },
+      Object.fromEntries(series.map((s, i) => [`v${i}`, s.read(p)])),
+    ),
+  );
+  const data = intervalMs
+    ? averageChartPoints(rows, start, end, intervalMs)
+    : chartPoints(withHistoryGaps(rows));
   const ceiling =
     max ??
-    Math.max(1, ...samples.flatMap((p) => series.map((s) => s.read(p) ?? 0))) *
-      1.15;
+    data.reduce(
+      (highest, row) =>
+        series.reduce(
+          (value, _, i) => Math.max(value, row[`v${i}`] ?? 0),
+          highest,
+        ),
+      1,
+    ) * 1.15;
+  const dotData = intervalMs ? data : rows;
+  const sampleIndices = new Map(dotData.map((p, i) => [p.at, i]));
   const isolatedDot =
-    (series: Series) =>
+    (series: Series, seriesIndex: number) =>
     (props: { cx?: number; cy?: number; payload?: { at?: number } }) => {
-      const index = samples.findIndex((p) => p.at === props.payload?.at);
-      const sample = samples[index];
+      const index = sampleIndices.get(props.payload?.at ?? -1) ?? -1;
+      const sample = dotData[index];
+      const key = `v${seriesIndex}`;
       if (
         !sample ||
-        series.read(sample) === null ||
+        sample[key] === null ||
         props.cx === undefined ||
         props.cy === undefined
       )
         return <g />;
-      const connected = (neighbor: MetricSample | undefined) =>
-        neighbor &&
-        series.read(neighbor) !== null &&
-        Math.abs(neighbor.at - sample.at) <= GAP_MS;
-      if (connected(samples[index - 1]) || connected(samples[index + 1]))
+      const connected = (neighbor: (typeof data)[number] | undefined) =>
+        neighbor && neighbor[key] !== null && !hasHistoryGap(neighbor, sample);
+      if (connected(dotData[index - 1]) || connected(dotData[index + 1]))
         return <g />;
       return (
         <circle
@@ -112,16 +142,7 @@ function Chart({
       >
         <ResponsiveContainer width="100%" height="100%" minWidth={0}>
           <ComposedChart
-            data={withHistoryGaps(
-              samples.map((p) =>
-                Object.assign(
-                  { at: p.at },
-                  Object.fromEntries(
-                    series.map((s, i) => [`v${i}`, s.read(p)]),
-                  ),
-                ),
-              ),
-            )}
+            data={data}
             margin={{ top: 12, right: 12, bottom: 4, left: 0 }}
             accessibilityLayer={false}
           >
@@ -137,10 +158,18 @@ function Chart({
               domain={[start, end]}
               ticks={[start, (start + end) / 2, end]}
               tickFormatter={(n) =>
-                new Date(n).toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })
+                new Date(start).toDateString() !== new Date(end).toDateString()
+                  ? new Date(n).toLocaleString([], {
+                      month: "short",
+                      day: "numeric",
+                      ...(intervalMs === 5 * 60000
+                        ? ({ hour: "numeric" } as const)
+                        : {}),
+                    })
+                  : new Date(n).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })
               }
               tickLine={false}
               axisLine={false}
@@ -168,7 +197,12 @@ function Chart({
               content={({ active, payload, label }) =>
                 active && payload?.length ? (
                   <div className="metric-tooltip">
-                    <time>{time(Number(label))}</time>
+                    <time>
+                      {new Date(start).toDateString() !==
+                      new Date(end).toDateString()
+                        ? new Date(Number(label)).toLocaleString()
+                        : time(Number(label))}
+                    </time>
                     {payload.map((p) => (
                       <div key={String(p.dataKey)}>
                         <span>{p.name}</span>
@@ -194,7 +228,7 @@ function Chart({
                   fillOpacity={0.09}
                   connectNulls={false}
                   isAnimationActive={false}
-                  dot={isolatedDot(s)}
+                  dot={isolatedDot(s, i)}
                   activeDot={{ r: 4, stroke: "var(--panel)", strokeWidth: 2 }}
                 />
               ) : (
@@ -208,7 +242,7 @@ function Chart({
                   strokeDasharray={s.dashed ? "5 4" : undefined}
                   connectNulls={false}
                   isAnimationActive={false}
-                  dot={isolatedDot(s)}
+                  dot={isolatedDot(s, i)}
                   activeDot={{ r: 4, stroke: "var(--panel)", strokeWidth: 2 }}
                 />
               ),
@@ -219,13 +253,21 @@ function Chart({
     </figure>
   );
 }
-export function MetricGraphs({ history }: { history: MetricSample[] }) {
-  const [minutes, setMinutes] = useState(5);
+export function MetricGraphs({
+  history,
+  minutes,
+  onMinutesChange,
+}: {
+  history: MetricSample[];
+  minutes: number;
+  onMinutesChange: (minutes: number) => void;
+}) {
   const [iface, setIface] = useState("");
+  const [showSamples, setShowSamples] = useState(false);
   const latest = history.at(-1);
   const end = latest?.at ?? Date.now();
-  const start = end - minutes * 60000;
-  const samples = history.filter((p) => p.at >= start);
+  const samples = history.filter((p) => p.at >= end - minutes * 60000);
+  const start = historyStart(samples, end, minutes);
   const interfaces = Object.keys(latest?.network ?? {});
   const selected = interfaces.includes(iface)
     ? iface
@@ -233,9 +275,9 @@ export function MetricGraphs({ history }: { history: MetricSample[] }) {
   const net = (key: "rx" | "tx") => (p: MetricSample) =>
     p.network[selected]?.[key] ?? null;
   // Network values are scaled together; the unit remains explicit on both axis and readings.
-  const netMax = Math.max(
+  const netMax = samples.reduce(
+    (highest, p) => Math.max(highest, net("rx")(p) ?? 0, net("tx")(p) ?? 0),
     1,
-    ...samples.flatMap((p) => [net("rx")(p) ?? 0, net("tx")(p) ?? 0]),
   );
   const scale = netMax >= 1048576 ? 1048576 : netMax >= 1024 ? 1024 : 1;
   const unit = scale === 1048576 ? "MiB/s" : scale === 1024 ? "KiB/s" : "B/s";
@@ -246,10 +288,13 @@ export function MetricGraphs({ history }: { history: MetricSample[] }) {
         <Select
           aria-label="History time window"
           value={String(minutes)}
-          onValueChange={(value) => setMinutes(Number(value))}
+          onValueChange={(value) => onMinutesChange(Number(value))}
         >
           <SelectItem value="5">Last 5 minutes</SelectItem>
           <SelectItem value="15">Last 15 minutes</SelectItem>
+          <SelectItem value="60">Last hour</SelectItem>
+          <SelectItem value="1440">Last 24 hours</SelectItem>
+          <SelectItem value="10080">Last 7 days</SelectItem>
         </Select>
       </div>
       <p className="history-caption">
@@ -265,6 +310,9 @@ export function MetricGraphs({ history }: { history: MetricSample[] }) {
           format={percent}
           start={start}
           end={end}
+          intervalMs={
+            minutes === 10080 ? 30 * 60000 : minutes === 1440 ? 5 * 60000 : 0
+          }
         />
         <Chart
           title="Memory"
@@ -274,6 +322,9 @@ export function MetricGraphs({ history }: { history: MetricSample[] }) {
           format={percent}
           start={start}
           end={end}
+          intervalMs={
+            minutes === 10080 ? 30 * 60000 : minutes === 1440 ? 5 * 60000 : 0
+          }
         />
         <Chart
           title="Load average"
@@ -282,6 +333,9 @@ export function MetricGraphs({ history }: { history: MetricSample[] }) {
           format={(n) => n.toFixed(2)}
           start={start}
           end={end}
+          intervalMs={
+            minutes === 10080 ? 30 * 60000 : minutes === 1440 ? 5 * 60000 : 0
+          }
         />
         <div>
           <label className="network-interface">
@@ -317,11 +371,17 @@ export function MetricGraphs({ history }: { history: MetricSample[] }) {
             format={(n) => rate(n * scale)}
             start={start}
             end={end}
+            intervalMs={
+              minutes === 10080 ? 30 * 60000 : minutes === 1440 ? 5 * 60000 : 0
+            }
           />
         </div>
       </div>
       {samples.length > 0 && (
-        <details className="history-data system-details">
+        <details
+          className="history-data system-details"
+          onToggle={(event) => setShowSamples(event.currentTarget.open)}
+        >
           <summary>View readings</summary>
           <p className="muted">
             Newest first · Network: {selected || "unavailable"} · — means
@@ -333,54 +393,56 @@ export function MetricGraphs({ history }: { history: MetricSample[] }) {
             role="region"
             aria-label="Recorded metric samples"
           >
-            <Table
-              className="cockpit-table recorded-samples-table"
-              aria-label="Recorded metric samples"
-            >
-              <caption className="sr-only">
-                Recorded metric samples for the selected history window
-              </caption>
-              <TableHeader>
-                <TableRow>
-                  {[
-                    "Time",
-                    "CPU",
-                    "Memory",
-                    "Load",
-                    "Received / s",
-                    "Sent / s",
-                  ].map((label) => (
-                    <TableHead
-                      scope="col"
-                      key={label}
-                      className={label === "Time" ? undefined : "numeric"}
-                    >
-                      {label}
-                    </TableHead>
-                  ))}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {[...samples].reverse().map((sample) => (
-                  <TableRow key={sample.at}>
-                    <TableCell>{time(sample.at)}</TableCell>
-                    <TableCell>{percent(sample.cpu)}</TableCell>
-                    <TableCell>{percent(sample.memory)}</TableCell>
-                    <TableCell>{sample.load.toFixed(2)}</TableCell>
-                    <TableCell>
-                      {net("rx")(sample) === null
-                        ? "—"
-                        : rate(net("rx")(sample)!)}
-                    </TableCell>
-                    <TableCell>
-                      {net("tx")(sample) === null
-                        ? "—"
-                        : rate(net("tx")(sample)!)}
-                    </TableCell>
+            {showSamples && (
+              <Table
+                className="cockpit-table recorded-samples-table"
+                aria-label="Recorded metric samples"
+              >
+                <caption className="sr-only">
+                  Recorded metric samples for the selected history window
+                </caption>
+                <TableHeader>
+                  <TableRow>
+                    {[
+                      "Time",
+                      "CPU",
+                      "Memory",
+                      "Load",
+                      "Received / s",
+                      "Sent / s",
+                    ].map((label) => (
+                      <TableHead
+                        scope="col"
+                        key={label}
+                        className={label === "Time" ? undefined : "numeric"}
+                      >
+                        {label}
+                      </TableHead>
+                    ))}
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {[...samples].reverse().map((sample) => (
+                    <TableRow key={sample.at}>
+                      <TableCell>{time(sample.at)}</TableCell>
+                      <TableCell>{percent(sample.cpu)}</TableCell>
+                      <TableCell>{percent(sample.memory)}</TableCell>
+                      <TableCell>{sample.load.toFixed(2)}</TableCell>
+                      <TableCell>
+                        {net("rx")(sample) === null
+                          ? "—"
+                          : rate(net("rx")(sample)!)}
+                      </TableCell>
+                      <TableCell>
+                        {net("tx")(sample) === null
+                          ? "—"
+                          : rate(net("tx")(sample)!)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
           </div>
         </details>
       )}
