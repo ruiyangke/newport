@@ -100,21 +100,29 @@ pub fn run() -> anyhow::Result<()> {
     let app = tauri::Builder::default()
         .plugin(logging)
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_sql::Builder::default()
-            .add_migrations(&metrics_url, crate::metrics_db::migrations()).build())
+        .plugin(
+            tauri_plugin_sql::Builder::default()
+                .add_migrations(&metrics_url, crate::metrics_db::migrations())
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
-        .plugin(tauri_plugin_stronghold::Builder::with_argon2(&profile_directory.join("vault.salt")).build())
-        .plugin(tauri_plugin_autostart::Builder::new()
-            .app_name("Porthop")
-            .macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent)
-            .arg("--autostart")
-            .build())
-        .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
+        .plugin(
+            tauri_plugin_stronghold::Builder::with_argon2(&profile_directory.join("vault.salt"))
+                .build(),
+        )
+        .plugin(crate::platform::desktop::autostart())
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        )
         .plugin(window_state)
         .manage(state.clone())
         .manage(sampler)
-        .manage(crate::updates::Updates::new(env!("CARGO_PKG_VERSION").into()))
+        .manage(crate::updates::Updates::new(
+            env!("CARGO_PKG_VERSION").into(),
+        ))
         .manage(crate::terminal::Sessions::default())
         .manage(crate::files::Operations::default())
         .invoke_handler(tauri::generate_handler![
@@ -159,10 +167,11 @@ pub fn run() -> anyhow::Result<()> {
         ])
         .setup(move |app| {
             let sampling_db = tauri::async_runtime::block_on(
-                crate::metrics_db::MetricsDb::from_plugin(app.handle(), &metrics_url, key)
-            ).map_err(anyhow::Error::msg)?;
+                crate::metrics_db::MetricsDb::from_plugin(app.handle(), &metrics_url, key),
+            )
+            .map_err(anyhow::Error::msg)?;
             app.manage(sampling_db.clone());
-            app.set_activation_policy(tauri::ActivationPolicy::Regular);
+            crate::platform::desktop::configure(app);
             crate::preferences::install(app, &profile_directory)?;
             crate::desktop::install(app)?;
             if let Err(error) = crate::system_events::install() {
@@ -186,28 +195,37 @@ pub fn run() -> anyhow::Result<()> {
                 })
                 .build(app)?;
             let observations = crate::connectivity::subscribe();
-            setup_workers.lock().unwrap().push(tauri::async_runtime::spawn(
-                manager::connection_events(state.clone(), observations),
-            ));
+            setup_workers
+                .lock()
+                .unwrap()
+                .push(tauri::async_runtime::spawn(manager::connection_events(
+                    state.clone(),
+                    observations,
+                )));
             setup_workers
                 .lock()
                 .unwrap()
                 .push(tauri::async_runtime::spawn(manager::background(
-                    background_state, app.handle().clone(),
+                    background_state,
+                    app.handle().clone(),
                 )));
-            setup_workers.lock().unwrap().push(tauri::async_runtime::spawn(
-                sampling_worker.run(sampling_state, sampling_db.clone()),
-            ));
-            setup_workers.lock().unwrap().push(tauri::async_runtime::spawn(
-                sampling_db.maintain(),
-            ));
+            setup_workers
+                .lock()
+                .unwrap()
+                .push(tauri::async_runtime::spawn(
+                    sampling_worker.run(sampling_state, sampling_db.clone()),
+                ));
+            setup_workers
+                .lock()
+                .unwrap()
+                .push(tauri::async_runtime::spawn(sampling_db.maintain()));
             let signal_app = app.handle().clone();
-            setup_workers.lock().unwrap().push(tauri::async_runtime::spawn(async move {
-                if let Ok(mut terminate) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                    tokio::select! { _ = terminate.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
-                    signal_app.exit(0);
-                }
-            }));
+            setup_workers
+                .lock()
+                .unwrap()
+                .push(tauri::async_runtime::spawn(async move {
+                    crate::platform::desktop::wait_for_termination(signal_app).await;
+                }));
             let status_state = state.clone();
             let handle = app.handle().clone();
             setup_workers
@@ -250,11 +268,16 @@ pub fn run() -> anyhow::Result<()> {
                     }
                 }));
             if std::env::args().any(|arg| arg == "--autostart") {
-                if let Some(window) = app.get_webview_window("main") { window.hide()?; }
+                if let Some(window) = app.get_webview_window("main") {
+                    window.hide()?;
+                }
             }
-            setup_workers.lock().unwrap().push(tauri::async_runtime::spawn(
-                crate::updates::background(app.handle().clone()),
-            ));
+            setup_workers
+                .lock()
+                .unwrap()
+                .push(tauri::async_runtime::spawn(crate::updates::background(
+                    app.handle().clone(),
+                )));
             log::info!("Desktop and background workers initialized");
             Ok(())
         })
@@ -316,9 +339,7 @@ pub fn run() -> anyhow::Result<()> {
                 }
             }
         }
-        if let tauri::RunEvent::Reopen { .. } = event {
-            show(app);
-        }
+        crate::platform::desktop::handle_event(app, &event);
     });
     drop(lock);
     Ok(())

@@ -17,27 +17,13 @@
         "width": 960,
         "height": 680,
         "minWidth": 640,
-        "minHeight": 480,
-        "titleBarStyle": "Overlay",
-        "hiddenTitle": true,
-        "trafficLightPosition": {
-          "x": 16,
-          "y": 19
-        },
-        "transparent": true,
-        "windowEffects": {
-          "effects": [
-            "sidebar"
-          ],
-          "state": "followsWindowActiveState"
-        }
+        "minHeight": 480
       }
     ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; worker-src 'self'; font-src 'self' blob: data:; object-src 'none'; base-uri 'none'; frame-src 'none'",
       "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost http://127.0.0.1:1420 ws://127.0.0.1:1420; worker-src 'self'; font-src 'self' blob: data:; object-src 'none'; base-uri 'none'; frame-src 'none'"
-    },
-    "macOSPrivateApi": true
+    }
   },
   "bundle": {
     "active": true,
@@ -48,10 +34,7 @@
     "icon": [
       "icons/icon.png",
       "icons/icon.icns"
-    ],
-    "macOS": {
-      "minimumSystemVersion": "14.0"
-    }
+    ]
   },
   "plugins": {
     "updater": {

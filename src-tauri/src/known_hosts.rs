@@ -8,9 +8,7 @@ use russh::keys::ssh_key::{
 };
 use sha1::Sha1;
 use std::{
-    fs::OpenOptions,
     io::{Read, Seek, SeekFrom, Write},
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 
@@ -113,17 +111,13 @@ pub fn verify(
         }
     }
     if let Some(parent) = path.parent() {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)?;
+        crate::platform::filesystem::create_private_directory(parent)?;
     }
-    let mut file = OpenOptions::new()
+    let mut file = crate::platform::filesystem::private_file_options()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .mode(0o600)
         .open(path)
         .context("Cannot access known_hosts; refusing unverified SSH connection")?;
     file.lock_exclusive()?;

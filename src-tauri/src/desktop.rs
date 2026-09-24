@@ -5,19 +5,6 @@ use tauri::{
 
 pub fn install(app: &tauri::App) -> tauri::Result<()> {
     let menu = Menu::default(app.handle())?;
-    if let Some(app_menu) = menu
-        .items()?
-        .first()
-        .and_then(|item| item.as_submenu())
-        .cloned()
-    {
-        app_menu.insert(
-            &MenuItemBuilder::with_id("app-settings", "Settings…")
-                .accelerator("CmdOrCtrl+,")
-                .build(app)?,
-            2,
-        )?;
-    }
     let server = Submenu::with_items(
         app,
         "Server",
@@ -58,8 +45,7 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
             .accelerator("CmdOrCtrl+Shift+L")
             .build(app)?,
     )?;
-    menu.insert(&server, 2)?;
-    menu.insert(&workspace, 4)?;
+    crate::platform::desktop::configure_menu(app, &menu, &server, &workspace)?;
     app.set_menu(menu)?;
     app.on_menu_event(|app, event| {
         let id = event.id.as_ref();

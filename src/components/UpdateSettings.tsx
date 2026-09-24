@@ -24,7 +24,7 @@ export function UpdateNotice() {
     if (data?.phase === "ready" && data.version !== notified.current) {
       notified.current = data.version;
       toast.info(
-        `Porthop ${data.version} is ready. Restart from Settings to update.`,
+        `Porthop ${data.version} is ready to install. Restart from Settings to update.`,
         {
           id: "app-update",
         },
@@ -64,7 +64,7 @@ export function UpdateSettings() {
           : phase === "installing"
             ? "Installing…"
             : ready
-              ? `Version ${data?.version} is ready.`
+              ? `Version ${data?.version} is ready to install.`
               : phase === "current"
                 ? "You’re up to date."
                 : "Updates download automatically. You choose when to restart.";

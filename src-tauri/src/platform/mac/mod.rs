@@ -1,0 +1,12 @@
+#[path = "mac_clipboard.rs"]
+pub mod clipboard;
+#[path = "mac_desktop.rs"]
+pub mod desktop;
+#[path = "mac_events.rs"]
+pub mod events;
+#[path = "mac_filesystem.rs"]
+pub mod filesystem;
+#[path = "mac_secrets.rs"]
+pub mod secrets;
+#[path = "mac_ssh_agent.rs"]
+pub mod ssh_agent;

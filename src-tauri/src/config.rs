@@ -20,9 +20,7 @@ impl Store {
                 .join("Porthop")
         };
         fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-            .map_err(|e| e.to_string())?;
+        crate::platform::filesystem::protect_directory(&directory).map_err(|e| e.to_string())?;
         Ok(Self {
             directory,
             key: Default::default(),
@@ -36,7 +34,7 @@ impl Store {
     }
     pub fn vault_key(&self) -> Result<&[u8], String> {
         self.key
-            .get_or_init(|| crate::keychain::vault_key(&self.directory))
+            .get_or_init(|| crate::platform::secrets::vault_key(&self.directory))
             .as_ref()
             .map(|key| key.as_slice())
             .map_err(Clone::clone)

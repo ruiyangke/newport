@@ -1,59 +1,8 @@
 use crate::{model::Server, ssh::ExecSession};
-use objc2::AnyThread;
-use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSPasteboard};
-use objc2_foundation::{NSDictionary, NSString};
 use std::{collections::BTreeMap, time::Duration};
 use tokio::sync::watch;
 
 const MAX_DATA: usize = 32 * 1024 * 1024;
-
-fn data(board: &NSPasteboard, kind: &str) -> Option<Vec<u8>> {
-    let t = NSString::from_str(kind);
-    if matches!(
-        kind,
-        "public.utf8-plain-text" | "public.html" | "public.url" | "public.file-url"
-    ) {
-        return board.stringForType(&t).map(|s| s.to_string().into_bytes());
-    }
-    if let Some(data) = board.dataForType(&t) {
-        return Some(data.to_vec());
-    }
-    if kind == "public.png" {
-        let tiff = board
-            .dataForType(&NSString::from_str("public.tiff"))
-            .or_else(|| {
-                NSImage::initWithPasteboard(NSImage::alloc(), board)
-                    .and_then(|image| image.TIFFRepresentation())
-            })?;
-        let image = NSBitmapImageRep::imageRepWithData(&tiff)?;
-        return unsafe {
-            image.representationUsingType_properties(
-                NSBitmapImageFileType::PNG,
-                &NSDictionary::new(),
-            )
-        }
-        .map(|d| d.to_vec());
-    }
-    None
-}
-fn urls(board: &NSPasteboard) -> Option<Vec<u8>> {
-    let mut urls = Vec::new();
-    if let Some(items) = board.pasteboardItems() {
-        for item in items.iter() {
-            if let Some(url) = item
-                .stringForType(&NSString::from_str("public.url"))
-                .or_else(|| item.stringForType(&NSString::from_str("public.file-url")))
-            {
-                urls.push(url.to_string());
-            }
-        }
-    }
-    if urls.is_empty() {
-        None
-    } else {
-        Some(urls.join("\n").into_bytes())
-    }
-}
 
 // Prefer portable representations; optional formats must not reject a usable copy.
 #[derive(Default)]
@@ -103,41 +52,11 @@ struct Snapshot {
     notice: Option<&'static str>,
 }
 
-// Called on the app's main thread; clipboard data never enters the webview.
 fn capture(previous: Option<isize>) -> Result<Option<Snapshot>, String> {
-    let board = NSPasteboard::generalPasteboard();
-    let count = board.changeCount();
-    if previous == Some(count) {
-        return Ok(None);
-    }
     let mut formats = Formats::default();
-    formats.add(
-        "text/plain",
-        data(&board, "public.utf8-plain-text"),
-        MAX_DATA,
-    );
-    formats.add("image/png", data(&board, "public.png"), MAX_DATA);
-    formats.add("text/html", data(&board, "public.html"), MAX_DATA);
-    formats.add("text/uri-list", urls(&board), MAX_DATA);
-    if let Some(types) = board.types() {
-        for kind in types.iter().map(|t| t.to_string()) {
-            if !matches!(
-                kind.as_str(),
-                "public.utf8-plain-text"
-                    | "public.html"
-                    | "public.png"
-                    | "public.url"
-                    | "public.file-url"
-            ) {
-                formats.add(&kind, data(&board, &kind), MAX_DATA);
-            }
-        }
-    }
-    // Retry next tick if an external app changed the pasteboard during capture.
-    if board.changeCount() != count {
-        return Ok(None);
-    }
-    formats.finish(count).map(Some)
+    crate::platform::clipboard::capture(previous, |kind, bytes| formats.add(kind, bytes, MAX_DATA))
+        .map(|count| formats.finish(count))
+        .transpose()
 }
 
 fn archive(mut formats: BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>, String> {
@@ -200,12 +119,10 @@ pub fn client_identity(
         Ok(value) => uuid::Uuid::parse_str(value.trim()).map_err(|e| e.to_string()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
             let id = uuid::Uuid::new_v4();
-            let mut file = std::fs::OpenOptions::new()
+            let mut file = crate::platform::filesystem::private_file_options()
                 .write(true)
                 .create_new(true)
-                .mode(0o600)
                 .open(path)
                 .map_err(|e| e.to_string())?;
             file.write_all(id.to_string().as_bytes())

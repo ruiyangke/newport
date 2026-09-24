@@ -1,0 +1,33 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Porthop",
+        "width": 960,
+        "height": 680,
+        "minWidth": 640,
+        "minHeight": 480,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 19
+        },
+        "transparent": true,
+        "windowEffects": {
+          "effects": [
+            "sidebar"
+          ],
+          "state": "followsWindowActiveState"
+        }
+      }
+    ],
+    "macOSPrivateApi": true
+  },
+  "bundle": {
+    "macOS": {
+      "minimumSystemVersion": "14.0"
+    }
+  }
+}

@@ -62,13 +62,11 @@ pub fn migrations() -> Vec<tauri_plugin_sql::Migration> {
 /// Use the existing profile directory (including isolated profiles), not the
 /// plugin's default app-config directory. Pre-create with private permissions.
 pub fn database_url(path: &Path) -> Result<String, String> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
+    crate::platform::filesystem::private_file_options()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .mode(0o600)
         .open(path)
         .map_err(|e| e.to_string())?;
     let path = path.canonicalize().map_err(|e| e.to_string())?;

@@ -9,13 +9,13 @@ mod connectivity;
 mod credentials;
 mod desktop;
 mod files;
-mod keychain;
 mod known_hosts;
 mod manager;
 mod metrics_db;
 mod metrics_sampler;
 mod model;
 mod monitoring;
+mod platform;
 mod plugins;
 mod ports;
 mod preferences;
@@ -30,3 +30,6 @@ fn main() {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod remote_tests;

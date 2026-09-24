@@ -54,7 +54,7 @@ impl client::Handler for Handler {
             #[cfg(test)]
             let system = None;
             #[cfg(not(test))]
-            let system = Some(std::path::Path::new("/etc/ssh/ssh_known_hosts"));
+            let system = crate::platform::ssh_agent::system_known_hosts();
             known_hosts::verify(&host, port, &key, &path, system)
         })
         .await??;

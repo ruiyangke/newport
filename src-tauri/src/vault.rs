@@ -146,16 +146,12 @@ pub fn write_with_password(
     if verified.config != record.config || verified.passwords != record.passwords {
         return Err("Encrypted profile verification failed; previous snapshot preserved".into());
     }
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&staged_path, fs::Permissions::from_mode(0o600))
-        .map_err(|e| e.to_string())?;
+    crate::platform::filesystem::protect_file(&staged_path).map_err(|e| e.to_string())?;
     fs::File::open(&staged_path)
         .and_then(|f| f.sync_all())
         .map_err(|e| e.to_string())?;
     fs::rename(staged_path, path).map_err(|e| e.to_string())?;
-    fs::File::open(directory)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| e.to_string())?;
+    crate::platform::filesystem::sync_directory(directory).map_err(|e| e.to_string())?;
     Ok(())
 }
 
