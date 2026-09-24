@@ -4514,6 +4514,8 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "block2",
+ "core-foundation 0.9.4",
  "dirs 7.0.0",
  "fs2",
  "hmac 0.13.0",
@@ -4529,6 +4531,7 @@ dependencies = [
  "sha1 0.11.0",
  "sha2 0.11.0",
  "sqlx",
+ "system-configuration",
  "tar",
  "tauri",
  "tauri-build",

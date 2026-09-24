@@ -165,6 +165,9 @@ pub fn run() -> anyhow::Result<()> {
             app.set_activation_policy(tauri::ActivationPolicy::Regular);
             crate::preferences::install(app, &profile_directory)?;
             crate::desktop::install(app)?;
+            if let Err(error) = crate::system_events::install() {
+                log::warn!("System event monitoring unavailable; using timed recovery: {error}");
+            }
             let open = MenuItem::with_id(app, "open", "Open Porthop", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Porthop", true, None::<&str>)?;
             let settings = MenuItem::with_id(app, "app-settings", "Settings…", true, None::<&str>)?;

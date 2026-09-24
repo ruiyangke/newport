@@ -77,7 +77,15 @@ impl Drop for Connection {
 }
 pub(crate) fn is_transient_connection_error(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        if let Some(error) = cause.downcast_ref::<std::io::Error>() {
+        // russh's transparent IO wrapper omits the inner error from source(),
+        // so anyhow's chain alone cannot expose its ErrorKind.
+        let io = cause.downcast_ref::<std::io::Error>().or_else(|| {
+            match cause.downcast_ref::<russh::Error>() {
+                Some(russh::Error::IO(error)) => Some(error),
+                _ => None,
+            }
+        });
+        if let Some(error) = io {
             return matches!(
                 error.kind(),
                 std::io::ErrorKind::ConnectionRefused
@@ -580,6 +588,22 @@ mod integration_tests {
 mod connection_retry_tests {
     use super::*;
 
+    #[test]
+    fn wrapped_io_errors_keep_their_retry_classification() {
+        for (kind, retryable) in [
+            (std::io::ErrorKind::ConnectionReset, true),
+            (std::io::ErrorKind::BrokenPipe, true),
+            (std::io::ErrorKind::UnexpectedEof, true),
+            (std::io::ErrorKind::TimedOut, true),
+            (std::io::ErrorKind::PermissionDenied, false),
+            (std::io::ErrorKind::InvalidData, false),
+        ] {
+            let error = anyhow::Error::new(russh::Error::IO(std::io::Error::from(kind)))
+                .context("SSH handshake or host-key verification failed");
+            assert_eq!(is_transient_connection_error(&error), retryable, "{kind:?}");
+        }
+    }
+
     #[tokio::test]
     async fn handshake_reset_recovers_before_any_command_runs() {
         let mut attempts = 0;
@@ -587,9 +611,9 @@ mod connection_retry_tests {
             || {
                 attempts += 1;
                 std::future::ready(if attempts == 1 {
-                    Err(anyhow::Error::new(std::io::Error::from(
+                    Err(anyhow::Error::new(russh::Error::IO(std::io::Error::from(
                         std::io::ErrorKind::ConnectionReset,
-                    ))
+                    )))
                     .context("SSH handshake or host-key verification failed"))
                 } else {
                     Ok("connected")

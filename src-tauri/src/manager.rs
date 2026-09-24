@@ -373,10 +373,16 @@ fn spawn(
     let (cancel, mut rx) = watch::channel(false);
     let task = tokio::spawn(async move {
         let clipboard = false;
-        let mut attempt = 0;
+        let mut attempt: u32 = 0;
+        let mut recovery = crate::system_events::subscribe();
         loop {
             if *rx.borrow() {
                 break;
+            }
+            tokio::select! {
+                biased;
+                _ = rx.changed() => break,
+                _ = recovery.ready() => {},
             }
             let connected = tokio::select! {
                 _ = rx.changed() => break,
@@ -415,20 +421,11 @@ fn spawn(
             if *rx.borrow() {
                 break;
             }
-            if !retryable || !tunnel.as_ref().is_some_and(|t| t.auto_reconnect) || attempt >= 10 {
-                set_state(
-                    &runtime,
-                    id,
-                    clipboard,
-                    ConnectionState::error(if attempt >= 10 {
-                        format!("Reconnect limit reached. {message}")
-                    } else {
-                        message
-                    }),
-                );
+            if !retryable || !tunnel.as_ref().is_some_and(|t| t.auto_reconnect) {
+                set_state(&runtime, id, clipboard, ConnectionState::error(message));
                 break;
             }
-            attempt += 1;
+            attempt = attempt.saturating_add(1);
             set_state(
                 &runtime,
                 id,
@@ -439,8 +436,8 @@ fn spawn(
                     reconnect_attempt: attempt,
                 },
             );
-            let delay = (2u64.pow(attempt.min(7))).min(120);
-            tokio::select! { _ = rx.changed() => break, _ = tokio::time::sleep(Duration::from_secs(delay)) => {} }
+            let delay = (2u64.pow(attempt.min(5))).min(30);
+            tokio::select! { biased; _ = rx.changed() => break, _ = recovery.wait(Duration::from_secs(delay)) => {} }
         }
     });
     Ok(Running { cancel, task })

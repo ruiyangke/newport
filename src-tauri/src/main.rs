@@ -20,6 +20,7 @@ mod plugins;
 mod ports;
 mod preferences;
 mod ssh;
+mod system_events;
 mod terminal;
 mod updates;
 mod vault;

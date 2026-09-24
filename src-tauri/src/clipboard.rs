@@ -230,9 +230,15 @@ where
     Fut: std::future::Future<Output = Result<(), String>>,
 {
     let mut wait = delay;
+    let mut recovery = crate::system_events::subscribe();
     loop {
         if *cancel.borrow() {
             return Ok(());
+        }
+        tokio::select! {
+            biased;
+            _ = cancel.changed() => return Ok(()),
+            _ = recovery.ready() => {},
         }
         let started = tokio::time::Instant::now();
         let result = tokio::select! {
@@ -258,7 +264,7 @@ where
         }
         tokio::select! {
             _ = cancel.changed() => return Ok(()),
-            _ = tokio::time::sleep(wait) => {}
+            _ = recovery.wait(wait) => {}
         }
         wait = (wait * 2).min(Duration::from_secs(30));
     }
