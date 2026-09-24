@@ -18,7 +18,11 @@ use std::{
 
 fn error_kind(error: &io::Error) -> u8 {
     match error.kind() {
-        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted => b'T',
+        io::ErrorKind::WouldBlock
+        | io::ErrorKind::TimedOut
+        | io::ErrorKind::Interrupted
+        | io::ErrorKind::StorageFull
+        | io::ErrorKind::QuotaExceeded => b'T',
         _ => b'E',
     }
 }
@@ -113,6 +117,20 @@ fn run(client: &str, clipboard: bool, browser: bool, output: &mut impl Write) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn disk_capacity_errors_are_retryable_including_path_wrappers() {
+        for code in [libc::ENOSPC, libc::EDQUOT] {
+            let error = io::Error::from_raw_os_error(code);
+            assert_eq!(error_kind(&error), b'T');
+            // tempfile attaches the failing path, preserving ErrorKind rather
+            // than raw_os_error. Classification must survive that wrapper.
+            let wrapped = io::Error::new(error.kind(), format!("{error} at path /clipboard/.tmp"));
+            assert_eq!(error_kind(&wrapped), b'T');
+        }
+        for code in [libc::EACCES, libc::EROFS] {
+            assert_eq!(error_kind(&io::Error::from_raw_os_error(code)), b'E');
+        }
+    }
     #[test]
     fn permanent_errors_do_not_inherit_retry_from_their_text() {
         assert_eq!(

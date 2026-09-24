@@ -134,13 +134,15 @@ pub fn client_identity(
     }
 }
 
-// Retry transport failures, never permission, ownership or authentication
+// Retry transport failures and agent-declared temporary failures (including
+// exhausted disk space), never permission, ownership or authentication
 // failures. Each agent owns its files until the SSH channel closes or its lease expires.
 async fn recover_connection<F, Fut>(
     mut attempt: F,
     mut cancel: watch::Receiver<bool>,
     retrying: impl Fn(),
     delay: Duration,
+    mut changes: Option<watch::Receiver<Option<isize>>>,
 ) -> Result<(), String>
 where
     F: FnMut() -> Fut,
@@ -158,6 +160,9 @@ where
             _ = recovery.ready() => {},
         }
         let started = tokio::time::Instant::now();
+        if let Some(changes) = &mut changes {
+            changes.borrow_and_update();
+        }
         let result = tokio::select! {
             biased;
             _ = cancel.changed() => return Ok(()),
@@ -181,6 +186,14 @@ where
         }
         tokio::select! {
             _ = cancel.changed() => return Ok(()),
+            _ = async {
+                if let Some(changes) = &mut changes {
+                    if changes.changed().await.is_ok() {
+                        return;
+                    }
+                }
+                std::future::pending::<()>().await;
+            } => {},
             _ = recovery.wait(wait) => {}
         }
         wait = (wait * 2).min(Duration::from_secs(30));
@@ -195,13 +208,54 @@ pub async fn run(
     ready: impl Fn(String, bool),
     retrying: impl Fn(),
 ) -> Result<(), String> {
-    recover_connection(
+    let initial = if server.clipboard_enabled {
+        revision(&app).await
+    } else {
+        None
+    };
+    let (send, receive) = watch::channel(initial);
+    let recovery = recover_connection(
         || run_once(server.clone(), client, app.clone(), cancel.clone(), &ready),
         cancel.clone(),
         retrying,
         Duration::from_secs(2),
-    )
-    .await
+        server.clipboard_enabled.then_some(receive),
+    );
+    // Observe only the cheap revision counter; actual contents are read by
+    // run_once after reconnecting. Keep this scoped to the integration session.
+    let monitor = async {
+        if !server.clipboard_enabled {
+            std::future::pending::<()>().await;
+        }
+        loop {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if let Some(count) = revision(&app).await {
+                send.send_if_modified(|previous| {
+                    if *previous == Some(count) {
+                        return false;
+                    }
+                    *previous = Some(count);
+                    true
+                });
+            }
+        }
+    };
+    tokio::select! {
+        result = recovery => result,
+        _ = monitor => unreachable!(),
+    }
+}
+
+async fn revision(app: &tauri::AppHandle) -> Option<isize> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let _ = send.send(crate::platform::clipboard::revision());
+    })
+    .ok()?;
+    tokio::time::timeout(Duration::from_secs(5), receive)
+        .await
+        .ok()?
+        .ok()?
 }
 
 /// One authenticated SSH connection carries all updates. No HTTP listener or forwarding.
@@ -430,6 +484,7 @@ mod tests {
             rx.clone(),
             || {},
             Duration::ZERO,
+            None,
         )
         .await
         .unwrap();
@@ -448,6 +503,7 @@ mod tests {
             rx.clone(),
             || {},
             Duration::ZERO,
+            None,
         )
         .await
         .unwrap();
@@ -464,11 +520,120 @@ mod tests {
             rx,
             || panic!("Ownership errors must not retry"),
             Duration::ZERO,
+            None,
         )
         .await
         .unwrap_err();
         assert_eq!(attempts, 1);
         assert!(error.contains("already active"));
+    }
+
+    #[tokio::test]
+    async fn copy_during_failed_attempt_is_not_lost() {
+        let (_cancel, rx) = watch::channel(false);
+        let (changes, revisions) = watch::channel(Some(1));
+        let mut attempts = 0;
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            recover_connection(
+                || {
+                    attempts += 1;
+                    std::future::ready(if attempts == 1 {
+                        changes.send(Some(2)).unwrap();
+                        Err("SSH transport interrupted: No space left on device".into())
+                    } else {
+                        Ok(())
+                    })
+                },
+                rx,
+                || {},
+                Duration::from_secs(30),
+                Some(revisions),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(attempts, 2);
+    }
+
+    #[tokio::test]
+    async fn new_copy_wakes_backoff_once_without_repeating_unchanged_copies() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let (_cancel, rx) = watch::channel(false);
+        let (changes, revisions) = watch::channel(Some(1));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let count = attempts.clone();
+        let recovery = recover_connection(
+            move || {
+                let attempt = count.fetch_add(1, Ordering::SeqCst) + 1;
+                std::future::ready(if attempt < 3 {
+                    Err("SSH transport interrupted: No space left on device".into())
+                } else {
+                    Ok(())
+                })
+            },
+            rx,
+            || {},
+            Duration::from_secs(30),
+            Some(revisions),
+        );
+        tokio::pin!(recovery);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut recovery)
+                .await
+                .is_err()
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        changes.send(Some(2)).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut recovery)
+                .await
+                .is_err()
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut recovery)
+                .await
+                .is_err()
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        changes.send(Some(3)).unwrap();
+        tokio::time::timeout(Duration::from_millis(200), &mut recovery)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn disk_full_agent_retries_until_space_is_available() {
+        let (_tx, rx) = watch::channel(false);
+        let mut attempts = 0;
+        recover_connection(
+            || {
+                attempts += 1;
+                std::future::ready(if attempts < 4 {
+                    Err(crate::agent::checked_event(
+                        b'T',
+                        b"No space left on device (os error 28) at path /clipboard/.tmp".to_vec(),
+                    )
+                    .unwrap_err())
+                } else {
+                    Ok(())
+                })
+            },
+            rx,
+            || {},
+            Duration::ZERO,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts, 4);
     }
 
     #[tokio::test]
@@ -485,6 +650,7 @@ mod tests {
                 tx.send(true).unwrap();
             },
             Duration::from_secs(60),
+            None,
         )
         .await
         .unwrap();
@@ -499,6 +665,7 @@ mod tests {
             rx,
             || panic!("Cancellation must not retry"),
             Duration::from_secs(60),
+            None,
         );
         let cancel = async {
             tokio::task::yield_now().await;
@@ -524,6 +691,7 @@ mod tests {
             rx,
             || panic!("Permanent agent errors must remain visible"),
             Duration::ZERO,
+            None,
         )
         .await
         .unwrap_err();

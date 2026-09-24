@@ -2,6 +2,10 @@ use objc2::AnyThread;
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSPasteboard};
 use objc2_foundation::{NSDictionary, NSString};
 
+pub fn revision() -> Option<isize> {
+    Some(NSPasteboard::generalPasteboard().changeCount())
+}
+
 fn data(board: &NSPasteboard, kind: &str) -> Option<Vec<u8>> {
     let t = NSString::from_str(kind);
     if matches!(

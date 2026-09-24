@@ -81,7 +81,7 @@ fn transport(error: impl std::fmt::Display) -> String {
     format!("SSH transport interrupted: {error}")
 }
 
-fn checked_event(kind: u8, data: Vec<u8>) -> Result<(u8, Vec<u8>), String> {
+pub(crate) fn checked_event(kind: u8, data: Vec<u8>) -> Result<(u8, Vec<u8>), String> {
     match kind {
         b'E' => Err(format!("Agent error: {}", String::from_utf8_lossy(&data))),
         b'T' => Err(transport(String::from_utf8_lossy(&data))),

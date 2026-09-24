@@ -6,6 +6,10 @@ use std::io::Cursor;
 
 const MAX_CAPTURE_BYTES: usize = 128 * 1024 * 1024;
 
+pub fn revision() -> Option<isize> {
+    clipboard_win::seq_num().map(|count| count.get() as isize)
+}
+
 fn bounded_memory_format(format: u32) -> bool {
     clipboard_win::size(format).is_some_and(|size| size.get() <= MAX_CAPTURE_BYTES)
 }
