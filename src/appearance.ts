@@ -1,3 +1,5 @@
+import { isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useSyncExternalStore } from "react";
 export type Appearance = "system" | "light" | "dark";
 const changed = "porthop-appearance-changed";
@@ -16,6 +18,15 @@ export function applyAppearance(value = getAppearance()) {
     (value === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
   document.documentElement.classList.toggle("dark", dark);
   document.documentElement.style.colorScheme = dark ? "dark" : "light";
+  if (isTauri()) {
+    document.documentElement.classList.add("native-vibrancy");
+    // Match the native sidebar material to the app's appearance override.
+    void getCurrentWindow()
+      .setTheme(value === "system" ? null : value)
+      .catch((error: unknown) => {
+        console.warn("Could not update native window appearance", error);
+      });
+  }
   window.dispatchEvent(new Event(changed));
 }
 export function setAppearance(value: Appearance) {

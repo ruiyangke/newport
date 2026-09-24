@@ -1861,7 +1861,7 @@ kbd {
   --background: #ffffff;
   --native-surface: #ffffff;
   --native-toolbar: #f5f4f6;
-  --sidebar: #eeedf0;
+  --sidebar: #f5f4f6;
   --native-selection: #dad9dd;
   --native-selection-foreground: #28272b;
   --border: #dedde1;
@@ -1871,7 +1871,7 @@ kbd {
   --background: #1e1f21;
   --native-surface: #1e1f21;
   --native-toolbar: #2a292d;
-  --sidebar: #29282c;
+  --sidebar: #343337;
   --native-selection: #454349;
   --native-selection-foreground: #f4f3f5;
   --border: #3c3b40;
@@ -1889,11 +1889,45 @@ kbd {
 .mac-shell .sidebar[hidden] {
   display: none;
 }
+/* Native material shows through the sidebar only; the workspace stays opaque. */
+html.native-vibrancy,
+.native-vibrancy body {
+  background: transparent;
+}
+:root:not(.dark) .mac-shell .sidebar {
+  --foreground: #191a1e;
+  --muted-foreground: #494c55;
+  --native-selection-foreground: #191a1e;
+  color: var(--foreground);
+}
 .mac-shell .sidebar {
-  background: var(--sidebar);
-  border-right: 1px solid var(--border);
+  -webkit-user-select: none;
+  user-select: none;
+  --native-selection: color-mix(in srgb, var(--foreground) 9%, transparent);
+  background: color-mix(in srgb, var(--sidebar) 76%, transparent);
+  border-right: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
   padding: 0 10px;
   overflow: auto;
+  -webkit-backdrop-filter: blur(24px) saturate(110%);
+  backdrop-filter: blur(24px) saturate(110%);
+}
+.dark .mac-shell .sidebar {
+  --native-selection: color-mix(in srgb, var(--foreground) 13%, transparent);
+}
+.native-vibrancy .mac-shell .sidebar {
+  background: color-mix(in srgb, var(--sidebar) 30%, transparent);
+  /* AppKit supplies the blur; avoid filtering its material a second time. */
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .mac-shell .sidebar,
+  .native-vibrancy .mac-shell .sidebar {
+    background: var(--sidebar);
+    border-right-color: var(--border);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
 }
 .sidebar-titlebar {
   height: 52px;
@@ -1970,6 +2004,11 @@ kbd {
 }
 .mac-shell .sidebar-secondary button {
   height: 28px;
+}
+:root:not(.dark) .mac-shell .source-list [role="tab"],
+:root:not(.dark) .mac-shell .sidebar-secondary button {
+  color: #191a1e;
+  font-weight: 500;
 }
 .mac-shell .sidebar-footer {
   font-size: 11px;
