@@ -1,64 +1,15 @@
 use crate::{model::Server, ssh::ExecSession};
-use std::{collections::BTreeMap, time::Duration};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::time::Duration;
+#[allow(dead_code)]
+#[path = "../../tools/agent/src/clipboard_wire.rs"]
+mod clipboard_wire;
 use tokio::sync::watch;
 
 const MAX_DATA: usize = 32 * 1024 * 1024;
 
-// Prefer portable representations; optional formats must not reject a usable copy.
-#[derive(Default)]
-struct Formats {
-    values: BTreeMap<String, Vec<u8>>,
-    size: usize,
-    skipped: bool,
-}
-impl Formats {
-    fn add(&mut self, kind: &str, bytes: Option<Vec<u8>>, limit: usize) {
-        // Format names become tar paths and TARGETS lines. Ignore malformed
-        // names and aliases already captured in their canonical representation.
-        if kind.is_empty()
-            || kind.len() > 256
-            || kind == "TARGETS"
-            || kind.chars().any(char::is_control)
-            || kind.split('/').any(|part| matches!(part, "" | "." | ".."))
-            || self.values.contains_key(kind)
-        {
-            return;
-        }
-        if let Some(bytes) = bytes {
-            if self.values.len() >= 256 || bytes.len() > limit.saturating_sub(self.size) {
-                self.skipped = true;
-                return;
-            }
-            self.size += bytes.len();
-            self.values.insert(kind.to_owned(), bytes);
-        }
-    }
-    fn finish(self, count: isize) -> Result<Snapshot, String> {
-        let notice = (self.values.is_empty() && self.skipped)
-            .then_some("Clipboard item exceeds 32 MiB. Waiting for a smaller copy.");
-        // Publish an empty snapshot for an oversized item, replacing stale data.
-        // Remember its change count so we wait for a new copy without rereading it.
-        Ok(Snapshot {
-            count,
-            bytes: archive(self.values)?,
-            notice,
-        })
-    }
-}
-
-struct Snapshot {
-    count: isize,
-    bytes: Vec<u8>,
-    notice: Option<&'static str>,
-}
-
-fn capture(previous: Option<isize>) -> Result<Option<Snapshot>, String> {
-    let mut formats = Formats::default();
-    crate::platform::clipboard::capture(previous, |kind, bytes| formats.add(kind, bytes, MAX_DATA))
-        .map(|count| formats.finish(count))
-        .transpose()
-}
-
+#[cfg(test)]
 fn archive(mut formats: BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>, String> {
     let mut targets: Vec<String> = formats.keys().cloned().collect();
     for (alias, kind) in [
@@ -92,21 +43,100 @@ fn archive(mut formats: BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>, String> {
     builder.into_inner().map_err(|e| e.to_string())
 }
 
-async fn snapshot(
+struct ClipboardReply {
+    request: clipboard_wire::Request,
+    chunks: Option<std::collections::VecDeque<(u8, Vec<u8>)>>,
+}
+async fn on_main<T: Send + 'static>(
     app: &tauri::AppHandle,
-    previous: Option<isize>,
-) -> Result<Option<Snapshot>, String> {
+    action: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.run_on_main_thread(move || {
         if !tx.is_closed() {
-            let _ = tx.send(capture(previous));
+            let _ = tx.send(action());
         }
     })
     .map_err(|e| e.to_string())?;
     tokio::time::timeout(Duration::from_secs(5), rx)
         .await
         .map_err(|_| "Timed out reading the clipboard".to_owned())?
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+async fn clipboard_offer(
+    app: &tauri::AppHandle,
+    previous: Option<isize>,
+) -> Result<Option<clipboard_wire::Offer>, String> {
+    let result = on_main(app, move || {
+        crate::platform::clipboard::offer(previous).map(|(revision, mut formats)| {
+            formats.retain(|s| clipboard_wire::valid_format(s) && s != "TARGETS");
+            formats.truncate(256);
+            log::info!(
+                "Clipboard offer revision={revision} formats={}",
+                formats.len()
+            );
+            clipboard_wire::Offer {
+                revision: revision as i64,
+                formats,
+            }
+        })
+    })
+    .await;
+    match result {
+        Err(error) if error == "Timed out reading the clipboard" => {
+            log::warn!("Clipboard metadata temporarily unavailable; retrying");
+            Ok(None)
+        }
+        other => other,
+    }
+}
+async fn read_requested(
+    app: &tauri::AppHandle,
+    request: clipboard_wire::Request,
+) -> ClipboardReply {
+    let revision = request.revision;
+    let format = request.format.clone();
+    let started = tokio::time::Instant::now();
+    let bytes = on_main(app, move || {
+        let (current, formats) = crate::platform::clipboard::offer(None)?;
+        if current as i64 != revision || !formats.contains(&format) {
+            return None;
+        }
+        crate::platform::clipboard::read_format(current, &format).filter(|b| b.len() <= MAX_DATA)
+    })
+    .await
+    .ok()
+    .flatten();
+    log::info!(
+        "Clipboard request id={} revision={} success={} bytes={} elapsed_ms={}",
+        request.id,
+        revision,
+        bytes.is_some(),
+        bytes.as_ref().map_or(0, Vec::len),
+        started.elapsed().as_millis()
+    );
+    let original_bytes = bytes.as_ref().map_or(0, Vec::len);
+    // Compression runs off the UI and async event-loop threads.
+    let chunks = match bytes {
+        Some(bytes) => tokio::task::spawn_blocking(move || {
+            if bytes.is_empty() {
+                return Ok(std::collections::VecDeque::from([(0, Vec::new())]));
+            }
+            bytes
+                .chunks(clipboard_wire::CHUNK)
+                .map(clipboard_wire::compress_chunk)
+                .collect::<std::io::Result<std::collections::VecDeque<_>>>()
+        })
+        .await
+        .ok()
+        .and_then(Result::ok),
+        None => None,
+    };
+    if let Some(chunks) = &chunks {
+        let transfer_bytes: usize = chunks.iter().map(|(_, bytes)| bytes.len()).sum();
+        log::info!("Clipboard transfer prepared id={} revision={} original_bytes={} transfer_bytes={} compressed_chunks={}", request.id, revision, original_bytes, transfer_bytes, chunks.iter().filter(|(status, _)| *status == 2).count());
+    }
+    ClipboardReply { request, chunks }
 }
 
 // Stable per local profile so reconnects can identify their previous agent.
@@ -235,6 +265,7 @@ pub async fn run(
                         return false;
                     }
                     *previous = Some(count);
+                    log::info!("Clipboard change detected revision={count}");
                     true
                 });
             }
@@ -305,65 +336,66 @@ async fn run_once(
             server.clipboard_enabled,
             server.browser_enabled
         );
-        let mut capture_failed = false;
         let mut previous = None;
         let mut heartbeat = tokio::time::Instant::now();
         let mut timer = tokio::time::interval(Duration::from_millis(200));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut reads = tokio::task::JoinSet::new();
+        let mut replies = std::collections::VecDeque::<ClipboardReply>::new();
         let outcome = async {
             loop {
-                if *cancel.borrow() {
-                    break;
-                }
+                if *cancel.borrow() { break; }
                 tokio::select! {
                     _ = cancel.changed() => break,
                     event = agent.event() => {
                         let (kind, data) = event?;
-                        if kind != b'O' { return Err("Unexpected agent event.".into()); }
-                        agent.open(&data).await?;
-                        continue;
-                    }
-                    _ = timer.tick() => {}
-                }
-                if let Some(snapshot) = if server.clipboard_enabled {
-                    match snapshot(&app, previous).await {
-                        Ok(snapshot) => {
-                            if capture_failed {
-                                log::info!("Mac clipboard reading recovered");
+                        match kind {
+                            b'O' => agent.open(&data).await?,
+                            b'C' if server.clipboard_enabled => {
+                                let request = clipboard_wire::Request::decode(&data).map_err(|e| e.to_string())?;
+                                if reads.len() + replies.len() >= 8 {
+                                    agent.clipboard_reply(&clipboard_wire::reply(&request, 1, true, &[])).await?;
+                                } else {
+                                    let app = app.clone();
+                                    reads.spawn(async move { read_requested(&app, request).await });
+                                }
                             }
-                            capture_failed = false;
-                            snapshot
+                            _ => return Err("Unexpected agent event.".into()),
                         }
-                        Err(error) if error.starts_with("Timed out reading the clipboard") => {
-                            if !capture_failed {
-                                log::warn!("Mac clipboard temporarily unavailable; retrying");
+                    }
+                    result = reads.join_next(), if !reads.is_empty() => {
+                        replies.push_back(result.unwrap().map_err(|e| e.to_string())?);
+                    }
+                    // One bounded chunk per turn lets events and timers run between writes.
+                    _ = tokio::task::yield_now(), if !replies.is_empty() => {
+                        let mut reply = replies.pop_front().unwrap();
+                        let current = crate::platform::clipboard::revision();
+                        if current != Some(reply.request.revision as isize) { reply.chunks = None; }
+                        let (status, bytes) = reply.chunks.as_mut().and_then(|chunks| chunks.pop_front()).unwrap_or((1, Vec::new()));
+                        let done = reply.chunks.as_ref().is_none_or(|chunks| chunks.is_empty());
+                        agent.clipboard_reply(&clipboard_wire::reply(&reply.request, status, done, &bytes)).await?;
+                        if !done { replies.push_back(reply); }
+                    }
+                    _ = timer.tick() => {
+                        if server.clipboard_enabled && reads.is_empty() {
+                            if let Some(offer) = clipboard_offer(&app, previous).await? {
+                                let revision = offer.revision;
+                                let backend = agent.request(b'M', &offer.encode()).await?;
+                                previous = Some(revision as isize);
+                                heartbeat = tokio::time::Instant::now();
+                                ready(backend, path_needed);
                             }
-                            capture_failed = true;
-                            None
                         }
-                        Err(error) => return Err(error),
+                        if heartbeat.elapsed() >= Duration::from_secs(5) {
+                            agent.request(b'H', &[]).await?;
+                            heartbeat = tokio::time::Instant::now();
+                        }
                     }
-                } else {
-                    None
-                } {
-                    if *cancel.borrow() {
-                        break;
-                    }
-                    let backend = agent.request(b'S', &snapshot.bytes).await?;
-                    previous = Some(snapshot.count);
-                    heartbeat = tokio::time::Instant::now();
-                    ready(
-                        snapshot.notice.unwrap_or(backend.trim()).to_owned(),
-                        path_needed,
-                    );
-                } else if heartbeat.elapsed() >= Duration::from_secs(5) {
-                    agent.request(b'H', &[]).await?;
-                    heartbeat = tokio::time::Instant::now();
                 }
             }
             Ok(())
-        }
-        .await;
+        }.await;
+        reads.abort_all();
         agent.close().await;
         outcome
     }
@@ -376,98 +408,6 @@ async fn run_once(
 mod tests {
     use super::*;
 
-    #[test]
-    fn oversized_extra_representation_does_not_reject_portable_content() {
-        let mut formats = Formats::default();
-        formats.add("image/png", Some(vec![1; 4]), 10);
-        formats.add("public.tiff", Some(vec![2; 20]), 10);
-        formats.add("custom-small", Some(vec![3; 2]), 10);
-        let values = formats.values;
-        assert_eq!(values["image/png"], vec![1; 4]);
-        assert!(!values.contains_key("public.tiff"));
-        assert_eq!(values["custom-small"], vec![3; 2]);
-    }
-
-    #[test]
-    fn combined_formats_stay_within_budget_and_oversize_can_fall_back() {
-        let mut formats = Formats::default();
-        formats.add("text/plain", Some(vec![1; 11]), 10);
-        formats.add("image/png", Some(vec![2; 6]), 10);
-        formats.add("text/html", Some(vec![3; 5]), 10);
-        formats.add("text/uri-list", Some(vec![4; 4]), 10);
-        let values = formats.values;
-        assert_eq!(values.values().map(Vec::len).sum::<usize>(), 10);
-        assert!(values.contains_key("image/png"));
-        assert!(!values.contains_key("text/html"));
-    }
-
-    #[test]
-    fn oversized_copy_clears_snapshot_and_next_copy_recovers() {
-        let empty = Formats::default().finish(1).unwrap();
-        assert!(empty.notice.is_none());
-        let mut formats = Formats::default();
-        formats.add("text/plain", Some(vec![1; 11]), 10);
-        let skipped = formats.finish(2).unwrap();
-        assert_eq!(skipped.count, 2);
-        assert!(skipped
-            .notice
-            .unwrap()
-            .contains("Waiting for a smaller copy"));
-        assert_eq!(skipped.bytes, empty.bytes);
-        let mut next = Formats::default();
-        next.add("text/plain", Some(b"small".to_vec()), 10);
-        let recovered = next.finish(3).unwrap();
-        assert_eq!(recovered.count, 3);
-        assert!(recovered.notice.is_none());
-        assert_ne!(recovered.bytes, empty.bytes);
-    }
-
-    #[test]
-    fn malformed_and_duplicate_formats_do_not_break_snapshot() {
-        let mut formats = Formats::default();
-        formats.add("text/plain", Some(b"original".to_vec()), 10);
-        for kind in [
-            "text/plain",
-            "../bad",
-            "/absolute",
-            "bad\nname",
-            "bad\0name",
-            "TARGETS",
-        ] {
-            formats.add(kind, Some(vec![1; 20]), 10);
-        }
-        assert!(!formats.skipped);
-        assert_eq!(formats.size, 8);
-        let snapshot = formats.finish(1).unwrap();
-        let mut archive = tar::Archive::new(snapshot.bytes.as_slice());
-        let paths: Vec<_> = archive
-            .entries()
-            .unwrap()
-            .map(|e| e.unwrap().path().unwrap().into_owned())
-            .collect();
-        assert_eq!(
-            paths,
-            vec![
-                std::path::PathBuf::from("TARGETS"),
-                std::path::PathBuf::from("text/plain")
-            ]
-        );
-    }
-
-    #[test]
-    fn format_count_and_names_match_agent_limits() {
-        let mut formats = Formats::default();
-        formats.add(&"x".repeat(257), Some(vec![1]), MAX_DATA);
-        assert!(formats.values.is_empty());
-        for n in 0..257 {
-            formats.add(&format!("application/x-test-{n}"), Some(vec![1]), MAX_DATA);
-        }
-        assert_eq!(formats.values.len(), 256);
-        assert!(formats.skipped);
-        let snapshot = formats.finish(1).unwrap();
-        let mut archive = tar::Archive::new(snapshot.bytes.as_slice());
-        assert_eq!(archive.entries().unwrap().count(), 257);
-    }
     #[tokio::test]
     async fn timeout_recovery_retries_but_preserves_permanent_errors() {
         let (_tx, rx) = watch::channel(false);
@@ -742,7 +682,7 @@ mod tests {
             stream.read_exact(&mut data).await.unwrap();
             data
         }
-        assert_eq!(event(&mut stream, b'R').await, b"porthop-agent/3");
+        assert_eq!(event(&mut stream, b'R').await, b"porthop-agent/5");
         let bytes = archive(BTreeMap::from([(
             "text/plain".into(),
             "SSH clipboard 世界\n".as_bytes().to_vec(),

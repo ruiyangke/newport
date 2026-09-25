@@ -4533,6 +4533,7 @@ dependencies = [
  "clipboard-win",
  "core-foundation 0.9.4",
  "dirs 7.0.0",
+ "flate2",
  "fs2",
  "hmac 0.13.0",
  "image",

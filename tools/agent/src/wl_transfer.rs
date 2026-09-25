@@ -42,5 +42,21 @@ pub(crate) fn write_pipe(fd: OwnedFd, bytes: &[u8], stop: &AtomicBool) -> io::Re
             Err(e) => return Err(e),
         }
     }
+    if !remaining.is_empty() {
+        return Err(io::ErrorKind::Interrupted.into());
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn canceled_transfer_is_not_reported_as_complete() {
+        let (writer, _reader) = UnixStream::pair().unwrap();
+        let result = write_pipe(writer.into(), b"image", &AtomicBool::new(true));
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
+    }
 }

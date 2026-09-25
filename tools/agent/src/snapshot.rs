@@ -72,7 +72,12 @@ pub(crate) fn publish(path: &Path, data: &[u8]) -> io::Result<()> {
         .as_file()
         .set_permissions(std::fs::Permissions::from_mode(0o600))?;
     pending.write_all(data)?;
-    read(pending.path())?;
+    let formats = read(pending.path())?;
     pending.persist(path).map_err(|error| error.error)?;
+    crate::diagnostics::event(
+        path,
+        "snapshot_published",
+        &crate::diagnostics::formats(&formats),
+    );
     Ok(())
 }

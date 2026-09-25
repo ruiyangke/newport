@@ -2,15 +2,12 @@
 use crate::wl_transfer::write_pipe;
 use std::{
     collections::BTreeMap,
-    fs,
-    os::unix::fs::MetadataExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     thread,
-    time::Duration,
 };
 use wayland_protocols_wlr::data_control::v1::server::{
     zwlr_data_control_device_v1::{self as device, ZwlrDataControlDeviceV1 as Device},
@@ -23,20 +20,11 @@ use wayland_server::{
 };
 
 type Formats = BTreeMap<String, Vec<u8>>;
-type Revision = (u64, u64, u64);
+type Revision = crate::clipboard_source::Revision;
 const READ_ONLY: &str = "Porthop clipboard is read-only";
-
-/// Only metadata is polled. A heartbeat updates mtime without reloading the archive.
-fn revision(path: &Path) -> Option<Revision> {
-    let m = fs::symlink_metadata(path).ok()?;
-    (m.is_file()
-        && m.uid() == unsafe { libc::geteuid() }
-        && m.modified().ok()?.elapsed().ok()? < Duration::from_secs(120))
-    .then_some((m.dev(), m.ino(), m.len()))
-}
-
 pub(crate) struct State {
     path: PathBuf,
+    source: crate::clipboard_source::Source,
     revision: Option<Revision>,
     formats: Arc<Formats>,
     devices: Vec<Weak<Device>>,
@@ -54,9 +42,10 @@ impl Drop for Offered {
 }
 
 impl State {
-    pub(crate) fn new(path: PathBuf, stop: Arc<AtomicBool>) -> Self {
+    pub(crate) fn new(source: crate::clipboard_source::Source, stop: Arc<AtomicBool>) -> Self {
         Self {
-            path,
+            path: source.path.clone(),
+            source,
             revision: None,
             formats: Arc::new(BTreeMap::new()),
             devices: Vec::new(),
@@ -71,12 +60,13 @@ impl State {
 
     pub(crate) fn refresh(&mut self, handle: &DisplayHandle) {
         self.devices.retain(|device| device.upgrade().is_ok());
-        let current = revision(&self.path);
+        let offer = self.source.offer().ok();
+        let current = offer.as_ref().map(|(r, _)| *r);
         if self.revision == current {
             return;
         }
         self.revision = current;
-        self.formats = Arc::new(crate::snapshot::read(&self.path).unwrap_or_default());
+        self.formats = Arc::new(offer.map(|(_, f)| f).unwrap_or_default());
         for device in &self.devices {
             if let Ok(device) = device.upgrade() {
                 self.publish(&device, handle);
@@ -223,9 +213,14 @@ impl Dispatch<Offer, Offered> for State {
         if let offer::Request::Receive { mime_type, fd } = request {
             // Old offers cannot resurrect expired or replaced clipboard contents.
             if data.revision.is_none()
-                || revision(&state.path) != data.revision
+                || state.source.offer().ok().map(|(r, _)| r) != data.revision
                 || state.revision != data.revision
             {
+                crate::diagnostics::event(
+                    &state.path,
+                    "wayland_request_stale",
+                    "offer no longer matches current snapshot",
+                );
                 return;
             }
             let mime = if mime_type == "text/plain;charset=utf-8" {
@@ -234,15 +229,45 @@ impl Dispatch<Offer, Offered> for State {
                 &mime_type
             };
             if !state.formats.contains_key(mime) || state.transfers.load(Ordering::Relaxed) >= 8 {
+                crate::diagnostics::event(
+                    &state.path,
+                    "wayland_request_rejected",
+                    &format!(
+                        "mime={:?} available={} active={}",
+                        mime.chars().take(128).collect::<String>(),
+                        state.formats.contains_key(mime),
+                        state.transfers.load(Ordering::Relaxed)
+                    ),
+                );
                 return;
             }
-            let formats = state.formats.clone();
+            let revision = data.revision.unwrap();
             let mime = mime.to_owned();
             let active = state.transfers.clone();
             let stop = state.stop.clone();
+            let path = state.path.clone();
+            let source = state.source.clone();
+            crate::diagnostics::event(
+                &path,
+                "wayland_request",
+                &format!("mime={:?}", mime.chars().take(128).collect::<String>(),),
+            );
             active.fetch_add(1, Ordering::Relaxed);
             thread::spawn(move || {
-                let _ = write_pipe(fd, &formats[&mime], &stop);
+                let started = std::time::Instant::now();
+                let result = source
+                    .get(revision, &mime)
+                    .and_then(|bytes| write_pipe(fd, &bytes, &stop));
+                crate::diagnostics::event(
+                    &path,
+                    "wayland_transfer_finished",
+                    &format!(
+                        "success={} elapsed_ms={} error={:?}",
+                        result.is_ok(),
+                        started.elapsed().as_millis(),
+                        result.err().map(|e| e.kind())
+                    ),
+                );
                 active.fetch_sub(1, Ordering::Relaxed);
             });
         }

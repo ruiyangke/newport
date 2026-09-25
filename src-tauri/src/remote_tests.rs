@@ -155,7 +155,7 @@ async fn deploy_reinstall_and_agent_protocol() {
         .await
         .unwrap()
     }
-    assert_eq!(event(&mut stream, b'R').await, b"porthop-agent/3");
+    assert_eq!(event(&mut stream, b'R').await, b"porthop-agent/5");
     let mut archive = tar::Builder::new(Vec::new());
     for (name, data) in [
         ("text/plain", "container clipboard 世界\n"),

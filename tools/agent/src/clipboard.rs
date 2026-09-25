@@ -1,5 +1,5 @@
 //! Read-only xclip and wl-paste command compatibility.
-use crate::{paths::root, snapshot};
+use crate::paths::root;
 use std::io::{self, Write};
 pub fn read(args: &[String]) -> io::Result<()> {
     let mut target = "text/plain";
@@ -31,7 +31,8 @@ pub fn read(args: &[String]) -> io::Result<()> {
     if !read {
         return Err(io::Error::other("clipboard is read-only; use -o"));
     }
-    let formats = snapshot::read(&root()?.join("snapshot.tar"))?;
+    let path = root()?.join("snapshot.tar");
+    let (revision, formats) = crate::clipboard_source::offer(&path)?;
     if target == "TARGETS" {
         for key in formats.keys() {
             println!("{key}");
@@ -47,11 +48,7 @@ pub fn read(args: &[String]) -> io::Result<()> {
     ) {
         target = "text/plain";
     }
-    io::stdout().write_all(
-        formats
-            .get(target)
-            .ok_or_else(|| io::Error::other("clipboard format unavailable"))?,
-    )
+    io::stdout().write_all(&crate::clipboard_source::get(&path, revision, target)?)
 }
 pub fn wl_paste(args: &[String]) -> io::Result<()> {
     let mut xargs = vec!["-o".into()];

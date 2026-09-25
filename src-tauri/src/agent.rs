@@ -55,6 +55,7 @@ async fn deploy(session: &ExecSession, force: bool) -> Result<String, String> {
 
 pub struct Agent<W> {
     writer: W,
+    deferred: std::collections::VecDeque<(u8, Vec<u8>)>,
     events: mpsc::Receiver<Result<(u8, Vec<u8>), String>>,
     reader: tokio::task::JoinHandle<()>,
     app: tauri::AppHandle,
@@ -113,6 +114,7 @@ impl Agent<tokio::io::Sink> {
         });
         let mut agent = Agent {
             writer,
+            deferred: Default::default(),
             events,
             reader,
             app,
@@ -130,6 +132,12 @@ impl Agent<tokio::io::Sink> {
 }
 impl<W: AsyncWrite + Unpin> Agent<W> {
     pub async fn event(&mut self) -> Result<(u8, Vec<u8>), String> {
+        if let Some(event) = self.deferred.pop_front() {
+            return Ok(event);
+        }
+        self.receive().await
+    }
+    async fn receive(&mut self) -> Result<(u8, Vec<u8>), String> {
         let (kind, data) = self
             .events
             .recv()
@@ -191,16 +199,26 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
             self.writer.write_all(&frame).await.map_err(transport)?;
             self.writer.flush().await.map_err(transport)?;
             loop {
-                let (kind, data) = self.event().await?;
+                let (kind, data) = self.receive().await?;
                 match kind {
                     b'A' => return Ok(String::from_utf8_lossy(&data).into_owned()),
                     b'O' => self.open(&data).await?,
+                    b'C' if self.deferred.len() < 8 => self.deferred.push_back((kind, data)),
                     _ => return Err("Unexpected agent event.".into()),
                 }
             }
         })
         .await
         .map_err(|_| transport("agent request timed out"))?
+    }
+    pub async fn clipboard_reply(&mut self, data: &[u8]) -> Result<(), String> {
+        let frame = wire::encode(b'D', data).map_err(|e| e.to_string())?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            self.writer.write_all(&frame).await.map_err(transport)?;
+            self.writer.flush().await.map_err(transport)
+        })
+        .await
+        .map_err(|_| transport("clipboard reply timed out"))?
     }
     pub async fn close(&mut self) {
         let _ = tokio::time::timeout(Duration::from_secs(2), async {

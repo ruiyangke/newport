@@ -1,5 +1,4 @@
 //! Only the core X11 requests needed by clipboard readers. No rendering backend.
-use crate::snapshot;
 use std::{
     collections::{HashMap, HashSet},
     io::{self, Read, Write},
@@ -89,6 +88,7 @@ impl Atoms {
 pub struct Shared {
     pub atoms: Mutex<Atoms>,
     pub snapshot: PathBuf,
+    pub(crate) source: crate::clipboard_source::Source,
 }
 #[derive(Clone)]
 struct Property {
@@ -280,6 +280,12 @@ impl Client {
                 t.offset = end;
                 if !finished {
                     self.transfer = Some(t);
+                } else {
+                    crate::diagnostics::event(
+                        &self.shared.snapshot,
+                        "x11_transfer_served",
+                        &format!("bytes={}", t.bytes.len()),
+                    );
                 }
                 self.notify_property(key, 0)?;
             } else {
@@ -307,8 +313,15 @@ impl Client {
                 a.name(target).unwrap_or("").to_owned(),
             )
         };
-        let formats = if selection_name == "CLIPBOARD" {
-            snapshot::read(&self.shared.snapshot).unwrap_or_default()
+        let (revision, formats) = if selection_name == "CLIPBOARD" {
+            self.shared.source.offer().unwrap_or_else(|error| {
+                crate::diagnostics::event(
+                    &self.shared.snapshot,
+                    "x11_snapshot_failed",
+                    &format!("kind={:?}", error.kind()),
+                );
+                Default::default()
+            })
         } else {
             Default::default()
         };
@@ -347,16 +360,31 @@ impl Client {
                 | "text/plain; charset=utf-8" => "text/plain",
                 s => s,
             };
-            formats.get(name).map(|bytes| Property {
-                kind: if target_name == "TEXT" {
-                    self.atom("UTF8_STRING")
-                } else {
-                    target
-                },
-                format: 8,
-                bytes: bytes.clone(),
-            })
+            self.shared
+                .source
+                .get(revision, name)
+                .ok()
+                .map(|bytes| Property {
+                    kind: if target_name == "TEXT" {
+                        self.atom("UTF8_STRING")
+                    } else {
+                        target
+                    },
+                    format: 8,
+                    bytes,
+                })
         };
+        crate::diagnostics::event(
+            &self.shared.snapshot,
+            "x11_request",
+            &format!(
+                "target={:?} available={} bytes={} busy={}",
+                target_name.chars().take(128).collect::<String>(),
+                value.is_some(),
+                value.as_ref().map_or(0, |v| v.bytes.len()),
+                self.transfer.is_some() || self.properties.len() >= 128
+            ),
+        );
         if let Some(value) = value {
             let key = (window, property);
             if self.transfer.is_some() || self.properties.len() >= 128 {
@@ -565,7 +593,7 @@ impl Client {
                 let id = o.u32(r, 4);
                 let clipboard = self.shared.atoms.lock().unwrap().name(id) == Some("CLIPBOARD");
                 let mut b = self.packet(1, 0);
-                if clipboard && snapshot::read(&self.shared.snapshot).is_ok_and(|s| !s.is_empty()) {
+                if clipboard && self.shared.source.offer().is_ok_and(|(_, s)| !s.is_empty()) {
                     o.set32(&mut b, 8, OWNER);
                 }
                 self.send(&b)

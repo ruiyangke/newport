@@ -36,6 +36,7 @@ pub(crate) struct Session {
     _lock: fs::File,
     _endpoint: Endpoint,
     pub(crate) snapshot: PathBuf,
+    pub(crate) source: crate::clipboard_source::Source,
 }
 impl Session {
     pub(crate) fn start(
@@ -116,14 +117,15 @@ impl Session {
             Err(e) if e.kind() == io::ErrorKind::NotFound => (),
             Err(e) => return Err(e),
         }
+        let source = crate::clipboard_source::Source::new(&snapshot);
         let wayland = clipboard
             .then(|| {
-                wl_server::Server::start_fixed(&snapshot, &root.join("wayland.sock"))
+                wl_server::Server::start_source(source.clone(), &root.join("wayland.sock"))
                     .map_err(|e| io::Error::other(format!("Cannot start Wayland clipboard: {e}")))
             })
             .transpose()?;
         let x11 = clipboard
-            .then(|| x_server::Server::start(&snapshot, None))
+            .then(|| x_server::Server::start_source(source.clone(), None))
             .transpose()?;
         private_write(&root.join("agent-client"), client.as_bytes())?;
         for name in [
@@ -161,6 +163,7 @@ impl Session {
                 _lock: lock,
                 _endpoint,
                 snapshot,
+                source,
             },
             listener,
         ))

@@ -29,6 +29,12 @@ pub struct Server {
 }
 impl Server {
     pub fn start(snapshot: &Path, requested: Option<u16>) -> io::Result<Self> {
+        Self::start_source(crate::clipboard_source::Source::new(snapshot), requested)
+    }
+    pub(crate) fn start_source(
+        source: crate::clipboard_source::Source,
+        requested: Option<u16>,
+    ) -> io::Result<Self> {
         let dir = Path::new("/tmp/.X11-unix");
         match fs::DirBuilder::new().mode(0o1777).create(dir) {
             Ok(()) => fs::set_permissions(dir, fs::Permissions::from_mode(0o1777))?,
@@ -98,7 +104,8 @@ impl Server {
         listener.set_nonblocking(true)?;
         let shared = Arc::new(x_protocol::Shared {
             atoms: Mutex::new(Default::default()),
-            snapshot: snapshot.to_owned(),
+            snapshot: source.path.clone(),
+            source,
         });
         let stop = server.stop.clone();
         let clients = server.clients.clone();

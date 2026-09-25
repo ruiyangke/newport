@@ -54,39 +54,46 @@ fn urls(board: &NSPasteboard) -> Option<Vec<u8>> {
     }
 }
 
-/// Read on the app's main thread. The shared consumer applies size/format limits.
-/// `None` means unchanged or changed during capture: discard collected formats.
-/// A returned revision, including an empty copy, replaces the previous snapshot.
-pub fn capture(
-    previous: Option<isize>,
-    mut add: impl FnMut(&str, Option<Vec<u8>>),
-) -> Option<isize> {
+/// Inspect types only. Never asks a pasteboard owner to render its data.
+pub fn offer(previous: Option<isize>) -> Option<(isize, Vec<String>)> {
     let board = NSPasteboard::generalPasteboard();
-    let count = board.changeCount();
-    if previous == Some(count) {
+    let revision = board.changeCount();
+    if previous == Some(revision) {
         return None;
     }
-    add("text/plain", data(&board, "public.utf8-plain-text"));
-    add("image/png", data(&board, "public.png"));
-    add("text/html", data(&board, "public.html"));
-    add("text/uri-list", urls(&board));
-    if let Some(types) = board.types() {
-        for kind in types.iter().map(|t| t.to_string()) {
-            if !matches!(
-                kind.as_str(),
-                "public.utf8-plain-text"
-                    | "public.html"
-                    | "public.png"
-                    | "public.url"
-                    | "public.file-url"
-            ) {
-                add(&kind, data(&board, &kind));
-            }
+    let types: Vec<String> = board
+        .types()
+        .map(|types| types.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    let mut formats = Vec::new();
+    for kind in &types {
+        let canonical = match kind.as_str() {
+            "public.utf8-plain-text" => "text/plain",
+            "public.png" | "public.tiff" => "image/png",
+            "public.html" => "text/html",
+            "public.url" | "public.file-url" => "text/uri-list",
+            other => other,
+        };
+        if !formats.iter().any(|s| s == canonical) {
+            formats.push(canonical.to_owned());
         }
     }
-    // Retry next tick if an external app changed the pasteboard during capture.
-    if board.changeCount() != count {
+    (board.changeCount() == revision).then_some((revision, formats))
+}
+pub fn read_format(revision: isize, format: &str) -> Option<Vec<u8>> {
+    let board = NSPasteboard::generalPasteboard();
+    if board.changeCount() != revision {
         return None;
     }
-    Some(count)
+    let bytes = match format {
+        "text/plain" => data(&board, "public.utf8-plain-text"),
+        "image/png" => data(&board, "public.png"),
+        "text/html" => data(&board, "public.html"),
+        "text/uri-list" => urls(&board),
+        other => data(&board, other),
+    };
+    if board.changeCount() != revision {
+        return None;
+    }
+    bytes
 }

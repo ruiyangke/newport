@@ -6,6 +6,7 @@ use std::{
     sync::mpsc,
     time::Duration,
 };
+static WAYLAND_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const BIN: &str = env!("CARGO_BIN_EXE_porthop-agent");
 struct Agent {
     child: Child,
@@ -102,6 +103,7 @@ fn cmd(home: &std::path::Path, args: &[&str]) -> std::process::Output {
 }
 #[test]
 fn single_agent_clipboard_browser_displays_and_disconnect_cleanup() {
+    let _guard = WAYLAND_ENV.lock().unwrap();
     let home = tempfile::tempdir().unwrap();
     let mut agent = Agent::start(home.path());
     assert_eq!(agent.event(b'R'), wire::VERSION.as_bytes());
@@ -471,4 +473,294 @@ fn browser_warning_is_nonfatal_and_original_url_is_preserved() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("without callback forwarding"));
     agent.send(b'H', b"");
     agent.event(b'A');
+}
+
+#[test]
+fn demand_clipboard_fetch_cache_invalidation_and_browser_interleave() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join(".cache/porthop/clipboard");
+    let mut agent = Agent::start(home.path());
+    agent.event(b'R');
+    agent.send(b'M', b"123\nimage/png\ntext/plain");
+    agent.event(b'A');
+    assert!(!root.join("snapshot.tar").exists());
+    let listed = cmd(home.path(), &["clipboard", "-o", "-t", "TARGETS"]);
+    assert!(listed.status.success());
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("image/png"));
+    assert!(
+        agent.events.try_recv().is_err(),
+        "listing must not fetch data"
+    );
+    let path = home.path().to_owned();
+    let read = std::thread::spawn(move || cmd(&path, &["clipboard", "-o", "-t", "image/png"]));
+    let request = String::from_utf8(agent.event(b'C')).unwrap();
+    let fields: Vec<_> = request.split('\n').collect();
+    assert_eq!(&fields[1..], &["123", "image/png"]);
+    let id: u64 = fields[0].parse().unwrap();
+    let chunk = |done: bool, bytes: &[u8]| {
+        let mut out = vec![];
+        out.extend(id.to_be_bytes());
+        out.extend(123i64.to_be_bytes());
+        out.extend([0, u8::from(done)]);
+        out.extend(bytes);
+        out
+    };
+    agent.send(b'D', &chunk(false, b"PNG first"));
+    // Heartbeats and browser opens still work while a clipboard response is incomplete.
+    agent.send(b'H', &[]);
+    agent.event(b'A');
+    let mut opener = Command::new(BIN)
+        .args(["open", "https://example.com"])
+        .env("HOME", home.path())
+        .spawn()
+        .unwrap();
+    let browser = String::from_utf8(agent.event(b'O')).unwrap();
+    let id = browser.split_once('\n').unwrap().0;
+    agent.send(b'B', format!("{id}\nok").as_bytes());
+    assert!(opener.wait().unwrap().success());
+    agent.send(b'D', &chunk(true, b" last"));
+    let output = read.join().unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"PNG first last");
+    let cached = cmd(home.path(), &["clipboard", "-o", "-t", "image/png"]);
+    assert_eq!(cached.stdout, b"PNG first last");
+    assert!(
+        agent.events.try_recv().is_err(),
+        "cached read must not fetch again"
+    );
+    assert!(!root.join("snapshot.tar").exists());
+    agent.send(b'M', b"124\ntext/plain");
+    agent.event(b'A');
+    assert!(!cmd(home.path(), &["clipboard", "-o", "-t", "image/png"])
+        .status
+        .success());
+    agent.send(b'Q', &[]);
+    agent.stopped();
+    assert!(!root.join("clipboard.sock").exists());
+}
+
+#[test]
+fn wayland_paste_fetches_image_on_demand() {
+    let _guard = WAYLAND_ENV.lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut agent = Agent::start(home.path());
+    agent.event(b'R');
+    agent.send(b'M', b"45\nimage/png");
+    agent.event(b'A');
+    let root = home.path().join(".cache/porthop/clipboard");
+    std::env::set_var("WAYLAND_DISPLAY", root.join("wayland.sock"));
+    std::env::remove_var("WAYLAND_SOCKET");
+    let read = std::thread::spawn(|| {
+        let (mut pipe, _) = wl_clipboard_rs::paste::get_contents(
+            wl_clipboard_rs::paste::ClipboardType::Regular,
+            wl_clipboard_rs::paste::Seat::Unspecified,
+            wl_clipboard_rs::paste::MimeType::Specific("image/png"),
+        )
+        .unwrap();
+        let mut bytes = vec![];
+        std::io::Read::read_to_end(&mut pipe, &mut bytes).unwrap();
+        bytes
+    });
+    let request = String::from_utf8(agent.event(b'C')).unwrap();
+    let id: u64 = request.split('\n').next().unwrap().parse().unwrap();
+    let mut response = vec![];
+    response.extend(id.to_be_bytes());
+    response.extend(45i64.to_be_bytes());
+    response.extend([0, 1]);
+    response.extend(include_bytes!("pixel.png"));
+    agent.send(b'D', &response);
+    assert_eq!(read.join().unwrap(), include_bytes!("pixel.png"));
+    agent.send(b'Q', &[]);
+    agent.stopped();
+}
+
+mod demand_x11 {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+    use x11rb::{
+        connection::Connection,
+        protocol::{xproto::*, Event},
+        rust_connection::{DefaultStream, RustConnection},
+        wrapper::ConnectionExt as _,
+        COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT, CURRENT_TIME,
+    };
+    fn atom(c: &RustConnection, name: &str) -> u32 {
+        c.intern_atom(false, name.as_bytes())
+            .unwrap()
+            .reply()
+            .unwrap()
+            .atom
+    }
+    fn window(c: &RustConnection) -> u32 {
+        let id = c.generate_id().unwrap();
+        c.create_window(
+            COPY_DEPTH_FROM_PARENT,
+            id,
+            c.setup().roots[0].root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            WindowClass::COPY_FROM_PARENT,
+            COPY_FROM_PARENT,
+            &CreateWindowAux::new()
+                .event_mask(EventMask::PROPERTY_CHANGE | EventMask::STRUCTURE_NOTIFY),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        id
+    }
+    fn read(c: &RustConnection, w: u32, kind: &str) -> Option<Vec<u8>> {
+        let selection = atom(c, "CLIPBOARD");
+        let target = atom(c, kind);
+        let property = atom(c, "TEST_PROPERTY");
+        c.delete_property(w, property).unwrap();
+        c.convert_selection(w, selection, target, property, CURRENT_TIME)
+            .unwrap();
+        c.flush().unwrap();
+        loop {
+            if let Event::SelectionNotify(e) = c.wait_for_event().unwrap() {
+                if e.property == 0 {
+                    return None;
+                }
+                break;
+            }
+        }
+        let first = c
+            .get_property(false, w, property, AtomEnum::ANY, 0, u32::MAX / 4)
+            .unwrap()
+            .reply()
+            .unwrap();
+        if first.type_ != atom(c, "INCR") {
+            c.delete_property(w, property).unwrap();
+            c.flush().unwrap();
+            return Some(first.value);
+        }
+        // Drain the initial property's queued NewValue event before acknowledging INCR.
+        c.sync().unwrap();
+        while c.poll_for_event().unwrap().is_some() {}
+        c.delete_property(w, property).unwrap();
+        c.flush().unwrap();
+        let mut result = Vec::new();
+        loop {
+            if let Event::PropertyNotify(e) = c.wait_for_event().unwrap() {
+                if e.atom == property && e.state == Property::NEW_VALUE {
+                    let p = c
+                        .get_property(true, w, property, target, 0, u32::MAX / 4)
+                        .unwrap()
+                        .reply()
+                        .unwrap();
+                    if p.value.is_empty() {
+                        return Some(result);
+                    }
+                    result.extend(p.value);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn x11_fetches_and_streams_large_clipboard_on_demand() {
+        let home = tempfile::tempdir().unwrap();
+        let mut agent = Agent::start(home.path());
+        agent.event(b'R');
+        agent.send(b'M', b"87\nimage/png");
+        agent.event(b'A');
+        let root = home.path().join(".cache/porthop/clipboard");
+        let display = fs::read_to_string(root.join("display")).unwrap();
+        let auth = fs::read(root.join("Xauthority")).unwrap();
+        let reader = std::thread::spawn(move || {
+            let socket = UnixStream::connect(format!(
+                "/tmp/.X11-unix/X{}",
+                display.trim().trim_start_matches(':')
+            ))
+            .unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let stream = DefaultStream::from_unix_stream(socket).unwrap().0;
+            let c = RustConnection::connect_to_stream_with_auth_info(
+                stream,
+                0,
+                b"MIT-MAGIC-COOKIE-1".to_vec(),
+                auth[auth.len() - 16..].to_vec(),
+            )
+            .unwrap();
+            let w = window(&c);
+            assert!(read(&c, w, "TARGETS").is_some());
+            read(&c, w, "image/png").unwrap()
+        });
+        let request = String::from_utf8(agent.event(b'C')).unwrap();
+        let id: u64 = request.split('\n').next().unwrap().parse().unwrap();
+        let bytes: Vec<u8> = (0..300001).map(|i| (i % 251) as u8).collect();
+        let chunks: Vec<_> = bytes.chunks(65536).collect();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let mut response = vec![];
+            response.extend(id.to_be_bytes());
+            response.extend(87i64.to_be_bytes());
+            response.extend([0, u8::from(i + 1 == chunks.len())]);
+            response.extend(*chunk);
+            agent.send(b'D', &response);
+        }
+        assert_eq!(reader.join().unwrap(), bytes);
+        agent.send(b'Q', &[]);
+        agent.stopped();
+    }
+}
+
+#[test]
+fn compressed_chunks_are_decoded_before_serving_and_bad_data_is_retryable() {
+    let home = tempfile::tempdir().unwrap();
+    let mut agent = Agent::start(home.path());
+    agent.event(b'R');
+    agent.send(b'M', b"900\ntext/plain");
+    agent.event(b'A');
+    let path = home.path().to_owned();
+    let read = std::thread::spawn(move || cmd(&path, &["clipboard", "-o"]));
+    let req = String::from_utf8(agent.event(b'C')).unwrap();
+    let id: u64 = req.split('\n').next().unwrap().parse().unwrap();
+    let data = vec![b'a'; 131072];
+    for (index, part) in data.chunks(65536).enumerate() {
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(part).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let (status, bytes) = if index == 0 {
+            (2, compressed)
+        } else {
+            (0, part.to_vec())
+        };
+        let mut response = vec![];
+        response.extend(id.to_be_bytes());
+        response.extend(900i64.to_be_bytes());
+        response.extend([status, u8::from(index == 1)]);
+        response.extend(bytes);
+        agent.send(b'D', &response);
+    }
+    let result = read.join().unwrap();
+    assert!(
+        result.status.success(),
+        "stderr={} event={:?}",
+        String::from_utf8_lossy(&result.stderr),
+        agent.events.try_recv()
+    );
+    assert_eq!(result.stdout, data);
+    agent.send(b'M', b"901\ntext/plain");
+    agent.event(b'A');
+    let path = home.path().to_owned();
+    let read = std::thread::spawn(move || cmd(&path, &["clipboard", "-o"]));
+    let req = String::from_utf8(agent.event(b'C')).unwrap();
+    let id: u64 = req.split('\n').next().unwrap().parse().unwrap();
+    let mut response = vec![];
+    response.extend(id.to_be_bytes());
+    response.extend(901i64.to_be_bytes());
+    response.extend([2, 1]);
+    response.extend(b"bad zlib");
+    agent.send(b'D', &response);
+    assert!(!read.join().unwrap().status.success());
+    agent.send(b'H', &[]);
+    agent.event(b'A');
+    agent.send(b'Q', &[]);
+    agent.stopped();
 }

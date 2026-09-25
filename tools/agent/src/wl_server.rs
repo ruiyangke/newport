@@ -24,19 +24,38 @@ pub struct Server {
 impl Server {
     pub fn start(snapshot: &Path) -> io::Result<Self> {
         let (listener, endpoint) = Endpoint::temporary()?;
-        Self::listen(snapshot, listener, endpoint)
+        Self::listen(
+            crate::clipboard_source::Source::new(snapshot),
+            listener,
+            endpoint,
+        )
     }
     pub fn start_fixed(snapshot: &Path, socket: &Path) -> io::Result<Self> {
         let (listener, endpoint) = Endpoint::fixed(socket)?;
-        Self::listen(snapshot, listener, endpoint)
+        Self::listen(
+            crate::clipboard_source::Source::new(snapshot),
+            listener,
+            endpoint,
+        )
     }
-    fn listen(snapshot: &Path, listener: UnixListener, endpoint: Endpoint) -> io::Result<Self> {
+    pub(crate) fn start_source(
+        source: crate::clipboard_source::Source,
+        socket: &Path,
+    ) -> io::Result<Self> {
+        let (listener, endpoint) = Endpoint::fixed(socket)?;
+        Self::listen(source, listener, endpoint)
+    }
+    fn listen(
+        source: crate::clipboard_source::Source,
+        listener: UnixListener,
+        endpoint: Endpoint,
+    ) -> io::Result<Self> {
         let mut display = Display::<State>::new().map_err(io::Error::other)?;
         let mut handle = display.handle();
         State::register(&handle);
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
-        let mut state = State::new(snapshot.to_owned(), stop.clone());
+        let mut state = State::new(source, stop.clone());
         let clients = Arc::new(AtomicUsize::new(0));
         let thread = thread::spawn(move || {
             let mut checked = Instant::now() - Duration::from_secs(1);

@@ -11,6 +11,7 @@ name = "porthop-agent"
 path = "src/main.rs"
 
 [dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
 url = "2"
 getrandom = "0.3"

@@ -1,7 +1,7 @@
-// Shared by the Linux agent and the Mac SSH client. Version 3, bounded binary frames.
+// Shared by the Linux agent and the Mac SSH client. Version 5, bounded binary frames.
 use std::io::{self, Read, Write};
 pub const MAX_FRAME: usize = 33 * 1024 * 1024;
-pub const VERSION: &str = "porthop-agent/3";
+pub const VERSION: &str = "porthop-agent/5";
 pub fn encode(kind: u8, data: &[u8]) -> io::Result<Vec<u8>> {
     if data.len() > MAX_FRAME {
         return Err(io::Error::other("agent frame exceeds limit"));

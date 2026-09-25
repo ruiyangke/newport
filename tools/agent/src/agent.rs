@@ -55,6 +55,13 @@ pub fn serve(client: &str, clipboard: bool, browser: bool) -> io::Result<()> {
 fn run(client: &str, clipboard: bool, browser: bool, output: &mut impl Write) -> io::Result<()> {
     let (session, listener) = crate::session::Session::start(client, clipboard, browser)?;
     let snapshot = &session.snapshot;
+    crate::diagnostics::event(
+        snapshot,
+        "session_started",
+        &format!("clipboard={clipboard} browser={browser}"),
+    );
+    let demand = crate::demand::Store::new();
+    let mut clipboard_service = None;
     let stopped = Arc::new(AtomicBool::new(false));
     let flag = stopped.clone();
     ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed)).map_err(io::Error::other)?;
@@ -90,10 +97,61 @@ fn run(client: &str, clipboard: bool, browser: bool, output: &mut impl Write) ->
         session.check_backends()?;
         match rx.recv_timeout(Duration::from_millis(20)) {
             Ok(Ok((kind, data))) => match kind {
-                b'S' if clipboard => {
-                    snapshot::publish(snapshot, &data)?;
+                b'M' if clipboard => {
+                    if clipboard_service.is_none() {
+                        clipboard_service = Some(crate::clipboard_source::Service::start(
+                            snapshot,
+                            demand.clone(),
+                        )?);
+                    }
+                    let offer = crate::clipboard_wire::Offer::decode(&data)?;
+                    crate::diagnostics::event(
+                        snapshot,
+                        "clipboard_offer",
+                        &format!(
+                            "revision={} formats={}",
+                            offer.revision,
+                            offer.formats.len()
+                        ),
+                    );
+                    demand.update(offer);
+                    session.source.enable(demand.clone());
+                    wire::write(output, b'A', b"Clipboard available on demand.")?;
+                }
+                b'D' if clipboard => {
+                    demand.reply(&data)?;
+                    let (id, revision, status, done, _) =
+                        crate::clipboard_wire::parse_reply(&data)?;
+                    if done {
+                        crate::diagnostics::event(
+                            snapshot,
+                            "clipboard_reply",
+                            &format!("id={id} revision={revision} sender_success={}", status != 1),
+                        );
+                    }
+                }
+                b'S' if clipboard && clipboard_service.is_none() => {
+                    let started = Instant::now();
+                    crate::diagnostics::event(
+                        snapshot,
+                        "snapshot_received",
+                        &format!("archive_bytes={}", data.len()),
+                    );
+                    if let Err(error) = snapshot::publish(snapshot, &data) {
+                        crate::diagnostics::event(
+                            snapshot,
+                            "snapshot_failed",
+                            &format!("kind={:?} os={:?}", error.kind(), error.raw_os_error()),
+                        );
+                        return Err(error);
+                    }
                     let backend = crate::native::update(snapshot);
                     wire::write(output, b'A', backend.as_bytes())?;
+                    crate::diagnostics::event(
+                        snapshot,
+                        "snapshot_acknowledged",
+                        &format!("elapsed_ms={}", started.elapsed().as_millis()),
+                    );
                 }
                 b'H' if data.is_empty() => {
                     if let Ok(file) = fs::OpenOptions::new().write(true).open(snapshot) {
@@ -110,6 +168,7 @@ fn run(client: &str, clipboard: bool, browser: bool, output: &mut impl Write) ->
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
             Err(mpsc::RecvTimeoutError::Timeout) => (),
         }
+        demand.poll(output)?;
         browser.poll(output)?;
     }
 }
