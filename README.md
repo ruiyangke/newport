@@ -35,9 +35,9 @@ On the server, read text with:
 xclip -selection clipboard -o
 ```
 
-Porthop installs one agent for clipboard sharing, headless X11/Wayland image paste, and opening server links on your Mac. It also supports native `wl-copy` and `xclip`. Clipboard and Browser can be enabled independently in Integration. The agent runs over SSH while either is enabled; no separate service is required.
+Porthop installs one agent for clipboard sharing, headless X11/Wayland image paste, and opening server links on your Mac. Clipboard contents transfer on demand through the agent’s `xclip`/`wl-paste` aliases and managed displays. Clipboard and Browser can be enabled independently in Integration. The agent runs over SSH while either is enabled; no separate service is required.
 
-Only enable sharing for servers you trust: copied passwords and other sensitive content are included, and remote clipboard files may remain after a lost connection. See [clipboard setup and behavior](docs/clipboard.md).
+Only enable sharing for servers you trust: server applications can request copied passwords and other sensitive content while sharing is enabled. See [clipboard setup and behavior](docs/clipboard.md).
 
 ## Compatibility and limits
 

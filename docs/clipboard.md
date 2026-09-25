@@ -1,6 +1,6 @@
 # Clipboard sync and the Porthop agent
 
-Enable **Integration → Clipboard** to share your Mac's clipboard with a Linux server. Porthop installs one `porthop-agent` binary for x86_64 or ARM64 and starts it over SSH. The agent handles clipboard storage, headless X11 and Wayland clipboards, and requests to open links on your Mac.
+Enable **Integration → Clipboard** to share your Mac's clipboard with a Linux server. Porthop installs one `porthop-agent` binary for x86_64 or ARM64 and starts it over SSH. The agent handles on-demand clipboard reads, headless X11 and Wayland clipboards, and requests to open links on your Mac.
 
 Sharing is one-way and remembered across app launches. Only enable it for trusted servers: copied passwords and other sensitive content are included, and enabling **Browser** lets processes running as the server account request browser tabs. Clipboard and Browser have independent switches; the shared agent stays connected while either is on.
 
@@ -80,20 +80,34 @@ Porthop does not guess hidden callback ports. HTTPS callbacks and listeners insi
 
 Only HTTP and HTTPS URLs without embedded credentials are accepted. Requests are sent immediately, with no stored queue or browser polling. A successful opener command means the Mac accepted the browser open request; it does not mean authorization completed. If sharing is disconnected or a request is rate-limited, reconnect or retry.
 
-## Desktop clipboards
+## On-demand clipboard reads
 
-When available in the SSH session, the agent publishes through native `wl-copy` or `xclip`. Wayland needs the user's session environment. X11 uses `DISPLAY`, falling back to `:0` when unset, and preserves `XAUTHORITY`. Native tools are optional; headless reads always use the stored snapshot. Each native call has a two-second deadline.
+Copying sends only a revision and available formats over SSH. Clipboard content stays on your computer until a server app requests it. Porthop then reads that format and transfers it in chunks. Chunks of at least 1 KiB are losslessly compressed with zlib when that makes them smaller; incompressible data stays raw. Decompression is bounded to 64 KiB per chunk and the 32 MiB clipboard limit. The agent caches requested formats in memory, up to 32 MiB total, and clears the cache on the next copy or disconnect. Simultaneous reads of the same format share one fetch.
 
-The snapshot holds up to 32 MiB, prioritizing text, PNG, HTML, and URLs. Extra representations that do not fit are skipped. If no format fits, the remote snapshot is cleared. Native desktop publishing selects one format; the agent's clipboard services expose all stored formats.
+macOS checks the clipboard change counter every 200 ms without reading its contents. Windows uses clipboard-change notifications, with counter polling as a fallback. Cached reads can briefly return the previous copy before its change notification arrives; they do not currently validate the desktop revision on every paste. The first paste may take longer for large images; Porthop must remain connected. Failed requests time out after 15 seconds and can be retried without restarting the agent.
+
+Use the installed `xclip`/`wl-paste` aliases or configure the agent's X11/Wayland displays with the environment command above. Porthop does not push copies into a separate native desktop clipboard. Applications using that desktop's display need to use the agent's display to read shared content.
 
 ## Reconnection and cleanup
 
-One agent owns each server account's clipboard. A single persistent SSH channel carries clipboard updates to Linux and browser requests back to your Mac. Private Unix sockets serve local agent clients. Browser authentication may create temporary Mac loopback listeners; inbound Mac SSH access is not needed.
+One agent owns each server account's clipboard. A single persistent SSH channel carries clipboard metadata, content requests and responses, and browser requests. Private Unix sockets serve local agent clients. Browser authentication may create temporary Mac loopback listeners; inbound Mac SSH access is not needed.
 
 Temporary SSH failures retry after 2, 4, 8, 16, then at most 30 seconds. Permission, protocol, and ownership errors stop with an error message. Temporary Mac clipboard-read timeouts retry without dropping the agent connection. Turning an integration off cancels in-flight work immediately. Disabling both integrations stops retries and the agent. Disabling one restarts the agent with only the remaining permission.
 
-Snapshots and sockets live in the account-only `~/.cache/porthop/clipboard` directory. The agent removes its snapshot and sockets on normal shutdown or SSH EOF, and stops after 45 seconds without incoming data from Porthop. Upload progress keeps it alive; clipboard uploads have a two-minute deadline, and stalled output is bounded to five seconds. A force-killed agent may leave files; clipboard readers reject snapshots older than two minutes. Native desktop clipboard content is not cleared on disconnect.
+Sockets and diagnostic logs live in the account-only `~/.cache/porthop/clipboard` directory. On-demand clipboard contents are not written to disk. The agent removes its sockets on normal shutdown or SSH EOF, and stops after 45 seconds without incoming data from Porthop. Heartbeats continue during clipboard transfers. A force-killed agent may leave socket files; the next session handles stale sockets. Existing snapshot files from older versions are removed on startup.
 
 Installed binaries and aliases remain for reuse. Porthop compares the bundled binary's checksum before uploading an update and verifies each upload before activation. Changing a profile's host, port, or username turns both integrations off until enabled for the new destination.
 
 To repair the installation, choose **Integration → Reinstall agent**. Porthop replaces its binary, repairs its aliases, and reconnects the integrations you enabled. Your switches remain unchanged.
+
+## Troubleshooting intermittent paste failures
+
+After a failed paste, note the time and check **Integration** for a connection error. On the server, inspect recent clipboard events:
+
+```sh
+tail -n 100 ~/.cache/porthop/clipboard/diagnostics.log
+```
+
+On macOS, desktop events are in `~/Library/Logs/ke.ry.porthop/porthop.log`. Search for `Clipboard` to follow format announcements and requested captures. Remote events show clipboard revisions, X11 and Wayland requests, stale offers, and transfer outcomes. A successful transfer does not confirm that the receiving app pasted the image.
+
+Logs contain timestamps, sizes, format metadata, and error categories—not clipboard contents. The remote log resets when it reaches 256 KiB, survives reconnects, and can be deleted. Logging failures do not stop sync.
