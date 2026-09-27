@@ -1,90 +1,96 @@
-# Newport
+<p align="center">
+  <img src="src-tauri/icons/icon.png" width="88" alt="Newport app icon" />
+</p>
 
-**Your remote servers, in one desktop app.**
+<h1 align="center">Newport</h1>
 
-Newport brings SSH tunnels, terminals, files, and server monitoring to macOS and Windows. Connect to a Linux host, see what is running, and work with it from your desktop.
+<p align="center"><strong>Make your remote server feel closer.</strong></p>
 
-[Download](https://github.com/ruiyangke/newport/releases) · [User guides](docs/README.md) · [Report an issue](https://github.com/ruiyangke/newport/issues)
+<p align="center">
+  SSH tunnels, terminals, files, and server health in one desktop app.<br />
+  Copy locally. Paste remotely. Open server links in your own browser.
+</p>
 
-## One workspace per server
+<p align="center">
+  <a href="https://github.com/ruiyangke/newport/releases"><strong>Download Newport</strong></a> ·
+  <a href="docs/README.md">User guides</a> ·
+  <a href="https://github.com/ruiyangke/newport/issues">Feedback</a>
+</p>
 
-- **Connections** — forward local ports to remote services, check destination health, and reconnect after temporary interruptions.
-- **Overview** — monitor CPU, memory, disks, and network traffic, with up to seven days of history.
-- **Services** — discover listening ports and inspect systemd services and logs.
-- **Containers** — browse Docker containers and Compose projects, view logs, and start, stop, or restart existing containers.
-- **Commands** — use an interactive SSH terminal.
-- **Files** — browse, preview, upload, and download over SFTP.
-- **Integration** — paste local text and images into remote applications and open remote web links in your local browser.
+## Your server, within reach
 
-Newport runs as a regular desktop app with a menu-bar or system-tray entry. Closing the window keeps connections running; quitting disconnects them.
+Newport is a desktop workspace for your Linux servers, available on macOS and Windows. Save a connection once, then move between your server’s apps, terminal, files, and activity without juggling separate tools.
 
-## Install
+### Open remote apps locally
 
-Choose the package for your computer from [GitHub Releases](https://github.com/ruiyangke/newport/releases).
+Reach a development server, dashboard, or database through an SSH tunnel. Discover listening services, choose a local port, and keep track of which connections are working. Automatic reconnect helps recover from temporary interruptions.
 
-| Platform                          | Package                  |
-| --------------------------------- | ------------------------ |
-| macOS 14 or later · Apple silicon | macOS ARM64 ZIP          |
-| Windows · Intel or AMD            | Windows x86_64 installer |
-| Windows · ARM                     | Windows ARM64 installer  |
+### Copy here. Paste there.
 
-Windows support is experimental. Windows installers are not Authenticode-signed; updater signatures verify updates separately. Linux is supported as a remote host, not as a desktop platform.
+Copy text or a screenshot on your computer and paste it into a supported remote application, including Codex. It works even when the server has no graphical desktop. Your clipboard is shared when a remote app requests it.
 
-The latest published release may still carry the **Porthop** name while Newport 0.2.4 is in preparation.
+### Sign in with your own browser
 
-## Connect your first server
+When a remote command opens a link, Newport can open it on your computer. Complete browser-based sign-ins without copying URLs between machines. Supported login callbacks are forwarded back to the server; some services still need a manual step.
 
-1. Open Newport and choose **Add Server**.
-2. Enter the SSH host and username. Authenticate with a key file, an SSH agent (including 1Password), or a password.
-3. Choose a workspace from the sidebar. Add a tunnel in **Connections**, or open a shell in **Commands**.
+### See how your server is doing
 
-Most features work through SSH without installing software on the server. Clipboard and browser integration use a small agent that Newport installs and manages when enabled.
+Check CPU, memory, storage, and network usage at a glance. Explore up to seven days of history to spot busy periods, spikes, and changes over time.
 
-## Bring your desktop into remote sessions
+### Work with terminals and files
 
-Enable **Clipboard** or **Browser** on the server’s **Integration** page. They can be used independently.
+Open an interactive SSH terminal. Browse remote folders, preview files, and upload or download over SFTP—all from the same server workspace. Use tmux when you want remote work to continue after leaving the terminal.
 
-Clipboard content is fetched on demand when a remote application requests it. The agent supports text and images through clipboard-only X11 and Wayland displays, including on headless servers. Compatible command aliases also let you read text directly:
+### Manage services and containers
 
-```sh
-xclip -selection clipboard -o
-```
+Find listening ports, inspect systemd services, and read logs. Browse Docker containers and Compose projects, then start, stop, or restart existing containers.
 
-Browser integration opens links requested by remote commands in your local browser. Supported loopback login callbacks use temporary SSH forwarding; not every login flow can be detected automatically.
+## Get started
 
-Shell setup is guarded so a missing agent does not break startup. Open a new shell after setup, or follow the instructions in Integration for an existing session.
+1. **[Download the app](https://github.com/ruiyangke/newport/releases)** for your computer.
+2. **Add a server.** Enter its SSH host and username, then choose a key file, SSH agent—including 1Password—or password.
+3. **Start working.** Open a terminal, browse files, or add your first tunnel from the sidebar.
 
-**Enable integration only for servers you trust.** Remote applications can request sensitive clipboard contents or open browser tabs while the corresponding integration is enabled.
+| Your computer                              | Download                 |
+| ------------------------------------------ | ------------------------ |
+| Mac with Apple silicon · macOS 14 or later | macOS ARM64 ZIP          |
+| Windows PC with an Intel or AMD processor  | Windows x86_64 installer |
+| Windows PC with an ARM processor           | Windows ARM64 installer  |
 
-See the [integration guide](docs/clipboard.md) for setup, supported clients, and troubleshooting.
+Windows support is experimental, and its installers are not yet Authenticode-signed. Linux is supported as a remote server, not as a desktop app.
 
-## Updates and the Porthop rename
+**Coming from Porthop?** Newport is its new name. Version 0.2.4 includes migration for your saved servers, credentials, preferences, and integration setup. Keep your existing app data when upgrading. Until 0.2.4 is published, the latest download still uses the Porthop name.
 
-Check **Settings → Updates** for new versions. Installed builds check automatically and download verified updates in the background. Restart when ready; restarting disconnects sessions and cancels active transfers.
+## Set up clipboard and browser sharing
 
-Newport is the new name for Porthop. Version 0.2.4 includes migration for existing profiles, credentials, preferences, and agent configuration. Keep your existing app data when upgrading. Builds with the updater can receive Newport through Settings once the release is published; older builds need a manual installation.
+Open **Integration** for a server and enable **Clipboard**, **Browser**, or both. Newport handles the remote setup. Open a new remote shell afterward, or follow the instructions on that page to use your current session.
 
-## Your data
+Keep Newport running while sharing. You can switch either feature off independently, at any time. Clipboard sharing goes from your computer to the server.
 
-Server profiles and saved passwords are encrypted locally. The vault key lives in macOS Keychain or Windows Credential Manager. Metric history is stored separately, is not encrypted, and can be cleared in **Settings → Cache**.
+Only enable sharing for servers you trust: remote apps can read sensitive content you copy or request browser tabs while these features are on.
 
-History keeps 10-second readings for the most recent 24 hours and one-minute summaries for the remainder of seven days. Older readings are removed automatically.
+[Read the integration guide →](docs/clipboard.md)
 
-SSH host keys are trusted on first use; changed or revoked keys are rejected. For backup requirements and known security limitations, read [storage and recovery](docs/storage.md) and [security](docs/security.md).
+## Made for everyday use
 
-## Supported workflows
+- **Stay connected in the background.** Close the window and keep tunnels running, with access from the menu bar or system tray. Quit the app to disconnect.
+- **Choose your appearance.** Use a light or dark theme and optionally launch Newport at login.
+- **Update when you’re ready.** Check **Settings → Updates**. Updates download automatically and are verified before installation; restart to apply them. Restarting disconnects sessions and cancels transfers.
+- **Keep credentials on your computer.** Saved profiles and passwords are encrypted, with the vault key stored in macOS Keychain or Windows Credential Manager.
 
-- Monitoring requires Linux utilities; service inspection requires systemd; container features require Docker access under your SSH account.
-- SSH configuration aliases, ProxyJump, host certificates, and interactive MFA are not supported.
-- Leaving Commands closes its terminal session. Use tmux or another session manager for persistent remote work.
-- Container actions manage existing containers. Newport does not deploy Compose files or recreate projects.
-- Clipboard sharing goes from your desktop to the server; it is not bidirectional.
+Metric history is stored separately and is not encrypted. Clear it anytime in **Settings → Cache**. See [storage and recovery](docs/storage.md) and [security notes](docs/security.md) for backup requirements and known limitations.
 
-## Contribute
+## Before you connect
 
-Bug reports and pull requests are welcome. Include your app version, operating system, and steps to reproduce. Remove credentials and private clipboard contents from logs before sharing them.
+Newport uses your SSH account’s permissions. Monitoring needs Linux utilities, service management needs systemd, and container features need Docker access. Most features need no remote installation; clipboard and browser sharing use an agent managed by Newport.
 
-Newport uses React, TypeScript, Tauri, and Rust. See the [testing guide](docs/testing.md) for local checks and the Testcontainers suite, which exercises the backend against disposable Linux SSH servers.
+SSH configuration aliases, ProxyJump, host certificates, and interactive MFA are not currently supported. Container actions manage existing containers; they do not deploy or recreate Compose projects.
+
+## Help shape Newport
+
+Found a bug or have an idea? [Open an issue](https://github.com/ruiyangke/newport/issues). For bugs, include your app version, operating system, and steps to reproduce, with private information removed from any logs.
+
+Contributions are welcome. The [testing guide](docs/testing.md) covers local checks and tests against disposable Linux servers.
 
 ## License
 
