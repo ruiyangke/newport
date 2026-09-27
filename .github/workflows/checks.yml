@@ -60,7 +60,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
-      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: tools/agent
@@ -139,7 +139,7 @@ jobs:
           workspaces: src-tauri
           key: desktop-${{ matrix.arch }}
           save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
+      - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
         if: runner.os == 'Windows' && matrix.arch == 'x86_64'
       - name: Locate LLVM for ARM64 dependencies
         if: runner.os == 'Windows' && matrix.arch == 'aarch64'
@@ -190,17 +190,16 @@ jobs:
           workspaces: src-tauri
           key: remote
           save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: douglascamata/setup-docker-macos-action@d5ccc6aae0ce23e7700154f5e63cc53e6433ac48 # v1.1.0
-        with:
-          lima: v2.2.0
-          colima: v0.10.3
-          colima-additional-options: --cpu 3 --memory 6
-      - run: npm run test:remote
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Start Linux VM
+        timeout-minutes: 15
+        run: nix develop .#remote --command colima start --cpu 3 --memory 6 --arch x86_64 --vm-type=vz --mount-type=virtiofs
+      - run: nix develop .#remote --command npm run test:remote
       - name: Docker diagnostics
         if: failure()
         run: |
-          docker info
-          docker ps -a
+          nix develop .#remote --command docker info
+          nix develop .#remote --command docker ps -a
 
   passed:
     name: All checks passed

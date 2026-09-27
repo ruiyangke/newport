@@ -9,6 +9,8 @@ export default defineConfig({
     baseURL: "http://127.0.0.1:1420",
     viewport: { width: 960, height: 680 },
     colorScheme: "light",
+    trace: process.env.CI ? "retain-on-failure" : "off",
+    screenshot: "only-on-failure",
   },
   webServer: {
     command: "npm run dev",

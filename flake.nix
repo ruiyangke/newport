@@ -1,5 +1,5 @@
 {
-  description = "Porthop development and agent CI tools";
+  description = "Porthop development and CI tools";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -19,8 +19,7 @@
             overlays = [ rust-overlay.overlays.default ];
           };
           rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-        in {
-          default = pkgs.mkShell {
+          development = pkgs.mkShell {
             packages = with pkgs; [
               rust nodejs_22 python3 pkg-config git openssh
               bashInteractive zsh fish coreutils perl actionlint shellcheck
@@ -28,6 +27,13 @@
             shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
               export PORTHOP_TEST_XCLIP="${pkgs.xclip}/bin/xclip"
             '';
+          };
+        in {
+          default = development;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+          remote = pkgs.mkShell {
+            inputsFrom = [ development ];
+            packages = with pkgs; [ colima docker-client ];
           };
         });
     };
