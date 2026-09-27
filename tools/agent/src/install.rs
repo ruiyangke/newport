@@ -46,5 +46,8 @@ pub fn install() -> io::Result<()> {
         "PORTHOP_SHIM_PATH={}",
         if ready { "ready" } else { "missing" }
     );
+    if let Err(error) = crate::shell_setup::install() {
+        eprintln!("porthop-agent: automatic shell setup skipped: {error}");
+    }
     Ok(())
 }

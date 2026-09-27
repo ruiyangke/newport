@@ -17,7 +17,7 @@ fn main() {
             ),
             Some("clipboard") => porthop_agent::clipboard::read(&args[2..]),
             Some("open") => porthop_agent::browser::open(&args[2..], false),
-            Some("env") => porthop_agent::environment::print(),
+            Some("env") => porthop_agent::environment::print(&args[2..]),
             Some("install") => porthop_agent::install::install(),
             Some("display") => match porthop_agent::display::run(std::env::args_os().skip(2)) {
                 Ok(code) => std::process::exit(code),

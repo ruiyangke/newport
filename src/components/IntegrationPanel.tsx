@@ -109,12 +109,13 @@ export function IntegrationPanel({ server, runtime, pending, act }: Props) {
             {state.status === "connected" && (
               <>
                 <p>
-                  Run on the server, or add to <code>~/.bashrc</code> or{" "}
-                  <code>~/.zshrc</code>.
+                  Open a new shell, or run this in your current Bash/Zsh shell.
                 </p>
                 <CodeBlock
                   label="Shell configuration"
-                  code={'eval "$("$HOME/.local/bin/porthop-agent" env)"'}
+                  code={
+                    'if [ -x "$HOME/.local/bin/porthop-agent" ]; then\n  if _porthop_env=$("$HOME/.local/bin/porthop-agent" env 2>/dev/null); then\n    eval "$_porthop_env"\n  fi\n  unset _porthop_env\nfi'
+                  }
                 />
                 {server.clipboardEnabled &&
                   runtime.clipboardPathNeeded?.[server.id] && (

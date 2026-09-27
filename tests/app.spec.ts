@@ -494,8 +494,16 @@ test("integration switches are independent and setup is copyable", async ({
   await browser.click();
   await expect(section.getByText("Connected", { exact: true })).toBeVisible();
   await expect(clipboard).not.toBeChecked();
+  const setupCommand = [
+    'if [ -x "$HOME/.local/bin/porthop-agent" ]; then',
+    '  if _porthop_env=$("$HOME/.local/bin/porthop-agent" env 2>/dev/null); then',
+    '    eval "$_porthop_env"',
+    "  fi",
+    "  unset _porthop_env",
+    "fi",
+  ].join("\n");
   await expect(section.locator(".setup-code-block code")).toHaveText(
-    'eval "$("$HOME/.local/bin/porthop-agent" env)"',
+    setupCommand,
   );
   await page.evaluate(() =>
     Object.defineProperty(navigator, "clipboard", {
@@ -509,7 +517,7 @@ test("integration switches are independent and setup is copyable", async ({
   );
   await section.getByRole("button", { name: "Copy", exact: true }).click();
   expect(await page.evaluate(() => (window as any).__copiedSetup)).toBe(
-    'eval "$("$HOME/.local/bin/porthop-agent" env)"',
+    setupCommand,
   );
   await clipboard.click();
   await browser.click();
