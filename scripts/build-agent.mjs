@@ -1,8 +1,11 @@
+import { verifyArtifact } from "./ci/artifact.mjs";
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../", import.meta.url));
-if (process.platform === "win32") {
+if (process.env.PORTHOP_PREBUILT === "1") {
+  verifyArtifact("src-tauri/agents");
+} else if (process.platform === "win32") {
   // Linux binaries are built in the Linux CI job, never replaced with stubs.
   for (const arch of ["x86_64", "aarch64"]) {
     if (!existsSync(`${root}/src-tauri/agents/porthop-agent-${arch}`)) {

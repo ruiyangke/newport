@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
+import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -39,8 +40,10 @@ def main():
     if not endpoint.startswith("unix://"):
         raise SystemExit("Remote tests require a local Docker socket (OrbStack is supported).")
     run(docker, "info", "--format", "{{.ServerVersion}}")
-    run("bash", str(ROOT / "scripts/build-agent.sh"), cwd=ROOT)
-    run(docker, "build", "-t", "porthop-test-remote:local", str(ROOT / "tests/remote"))
+    run("node", str(ROOT / "scripts/build-agent.mjs"), cwd=ROOT)
+    toolchain = tomllib.loads((ROOT / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+    run(docker, "build", "--build-arg", f"RUST_VERSION={toolchain}",
+        "-t", "porthop-test-remote:local", str(ROOT / "tests/remote"))
     env = {**os.environ, "DOCKER_HOST": endpoint}
     run("cargo", "run", "--locked", "--manifest-path", "src-tauri/Cargo.toml",
         "--example", "remote_tests", cwd=ROOT, env=env)
