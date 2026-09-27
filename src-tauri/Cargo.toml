@@ -55,7 +55,9 @@ objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSImage", "NSBit
 opt-level = 3
 
 [dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 tauri = { version = "2", features = ["test"] }
+testcontainers = "0.27"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 clipboard-win = { version = "5.4", features = ["std"] }
