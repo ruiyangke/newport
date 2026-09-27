@@ -32,7 +32,7 @@ directory = pathlib.Path(parser.parse_args().directory)
 remote_home = directory / 'remote-home'
 remote_home.mkdir()
 source = pathlib.Path(__file__).resolve().parents[1] / 'src-tauri/src'
-agent_binary = source.parents[1] / 'tools/agent/target/debug/porthop-agent'
+agent_binary = source.parents[1] / 'tools/agent/target/debug/newport-agent'
 fixture_path = os.environ['PATH']
 private = Ed25519PrivateKey.generate()
 public = private.public_key().public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
@@ -228,7 +228,7 @@ class Server(paramiko.ServerInterface):
                             b'fixture-open': ['open', 'https://example.com/login?code=fixture']}[command]
                     process = subprocess.Popen([str(agent_binary), *args], stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                        env=dict(os.environ, HOME=str(remote_home), PATH=fixture_path, PORTHOP_CLIPBOARD_NATIVE="0"))
+                        env=dict(os.environ, HOME=str(remote_home), PATH=fixture_path, NEWPORT_CLIPBOARD_NATIVE="0"))
                     def feed():
                         try:
                             while data := channel.recv(32768):

@@ -222,7 +222,7 @@ impl Connection {
         let _ = tokio::time::timeout(
             Duration::from_secs(1),
             self.handle
-                .disconnect(Disconnect::ByApplication, "Porthop disconnected", "en"),
+                .disconnect(Disconnect::ByApplication, "Newport disconnected", "en"),
         )
         .await;
         let _ = self.transport.0.shutdown(Shutdown::Both);
@@ -430,11 +430,11 @@ mod integration_tests {
             name: "Fixture".into(),
             ssh_user: "fixture".into(),
             ssh_host: "127.0.0.1".into(),
-            ssh_port: std::env::var("PORTHOP_TEST_SSH_PORT")
+            ssh_port: std::env::var("NEWPORT_TEST_SSH_PORT")
                 .unwrap()
                 .parse()
                 .unwrap(),
-            identity_file: Some(std::env::var("PORTHOP_TEST_IDENTITY").unwrap()),
+            identity_file: Some(std::env::var("NEWPORT_TEST_IDENTITY").unwrap()),
             agent_source: None,
             agent_key_fingerprint: None,
             auth_method: AuthMethod::PublicKey,
@@ -513,7 +513,7 @@ mod integration_tests {
         // This uses the fixture's real SSH-agent Unix socket, not a mocked russh API.
         s.identity_file = Some(format!(
             "{}.encrypted",
-            std::env::var("PORTHOP_TEST_IDENTITY").unwrap()
+            std::env::var("NEWPORT_TEST_IDENTITY").unwrap()
         ));
         assert_eq!(execute(&s, "printf ok", None).await.unwrap(), "ok");
         s.identity_file = None;
@@ -544,7 +544,7 @@ mod integration_tests {
             servers: vec![s.clone()],
             tunnels: vec![],
         };
-        let password = zeroize::Zeroizing::new(std::env::var("PORTHOP_TEST_PASSWORD").unwrap());
+        let password = zeroize::Zeroizing::new(std::env::var("NEWPORT_TEST_PASSWORD").unwrap());
         store
             .save_with_password(&config, Some((s.id, &password)))
             .unwrap();

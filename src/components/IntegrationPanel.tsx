@@ -114,7 +114,7 @@ export function IntegrationPanel({ server, runtime, pending, act }: Props) {
                 <CodeBlock
                   label="Shell configuration"
                   code={
-                    'if [ -x "$HOME/.local/bin/porthop-agent" ]; then\n  if _porthop_env=$("$HOME/.local/bin/porthop-agent" env 2>/dev/null); then\n    eval "$_porthop_env"\n  fi\n  unset _porthop_env\nfi'
+                    'if [ -x "$HOME/.local/bin/newport-agent" ]; then\n  if _newport_env=$("$HOME/.local/bin/newport-agent" env 2>/dev/null); then\n    eval "$_newport_env"\n  fi\n  unset _newport_env\nfi'
                   }
                 />
                 {server.clipboardEnabled &&

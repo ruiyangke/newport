@@ -5,9 +5,9 @@ if elevated=$(sudo -n ss -tlnp 2>/dev/null || sudo -n netstat -tlnp 2>/dev/null)
 $elevated"
 fi
 printf '%s\n' "$listeners"
-printf '__PORTHOP_DOCKER_PORTS__\n'
+printf '__NEWPORT_DOCKER_PORTS__\n'
 docker ps --format '{"name":{{json .Names}},"ports":{{json .Ports}}}' 2>/dev/null || true
-printf '__PORTHOP_PROCESS_DETAILS__\n'
+printf '__NEWPORT_PROCESS_DETAILS__\n'
 # Encode fields so paths, whitespace and NUL-delimited argv cannot corrupt records.
 hex() { od -An -v -tx1 | tr -d ' \n'; }
 start_time() { sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; }

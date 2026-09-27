@@ -115,7 +115,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
-      PORTHOP_PREBUILT: "1"
+      NEWPORT_PREBUILT: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -155,7 +155,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: runner.os == 'Windows'
         with:
-          name: porthop-windows-${{ matrix.arch }}-unsigned
+          name: newport-windows-${{ matrix.arch }}-unsigned
           path: src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
           retention-days: 7
@@ -166,8 +166,8 @@ jobs:
     runs-on: macos-15-intel
     timeout-minutes: 60
     env:
-      PORTHOP_PREBUILT: "1"
-      PORTHOP_TEST_DOCKER_CONTEXT: colima
+      NEWPORT_PREBUILT: "1"
+      NEWPORT_TEST_DOCKER_CONTEXT: colima
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -177,7 +177,7 @@ jobs:
         with:
           name: linux-agents
           path: src-tauri/agents
-      - run: chmod +x src-tauri/agents/porthop-agent-*
+      - run: chmod +x src-tauri/agents/newport-agent-*
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22

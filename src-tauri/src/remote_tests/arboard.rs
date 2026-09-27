@@ -19,7 +19,7 @@ impl Probe {
             Backend::X11 => "unset WAYLAND_DISPLAY WAYLAND_SOCKET; test -n \"$DISPLAY\" && test -f \"$XAUTHORITY\" || exit 1",
             Backend::Wayland => "unset DISPLAY XAUTHORITY WAYLAND_SOCKET; test -S \"$WAYLAND_DISPLAY\" || exit 1",
         };
-        let stream = session.stream(&format!("eval \"$(~/.local/bin/porthop-agent env)\"; {isolate}; exec arboard-probe read-sequence")).await.unwrap();
+        let stream = session.stream(&format!("eval \"$(~/.local/bin/newport-agent env)\"; {isolate}; exec arboard-probe read-sequence")).await.unwrap();
         let mut probe = Self(BufReader::new(stream));
         let ready = probe.next().await;
         assert_eq!(ready["ready"], true, "{backend:?}: {ready}");
@@ -63,12 +63,12 @@ async fn agent(session: &ExecSession) -> Stream {
     crate::agent::install(session).await.unwrap();
     let mut agent = session
         .stream(&format!(
-            "exec ~/.local/bin/porthop-agent serve {} --clipboard",
+            "exec ~/.local/bin/newport-agent serve {} --clipboard",
             Uuid::new_v4()
         ))
         .await
         .unwrap();
-    assert_eq!(receive(&mut agent, b'R').await, b"porthop-agent/5");
+    assert_eq!(receive(&mut agent, b'R').await, b"newport-agent/5");
     agent
 }
 async fn stop(agent: &mut Stream) {

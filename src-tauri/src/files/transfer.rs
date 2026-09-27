@@ -80,7 +80,7 @@ pub async fn upload(
         bail!("Choose a regular file to upload");
     }
     let total = metadata.len();
-    let staging = child(&folder, &format!(".porthop-upload-{}", Uuid::new_v4()))?;
+    let staging = child(&folder, &format!(".newport-upload-{}", Uuid::new_v4()))?;
     let handle = sftp
         .session
         .open(

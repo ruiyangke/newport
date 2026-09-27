@@ -7,12 +7,12 @@ async fn agent(session: &ExecSession) -> Stream {
     crate::agent::install(session).await.unwrap();
     let mut stream = session
         .stream(&format!(
-            "exec ~/.local/bin/porthop-agent serve {} --clipboard --browser",
+            "exec ~/.local/bin/newport-agent serve {} --clipboard --browser",
             Uuid::new_v4()
         ))
         .await
         .unwrap();
-    assert_eq!(receive(&mut stream, b'R').await, b"porthop-agent/5");
+    assert_eq!(receive(&mut stream, b'R').await, b"newport-agent/5");
     stream
 }
 async fn offer(stream: &mut Stream, revision: i64, formats: &str) {
@@ -99,7 +99,7 @@ async fn crashed_agent_restarts_without_serving_old_clipboard() {
     let pid_file = format!("/home/fixture/agent-{}.pid", Uuid::new_v4());
     let mut stream = session
         .stream(&format!(
-            "echo $$ > {pid_file}; exec ~/.local/bin/porthop-agent serve {} --clipboard",
+            "echo $$ > {pid_file}; exec ~/.local/bin/newport-agent serve {} --clipboard",
             Uuid::new_v4()
         ))
         .await
@@ -225,11 +225,11 @@ async fn agent_upgrade_and_bad_upload_preserve_working_installation() {
     let session = ExecSession::connect(&server()).await.unwrap();
     crate::agent::install(&session).await.unwrap();
     let hash = session
-        .execute("sha256sum ~/.local/bin/porthop-agent", None)
+        .execute("sha256sum ~/.local/bin/newport-agent", None)
         .await
         .unwrap();
     let command = format!(
-        "sh -c '{}' porthop-install {}",
+        "sh -c '{}' newport-install {}",
         include_str!("../agent-install.sh").replace('\'', "'\"'\"'"),
         "0".repeat(64)
     );
@@ -240,14 +240,14 @@ async fn agent_upgrade_and_bad_upload_preserve_working_installation() {
     assert!(error.contains("checksum mismatch"), "{error}");
     assert_eq!(
         session
-            .execute("sha256sum ~/.local/bin/porthop-agent", None)
+            .execute("sha256sum ~/.local/bin/newport-agent", None)
             .await
             .unwrap(),
         hash
     );
     assert_eq!(
         session
-            .execute("find ~/.local/bin -name '.porthop-agent.*' | wc -l", None)
+            .execute("find ~/.local/bin -name '.newport-agent.*' | wc -l", None)
             .await
             .unwrap()
             .trim(),
@@ -257,7 +257,7 @@ async fn agent_upgrade_and_bad_upload_preserve_working_installation() {
     // pretending this is compatibility testing against an actual old release.
     session
         .execute(
-            "printf '#!/bin/sh\necho porthop-agent/4\n' > ~/.local/bin/porthop-agent",
+            "printf '#!/bin/sh\necho newport-agent/4\n' > ~/.local/bin/newport-agent",
             None,
         )
         .await
@@ -265,7 +265,7 @@ async fn agent_upgrade_and_bad_upload_preserve_working_installation() {
     crate::agent::install(&session).await.unwrap();
     assert_eq!(
         session
-            .execute("sha256sum ~/.local/bin/porthop-agent", None)
+            .execute("sha256sum ~/.local/bin/newport-agent", None)
             .await
             .unwrap(),
         hash
@@ -304,7 +304,7 @@ async fn disk_full_reports_retryable_error_and_recovers_after_space_is_freed() {
         .await
         .unwrap();
     let command = format!(
-        "HOME={home} /home/fixture/.local/bin/porthop-agent serve {} --clipboard",
+        "HOME={home} /home/fixture/.local/bin/newport-agent serve {} --clipboard",
         Uuid::new_v4()
     );
     let mut stream = session.stream(&command).await.unwrap();
@@ -356,7 +356,7 @@ with open("{filler}", "wb", buffering=0) as f:
     assert_eq!(
         session
             .execute(
-                &format!("HOME={home} /home/fixture/.local/bin/porthop-agent clipboard -o"),
+                &format!("HOME={home} /home/fixture/.local/bin/newport-agent clipboard -o"),
                 None
             )
             .await
@@ -414,7 +414,7 @@ async fn http(port: u16) {
         .await
         .unwrap()
         .unwrap();
-    assert!(response.contains("200 OK") && response.contains("porthop remote fixture"));
+    assert!(response.contains("200 OK") && response.contains("newport remote fixture"));
 }
 
 #[tokio::test]

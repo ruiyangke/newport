@@ -18,6 +18,7 @@ mod known_hosts;
 mod manager;
 mod metrics_db;
 mod metrics_sampler;
+mod migration;
 mod model;
 mod monitoring;
 mod platform;
@@ -31,7 +32,7 @@ mod updates;
 mod vault;
 fn main() {
     if let Err(error) = app::run() {
-        eprintln!("Could not start Porthop: {error:#}");
+        eprintln!("Could not start Newport: {error:#}");
         std::process::exit(1);
     }
 }

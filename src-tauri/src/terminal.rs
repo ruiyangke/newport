@@ -127,11 +127,11 @@ mod tests {
             name: "Terminal fixture".into(),
             ssh_user: "fixture".into(),
             ssh_host: "127.0.0.1".into(),
-            ssh_port: std::env::var("PORTHOP_TEST_SSH_PORT")
+            ssh_port: std::env::var("NEWPORT_TEST_SSH_PORT")
                 .unwrap()
                 .parse()
                 .unwrap(),
-            identity_file: Some(std::env::var("PORTHOP_TEST_IDENTITY").unwrap()),
+            identity_file: Some(std::env::var("NEWPORT_TEST_IDENTITY").unwrap()),
             agent_source: None,
             agent_key_fingerprint: None,
             auth_method: crate::model::AuthMethod::PublicKey,
@@ -171,14 +171,14 @@ mod tests {
         sessions
             .send(
                 id,
-                Input::Data(b"export PORTHOP_VALUE=persistent\r".to_vec()),
+                Input::Data(b"export NEWPORT_VALUE=persistent\r".to_vec()),
             )
             .unwrap();
         until(&sessions, id, "fixture> ").await;
         sessions
             .send(
                 id,
-                Input::Data(b"printf 'value=%s\\n' \"$PORTHOP_VALUE\"\r".to_vec()),
+                Input::Data(b"printf 'value=%s\\n' \"$NEWPORT_VALUE\"\r".to_vec()),
             )
             .unwrap();
         until(&sessions, id, "value=persistent").await;

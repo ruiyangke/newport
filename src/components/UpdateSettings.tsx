@@ -24,7 +24,7 @@ export function UpdateNotice() {
     if (data?.phase === "ready" && data.version !== notified.current) {
       notified.current = data.version;
       toast.info(
-        `Porthop ${data.version} is ready to install. Restart from Settings to update.`,
+        `Newport ${data.version} is ready to install. Restart from Settings to update.`,
         {
           id: "app-update",
         },
@@ -73,7 +73,7 @@ export function UpdateSettings() {
       <h2 id="updates-heading">Updates</h2>
       <div className="settings-row settings-cache-row">
         <div>
-          <span>Porthop {data?.currentVersion ?? version}</span>
+          <span>Newport {data?.currentVersion ?? version}</span>
           <small role="status">{message}</small>
         </div>
         <Button

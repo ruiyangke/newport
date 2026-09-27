@@ -1,6 +1,6 @@
 # Test coverage
 
-Porthop uses unit tests, browser tests, real SSH integration tests and native desktop checks. These layers are complementary: browser tests mock Tauri, while the remote suite calls the production Rust backend against disposable Linux servers. Neither alone is a full native UI end-to-end test.
+Newport uses unit tests, browser tests, real SSH integration tests and native desktop checks. These layers are complementary: browser tests mock Tauri, while the remote suite calls the production Rust backend against disposable Linux servers. Neither alone is a full native UI end-to-end test.
 
 ## Run the suites
 
@@ -20,7 +20,7 @@ Commit both `flake.nix` and `flake.lock`. The lock pins the package collection a
 The backend runner currently requires a macOS host (the desktop backend does not support Linux). The fixture itself is Linux. The remote suite requires Rust, Node, Python 3, OpenSSH tools and a running local Docker-compatible engine. It builds the Linux agents and the fixture image. To use another local Docker context:
 
 ```sh
-PORTHOP_TEST_DOCKER_CONTEXT=default npm run test:remote
+NEWPORT_TEST_DOCKER_CONTEXT=default npm run test:remote
 ```
 
 The Python entry point only builds prerequisites and resolves the Docker context. The Rust Testcontainers runner owns container readiness, dynamic localhost port mapping, file provisioning and removal. It pins the server host key through the container API, uses a temporary key and private SSH agent, and runs backend tests in a child process so test credentials never affect other tests or saved profiles. The suite is serial because its tests share a remote account and mutate the agent installation. It captures server logs on test failure and imposes a ten-minute test timeout.
@@ -82,6 +82,18 @@ The host test supplies clipboard bytes over real SSH; it does not read or modify
 | Callback connection closes while destination remains healthy | `temporary_callback_does_not_reconnect_a_closed_ssh_session` |
 
 The cancellation tests drop the production transfer future, as the operation registry does. They do not click a UI cancel button. Source-mutation tests synchronize on progress, avoiding guesses based on transfer speed. The old-version agent fixture is a marked stub, not a downloaded historical executable.
+
+## Signed macOS upgrade
+
+The opt-in `signed_macos_rebrand_installs_over_existing_bundle` test copies an installed Porthop bundle into a temporary directory, downloads and verifies a Newport update using the production updater, installs it in place, and checks its bundle identity, executable, signature, notarization ticket, and Gatekeeper acceptance. It does not modify the source app or launch the updated copy.
+
+Set `NEWPORT_UPDATE_TEST_APP` to an installed Porthop `.app` and `NEWPORT_UPDATE_TEST_PACKAGE` to the signed, notarized Newport `.app.tar.gz` (with its adjacent `.sig`), then run:
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml signed_macos_rebrand_installs_over_existing_bundle -- --ignored --nocapture
+```
+
+This covers package installation, not the Settings UI, restart, or migration of a user's live credentials. Those need a separate native upgrade check.
 
 ## Next scenarios
 

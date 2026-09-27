@@ -7,6 +7,6 @@
 
 ## Known limitation
 
-As of 21 September 2026, the SSH dependencies include an RSA implementation affected by [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html), a timing side-channel vulnerability with no reported patch. RSA support remains enabled for compatibility. Whether Porthop exposes the attack path has not been assessed.
+As of 21 September 2026, the SSH dependencies include an RSA implementation affected by [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html), a timing side-channel vulnerability with no reported patch. RSA support remains enabled for compatibility. Whether Newport exposes the attack path has not been assessed.
 
 Some dependencies also have maintenance warnings. Dependency checks are not a comprehensive security audit.

@@ -1,5 +1,5 @@
 {
-  description = "Porthop development and CI tools";
+  description = "Newport development and CI tools";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -25,7 +25,7 @@
               bashInteractive zsh fish coreutils perl actionlint shellcheck
             ] ++ lib.optionals stdenv.hostPlatform.isLinux [ xclip wl-clipboard ];
             shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-              export PORTHOP_TEST_XCLIP="${pkgs.xclip}/bin/xclip"
+              export NEWPORT_TEST_XCLIP="${pkgs.xclip}/bin/xclip"
             '';
           };
         in {

@@ -54,7 +54,7 @@ impl Operations {
             let profile = manager.server(server)?;
             let mut registry = self.0.lock().unwrap();
             if registry.closing {
-                return Err("Porthop is shutting down".into());
+                return Err("Newport is shutting down".into());
             }
             if let Some(index) = registry
                 .cancelled

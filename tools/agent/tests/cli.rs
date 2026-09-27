@@ -1,6 +1,6 @@
 use std::{path::Path, process::Command};
 
-const GENERIC: &str = env!("CARGO_BIN_EXE_porthop-agent");
+const GENERIC: &str = env!("CARGO_BIN_EXE_newport-agent");
 
 #[test]
 fn generic_target_selects_both_backends_and_defaults_to_x11() {
@@ -15,7 +15,9 @@ fn generic_target_selects_both_backends_and_defaults_to_x11() {
         } else {
             "test -S /tmp/.X11-unix/X${DISPLAY#:} && test -f \"$XAUTHORITY\" && test -z \"${WAYLAND_DISPLAY-}${WAYLAND_SOCKET-}\" || exit 2; printf '/tmp/.X11-unix/X%s\\n%s\\n' \"${DISPLAY#:}\" \"$XAUTHORITY\"; exit 7"
         };
+        let home = tempfile::tempdir().unwrap();
         let result = Command::new(GENERIC)
+            .env("HOME", home.path())
             .arg("display")
             .args(options)
             .args(["--", "sh", "-c", script])
@@ -54,7 +56,9 @@ fn rejects_invalid_or_conflicting_backend_options() {
             "relative.sock",
         ],
     ] {
+        let home = tempfile::tempdir().unwrap();
         assert!(!Command::new(GENERIC)
+            .env("HOME", home.path())
             .arg("display")
             .args(args)
             .output()

@@ -21,7 +21,7 @@ use wayland_server::{
 
 type Formats = BTreeMap<String, Vec<u8>>;
 type Revision = crate::clipboard_source::Revision;
-const READ_ONLY: &str = "Porthop clipboard is read-only";
+const READ_ONLY: &str = "Newport clipboard is read-only";
 pub(crate) struct State {
     path: PathBuf,
     source: crate::clipboard_source::Source,
@@ -120,7 +120,7 @@ impl GlobalDispatch<WlSeat, ()> for State {
         let seat = init.init(seat, ());
         seat.capabilities(wl_seat::Capability::empty());
         if seat.version() >= 2 {
-            seat.name("porthop".into());
+            seat.name("newport".into());
         }
     }
 }

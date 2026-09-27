@@ -97,7 +97,7 @@
     @apply font-sans;
   }
 }
-/* Porthop workspace: neutral surfaces, precise rows, color reserved for data and state. */
+/* Newport workspace: neutral surfaces, precise rows, color reserved for data and state. */
 :root {
   --input: #dfe3e9;
   --ring: #8192ac;

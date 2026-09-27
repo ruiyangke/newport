@@ -1,4 +1,7 @@
 //! Verified downloads stay in memory until the user explicitly chooses to restart.
+#[cfg(all(test, target_os = "macos"))]
+#[path = "updates/macos_install_test.rs"]
+mod macos_install_test;
 use serde::Serialize;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -32,8 +35,8 @@ impl Updates {
             status: Mutex::new(Status {
                 enabled: !cfg!(debug_assertions)
                     && cfg!(any(target_os = "macos", target_os = "windows"))
-                    && option_env!("PORTHOP_APP_STORE").is_none()
-                    && std::env::var_os("PORTHOP_DATA_DIR").is_none(),
+                    && option_env!("NEWPORT_APP_STORE").is_none()
+                    && crate::migration::data_directory_override().is_none(),
                 current_version: version,
                 phase: "idle".into(),
                 version: None,
@@ -244,7 +247,7 @@ mod tests {
         let updater = app
             .updater_builder()
             .executable_path(std::path::PathBuf::from(
-                "/tmp/Porthop.app/Contents/MacOS/porthop",
+                "/tmp/Newport.app/Contents/MacOS/newport",
             ))
             .target(target)
             .timeout(Duration::from_secs(3))

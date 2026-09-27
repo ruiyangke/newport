@@ -48,7 +48,7 @@ async fn browser_only_rejects_clipboard_and_unsafe_urls_but_accepts_matching_ack
     crate::agent::install(&session).await.unwrap();
     let mut stream = session
         .stream(&format!(
-            "exec ~/.local/bin/porthop-agent serve {} --browser",
+            "exec ~/.local/bin/newport-agent serve {} --browser",
             Uuid::new_v4()
         ))
         .await

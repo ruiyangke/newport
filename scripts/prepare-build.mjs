@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { verifyArtifact } from "./ci/artifact.mjs";
 
-if (process.env.PORTHOP_PREBUILT === "1") {
+if (process.env.NEWPORT_PREBUILT === "1") {
   verifyArtifact("src-tauri/agents");
   verifyArtifact("dist");
 } else {

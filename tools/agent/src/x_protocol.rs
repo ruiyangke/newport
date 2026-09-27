@@ -117,7 +117,7 @@ struct Client {
 
 /// X11 setup with one tiny logical screen. Nothing is ever drawn or mapped.
 fn setup(o: Order, base: u32) -> Vec<u8> {
-    let vendor = b"Porthop clipboard";
+    let vendor = b"Newport clipboard";
     let mut b = vec![0; 8 + 32 + padded(vendor.len()) + 8 + 40 + 8 + 24];
     b[0] = 1;
     o.set16(&mut b, 2, 11);

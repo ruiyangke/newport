@@ -1,6 +1,6 @@
 {
   "identifier": "main",
-  "description": "Local Porthop window; system access stays in Rust commands.",
+  "description": "Local Newport window; system access stays in Rust commands.",
   "windows": ["main"],
   "permissions": [
     "core:default",

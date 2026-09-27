@@ -255,7 +255,7 @@ export default function App() {
         <div className="sidebar-titlebar" data-tauri-drag-region />
         <div className="app-brand" data-tauri-drag-region>
           <img src={appIcon} alt="" width={22} height={22} draggable={false} />
-          <span data-tauri-drag-region>Porthop</span>
+          <span data-tauri-drag-region>Newport</span>
         </div>
         <ServerPicker
           servers={data.config.servers}
@@ -403,7 +403,7 @@ export default function App() {
 
             <span>
               {settings
-                ? "Porthop"
+                ? "Newport"
                 : server
                   ? `${displayName(server)} · ${server.sshUser}@${server.sshHost}`
                   : "Your SSH workspace"}

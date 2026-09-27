@@ -122,7 +122,7 @@ impl MetricsDb {
         use hmac::{Hmac, KeyInit, Mac};
         let key = self.key.as_ref().as_ref().map_err(Clone::clone)?;
         let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key).map_err(|e| e.to_string())?;
-        mac.update(b"porthop-metrics-endpoint-v2\0");
+        mac.update(crate::migration::legacy::METRICS_SALT);
         mac.update(endpoint.as_bytes());
         Ok(mac
             .finalize()
@@ -138,7 +138,7 @@ impl MetricsDb {
             .await
             .map_err(|e| e.to_string())?;
         if version > 2 {
-            return Err("Metrics database was created by a newer Porthop version".into());
+            return Err("Metrics database was created by a newer Newport version".into());
         }
         sqlx::query("PRAGMA journal_mode=WAL")
             .execute(&mut *connection)
@@ -333,7 +333,7 @@ mod tests {
     async fn open(path: &Path, key: u8) -> Result<MetricsDb, String> {
         let url = database_url(path)?;
         let mut context = mock_context(noop_assets());
-        context.config_mut().identifier = "ke.ry.porthop.metrics-tests".into();
+        context.config_mut().identifier = "app.newport.metrics-tests".into();
         context
             .config_mut()
             .plugins

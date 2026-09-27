@@ -9,7 +9,7 @@ import { verifyArtifact } from "./artifact.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 test("reject stale, changed, incomplete and extra artifact contents", () => {
-  const directory = mkdtempSync(join(tmpdir(), "porthop-artifact-"));
+  const directory = mkdtempSync(join(tmpdir(), "newport-artifact-"));
   const path = relative(root, directory);
   const record = () =>
     execFileSync(process.execPath, [
@@ -29,11 +29,11 @@ test("reject stale, changed, incomplete and extra artifact contents", () => {
     assert.throws(() => verifyArtifact(path), /does not match/);
     rmSync(join(directory, "extra"));
     const manifest = JSON.parse(
-      readFileSync(join(directory, "porthop-build.json"), "utf8"),
+      readFileSync(join(directory, "newport-build.json"), "utf8"),
     );
     manifest.commit = "0".repeat(40);
     writeFileSync(
-      join(directory, "porthop-build.json"),
+      join(directory, "newport-build.json"),
       JSON.stringify(manifest),
     );
     assert.throws(() => verifyArtifact(path), /does not match/);

@@ -8,7 +8,7 @@ pub fn handle_event(app: &tauri::AppHandle, event: &tauri::RunEvent) {
 }
 pub fn autostart() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri_plugin_autostart::Builder::new()
-        .app_name("Porthop")
+        .app_name("Newport")
         .macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent)
         .arg("--autostart")
         .build()

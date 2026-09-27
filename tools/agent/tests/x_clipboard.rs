@@ -1,4 +1,4 @@
-use porthop_agent::x_server::Server;
+use newport_agent::x_server::Server;
 use std::{fs, io::Write, os::unix::net::UnixStream, path::Path};
 use x11rb::{
     connection::Connection,
@@ -292,7 +292,7 @@ fn unmodified_arboard_reads_text_and_png() {
 #[test]
 fn wrapper_sets_environment_and_cleans_up() {
     let dir = tempfile::tempdir().unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_porthop-agent")).args(["display", "--backend", "x11"])
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_newport-agent")).args(["display", "--backend", "x11"])
         .args(["--snapshot", dir.path().join("snapshot.tar").to_str().unwrap(), "--", "sh", "-c",
             "test -S /tmp/.X11-unix/X${DISPLAY#:} && test -f \"$XAUTHORITY\" && test -z \"${WAYLAND_DISPLAY-}${WAYLAND_SOCKET-}\" || exit 2; printf '%s\\n%s\\n' \"$DISPLAY\" \"$XAUTHORITY\"; exit 7"])
         .env("WAYLAND_DISPLAY", "existing-display")
@@ -418,14 +418,14 @@ fn native_xclip_reads_formats_text_and_png_through_xlib() {
     let png = include_bytes!("pixel.png");
     snapshot(&path, &[("text/plain", &text), ("image/png", png)]);
     let server = Server::start(&path, None).unwrap();
-    let binary = std::env::var("PORTHOP_TEST_XCLIP").unwrap_or_else(|_| "/usr/bin/xclip".into());
+    let binary = std::env::var("NEWPORT_TEST_XCLIP").unwrap_or_else(|_| "/usr/bin/xclip".into());
     let read = |target: &str| {
         let output = std::process::Command::new("timeout")
             .args(["8", &binary, "-selection", "clipboard", "-o", "-t", target])
             .env("DISPLAY", &server.display)
             .env("XAUTHORITY", server.authority())
             .output()
-            .expect("Install xclip or set PORTHOP_TEST_XCLIP to the native executable");
+            .expect("Install xclip or set NEWPORT_TEST_XCLIP to the native executable");
         assert!(
             output.status.success(),
             "{}",

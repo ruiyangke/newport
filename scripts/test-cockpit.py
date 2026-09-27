@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class CollectorTests(unittest.TestCase):
     def test_metrics_and_json_escaping(self):
-        with tempfile.TemporaryDirectory(prefix='porthop-cockpit-') as directory:
+        with tempfile.TemporaryDirectory(prefix='newport-cockpit-') as directory:
             root = Path(directory)
             (root/'proc/net').mkdir(parents=True)
             (root/'proc/stat').write_text('cpu 10 0 5 80 5 0 0 0 0 0\n')

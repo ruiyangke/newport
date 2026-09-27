@@ -1,4 +1,4 @@
-# Run on an interactive Windows desktop against a built Porthop executable.
+# Run on an interactive Windows desktop against a built Newport executable.
 param([Parameter(Mandatory=$true)][string]$BinaryPath)
 $BinaryPath=(Resolve-Path $BinaryPath).Path
 $ErrorActionPreference='Stop'
@@ -12,10 +12,10 @@ public static class ActivationTest {
  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder text, int size);
- public static IntPtr Find(uint pid) { IntPtr found=IntPtr.Zero; EnumWindows((h,l)=> {uint p;GetWindowThreadProcessId(h,out p); var text=new System.Text.StringBuilder(256);GetWindowText(h,text,256); if(p==pid && IsWindowVisible(h) && text.ToString()=="Porthop") {found=h;return false;}return true;}, IntPtr.Zero);return found; }
+ public static IntPtr Find(uint pid) { IntPtr found=IntPtr.Zero; EnumWindows((h,l)=> {uint p;GetWindowThreadProcessId(h,out p); var text=new System.Text.StringBuilder(256);GetWindowText(h,text,256); if(p==pid && IsWindowVisible(h) && text.ToString()=="Newport") {found=h;return false;}return true;}, IntPtr.Zero);return found; }
 }
 '@
-$profile=Join-Path $env:TEMP ('PorthopActivation-'+[guid]::NewGuid())
+$profile=Join-Path $env:TEMP ('NewportActivation-'+[guid]::NewGuid())
 New-Item -ItemType Directory $profile | Out-Null
 $key=Join-Path $profile 'test-key'
 $bytes=New-Object byte[] 32
@@ -23,8 +23,8 @@ $rng=[System.Security.Cryptography.RandomNumberGenerator]::Create()
 $rng.GetBytes($bytes)
 $rng.Dispose()
 [IO.File]::WriteAllBytes($key,$bytes)
-$env:PORTHOP_DATA_DIR=$profile
-$env:PORTHOP_TEST_VAULT_KEY_FILE=$key
+$env:NEWPORT_DATA_DIR=$profile
+$env:NEWPORT_TEST_VAULT_KEY_FILE=$key
 $first=$null
 try {
  $first=Start-Process $BinaryPath -PassThru -RedirectStandardError (Join-Path $profile 'primary.log')

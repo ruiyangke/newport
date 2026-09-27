@@ -306,10 +306,10 @@ async fn run_once(
         let installed = crate::agent::install(&session).await?;
         let path_needed = installed
             .lines()
-            .any(|line| line == "PORTHOP_SHIM_PATH=missing");
+            .any(|line| line == "NEWPORT_SHIM_PATH=missing");
         let stream = session
             .stream(&format!(
-                "exec \"$HOME/.local/bin/porthop-agent\" serve {client} {} {}",
+                "exec \"$HOME/.local/bin/newport-agent\" serve {client} {} {}",
                 if server.clipboard_enabled {
                     "--clipboard"
                 } else {
@@ -708,11 +708,11 @@ mod tests {
             name: "Agent fixture".into(),
             ssh_user: "fixture".into(),
             ssh_host: "127.0.0.1".into(),
-            ssh_port: std::env::var("PORTHOP_TEST_SSH_PORT")
+            ssh_port: std::env::var("NEWPORT_TEST_SSH_PORT")
                 .unwrap()
                 .parse()
                 .unwrap(),
-            identity_file: Some(std::env::var("PORTHOP_TEST_IDENTITY").unwrap()),
+            identity_file: Some(std::env::var("NEWPORT_TEST_IDENTITY").unwrap()),
             agent_source: None,
             agent_key_fingerprint: None,
             auth_method: crate::model::AuthMethod::PublicKey,
@@ -732,7 +732,7 @@ mod tests {
             stream.read_exact(&mut data).await.unwrap();
             data
         }
-        assert_eq!(event(&mut stream, b'R').await, b"porthop-agent/5");
+        assert_eq!(event(&mut stream, b'R').await, b"newport-agent/5");
         let bytes = archive(BTreeMap::from([(
             "text/plain".into(),
             "SSH clipboard 世界\n".as_bytes().to_vec(),

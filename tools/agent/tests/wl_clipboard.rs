@@ -1,4 +1,4 @@
-use porthop_agent::wl_server::Server;
+use newport_agent::wl_server::Server;
 use std::{
     fs,
     io::Read,
@@ -276,7 +276,7 @@ fn stalled_transfer_does_not_block_other_clients_or_shutdown() {
 #[test]
 fn standalone_termination_removes_private_socket() {
     use std::io::BufRead;
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_porthop-agent"))
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_newport-agent"))
         .args(["display", "--backend", "wayland"])
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -364,7 +364,7 @@ fn wl_clipboard_library_reads_text_and_large_images() {
 
 #[test]
 fn wrapper_sets_wayland_environment_and_cleans_up() {
-    let output=std::process::Command::new(env!("CARGO_BIN_EXE_porthop-agent")).args(["display", "--backend", "wayland"])
+    let output=std::process::Command::new(env!("CARGO_BIN_EXE_newport-agent")).args(["display", "--backend", "wayland"])
         .args(["--", "sh", "-c", "test -S \"$WAYLAND_DISPLAY\" && test -z \"${DISPLAY-}${XAUTHORITY-}${WAYLAND_SOCKET-}\" || exit 2; printf '%s\\n' \"$WAYLAND_DISPLAY\"; exit 7"])
         .env("DISPLAY", ":99").env("XAUTHORITY", "/existing").env("WAYLAND_SOCKET", "17").output().unwrap();
     assert_eq!(output.status.code(), Some(7));
@@ -465,8 +465,8 @@ fn fixed_socket_survives_crash_and_restarts_at_default_path() {
         .permissions(fs::Permissions::from_mode(0o700))
         .tempdir_in("/tmp")
         .unwrap();
-    let socket = home.path().join(".cache/porthop/clipboard/wayland.sock");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_porthop-agent"))
+    let socket = home.path().join(".cache/newport/clipboard/wayland.sock");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_newport-agent"))
         .args(["display", "--backend", "wayland"])
         .arg("--service")
         .env("HOME", home.path())

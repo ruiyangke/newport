@@ -6,9 +6,9 @@ use std::{
     path::PathBuf,
 };
 pub fn root() -> io::Result<PathBuf> {
-    let root =
-        PathBuf::from(env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is required"))?)
-            .join(".cache/porthop/clipboard");
+    let home =
+        PathBuf::from(env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is required"))?);
+    let root = crate::migration::cache_root(&home)?;
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)

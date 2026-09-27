@@ -34,7 +34,7 @@ fn install_observer() -> bool {
     }
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || unsafe {
-        let name: Vec<u16> = "PorthopClipboardObserver\0".encode_utf16().collect();
+        let name: Vec<u16> = "NewportClipboardObserver\0".encode_utf16().collect();
         let class = WNDCLASSW {
             lpfnWndProc: Some(procedure),
             lpszClassName: name.as_ptr(),

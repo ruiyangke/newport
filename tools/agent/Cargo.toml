@@ -1,13 +1,13 @@
 [package]
-name = "porthop-agent"
+name = "newport-agent"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-default-run = "porthop-agent"
-description = "Remote clipboard and browser agent for Porthop"
+default-run = "newport-agent"
+description = "Remote clipboard and browser agent for Newport"
 
 [[bin]]
-name = "porthop-agent"
+name = "newport-agent"
 path = "src/main.rs"
 
 [dependencies]

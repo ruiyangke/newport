@@ -7,14 +7,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const START: &str = "# >>> Porthop >>>";
-const END: &str = "# <<< Porthop <<<";
+const START: &str = "# >>> Newport >>>";
+const END: &str = "# <<< Newport <<<";
 
 pub fn block(fish: bool) -> String {
     let body = if fish {
-        "if test -x \"$HOME/.local/bin/porthop-agent\"\n    if set -l _porthop_env (\"$HOME/.local/bin/porthop-agent\" env --shell fish 2>/dev/null)\n        eval (string join \\n -- $_porthop_env | string collect)\n    end\nend"
+        "if test -x \"$HOME/.local/bin/newport-agent\"\n    if set -l _newport_env (\"$HOME/.local/bin/newport-agent\" env --shell fish 2>/dev/null)\n        eval (string join \\n -- $_newport_env | string collect)\n    end\nend"
     } else {
-        "if [ -x \"$HOME/.local/bin/porthop-agent\" ]; then\n    if _porthop_env=$(\"$HOME/.local/bin/porthop-agent\" env 2>/dev/null); then\n        eval \"$_porthop_env\"\n    fi\n    unset _porthop_env\nfi"
+        "if [ -x \"$HOME/.local/bin/newport-agent\" ]; then\n    if _newport_env=$(\"$HOME/.local/bin/newport-agent\" env 2>/dev/null); then\n        eval \"$_newport_env\"\n    fi\n    unset _newport_env\nfi"
     };
     format!("{START}\n{body}\n{END}\n")
 }
@@ -24,12 +24,14 @@ fn merge(original: &str, block: &str) -> io::Result<String> {
     let mut ends = Vec::new();
     let mut offset = 0;
     for line in original.split_inclusive('\n') {
-        match line.trim_end_matches(['\r', '\n']) {
-            START => starts.push(offset),
-            END => ends.push(offset + line.len()),
-            _ => {}
+        let length = line.len();
+        let line = line.trim_end_matches(['\r', '\n']);
+        if crate::migration::shell_start(line) {
+            starts.push(offset);
+        } else if crate::migration::shell_end(line) {
+            ends.push(offset + length);
         }
-        offset += line.len();
+        offset += length;
     }
     match (starts.as_slice(), ends.as_slice()) {
         ([], []) => Ok(format!(
@@ -46,7 +48,7 @@ fn merge(original: &str, block: &str) -> io::Result<String> {
             &original[*end..]
         )),
         _ => Err(io::Error::other(
-            "Porthop shell markers are incomplete or duplicated; leaving file unchanged",
+            "Newport shell markers are incomplete or duplicated; leaving file unchanged",
         )),
     }
 }
@@ -91,7 +93,7 @@ fn patch(path: &Path, fish: bool) -> io::Result<()> {
     if metadata.is_some() {
         let mut backup = tempfile::Builder::new()
             .prefix(&format!(
-                "{}.porthop-backup-",
+                "{}.newport-backup-",
                 path.file_name().unwrap().to_string_lossy()
             ))
             .tempfile_in(parent)?;
@@ -152,17 +154,20 @@ pub fn install() -> io::Result<()> {
             .map(PathBuf::from)
             .unwrap_or_else(|| home.clone())
             .join(".zshrc")],
-        "fish" => vec![env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".config"))
-            .join("fish/conf.d/porthop.fish")],
+        "fish" => {
+            let dir = env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".config"))
+                .join("fish/conf.d");
+            vec![crate::migration::fish_config(&dir)]
+        }
         _ => {
             return Err(io::Error::other(
                 "Shell not supported for automatic setup; configure it manually",
             ))
         }
     };
-    let lock_dir = home.join(".local/share/porthop");
+    let lock_dir = crate::migration::shell_lock_directory(&home);
     fs::create_dir_all(&lock_dir)?;
     let lock = fs::OpenOptions::new()
         .write(true)
@@ -179,6 +184,18 @@ pub fn install() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn replaces_legacy_brand_block_without_duplicating_shell_setup() {
+        let old =
+            "export CUSTOM=yes\n# >>> Porthop >>>\nold command\n# <<< Porthop <<<\n# user footer\n";
+        let new = merge(old, &block(false)).unwrap();
+        assert!(new.starts_with("export CUSTOM=yes\n"));
+        assert!(new.ends_with("# user footer\n"));
+        assert!(!new.contains("Porthop"));
+        assert_eq!(new.matches(START).count(), 1);
+        assert_eq!(merge(&new, &block(false)).unwrap(), new);
+        assert!(merge("# >>> Porthop >>>\nincomplete", &block(false)).is_err());
+    }
     #[test]
     fn preserves_content_and_installs_once() {
         let old = "export CUSTOM=hello\n# user settings";
@@ -255,7 +272,7 @@ mod tests {
         assert_eq!(result.stdout, b"alive");
         let bin = dir.path().join(".local/bin");
         fs::create_dir_all(&bin).unwrap();
-        let agent = bin.join("porthop-agent");
+        let agent = bin.join("newport-agent");
         fs::write(&agent, "#!/bin/sh\necho 'exit 99'\nexit 1\n").unwrap();
         fs::set_permissions(agent, fs::Permissions::from_mode(0o700)).unwrap();
         let result = run();

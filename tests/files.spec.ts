@@ -8,7 +8,7 @@ function pdfFixture() {
     "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
     "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>",
-    "<< /Length 54 >>\nstream\nBT /F1 20 Tf 40 220 Td (Porthop PDF preview) Tj ET\nendstream",
+    "<< /Length 54 >>\nstream\nBT /F1 20 Tf 40 220 Td (Newport PDF preview) Tj ET\nendstream",
     "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] /Rotate 90 /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>",
     "<< /Length 44 >>\nstream\nBT /F1 20 Tf 40 220 Td (Second page) Tj ET\nendstream",
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
@@ -370,7 +370,7 @@ test("files layout desktop, compact dark and PDF screenshots", async ({
   await expect(
     page.getByRole("button", { name: "Next PDF page" }),
   ).toBeEnabled();
-  await expect(page.locator(".textLayer")).toContainText("Porthop PDF preview");
+  await expect(page.locator(".textLayer")).toContainText("Newport PDF preview");
   await page.locator(".textLayer").evaluate((layer) => {
     const range = document.createRange();
     range.selectNodeContents(layer);
@@ -380,7 +380,7 @@ test("files layout desktop, compact dark and PDF screenshots", async ({
   });
   expect(
     await page.evaluate(() => window.getSelection()?.toString()),
-  ).toContain("Porthop PDF preview");
+  ).toContain("Newport PDF preview");
   await page.evaluate(() => window.getSelection()?.removeAllRanges());
   await page.keyboard.press("Meta+1");
   await expect(page.getByRole("dialog")).toBeVisible();

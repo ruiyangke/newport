@@ -24,7 +24,7 @@ class Manifests(unittest.TestCase):
             (self.root / (name + ".sig")).write_text("test signature")
             path = self.root / (target + ".json")
             path.write_text(json.dumps({"version": "1.2.3", "pub_date": "2026-01-01T00:00:00Z", "platforms": {
-                target: {"signature": "test signature", "url": f"https://github.com/ruiyangke/porthop/releases/download/v1.2.3/{name}"}
+                target: {"signature": "test signature", "url": f"https://github.com/ruiyangke/newport/releases/download/v1.2.3/{name}"}
             }}))
             self.fragments.append(path)
 
@@ -65,7 +65,7 @@ class Signatures(unittest.TestCase):
         shutil.copy2(fixture / "payload.txt", self.root / "payload.txt")
         self.key = (fixture / "public.key").read_text().strip()
         self.manifest = {"version": "2.0.0", "platforms": {"windows-aarch64": {
-            "url": "https://github.com/ruiyangke/porthop/releases/download/v2.0.0/payload.txt",
+            "url": "https://github.com/ruiyangke/newport/releases/download/v2.0.0/payload.txt",
             "signature": (fixture / "payload.txt.sig").read_text().strip(),
         }}}
 

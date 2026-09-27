@@ -27,10 +27,10 @@ const DISCOVER_PORTS_COMMAND: &str = include_str!("discover-ports.sh");
 
 pub fn parse_ports(output: &str) -> Vec<DiscoveredPort> {
     let (output, details) = output
-        .split_once("__PORTHOP_PROCESS_DETAILS__\n")
+        .split_once("__NEWPORT_PROCESS_DETAILS__\n")
         .unwrap_or((output, ""));
     let (listeners, docker) = output
-        .split_once("__PORTHOP_DOCKER_PORTS__\n")
+        .split_once("__NEWPORT_DOCKER_PORTS__\n")
         .unwrap_or((output, ""));
     let mut ports: BTreeMap<(u16, String), DiscoveredPort> = BTreeMap::new();
     for line in listeners.lines().filter(|line| line.contains("LISTEN")) {
@@ -211,7 +211,7 @@ mod tests {
     }
     #[test]
     fn enriches_node_without_guessing_from_thread_name() {
-        let data = format!("LISTEN 0 511 0.0.0.0:5174 *:* users:((\"MainThread\",pid=126945,fd=25))\n__PORTHOP_PROCESS_DETAILS__\n{}\n", detail(126945, ["/nix/store/node/bin/node\n", "/home/ruiyang/Projects/webcontainers-demo\n", "node\0/home/ruiyang/Projects/webcontainers-demo/node_modules/.bin/vite\0--host\x000.0.0.0\0", "ruiyang\n"]));
+        let data = format!("LISTEN 0 511 0.0.0.0:5174 *:* users:((\"MainThread\",pid=126945,fd=25))\n__NEWPORT_PROCESS_DETAILS__\n{}\n", detail(126945, ["/nix/store/node/bin/node\n", "/home/ruiyang/Projects/webcontainers-demo\n", "node\0/home/ruiyang/Projects/webcontainers-demo/node_modules/.bin/vite\0--host\x000.0.0.0\0", "ruiyang\n"]));
         let port = &parse_ports(&data)[0];
         assert_eq!(
             port.application_name.as_deref(),
@@ -223,7 +223,7 @@ mod tests {
     }
     #[test]
     fn incomplete_or_invalid_metadata_preserves_listener() {
-        let base = "LISTEN 0 511 0.0.0.0:5174 *:* users:((\"MainThread\",pid=9,fd=25))\n__PORTHOP_PROCESS_DETAILS__\n";
+        let base = "LISTEN 0 511 0.0.0.0:5174 *:* users:((\"MainThread\",pid=9,fd=25))\n__NEWPORT_PROCESS_DETAILS__\n";
         for details in ["9||||", "9|zz|||", "9|é|||", "10|6e6f6465|||"] {
             let ports = parse_ports(&format!("{base}{details}\n"));
             assert_eq!(ports.len(), 1);
@@ -233,7 +233,7 @@ mod tests {
     }
     #[test]
     fn preserves_spaces_and_does_not_misidentify_command_arguments() {
-        let data = format!("LISTEN 0 511 0.0.0.0:5174 *:* users:((\"MainThread\",pid=9,fd=25))\n__PORTHOP_PROCESS_DETAILS__\n{}", detail(9, ["/usr/bin/node\n", "/srv/my project\n", "node\0server.js\0--description=vite\0", "alice\n"]));
+        let data = format!("LISTEN 0 511 0.0.0.0:5174 *:* users:((\"MainThread\",pid=9,fd=25))\n__NEWPORT_PROCESS_DETAILS__\n{}", detail(9, ["/usr/bin/node\n", "/srv/my project\n", "node\0server.js\0--description=vite\0", "alice\n"]));
         let port = &parse_ports(&data)[0];
         assert_eq!(port.application_name.as_deref(), Some("node · my project"));
         assert_eq!(port.working_directory.as_deref(), Some("/srv/my project"));
@@ -264,7 +264,7 @@ mod tests {
     fn identifies_docker_bindings_without_guessing_processes() {
         let ports = parse_ports(
             r#"LISTEN 0 128 0.0.0.0:8080 *:*
-__PORTHOP_DOCKER_PORTS__
+__NEWPORT_DOCKER_PORTS__
 {"name":"web","ports":"0.0.0.0:8080->80/tcp, [::]:8080->80/tcp, 80/tcp, 0.0.0.0:5353->53/udp"}
 {"name":"workers","ports":"127.0.0.1:9000-9001->9000-9001/tcp"}
 not json
@@ -278,7 +278,7 @@ not json
     }
     #[test]
     fn missing_docker_access_keeps_listeners() {
-        let ports = parse_ports("LISTEN 0 128 0.0.0.0:22 *:*\n__PORTHOP_DOCKER_PORTS__\n");
+        let ports = parse_ports("LISTEN 0 128 0.0.0.0:22 *:*\n__NEWPORT_DOCKER_PORTS__\n");
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].process_name, None);
         assert_eq!(ports[0].container_name, None);

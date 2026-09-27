@@ -21,7 +21,7 @@ pub(crate) struct Endpoint {
 impl Endpoint {
     pub(crate) fn temporary() -> io::Result<(UnixListener, Self)> {
         let directory = tempfile::Builder::new()
-            .prefix("porthop-wl-")
+            .prefix("newport-wl-")
             .permissions(fs::Permissions::from_mode(0o700))
             .tempdir_in("/tmp")?;
         Self::bind(directory.path().join("clipboard"), None, Some(directory))
@@ -126,6 +126,6 @@ impl Drop for Endpoint {
 fn already_running() -> io::Error {
     io::Error::new(
         io::ErrorKind::AddrInUse,
-        "a Porthop service is already listening at this socket",
+        "a Newport service is already listening at this socket",
     )
 }

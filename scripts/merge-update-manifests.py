@@ -10,7 +10,7 @@ from urllib.parse import unquote, urlparse
 
 
 def merge(paths, version, assets):
-    result = {"version": version, "notes": f"Porthop {version}", "platforms": {}}
+    result = {"version": version, "notes": f"Newport {version}", "platforms": {}}
     for path in paths:
         fragment = json.loads(path.read_text())
         if fragment["version"] != version:
@@ -20,7 +20,7 @@ def merge(paths, version, assets):
             if target in result["platforms"]:
                 raise ValueError(f"Duplicate update target: {target}")
             url = urlparse(entry["url"])
-            expected_prefix = f"/ruiyangke/porthop/releases/download/v{version}/"
+            expected_prefix = f"/ruiyangke/newport/releases/download/v{version}/"
             if url.scheme != "https" or url.netloc != "github.com" or not url.path.startswith(expected_prefix):
                 raise ValueError("Update URL does not match this release")
             filename = unquote(url.path.rsplit("/", 1)[-1])

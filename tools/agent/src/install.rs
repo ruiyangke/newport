@@ -5,49 +5,35 @@ pub fn install() -> io::Result<()> {
         PathBuf::from(env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is required"))?);
     let dir = home.join(".local/bin");
     fs::create_dir_all(&dir)?;
-    for name in ["xclip", "wl-paste", "xdg-open", "porthop-browser"] {
+    for name in ["xclip", "wl-paste", "xdg-open", "newport-browser"] {
         let path = dir.join(name);
-        let managed = fs::read_link(&path).ok().is_some_and(|v| {
-            matches!(
-                v.to_str(),
-                Some("porthop-agent" | "porthop-clip" | "porthop-open")
-            )
-        });
+        let managed = fs::read_link(&path)
+            .ok()
+            .is_some_and(|v| crate::migration::managed_alias(&v));
         if managed {
             fs::remove_file(&path)?;
         }
-        if name == "porthop-browser" && fs::symlink_metadata(&path).is_ok() {
+        if name == "newport-browser" && fs::symlink_metadata(&path).is_ok() {
             return Err(io::Error::other(
-                "porthop-browser is occupied by an unrelated command",
+                "newport-browser is occupied by an unrelated command",
             ));
         }
         if fs::symlink_metadata(&path).is_err() {
-            symlink("porthop-agent", &path)?;
+            symlink("newport-agent", &path)?;
         }
     }
-    // Remove only our obsolete Bash helpers, never unrelated commands.
-    for (name, marker) in [
-        ("porthop-clip", "# Porthop clipboard helper"),
-        ("porthop-open", "# Porthop browser helper"),
-    ] {
-        let path = dir.join(name);
-        if fs::symlink_metadata(&path).is_ok_and(|m| m.is_file())
-            && fs::read_to_string(&path).is_ok_and(|s| s.lines().any(|l| l.starts_with(marker)))
-        {
-            fs::remove_file(path)?;
-        }
-    }
+    crate::migration::commands(&dir)?;
     let ours = env::current_exe()?.canonicalize()?;
     let resolved = env::split_paths(&env::var_os("PATH").unwrap_or_default())
         .map(|p| p.join("xclip"))
         .find(|p| p.is_file());
     let ready = resolved.and_then(|p| p.canonicalize().ok()).as_ref() == Some(&ours);
     println!(
-        "PORTHOP_SHIM_PATH={}",
+        "NEWPORT_SHIM_PATH={}",
         if ready { "ready" } else { "missing" }
     );
     if let Err(error) = crate::shell_setup::install() {
-        eprintln!("porthop-agent: automatic shell setup skipped: {error}");
+        eprintln!("newport-agent: automatic shell setup skipped: {error}");
     }
     Ok(())
 }

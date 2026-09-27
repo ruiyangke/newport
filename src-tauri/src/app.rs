@@ -49,14 +49,16 @@ pub(crate) fn show(app: &tauri::AppHandle) {
 pub fn run() -> anyhow::Result<()> {
     let store = Store::open()
         .map_err(anyhow::Error::msg)
-        .context("Cannot open Porthop profile directory")?;
+        .context("Cannot open Newport profile directory")?;
     #[cfg(target_os = "windows")]
     let activation = crate::platform::activation::Activation::new(&store.directory)?;
     // Same lock location as the Swift app, unless running an isolated test profile.
-    let lock_path = if std::env::var_os("PORTHOP_DATA_DIR").is_some() {
-        store.directory.join("porthop.lock")
+    let lock_path = if crate::migration::data_directory_override().is_some() {
+        store
+            .directory
+            .join(crate::migration::legacy::INSTANCE_LOCK)
     } else {
-        std::env::temp_dir().join("porthop.lock")
+        std::env::temp_dir().join(crate::migration::legacy::INSTANCE_LOCK)
     };
     let lock = OpenOptions::new()
         .create(true)
@@ -64,17 +66,18 @@ pub fn run() -> anyhow::Result<()> {
         .read(true)
         .write(true)
         .open(lock_path)
-        .context("Cannot open Porthop instance lock")?;
+        .context("Cannot open Newport instance lock")?;
     match lock.try_lock_exclusive() {
         Ok(()) => {}
         Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
             #[cfg(target_os = "windows")]
             activation.request()?;
-            eprintln!("Porthop is already running.");
+            eprintln!("Newport is already running.");
             return Ok(());
         }
-        Err(error) => return Err(error).context("Cannot acquire Porthop instance lock"),
+        Err(error) => return Err(error).context("Cannot acquire Newport instance lock"),
     }
+    crate::migration::prepare_ui().context("Cannot migrate existing UI preferences")?;
     let logging = crate::plugins::logging(&store.directory);
     let profile_directory = store.directory.clone();
     let manager = Manager::new(store);
@@ -204,16 +207,19 @@ pub fn run() -> anyhow::Result<()> {
             app.manage(sampling_db.clone());
             crate::platform::desktop::configure(app);
             crate::preferences::install(app, &profile_directory)?;
+            if let Err(error) = crate::migration::finish_startup(app, &profile_directory) {
+                log::warn!("Cannot migrate launch-at-login preference: {error}");
+            }
             crate::desktop::install(app)?;
             if let Err(error) = crate::system_events::install() {
                 log::warn!("System event monitoring unavailable; using timed recovery: {error}");
             }
-            let open = MenuItem::with_id(app, "open", "Open Porthop", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit Porthop", true, None::<&str>)?;
+            let open = MenuItem::with_id(app, "open", "Open Newport", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit Newport", true, None::<&str>)?;
             let settings = MenuItem::with_id(app, "app-settings", "Settings…", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &settings, &quit])?;
-            TrayIconBuilder::with_id("porthop")
-                .tooltip("Porthop · SSH tunnels")
+            TrayIconBuilder::with_id("newport")
+                .tooltip("Newport · SSH tunnels")
                 .icon(tauri::image::Image::from_bytes(include_bytes!(
                     "../icons/tray.png"
                 ))?)
@@ -283,7 +289,7 @@ pub fn run() -> anyhow::Result<()> {
                             .tunnels
                             .values()
                             .any(|s| s.status == Status::Error);
-                        if let Some(tray) = handle.tray_by_id("porthop") {
+                        if let Some(tray) = handle.tray_by_id("newport") {
                             let _ = tray.set_title(if connected > 0 {
                                 Some(connected.to_string())
                             } else if errors {
@@ -292,7 +298,7 @@ pub fn run() -> anyhow::Result<()> {
                                 None
                             });
                             let _ = tray.set_tooltip(Some(format!(
-                                "Porthop · {connected} connected tunnels"
+                                "Newport · {connected} connected tunnels"
                             )));
                         }
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;

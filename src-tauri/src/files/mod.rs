@@ -287,11 +287,11 @@ mod integration_tests {
             name: "Files fixture".into(),
             ssh_user: "fixture".into(),
             ssh_host: "127.0.0.1".into(),
-            ssh_port: std::env::var("PORTHOP_TEST_SSH_PORT")
+            ssh_port: std::env::var("NEWPORT_TEST_SSH_PORT")
                 .unwrap()
                 .parse()
                 .unwrap(),
-            identity_file: Some(std::env::var("PORTHOP_TEST_IDENTITY").unwrap()),
+            identity_file: Some(std::env::var("NEWPORT_TEST_IDENTITY").unwrap()),
             agent_source: None,
             agent_key_fingerprint: None,
             auth_method: AuthMethod::PublicKey,
@@ -350,7 +350,7 @@ mod integration_tests {
         assert!(!folders
             .entries
             .iter()
-            .any(|entry| entry.name.starts_with(".porthop-upload")));
+            .any(|entry| entry.name.starts_with(".newport-upload")));
         // Dropping the transfer before completion removes the unpublished staging file.
         let cancelled = directory.path().join("cancelled.bin");
         std::fs::write(&cancelled, vec![0u8; 1024 * 1024]).unwrap();
@@ -373,7 +373,7 @@ mod integration_tests {
         operations.shutdown().await;
         let folders = list(&sftp, "/Documents").await.unwrap();
         assert!(!folders.entries.iter().any(
-            |entry| entry.name.starts_with(".porthop-upload") || entry.name == "cancelled.bin"
+            |entry| entry.name.starts_with(".newport-upload") || entry.name == "cancelled.bin"
         ));
     }
 }

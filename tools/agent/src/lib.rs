@@ -1,4 +1,4 @@
-//! Linux clipboard and browser integration for Porthop.
+//! Linux clipboard and browser integration for Newport.
 pub mod agent;
 pub mod browser;
 pub mod clipboard;
@@ -7,6 +7,7 @@ pub mod display;
 pub mod environment;
 pub mod install;
 mod local_socket;
+pub mod migration;
 mod native;
 mod paths;
 mod session;

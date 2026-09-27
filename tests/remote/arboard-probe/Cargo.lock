@@ -513,7 +513,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "porthop-arboard-probe"
+name = "newport-arboard-probe"
 version = "0.1.0"
 dependencies = [
  "arboard",

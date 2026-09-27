@@ -6,7 +6,8 @@ use uuid::Uuid;
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
-const CLIENT: &[u8] = b"porthop-profiles-v1";
+const CLIENT: &[u8] = b"newport-profiles-v1";
+use crate::migration::legacy::VAULT_CLIENT as LEGACY_CLIENT;
 const RECORD: &[u8] = b"config";
 
 const SCHEMA_VERSION: u64 = 2;
@@ -41,7 +42,7 @@ fn decode_record(data: &[u8]) -> Result<ProfileRecord, String> {
         }
         Some(_) => {
             return Err(
-                "Unsupported profile version. Update Porthop before editing these profiles.".into(),
+                "Unsupported profile version. Update Newport before editing these profiles.".into(),
             )
         }
         None => ProfileRecord {
@@ -67,7 +68,10 @@ fn read_record(path: &Path, key: &[u8]) -> Result<ProfileRecord, String> {
         "Cannot unlock saved profiles. Check the vault key in your system credential storage."
             .to_string()
     })?;
-    let client = vault.load_client(CLIENT).map_err(|e| e.to_string())?;
+    let client = vault
+        .load_client(CLIENT)
+        .or_else(|_| vault.load_client(LEGACY_CLIENT))
+        .map_err(|e| e.to_string())?;
     let data = Zeroizing::new(
         client
             .store()
@@ -163,6 +167,39 @@ pub fn write_with_password(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_snapshot_moves_to_new_namespace_without_losing_passwords() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.stronghold");
+        let key = vec![7; 32];
+        let config = config();
+        let id = config.servers[0].id;
+        let record = ProfileRecord {
+            schema_version: SCHEMA_VERSION,
+            config: config.clone(),
+            passwords: BTreeMap::from([(id, "migration-test".into())]),
+        };
+        let old = Stronghold::new(&path, key.clone()).unwrap();
+        old.create_client(LEGACY_CLIENT)
+            .unwrap()
+            .store()
+            .insert(RECORD.to_vec(), serde_json::to_vec(&record).unwrap(), None)
+            .unwrap();
+        old.save().unwrap();
+        drop(old);
+        assert_eq!(
+            password(&path, &key, id).unwrap().as_str(),
+            "migration-test"
+        );
+        write(&path, &key, &config).unwrap();
+        assert_eq!(
+            password(&path, &key, id).unwrap().as_str(),
+            "migration-test"
+        );
+        let migrated = Stronghold::new(&path, key).unwrap();
+        assert!(migrated.load_client(CLIENT).is_ok());
+        assert!(migrated.load_client(LEGACY_CLIENT).is_err());
+    }
     fn config() -> Config {
         serde_json::from_value(serde_json::json!({"servers":[{"id":uuid::Uuid::new_v4(),"name":"Private production","sshHost":"private.internal.example","sshPort":22,"sshUser":"private-user","identityFile":"/private/key"}],"tunnels":[]})).unwrap()
     }

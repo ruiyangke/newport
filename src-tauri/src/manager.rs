@@ -575,11 +575,11 @@ mod integration_tests {
             name: "Fixture".into(),
             ssh_user: "fixture".into(),
             ssh_host: "127.0.0.1".into(),
-            ssh_port: std::env::var("PORTHOP_TEST_SSH_PORT")
+            ssh_port: std::env::var("NEWPORT_TEST_SSH_PORT")
                 .unwrap()
                 .parse()
                 .unwrap(),
-            identity_file: Some(std::env::var("PORTHOP_TEST_IDENTITY").unwrap()),
+            identity_file: Some(std::env::var("NEWPORT_TEST_IDENTITY").unwrap()),
             agent_source: None,
             agent_key_fingerprint: None,
             auth_method: AuthMethod::PublicKey,
@@ -618,13 +618,13 @@ mod integration_tests {
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .unwrap();
-        stream.write_all(b"porthop roundtrip").await.unwrap();
+        stream.write_all(b"newport roundtrip").await.unwrap();
         let mut received = [0; 17];
         tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut received))
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(&received, b"porthop roundtrip");
+        assert_eq!(&received, b"newport roundtrip");
         drop(stream);
         // A second profile cannot claim a live local port.
         let mut overlap = tunnel.clone();

@@ -59,7 +59,7 @@ impl Session {
                 e.kind(),
                 io::ErrorKind::AddrInUse | io::ErrorKind::WouldBlock
             ) {
-                io::Error::other("Integration is active in another Porthop installation.")
+                io::Error::other("Integration is active in another Newport installation.")
             } else {
                 e
             }
@@ -107,7 +107,7 @@ impl Session {
                 != Some(client)
         {
             return Err(io::Error::other(
-                "Clipboard sync is active in another Porthop installation.",
+                "Clipboard sync is active in another Newport installation.",
             ));
         }
         let _cleanup = Cleanup(root.clone());
