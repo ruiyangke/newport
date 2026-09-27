@@ -1,4 +1,5 @@
-FROM rust:1.95-bookworm AS probe
+ARG RUST_VERSION=1.98.0
+FROM rust:${RUST_VERSION}-bookworm AS probe
 WORKDIR /probe
 COPY arboard-probe/Cargo.toml arboard-probe/Cargo.lock ./
 COPY arboard-probe/src ./src

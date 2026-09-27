@@ -1,0 +1,221 @@
+name: Shared checks
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact commit to validate and build
+        required: true
+        type: string
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium webkit
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - run: npx playwright test --config playwright.production.config.ts
+      - run: python3 scripts/test-cockpit.py
+      - run: sudo apt-get update && sudo apt-get install -y minisign
+      - run: python3 scripts/test-update-manifests.py
+      - run: node --test scripts/ci/*.test.mjs
+      - run: python3 scripts/ci/test-release.py
+      - run: node scripts/ci/artifact.mjs record dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frontend
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: browser-test-results
+          path: test-results
+          retention-days: 7
+
+  agent-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: tools/agent
+          key: nix-agent
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - run: nix develop --command npm run check:agent
+      - name: Validate workflows
+        if: runner.os == 'Linux'
+        run: nix develop --command actionlint
+
+  agents:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: tools/agent
+          key: linux-musl
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - run: bash scripts/build-agent.sh
+      - run: node scripts/ci/artifact.mjs record src-tauri/agents
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-agents
+          path: src-tauri/agents/
+          if-no-files-found: error
+          retention-days: 7
+
+  desktop:
+    needs: [frontend, agents]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            arch: aarch64
+            bundle: app
+          - os: windows-2025
+            arch: x86_64
+            bundle: nsis
+          - os: windows-11-arm
+            arch: aarch64
+            bundle: nsis
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      PORTHOP_PREBUILT: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: linux-agents
+          path: src-tauri/agents
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: frontend
+          path: dist
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          key: desktop-${{ matrix.arch }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
+        if: runner.os == 'Windows' && matrix.arch == 'x86_64'
+      - name: Locate LLVM for ARM64 dependencies
+        if: runner.os == 'Windows' && matrix.arch == 'aarch64'
+        shell: pwsh
+        run: |
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (!(Test-Path "$llvm\clang.exe")) { throw 'LLVM is required for ARM64' }
+          $llvm >> $env:GITHUB_PATH
+      - run: npm ci
+      - run: node scripts/prepare-build.mjs
+      - run: npm run check:rust
+      - run: npm run tauri build -- --bundles ${{ matrix.bundle }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: runner.os == 'Windows'
+        with:
+          name: porthop-windows-${{ matrix.arch }}-unsigned
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  remote:
+    needs: agents
+    # The real desktop backend requires macOS; hosted ARM Macs cannot run Linux VMs.
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    env:
+      PORTHOP_PREBUILT: "1"
+      PORTHOP_TEST_DOCKER_CONTEXT: colima
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: linux-agents
+          path: src-tauri/agents
+      - run: chmod +x src-tauri/agents/porthop-agent-*
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          key: remote
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: douglascamata/setup-docker-macos-action@d5ccc6aae0ce23e7700154f5e63cc53e6433ac48 # v1.1.0
+        with:
+          lima: v2.2.0
+          colima: v0.10.3
+          colima-additional-options: --cpu 3 --memory 6
+      - run: npm run test:remote
+      - name: Docker diagnostics
+        if: failure()
+        run: |
+          docker info
+          docker ps -a
+
+  passed:
+    name: All checks passed
+    if: always()
+    needs: [frontend, agent-tests, agents, desktop, remote]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every check
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          failed = [name for name, job in results.items() if job['result'] != 'success']
+          if failed: raise SystemExit('Checks did not pass: ' + ', '.join(failed))
+          PY

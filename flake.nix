@@ -18,14 +18,12 @@
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
-          rust = pkgs.rust-bin.stable."1.98.0".minimal.override {
-            extensions = [ "clippy" "rustfmt" ];
-          };
+          rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         in {
           default = pkgs.mkShell {
             packages = with pkgs; [
               rust nodejs_22 python3 pkg-config git openssh
-              bashInteractive zsh fish coreutils perl
+              bashInteractive zsh fish coreutils perl actionlint shellcheck
             ] ++ lib.optionals stdenv.hostPlatform.isLinux [ xclip wl-clipboard ];
             shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
               export PORTHOP_TEST_XCLIP="${pkgs.xclip}/bin/xclip"
