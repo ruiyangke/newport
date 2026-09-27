@@ -57,7 +57,11 @@ impl Connectivity {
         // Success proves liveness at completion. Failure cannot erase evidence
         // obtained while that failed attempt was still running.
         let cutoff = if result.is_ok() { finished } else { started };
-        if self.observed.is_some_and(|at| at > cutoff) {
+        // Clock readings can tie (notably on Windows). Prefer successful
+        // evidence when a failed attempt started in the same clock tick.
+        if self.observed.is_some_and(|at| at > cutoff)
+            || (result.is_err() && self.succeeded.is_some_and(|at| at >= started))
+        {
             return;
         }
         self.observed = Some(finished);
@@ -97,10 +101,33 @@ mod tests {
     #[test]
     fn late_failure_cannot_replace_success() {
         let mut state = Connectivity::default();
-        let old_probe = Instant::now();
-        state.observe(Instant::now(), Ok(()));
-        state.observe(old_probe, Err("timeout".into()));
-        assert_eq!(state.health(Instant::now()).status, "reachable");
+        let start = Instant::now();
+        let wall = SystemTime::now();
+        let success = start + Duration::from_secs(1);
+        let finish = start + Duration::from_secs(2);
+        state.observe_at(start, success, wall, Ok(()));
+        state.observe_at(start, finish, wall, Err("timeout".into()));
+        assert_eq!(state.health(finish).status, "reachable");
+    }
+    #[test]
+    fn success_wins_clock_ties_but_later_failures_are_reported() {
+        let start = Instant::now();
+        let wall = SystemTime::now();
+        let finish = start + Duration::from_secs(1);
+        for failure_first in [false, true] {
+            let mut state = Connectivity::default();
+            if failure_first {
+                state.observe_at(start, start, wall, Err("timeout".into()));
+            }
+            state.observe_at(start, start, wall, Ok(()));
+            state.observe_at(start, finish, wall, Err("timeout".into()));
+            assert_eq!(state.health(finish).status, "reachable");
+            assert!(state.health(finish).error.is_none());
+
+            state.observe_at(finish, finish, wall, Err("disconnected".into()));
+            assert_eq!(state.health(finish).status, "error");
+            assert_eq!(state.health(finish).error.as_deref(), Some("disconnected"));
+        }
     }
     #[test]
     fn success_is_ordered_by_completion_and_delayed_events_cannot_rewind_state() {
