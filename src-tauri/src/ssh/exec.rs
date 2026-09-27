@@ -111,10 +111,12 @@ impl Connection {
     }
 }
 
-// Preserve transport failure identity before turning errors into UI strings.
+// Preserve retryable setup failures before turning errors into UI strings.
 fn session_error(error: anyhow::Error) -> String {
     let transient = super::is_transient_connection_error(&error);
-    if transient {
+    if error.is::<super::auth::SelectedAgentUnavailable>() {
+        format!("SSH agent unavailable: {error:#}")
+    } else if transient {
         format!("SSH transport interrupted: {error:#}")
     } else {
         format!("{error:#}")
@@ -126,6 +128,14 @@ pub struct ExecSession(std::sync::Arc<Connection>);
 impl ExecSession {
     pub async fn connect(server: &Server) -> Result<Self, String> {
         Connection::connect(server)
+            .await
+            .map(|connection| Self(std::sync::Arc::new(connection)))
+            .map_err(session_error)
+    }
+    /// Long-lived sync waits for agent approval without a request deadline.
+    /// The caller must own cancellation and reconnect backoff.
+    pub async fn connect_integration(server: &Server) -> Result<Self, String> {
+        Connection::connect_with_policy(server, super::ConnectionPolicy::Integration)
             .await
             .map(|connection| Self(std::sync::Arc::new(connection)))
             .map_err(session_error)
@@ -178,6 +188,13 @@ mod tests {
         .starts_with("SSH transport interrupted:"));
         assert!(!session_error(anyhow::anyhow!("Host key changed"))
             .starts_with("SSH transport interrupted:"));
+    }
+
+    #[test]
+    fn selected_agent_error_survives_session_string_conversion() {
+        let error = anyhow::Error::new(super::super::auth::SelectedAgentUnavailable)
+            .context("Authentication failed");
+        assert!(session_error(error).starts_with("SSH agent unavailable:"));
     }
 
     #[test]
