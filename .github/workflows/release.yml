@@ -127,7 +127,7 @@ jobs:
         with:
           name: frontend
           path: dist
-      - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
+      - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
         if: matrix.arch == 'x86_64'
       - name: Locate LLVM for ARM64 dependencies
         if: matrix.arch == 'aarch64'
@@ -186,5 +186,5 @@ jobs:
           python3 scripts/test-update-manifests.py
           python3 scripts/merge-update-manifests.py release/latest.json release/windows-*.json --version "${RELEASE_TAG#v}" --output release/latest.json
           rm release/windows-*.json
-          test "$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}" | tail -1 | cut -f1)" = "$RELEASE_COMMIT"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$RELEASE_COMMIT"
           gh release create "$RELEASE_TAG" release/* --verify-tag --draft --title "Porthop $RELEASE_TAG" --generate-notes

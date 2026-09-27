@@ -1012,6 +1012,7 @@ test("agent key selection persists and can switch to a file", async ({
     path: "test-results/screenshots/agent-key-desktop.png",
   });
   await page.getByRole("button", { name: "Save server", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.getByRole("button", { name: "Edit server", exact: true }).click();
   await expect(
     page.getByRole("combobox", { name: "SSH key", exact: true }),
@@ -1021,11 +1022,20 @@ test("agent key selection persists and can switch to a file", async ({
   await page
     .getByRole("option", { name: "Enter a key-file path…", exact: true })
     .click();
+  // Radix restores focus to the trigger when the menu closes. Wait before
+  // typing into the newly mounted field so WebKit does not lose the keystrokes.
+  await expect(
+    page.getByRole("combobox", { name: "SSH key", exact: true }),
+  ).toBeFocused();
   await page.getByLabel(/^Identity file/).fill("~/.ssh/deploy_key");
+  await expect(page.getByLabel(/^Identity file/)).toHaveValue(
+    "~/.ssh/deploy_key",
+  );
   await page.screenshot({
     path: "test-results/screenshots/agent-key-compact.png",
   });
   await page.getByRole("button", { name: "Save server", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.getByRole("button", { name: "Edit server", exact: true }).click();
   await expect(
     page.getByRole("combobox", { name: "SSH key", exact: true }),
