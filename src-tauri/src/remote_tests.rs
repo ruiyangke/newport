@@ -10,6 +10,10 @@ use tokio::{
 };
 use uuid::Uuid;
 
+mod arboard;
+mod boundaries;
+mod recovery;
+
 fn server() -> Server {
     serde_json::from_value(serde_json::json!({
         "id": Uuid::new_v4(), "name": "Disposable Linux", "sshUser": "fixture",
@@ -285,4 +289,317 @@ async fn changed_host_key_is_rejected_and_restoration_recovers() {
             .unwrap(),
         "recovered"
     );
+}
+
+#[tokio::test]
+#[ignore = "Requires npm run test:remote"]
+async fn shell_setup_is_idempotent_and_respects_protected_files() {
+    let session = ExecSession::connect(&server()).await.unwrap();
+    crate::agent::install(&session).await.unwrap();
+    let output = session
+        .execute("python3 /srv/fixture/shell_setup.py", None)
+        .await
+        .unwrap();
+    for shell in ["bash", "zsh", "fish"] {
+        assert!(
+            output.contains(&format!("{shell}: repeated install")),
+            "{output}"
+        );
+    }
+    session.close().await;
+}
+
+async fn frame(stream: &mut (impl tokio::io::AsyncWrite + Unpin), kind: u8, data: &[u8]) {
+    stream.write_all(&[kind]).await.unwrap();
+    stream
+        .write_all(&(data.len() as u32).to_be_bytes())
+        .await
+        .unwrap();
+    stream.write_all(data).await.unwrap();
+}
+async fn receive(stream: &mut (impl tokio::io::AsyncRead + Unpin), kind: u8) -> Vec<u8> {
+    timeout(Duration::from_secs(15), async {
+        let mut header = [0; 5];
+        stream.read_exact(&mut header).await.unwrap();
+        assert_eq!(header[0], kind);
+        let size = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
+        assert!(size < 1024 * 1024);
+        let mut bytes = vec![0; size];
+        stream.read_exact(&mut bytes).await.unwrap();
+        bytes
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "Requires npm run test:remote"]
+async fn demand_clipboard_compression_freshness_and_failed_transfer_recovery() {
+    use std::io::Write;
+    let session = ExecSession::connect(&server()).await.unwrap();
+    crate::agent::install(&session).await.unwrap();
+    let mut stream = session
+        .stream(&format!(
+            "exec ~/.local/bin/porthop-agent serve {} --clipboard",
+            Uuid::new_v4()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(receive(&mut stream, b'R').await, b"porthop-agent/5");
+    // A new offer invalidates the old cache. A failed transfer of that revision
+    // must be retryable without another clipboard change.
+    for (revision, corrupt) in [(100i64, false), (101, true), (101, false)] {
+        frame(
+            &mut stream,
+            b'M',
+            format!("{revision}\ntext/plain").as_bytes(),
+        )
+        .await;
+        receive(&mut stream, b'A').await;
+        let content = format!("revision {revision}: 世界\n").repeat(8192);
+        let (read, ()) = tokio::join!(
+            session.execute("~/.local/bin/xclip -selection clipboard -o", None),
+            async {
+                let request = String::from_utf8(receive(&mut stream, b'C').await).unwrap();
+                let fields: Vec<_> = request.split('\n').collect();
+                assert_eq!(fields[1], revision.to_string());
+                assert_eq!(fields[2], "text/plain");
+                let id: u64 = fields[0].parse().unwrap();
+                let chunks: Vec<_> = content.as_bytes().chunks(64 * 1024).collect();
+                for (index, chunk) in chunks.iter().enumerate() {
+                    let mut encoder =
+                        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+                    encoder.write_all(chunk).unwrap();
+                    let bytes = if corrupt {
+                        b"invalid zlib".to_vec()
+                    } else {
+                        encoder.finish().unwrap()
+                    };
+                    let mut response = Vec::new();
+                    response.extend(id.to_be_bytes());
+                    response.extend(revision.to_be_bytes());
+                    response.extend([2, u8::from(corrupt || index + 1 == chunks.len())]);
+                    response.extend(bytes);
+                    frame(&mut stream, b'D', &response).await;
+                    if corrupt {
+                        break;
+                    }
+                }
+            }
+        );
+        if corrupt {
+            assert!(read.is_err());
+            // Failed reads are coalesced for one second to avoid request storms.
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+        } else {
+            assert_eq!(read.unwrap(), content);
+            // Cache hit finishes without servicing another demand request.
+            assert_eq!(
+                timeout(
+                    Duration::from_secs(5),
+                    session.execute("~/.local/bin/xclip -selection clipboard -o", None)
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+                content
+            );
+        }
+        frame(&mut stream, b'H', &[]).await;
+        receive(&mut stream, b'A').await;
+    }
+    frame(&mut stream, b'Q', &[]).await;
+    timeout(Duration::from_secs(10), stream.read_to_end(&mut Vec::new()))
+        .await
+        .unwrap()
+        .unwrap();
+    session.close().await;
+}
+
+#[tokio::test]
+#[ignore = "Requires npm run test:remote"]
+async fn files_transfer_roundtrip_and_existing_file_protection() {
+    use crate::files::{transfer, Operations};
+    use std::sync::Arc;
+    let server = server();
+    let sftp = Arc::new(Sftp::connect(&server).await.unwrap());
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join(format!("世界-{}.bin", Uuid::new_v4()));
+    let bytes: Vec<u8> = (0..524_288).map(|n| (n % 251) as u8).collect();
+    std::fs::write(&source, &bytes).unwrap();
+    let operations = Operations::default();
+    let remote = transfer::upload(
+        &operations,
+        sftp.clone(),
+        &source,
+        "/home/fixture",
+        |_, _| {},
+    )
+    .await
+    .unwrap();
+    assert!(transfer::upload(
+        &operations,
+        sftp.clone(),
+        &source,
+        "/home/fixture",
+        |_, _| {}
+    )
+    .await
+    .is_err());
+    let destination = temp.path().join("download.bin");
+    transfer::download(&sftp, &remote, &destination, |_, _| {})
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+    sftp.session.remove(remote).await.unwrap();
+    operations.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "Requires npm run test:remote"]
+async fn browser_callback_http_roundtrip_conflict_and_cleanup() {
+    let session = ExecSession::connect(&server()).await.unwrap();
+    let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    let url = url::Url::parse(&format!(
+        "https://login.example/authorize?redirect_uri=http://127.0.0.1:{port}/callback"
+    ))
+    .unwrap();
+    let mut callbacks = session.callbacks();
+    assert!(callbacks
+        .prepare(ssh::callback::endpoint(&url).unwrap().unwrap())
+        .await
+        .is_err());
+    drop(reservation);
+    // A real remote HTTP receiver stands in for the CLI's login callback.
+    let mut receiver = session
+        .stream(&format!(
+            r#"python3 -u -c '
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", {port}))
+s.listen()
+print("ready", flush=True)
+c, _ = s.accept()
+data = b""
+while b"\r\n\r\n" not in data:
+    chunk = c.recv(4096)
+    if not chunk: raise RuntimeError("early EOF")
+    data += chunk
+assert b"GET /callback?code=fixture&state=nonce HTTP/1.1" in data
+c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nlogged-in")
+c.close()
+s.close()
+'"#
+        ))
+        .await
+        .unwrap();
+    let mut ready = [0; 6];
+    timeout(Duration::from_secs(10), receiver.read_exact(&mut ready))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&ready, b"ready\n");
+    callbacks
+        .prepare(ssh::callback::endpoint(&url).unwrap().unwrap())
+        .await
+        .unwrap();
+    let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    socket
+        .write_all(b"GET /callback?code=fixture&state=nonce HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = String::new();
+    timeout(
+        Duration::from_secs(10),
+        socket.read_to_string(&mut response),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.ends_with("logged-in"), "{response}");
+    drop(socket);
+    drop(callbacks);
+    timeout(Duration::from_secs(3), async {
+        loop {
+            if TcpListener::bind(("127.0.0.1", port)).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        session
+            .execute("printf still-connected", None)
+            .await
+            .unwrap(),
+        "still-connected"
+    );
+    session.close().await;
+}
+
+#[tokio::test]
+#[ignore = "Requires npm run test:remote"]
+async fn native_x11_and_wayland_clients_fetch_png_on_demand() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use sha2::{Digest, Sha256};
+    let png = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB1sAAAAASUVORK5CYII=").unwrap();
+    let expected: String = Sha256::digest(&png)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let session = ExecSession::connect(&server()).await.unwrap();
+    crate::agent::install(&session).await.unwrap();
+    let mut stream = session
+        .stream(&format!(
+            "exec ~/.local/bin/porthop-agent serve {} --clipboard",
+            Uuid::new_v4()
+        ))
+        .await
+        .unwrap();
+    receive(&mut stream, b'R').await;
+    for (revision, client) in [
+        (
+            200i64,
+            "/usr/bin/xclip -selection clipboard -t image/png -o",
+        ),
+        (201, "/usr/bin/wl-paste --type image/png --no-newline"),
+    ] {
+        frame(
+            &mut stream,
+            b'M',
+            format!("{revision}\nimage/png").as_bytes(),
+        )
+        .await;
+        receive(&mut stream, b'A').await;
+        let command = format!("eval \"$(~/.local/bin/porthop-agent env)\"; {client} | sha256sum");
+        let (output, ()) = tokio::join!(session.execute(&command, None), async {
+            let request = String::from_utf8(receive(&mut stream, b'C').await).unwrap();
+            let fields: Vec<_> = request.split('\n').collect();
+            assert_eq!(fields[1], revision.to_string());
+            assert_eq!(fields[2], "image/png");
+            let id: u64 = fields[0].parse().unwrap();
+            let mut response = Vec::new();
+            response.extend(id.to_be_bytes());
+            response.extend(revision.to_be_bytes());
+            response.extend([0, 1]);
+            response.extend(&png);
+            frame(&mut stream, b'D', &response).await;
+        });
+        assert_eq!(
+            output.unwrap().split_whitespace().next().unwrap(),
+            expected,
+            "{client}"
+        );
+    }
+    frame(&mut stream, b'Q', &[]).await;
+    timeout(Duration::from_secs(10), stream.read_to_end(&mut Vec::new()))
+        .await
+        .unwrap()
+        .unwrap();
+    session.close().await;
 }
