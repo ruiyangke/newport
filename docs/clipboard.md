@@ -26,11 +26,20 @@ You can bypass a preserved command with `~/.local/bin/porthop-agent clipboard -o
 
 Applications such as Codex read display protocols directly. While sharing is active, the agent serves both X11 and Wayland without a graphical desktop.
 
-Add this to your headless shell's startup file:
+Installing or reinstalling the agent configures the account's default Bash, Zsh, or Fish shell automatically. Setup adds one guarded Porthop block to `.bashrc` and the active Bash login profile, `${ZDOTDIR:-$HOME}/.zshrc`, or `${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/porthop.fish`. Reinstalling updates that block without duplicating it. Existing files are backed up before edits; read-only files, symlinks, and malformed Porthop blocks are left unchanged.
+
+Open a new shell after enabling integration. To activate an existing Bash/Zsh shell:
 
 ```sh
-eval "$("$HOME/.local/bin/porthop-agent" env)"
+if [ -x "$HOME/.local/bin/porthop-agent" ]; then
+  if _porthop_env=$("$HOME/.local/bin/porthop-agent" env 2>/dev/null); then
+    eval "$_porthop_env"
+  fi
+  unset _porthop_env
+fi
 ```
+
+A missing or failing agent is silently skipped. Fish uses `porthop-agent env --shell fish` in its managed startup block. Unsupported shells require manual configuration.
 
 This sets PATH and the environment for currently enabled integrations: the browser command for Browser, and a fixed Wayland socket plus the active X11 display and authority file for Clipboard. Run it once in the current shell too, then start a new Codex process or tmux pane. An existing process keeps its previous environment.
 

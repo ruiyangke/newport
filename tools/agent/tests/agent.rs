@@ -34,7 +34,11 @@ impl Agent {
             .env("PORTHOP_CLIPBOARD_NATIVE", if native { "1" } else { "0" })
             .env(
                 "PATH",
-                format!("{}:/usr/bin:/bin", home.join("bin").display()),
+                format!(
+                    "{}:{}",
+                    home.join("bin").display(),
+                    std::env::var("PATH").unwrap()
+                ),
             )
             .env("WAYLAND_DISPLAY", "wayland-test")
             .env_remove("DISPLAY")
@@ -322,6 +326,9 @@ fn upload_installer_verifies_hash_and_preserves_unrelated_binary() {
                 hash,
             ])
             .env("HOME", home.path())
+            .env("SHELL", "/bin/bash")
+            .env_remove("ZDOTDIR")
+            .env_remove("XDG_CONFIG_HOME")
             .env(
                 "PATH",
                 format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),

@@ -22,3 +22,5 @@ pub mod x_server;
 mod clipboard_source;
 mod clipboard_wire;
 mod demand;
+
+mod shell_setup;
