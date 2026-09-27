@@ -1,0 +1,2 @@
+# Signed fixtures must remain byte-for-byte identical on every platform.
+/src-tauri/tests/fixtures/updater/* -text

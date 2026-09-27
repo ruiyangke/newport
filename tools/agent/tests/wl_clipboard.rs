@@ -247,6 +247,11 @@ fn stalled_transfer_does_not_block_other_clients_or_shutdown() {
     let server = Server::start(&path).unwrap();
     let (_conn, mut queue, mut probe, _device) = connect(&server);
     let (mut reader, writer) = UnixStream::pair().unwrap();
+    // Darwin rejects socket options after shutdown, so configure the bound
+    // before handing the writer to the server.
+    reader
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
     probe
         .selected
         .as_ref()
@@ -264,9 +269,6 @@ fn stalled_transfer_does_not_block_other_clients_or_shutdown() {
     let started = Instant::now();
     drop(server);
     assert!(started.elapsed() < Duration::from_secs(1));
-    reader
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
     let mut remaining = Vec::new();
     reader.read_to_end(&mut remaining).unwrap();
 }
