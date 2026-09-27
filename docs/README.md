@@ -7,3 +7,7 @@
 - [Remote files](files.md): browsing, previews and transfers.
 - [Storage and recovery](storage.md): saved data, backups and connection preferences.
 - [Security notes](security.md): trust boundaries and known dependency advisories.
+
+## Testing
+
+- [Feature coverage](testing.md): test matrix, container suite and remaining gaps.

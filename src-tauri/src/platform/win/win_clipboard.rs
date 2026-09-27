@@ -220,24 +220,6 @@ fn html_fragment(bytes: &[u8]) -> Option<&[u8]> {
     bytes.get(offset("StartFragment:")?..offset("EndFragment:")?)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn html_offsets_are_bounded_byte_positions() {
-        let prefix = "Version:1.0\r\nStartFragment:0000000065\r\nEndFragment:0000000067\r\n";
-        let start = prefix.len() + 4;
-        let input = format!(
-            "Version:1.0\r\nStartFragment:{start:010}\r\nEndFragment:{:010}\r\n<!--é-->",
-            start + 2
-        );
-        assert_eq!(html_fragment(input.as_bytes()), Some("é".as_bytes()));
-        assert!(html_fragment(b"StartFragment:999\nEndFragment:1000\n<x>").is_none());
-        assert!(html_fragment(b"StartFragment:40\nEndFragment:1\n<x>").is_none());
-        assert!(html_fragment(b"StartFragment:-1\nEndFragment:1\n<x>").is_none());
-    }
-}
-
 pub fn offer(previous: Option<isize>) -> Option<(isize, Vec<String>)> {
     let count = revision()?;
     if previous == Some(count) {
@@ -275,4 +257,22 @@ pub fn read_format(expected: isize, format: &str) -> Option<Vec<u8>> {
         return None;
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn html_offsets_are_bounded_byte_positions() {
+        let prefix = "Version:1.0\r\nStartFragment:0000000065\r\nEndFragment:0000000067\r\n";
+        let start = prefix.len() + 4;
+        let input = format!(
+            "Version:1.0\r\nStartFragment:{start:010}\r\nEndFragment:{:010}\r\n<!--é-->",
+            start + 2
+        );
+        assert_eq!(html_fragment(input.as_bytes()), Some("é".as_bytes()));
+        assert!(html_fragment(b"StartFragment:999\nEndFragment:1000\n<x>").is_none());
+        assert!(html_fragment(b"StartFragment:40\nEndFragment:1\n<x>").is_none());
+        assert!(html_fragment(b"StartFragment:-1\nEndFragment:1\n<x>").is_none());
+    }
 }

@@ -10,17 +10,18 @@
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
     "test": "vitest run src --exclude '**/src-tauri/**'",
-    "check": "npm run check:frontend && npm run check:rust && python3 scripts/test-cockpit.py && cargo test --manifest-path tools/agent/Cargo.toml --locked && python3 scripts/test-update-manifests.py",
+    "check": "npm run check:frontend && npm run check:rust && python3 scripts/test-cockpit.py && npm run check:agent && python3 scripts/test-update-manifests.py",
     "test:ui": "playwright test",
     "format": "prettier --write src tests *.ts *.json && cargo fmt --manifest-path src-tauri/Cargo.toml",
     "ui": "shadcn",
-    "check:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml",
+    "check:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml --locked",
     "lint": "eslint src --max-warnings=0",
     "check:frontend": "npm run lint && npm run build && npm test && npm run test:ui",
     "test:files": "npm run build && playwright test --config playwright.files.config.ts",
     "test:production": "npm run build && playwright test --config playwright.production.config.ts",
     "build:agent": "node scripts/build-agent.mjs",
-    "test:remote": "python3 scripts/test-remote.py"
+    "test:remote": "python3 scripts/test-remote.py",
+    "check:agent": "cargo fmt --manifest-path tools/agent/Cargo.toml --check && cargo clippy --manifest-path tools/agent/Cargo.toml --locked --all-targets -- -D warnings && cargo test --manifest-path tools/agent/Cargo.toml --locked"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",
