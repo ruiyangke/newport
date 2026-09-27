@@ -3,12 +3,12 @@ import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../", import.meta.url));
-if (process.env.PORTHOP_PREBUILT === "1") {
+if (process.env.NEWPORT_PREBUILT === "1") {
   verifyArtifact("src-tauri/agents");
 } else if (process.platform === "win32") {
   // Linux binaries are built in the Linux CI job, never replaced with stubs.
   for (const arch of ["x86_64", "aarch64"]) {
-    if (!existsSync(`${root}/src-tauri/agents/porthop-agent-${arch}`)) {
+    if (!existsSync(`${root}/src-tauri/agents/newport-agent-${arch}`)) {
       throw new Error(
         "Linux agent binaries are missing. Copy the linux-agents CI artifact into src-tauri/agents before building on Windows.",
       );

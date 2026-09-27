@@ -10,9 +10,9 @@ fi
 zigdir="$("$envdir/bin/python" -c 'import pathlib, ziglang; print(pathlib.Path(ziglang.__file__).parent)')"
 export PATH="$zigdir:$envdir/bin:$PATH"
 rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
-cargo zigbuild --manifest-path tools/agent/Cargo.toml --release --locked --bin porthop-agent \
+cargo zigbuild --manifest-path tools/agent/Cargo.toml --release --locked --bin newport-agent \
     --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl
 mkdir -p src-tauri/agents
 for arch in x86_64 aarch64; do
-    cp "tools/agent/target/$arch-unknown-linux-musl/release/porthop-agent" "src-tauri/agents/porthop-agent-$arch"
+    cp "tools/agent/target/$arch-unknown-linux-musl/release/newport-agent" "src-tauri/agents/newport-agent-$arch"
 done

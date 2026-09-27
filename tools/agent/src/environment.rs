@@ -17,7 +17,7 @@ pub fn print(args: &[String]) -> io::Result<()> {
         ["--shell", "fish"] => true,
         _ => {
             return Err(io::Error::other(
-                "Usage: porthop-agent env [--shell bash|zsh|sh|fish]",
+                "Usage: newport-agent env [--shell bash|zsh|sh|fish]",
             ))
         }
     };
@@ -63,14 +63,14 @@ fn render(home: &str, root: &Path, features: &str, display: Option<&str>, fish: 
     if features.split_whitespace().any(|f| f == "browser") {
         output.push_str(&export(
             "BROWSER",
-            &format!("{home}/.local/bin/porthop-browser"),
+            &format!("{home}/.local/bin/newport-browser"),
         ));
     }
     if features.split_whitespace().any(|f| f == "clipboard") {
         let socket = root.join("wayland.sock").to_string_lossy().into_owned();
         let authority = root.join("Xauthority").to_string_lossy().into_owned();
         // Do not redirect applications in an existing graphical desktop session.
-        // Existing Porthop shells may refresh their display after reconnection.
+        // Existing Newport shells may refresh their display after reconnection.
         output.push_str(&if fish {
             format!("if begin; not set -q DISPLAY[1]; and not set -q WAYLAND_DISPLAY[1]; end; or test \"$XAUTHORITY\" = {}; or test \"$WAYLAND_DISPLAY\" = {}\n", quote(&authority), quote(&socket))
         } else {
@@ -124,7 +124,7 @@ mod tests {
         let output = String::from_utf8(result.stdout).unwrap();
         assert_eq!(
             output,
-            format!("{home}/.local/bin:/usr/bin\n{home}/.local/bin/porthop-browser\n:99\n")
+            format!("{home}/.local/bin:/usr/bin\n{home}/.local/bin/newport-browser\n:99\n")
         );
     }
 }

@@ -1,9 +1,8 @@
-use crate::model::{Config, Server, Tunnel};
-use serde_json::Value;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use crate::migration::{data_directory_override, profile_directory};
+use crate::model::Config;
+#[cfg(test)]
+use crate::model::Server;
+use std::{fs, path::PathBuf};
 use uuid::Uuid;
 
 pub struct Store {
@@ -12,12 +11,12 @@ pub struct Store {
 }
 impl Store {
     pub fn open() -> Result<Self, String> {
-        let directory = if let Some(path) = std::env::var_os("PORTHOP_DATA_DIR") {
-            PathBuf::from(path)
-        } else {
-            crate::platform::filesystem::application_data_directory()
-                .ok_or("Cannot locate application data directory")?
-                .join("Porthop")
+        let directory = match data_directory_override() {
+            Some(path) => path,
+            None => profile_directory(
+                &crate::platform::filesystem::application_data_directory()
+                    .ok_or("Cannot locate application data directory")?,
+            )?,
         };
         fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
         crate::platform::filesystem::protect_directory(&directory).map_err(|e| e.to_string())?;
@@ -40,66 +39,13 @@ impl Store {
             .map_err(Clone::clone)
     }
     pub fn load(&self) -> Result<Config, String> {
-        let target = self.directory.join("config.json");
         let vault = self.directory.join("profiles.stronghold");
         if vault.exists() {
             let config = crate::vault::read(&vault, self.vault_key()?)?;
-            self.remove_plaintext()?;
+            crate::migration::remove_plaintext(&self.directory)?;
             return Ok(config);
         }
-        if target.exists() {
-            let config = read_config(&target)?;
-            self.save(&config)?;
-            self.remove_plaintext()?;
-            return Ok(config);
-        }
-        let legacy = if self.directory.join("tunnels.json").exists()
-            || self.directory.join("servers.json").exists()
-        {
-            self.directory.clone()
-        } else if std::env::var_os("PORTHOP_DATA_DIR").is_none() {
-            self.directory.with_file_name("SSHTunnelBar")
-        } else {
-            self.directory.clone()
-        };
-        let mut config = Config::default();
-        if legacy.join("servers.json").exists() {
-            config.servers = serde_json::from_slice(&read(&legacy.join("servers.json"))?)
-                .map_err(|e| format!("Cannot import servers.json: {e}"))?;
-            if legacy.join("tunnels.json").exists() {
-                config.tunnels = serde_json::from_slice(&read(&legacy.join("tunnels.json"))?)
-                    .map_err(|e| format!("Cannot import tunnels.json: {e}"))?;
-            }
-        } else if legacy.join("tunnels.json").exists() {
-            let values: Vec<Value> = serde_json::from_slice(&read(&legacy.join("tunnels.json"))?)
-                .map_err(|e| e.to_string())?;
-            for mut value in values {
-                let mut server: Server = serde_json::from_value(value.clone())
-                    .map_err(|e| format!("Cannot import legacy tunnel: {e}"))?;
-                let id = if let Some(found) = config.servers.iter().find(|s| {
-                    s.ssh_host == server.ssh_host
-                        && s.ssh_user == server.ssh_user
-                        && s.ssh_port == server.ssh_port
-                        && s.identity_file == server.identity_file
-                }) {
-                    found.id
-                } else {
-                    server.id = Uuid::new_v4();
-                    server.name = server.ssh_host.clone();
-                    let id = server.id;
-                    config.servers.push(server);
-                    id
-                };
-                value["serverId"] = serde_json::json!(id);
-                config
-                    .tunnels
-                    .push(serde_json::from_value::<Tunnel>(value).map_err(|e| e.to_string())?);
-            }
-        }
-        config.validate()?;
-        self.save(&config)?;
-        self.remove_plaintext()?;
-        Ok(config)
+        crate::migration::import_profiles(self)
     }
     pub fn save(&self, config: &Config) -> Result<(), String> {
         crate::vault::write(
@@ -127,33 +73,77 @@ impl Store {
             id,
         )
     }
-    fn remove_plaintext(&self) -> Result<(), String> {
-        for name in ["config.json", "servers.json", "tunnels.json"] {
-            match fs::remove_file(self.directory.join(name)) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    return Err(format!(
-                        "Profiles encrypted, but cannot remove old {name}: {e}"
-                    ))
-                }
-            }
-        }
-        Ok(())
-    }
 }
-fn read(path: &Path) -> Result<Vec<u8>, String> {
-    fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))
-}
-fn read_config(path: &Path) -> Result<Config, String> {
-    let c: Config = serde_json::from_slice(&read(path)?)
-        .map_err(|e| format!("Cannot read saved profiles; original file was preserved: {e}"))?;
-    c.validate()?;
-    Ok(c)
-}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn new_install_uses_newport_and_existing_profiles_keep_their_path() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            profile_directory(root.path()).unwrap(),
+            root.path().join("Newport")
+        );
+        let legacy = root.path().join("Porthop");
+        fs::create_dir(&legacy).unwrap();
+        // An empty/new Newport directory must not hide a user's existing profile.
+        fs::create_dir(root.path().join("Newport")).unwrap();
+        assert_eq!(profile_directory(root.path()).unwrap(), legacy);
+    }
+
+    #[test]
+    fn rebrand_preserves_encrypted_profiles_passwords_and_supporting_data() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("Porthop");
+        fs::create_dir(&legacy).unwrap();
+        let old = Store::for_test(legacy.clone());
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": Uuid::new_v4(), "name": "My server", "sshHost": "host", "sshUser": "dev", "sshPort": 22
+        }))
+        .unwrap();
+        let id = server.id;
+        let config = Config {
+            servers: vec![server],
+            ..Default::default()
+        };
+        old.save_with_password(&config, Some((id, "test-password")))
+            .unwrap();
+        for name in [
+            "metrics.sqlite3",
+            "vault-key.storage",
+            "clipboard-client-test",
+        ] {
+            fs::write(legacy.join(name), name.as_bytes()).unwrap();
+        }
+        let original_vault = fs::read(legacy.join("profiles.stronghold")).unwrap();
+        for _ in 0..2 {
+            let new = Store::for_test(profile_directory(root.path()).unwrap());
+            assert_eq!(new.load().unwrap().servers[0].id, id);
+            assert_eq!(new.password(id).unwrap().as_str(), "test-password");
+            assert_eq!(
+                fs::read(new.directory.join("profiles.stronghold")).unwrap(),
+                original_vault
+            );
+            for name in [
+                "metrics.sqlite3",
+                "vault-key.storage",
+                "clipboard-client-test",
+            ] {
+                assert_eq!(fs::read(new.directory.join(name)).unwrap(), name.as_bytes());
+            }
+        }
+        assert!(!root.path().join("Newport").exists());
+    }
+
+    #[test]
+    fn invalid_legacy_profile_does_not_silently_create_a_new_profile() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("Porthop"), "invalid").unwrap();
+        assert!(profile_directory(root.path()).is_err());
+        assert!(!root.path().join("Newport").exists());
+    }
+
     #[test]
     fn corrupt_config_is_not_overwritten() {
         let dir = tempfile::tempdir().unwrap();

@@ -1,6 +1,6 @@
 //! Exercise the installed startup blocks using real shells when available.
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
-const BIN: &str = env!("CARGO_BIN_EXE_porthop-agent");
+const BIN: &str = env!("CARGO_BIN_EXE_newport-agent");
 
 #[test]
 fn installed_blocks_are_repeatable_and_survive_agent_removal() {
@@ -11,7 +11,7 @@ fn installed_blocks_are_repeatable_and_survive_agent_removal() {
         let home = tempfile::tempdir().unwrap();
         let bin = home.path().join(".local/bin");
         fs::create_dir_all(&bin).unwrap();
-        let agent = bin.join("porthop-agent");
+        let agent = bin.join("newport-agent");
         fs::copy(BIN, &agent).unwrap();
         fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
         if shell == "bash" {
@@ -36,13 +36,13 @@ fn installed_blocks_are_repeatable_and_survive_agent_removal() {
         let rc = home.path().join(match shell {
             "bash" => ".bashrc",
             "zsh" => ".zshrc",
-            _ => ".config/fish/conf.d/porthop.fish",
+            _ => ".config/fish/conf.d/newport.fish",
         });
         let original = fs::read(&rc).unwrap();
         if shell == "bash" {
             assert!(fs::read_to_string(home.path().join(".bash_profile"))
                 .unwrap()
-                .contains("# >>> Porthop >>>"));
+                .contains("# >>> Newport >>>"));
             assert_eq!(
                 fs::read_to_string(home.path().join(".profile")).unwrap(),
                 "# inactive profile\n"
@@ -50,7 +50,7 @@ fn installed_blocks_are_repeatable_and_survive_agent_removal() {
         }
         assert!(install().status.success());
         assert_eq!(fs::read(&rc).unwrap(), original);
-        let state = home.path().join(".cache/porthop/clipboard");
+        let state = home.path().join(".cache/newport/clipboard");
         fs::create_dir_all(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(state.join("features"), "clipboard browser").unwrap();

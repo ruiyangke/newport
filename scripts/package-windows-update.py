@@ -22,7 +22,7 @@ def main():
     version = config["version"]
     # NSIS's installer stub may be x86 even when the installed app is ARM64.
     # Inspect the actual application instead of guessing from the stub.
-    binary = root / "src-tauri/target/release/porthop.exe"
+    binary = root / "src-tauri/target/release/newport.exe"
     data = binary.read_bytes()
     offset = struct.unpack_from("<I", data, 0x3C)[0]
     expected = {"x86_64": 0x8664, "aarch64": 0xAA64}[args.arch]
@@ -31,7 +31,7 @@ def main():
     if not os.environ.get("TAURI_SIGNING_PRIVATE_KEY"):
         parser.error("TAURI_SIGNING_PRIVATE_KEY is required")
     args.output.mkdir(parents=True, exist_ok=True)
-    installer = args.output / f"Porthop-{version}-windows-{args.arch}-setup.exe"
+    installer = args.output / f"Newport-{version}-windows-{args.arch}-setup.exe"
     shutil.copy2(args.installer, installer)
     key = os.environ["TAURI_SIGNING_PRIVATE_KEY"]
     if "\n" not in key and len(key) < 1024 and Path(key).is_file():
@@ -42,11 +42,11 @@ def main():
                     "signer", "sign", "--app-version", version, str(installer)], check=True)
     manifest = {
         "version": version,
-        "notes": f"Porthop {version}",
+        "notes": f"Newport {version}",
         "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "platforms": {f"windows-{args.arch}": {
             "signature": Path(str(installer) + ".sig").read_text().strip(),
-            "url": f"https://github.com/ruiyangke/porthop/releases/download/v{version}/{installer.name}",
+            "url": f"https://github.com/ruiyangke/newport/releases/download/v{version}/{installer.name}",
         }},
     }
     (args.output / f"windows-{args.arch}.json").write_text(json.dumps(manifest, indent=2) + "\n")

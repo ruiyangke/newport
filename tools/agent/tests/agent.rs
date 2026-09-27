@@ -1,4 +1,4 @@
-use porthop_agent::wire;
+use newport_agent::wire;
 use std::{
     fs,
     io::Write,
@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 static WAYLAND_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-const BIN: &str = env!("CARGO_BIN_EXE_porthop-agent");
+const BIN: &str = env!("CARGO_BIN_EXE_newport-agent");
 struct Agent {
     child: Child,
     input: Option<ChildStdin>,
@@ -31,7 +31,7 @@ impl Agent {
             .args(["serve", "test-client"])
             .args(features)
             .env("HOME", home)
-            .env("PORTHOP_CLIPBOARD_NATIVE", if native { "1" } else { "0" })
+            .env("NEWPORT_CLIPBOARD_NATIVE", if native { "1" } else { "0" })
             .env(
                 "PATH",
                 format!(
@@ -116,7 +116,7 @@ fn single_agent_clipboard_browser_displays_and_disconnect_cleanup() {
     let output = cmd(home.path(), &["clipboard", "-selection", "clipboard", "-o"]);
     assert!(output.status.success());
     assert_eq!(output.stdout, b"hello from Mac");
-    let root = home.path().join(".cache/porthop/clipboard");
+    let root = home.path().join(".cache/newport/clipboard");
     assert!(root.join("Xauthority").is_file());
     assert!(root.join("display").is_file());
     std::env::set_var("WAYLAND_DISPLAY", root.join("wayland.sock"));
@@ -207,7 +207,7 @@ fn invalid_and_oversized_frames_stop_without_publishing() {
         agent.stopped();
         assert!(!home
             .path()
-            .join(".cache/porthop/clipboard/snapshot.tar")
+            .join(".cache/newport/clipboard/snapshot.tar")
             .exists());
     }
 }
@@ -223,17 +223,58 @@ fn installer_replaces_our_shims_but_preserves_unrelated_commands() {
     )
     .unwrap();
     symlink("porthop-clip", bin.join("xclip")).unwrap();
+    symlink("porthop-agent", bin.join("porthop-browser")).unwrap();
     fs::write(bin.join("xdg-open"), "unrelated").unwrap();
     assert!(cmd(home.path(), &["install"]).status.success());
     assert_eq!(
         fs::read_link(bin.join("xclip")).unwrap().to_str(),
-        Some("porthop-agent")
+        Some("newport-agent")
     );
     assert_eq!(
         fs::read_to_string(bin.join("xdg-open")).unwrap(),
         "unrelated"
     );
     assert!(!bin.join("porthop-clip").exists());
+    assert_eq!(
+        fs::read_link(bin.join("porthop-browser")).unwrap().to_str(),
+        Some("newport-agent")
+    );
+}
+
+#[test]
+fn legacy_agent_alias_is_idempotent_and_preserves_unrelated_files() {
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let old = bin.join("porthop-agent");
+    fs::write(&old, b"legacy executable\0porthop-agent/5\0").unwrap();
+    for _ in 0..2 {
+        assert!(cmd(home.path(), &["install"]).status.success());
+        assert_eq!(
+            fs::read_link(&old).unwrap(),
+            std::path::Path::new("newport-agent")
+        );
+    }
+    fs::remove_file(&old).unwrap();
+    fs::write(&old, "unrelated executable").unwrap();
+    assert!(cmd(home.path(), &["install"]).status.success());
+    assert_eq!(fs::read_to_string(&old).unwrap(), "unrelated executable");
+}
+
+#[test]
+fn rebrand_preserves_socket_paths_for_existing_shells() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let old = home.path().join(".cache/porthop/clipboard");
+    fs::create_dir_all(&old).unwrap();
+    fs::set_permissions(&old, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut agent = Agent::features(home.path(), false, &["--browser"]);
+    assert_eq!(agent.event(b'R'), b"newport-agent/5");
+    assert!(old.join("agent.sock").exists());
+    assert!(!home.path().join(".cache/newport").exists());
+    agent.send(b'Q', &[]);
+    agent.stopped();
+    assert!(!old.join("agent.sock").exists());
 }
 #[test]
 fn web_requests_reject_unsafe_schemes_and_frames_preserve_binary_data() {
@@ -347,33 +388,33 @@ fn upload_installer_verifies_hash_and_preserves_unrelated_binary() {
         process.wait().unwrap().success()
     };
     assert!(!install(&"0".repeat(64)));
-    assert!(!home.path().join(".local/bin/porthop-agent").exists());
+    assert!(!home.path().join(".local/bin/newport-agent").exists());
     assert!(install(&hash));
     assert_eq!(
-        fs::read(home.path().join(".local/bin/porthop-agent")).unwrap(),
+        fs::read(home.path().join(".local/bin/newport-agent")).unwrap(),
         fs::read(BIN).unwrap()
     );
     // Reinstall replaces an identical binary and repairs missing aliases.
     use std::os::unix::fs::MetadataExt;
-    let agent_path = home.path().join(".local/bin/porthop-agent");
+    let agent_path = home.path().join(".local/bin/newport-agent");
     let before = fs::metadata(&agent_path).unwrap().ino();
-    fs::remove_file(home.path().join(".local/bin/porthop-browser")).unwrap();
+    fs::remove_file(home.path().join(".local/bin/newport-browser")).unwrap();
     assert!(install(&hash));
     assert_ne!(fs::metadata(&agent_path).unwrap().ino(), before);
     assert_eq!(
-        fs::read_link(home.path().join(".local/bin/porthop-browser")).unwrap(),
-        std::path::Path::new("porthop-agent")
+        fs::read_link(home.path().join(".local/bin/newport-browser")).unwrap(),
+        std::path::Path::new("newport-agent")
     );
     assert!(!install(&"0".repeat(64)));
     assert_eq!(fs::read(&agent_path).unwrap(), fs::read(BIN).unwrap());
     fs::write(
-        home.path().join(".local/bin/porthop-agent"),
+        home.path().join(".local/bin/newport-agent"),
         b"unrelated command",
     )
     .unwrap();
     assert!(!install(&hash));
     assert_eq!(
-        fs::read(home.path().join(".local/bin/porthop-agent")).unwrap(),
+        fs::read(home.path().join(".local/bin/newport-agent")).unwrap(),
         b"unrelated command"
     );
 }
@@ -382,7 +423,7 @@ fn upload_installer_verifies_hash_and_preserves_unrelated_binary() {
 fn unrelated_socket_file_is_preserved_and_not_treated_as_reconnect() {
     use std::os::unix::fs::PermissionsExt;
     let home = tempfile::tempdir().unwrap();
-    let root = home.path().join(".cache/porthop/clipboard");
+    let root = home.path().join(".cache/newport/clipboard");
     fs::create_dir_all(&root).unwrap();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(root.join("agent-client"), "test-client").unwrap();
@@ -402,7 +443,7 @@ fn browser_only_does_not_create_clipboard_services_or_accept_snapshots() {
     let home = tempfile::tempdir().unwrap();
     let mut agent = Agent::features(home.path(), false, &["--browser"]);
     agent.event(b'R');
-    let root = home.path().join(".cache/porthop/clipboard");
+    let root = home.path().join(".cache/newport/clipboard");
     for name in ["snapshot.tar", "wayland.sock", "display", "Xauthority"] {
         assert!(!root.join(name).exists(), "{name}");
     }
@@ -427,7 +468,7 @@ fn browser_only_does_not_create_clipboard_services_or_accept_snapshots() {
         .output()
         .unwrap();
     let env = String::from_utf8(env.stdout).unwrap();
-    assert!(env.contains("porthop-browser"));
+    assert!(env.contains("newport-browser"));
     assert!(!env.contains("DISPLAY"));
     agent.send(b'S', &archive());
     agent.event(b'E');
@@ -485,7 +526,7 @@ fn browser_warning_is_nonfatal_and_original_url_is_preserved() {
 #[test]
 fn demand_clipboard_fetch_cache_invalidation_and_browser_interleave() {
     let home = tempfile::tempdir().unwrap();
-    let root = home.path().join(".cache/porthop/clipboard");
+    let root = home.path().join(".cache/newport/clipboard");
     let mut agent = Agent::start(home.path());
     agent.event(b'R');
     agent.send(b'M', b"123\nimage/png\ntext/plain");
@@ -554,7 +595,7 @@ fn wayland_paste_fetches_image_on_demand() {
     agent.event(b'R');
     agent.send(b'M', b"45\nimage/png");
     agent.event(b'A');
-    let root = home.path().join(".cache/porthop/clipboard");
+    let root = home.path().join(".cache/newport/clipboard");
     std::env::set_var("WAYLAND_DISPLAY", root.join("wayland.sock"));
     std::env::remove_var("WAYLAND_SOCKET");
     let read = std::thread::spawn(|| {
@@ -675,7 +716,7 @@ mod demand_x11 {
         agent.event(b'R');
         agent.send(b'M', b"87\nimage/png");
         agent.event(b'A');
-        let root = home.path().join(".cache/porthop/clipboard");
+        let root = home.path().join(".cache/newport/clipboard");
         let display = fs::read_to_string(root.join("display")).unwrap();
         let auth = fs::read(root.join("Xauthority")).unwrap();
         let reader = std::thread::spawn(move || {

@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
             .args(["-q", "-t", "ed25519", "-N", "", "-f"])
             .arg(&key),
     )?;
-    let container = GenericImage::new("porthop-test-remote", "local")
+    let container = GenericImage::new("newport-test-remote", "local")
         .with_exposed_port(22.tcp())
         .with_wait_for(WaitFor::healthcheck())
         .with_copy_to("/fixture-key/client.pub", key.with_extension("pub"))
@@ -104,9 +104,9 @@ async fn main() -> Result<()> {
             ])
             .current_dir(root)
             .env("SSH_AUTH_SOCK", &socket)
-            .env("PORTHOP_TEST_SSH_PORT", port.to_string())
-            .env("PORTHOP_TEST_IDENTITY", &key)
-            .env("PORTHOP_TEST_KNOWN_HOSTS", &known_hosts)
+            .env("NEWPORT_TEST_SSH_PORT", port.to_string())
+            .env("NEWPORT_TEST_IDENTITY", &key)
+            .env("NEWPORT_TEST_KNOWN_HOSTS", &known_hosts)
             .spawn()?,
     );
     let deadline = Instant::now() + Duration::from_secs(600);

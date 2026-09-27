@@ -2,7 +2,7 @@ pub fn configure(_: &mut tauri::App) {}
 pub fn handle_event(_: &tauri::AppHandle, _: &tauri::RunEvent) {}
 pub fn autostart() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri_plugin_autostart::Builder::new()
-        .app_name("Porthop")
+        .app_name("Newport")
         .arg("--autostart")
         .build()
 }

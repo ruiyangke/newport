@@ -10,6 +10,7 @@ profile.write_bytes(base64.b64decode(os.environ['APPLE_PROVISIONING_PROFILE']))
 ent = root / 'release.entitlements'
 ent.write_text(os.environ['APPLE_ENTITLEMENTS'])
 assert not plistlib.loads(ent.read_bytes()).get('com.apple.security.get-task-allow')
+subprocess.run(['python3', 'scripts/check-signing.py', str(ent), str(profile)], check=True)
 kc = str(root / 'release.keychain-db')
 pw = secrets.token_urlsafe(32)
 def run(*args):
@@ -22,4 +23,4 @@ run('security', 'import', str(cert), '-k', kc, '-P', os.environ['APPLE_CERTIFICA
 run('security', 'set-key-partition-list', '-S', 'apple-tool:,apple:,codesign:', '-s', '-k', pw, kc)
 run('security', 'list-keychains', '-d', 'user', '-s', kc)
 with open(os.environ['GITHUB_ENV'], 'a') as out:
-    out.write(f'PORTHOP_PROVISIONING_PROFILE={profile}\nPORTHOP_SIGNING_ENTITLEMENTS={ent}\n')
+    out.write(f'NEWPORT_PROVISIONING_PROFILE={profile}\nNEWPORT_SIGNING_ENTITLEMENTS={ent}\n')

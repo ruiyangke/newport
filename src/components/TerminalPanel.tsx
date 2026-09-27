@@ -78,7 +78,7 @@ export default function TerminalPanel({ server }: { server: Server }) {
   useEffect(() => {
     mounted.current = true;
     const term = new Terminal({
-      fontFamily: 'Menlo, Monaco, "Porthop Symbols", ui-monospace, monospace',
+      fontFamily: 'Menlo, Monaco, "Newport Symbols", ui-monospace, monospace',
       fontSize: 12,
       cursorBlink: false,
       scrollback: 5000,
@@ -174,7 +174,7 @@ export default function TerminalPanel({ server }: { server: Server }) {
     session.current = current;
     try {
       // Load prompt icons before xterm measures and renders the remote shell.
-      await document.fonts.load('12px "Porthop Symbols"');
+      await document.fonts.load('12px "Newport Symbols"');
       if (session.current !== current) return;
       await desktop("terminal_open", {
         id: server.id,

@@ -13,10 +13,10 @@ import tempfile
 import time
 
 root = Path(__file__).resolve().parent.parent
-binary = root / 'src-tauri/target/release/bundle/macos/Porthop.app/Contents/MacOS/porthop'
+binary = root / 'src-tauri/target/release/bundle/macos/Newport.app/Contents/MacOS/newport'
 if not binary.exists():
     raise SystemExit('Build the app first: npm run tauri build -- --bundles app')
-with tempfile.TemporaryDirectory(prefix='porthop-native-smoke-') as directory:
+with tempfile.TemporaryDirectory(prefix='newport-native-smoke-') as directory:
     profile = Path(directory, 'profile')
     profile.mkdir()
     fixture_key = Path(directory, 'fixture-key')
@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory(prefix='porthop-native-smoke-') as directory:
         "id": "8d43df10-73f7-4358-b818-c41dddc2006e", "name": "Offline fixture",
         "sshHost": "127.0.0.1", "sshPort": 1, "sshUser": "fixture", "clipboardEnabled": True,
     }], "tunnels": []}))
-    env = dict(os.environ, PORTHOP_DATA_DIR=str(profile), PORTHOP_TEST_VAULT_KEY_FILE=str(fixture_key))
+    env = dict(os.environ, NEWPORT_DATA_DIR=str(profile), NEWPORT_TEST_VAULT_KEY_FILE=str(fixture_key))
     app = subprocess.Popen([str(binary)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         deadline = time.monotonic() + 10
@@ -57,7 +57,7 @@ with tempfile.TemporaryDirectory(prefix='porthop-native-smoke-') as directory:
         assert app.returncode == 0, f'Graceful shutdown failed: {app.returncode}: {error!r}'
         assert not Path(profile, 'config.json').exists(), 'Plaintext profile must be removed after verified migration'
         assert Path(profile, 'profiles.stronghold').stat().st_size > 0
-        diagnostics = Path(profile, 'logs', 'porthop.log').read_text()
+        diagnostics = Path(profile, 'logs', 'newport.log').read_text()
         assert 'Desktop and background workers initialized' in diagnostics, diagnostics
         assert 'Background workers and SSH sessions stopped' in diagnostics, diagnostics
         assert 'Restoring clipboard sharing for 1 saved profiles' in diagnostics, diagnostics
@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory(prefix='porthop-native-smoke-') as directory:
             assert db.execute('SELECT COUNT(*) FROM _sqlx_migrations').fetchone()[0] == 1
 
         assert not Path(profile, 'config.json').exists()
-        assert Path(profile, 'logs', 'porthop.log').read_text().count('Restoring clipboard sharing for 1 saved profiles') == 2
+        assert Path(profile, 'logs', 'newport.log').read_text().count('Restoring clipboard sharing for 1 saved profiles') == 2
         print('PASS: native encrypted migration/reopen, SQL plugin migration/reopen, Store IPC, background launch, logging, instance lock and graceful shutdown')
     finally:
         if app.poll() is None:

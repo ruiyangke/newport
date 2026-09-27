@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package a signed, stapled macOS app for GitHub and Porthop's updater."""
+"""Package a signed, stapled macOS app for GitHub and Newport's updater."""
 import argparse
 import datetime
 import hashlib
@@ -38,12 +38,12 @@ def main():
     if not os.environ.get("TAURI_SIGNING_PRIVATE_KEY"):
         parser.error("Set TAURI_SIGNING_PRIVATE_KEY to the update key path or contents")
     args.output.mkdir(parents=True, exist_ok=True)
-    name = f"Porthop-{version}-macos-arm64"
+    name = f"Newport-{version}-macos-arm64"
     archive = args.output / (name + ".app.tar.gz")
     # Preserve the final signed/stapled bundle. Signing before stapling the
     # archive would make the updater signature invalid after repackaging.
     with tarfile.open(archive, "w:gz") as tar:
-        tar.add(app, arcname="Porthop.app")
+        tar.add(app, arcname="Newport.app")
     # The standalone signer distinguishes key contents from a key file path.
     key = os.environ["TAURI_SIGNING_PRIVATE_KEY"]
     if "\n" not in key and len(key) < 1024 and Path(key).is_file():
@@ -55,11 +55,11 @@ def main():
     run("ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(app), str(zip_path))
     manifest = {
         "version": version,
-        "notes": f"Porthop {version}",
+        "notes": f"Newport {version}",
         "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "platforms": {"darwin-aarch64": {
             "signature": Path(str(archive) + ".sig").read_text().strip(),
-            "url": f"https://github.com/ruiyangke/porthop/releases/download/v{version}/{archive.name}",
+            "url": f"https://github.com/ruiyangke/newport/releases/download/v{version}/{archive.name}",
         }},
     }
     (args.output / "latest.json").write_text(json.dumps(manifest, indent=2) + "\n")

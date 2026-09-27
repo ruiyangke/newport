@@ -6,7 +6,7 @@ import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
-const manifest = "porthop-build.json";
+const manifest = "newport-build.json";
 function snapshot(directory) {
   const files = {};
   function walk(relative = "") {

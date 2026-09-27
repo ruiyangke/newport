@@ -1,6 +1,6 @@
 # Documentation
 
-## Using Porthop
+## Using Newport
 
 - [Getting started](../README.md): features, requirements and first connection.
 - [Clipboard sync](clipboard.md): setup, desktop support and troubleshooting.

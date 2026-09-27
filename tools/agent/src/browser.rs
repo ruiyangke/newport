@@ -9,32 +9,32 @@ use std::{
 };
 pub fn open(args: &[String], desktop: bool) -> io::Result<()> {
     if args.len() != 1 {
-        return Err(io::Error::other("usage: porthop-agent open URL"));
+        return Err(io::Error::other("usage: newport-agent open URL"));
     }
     let root = root()?;
     let wayland = env::var("WAYLAND_DISPLAY").unwrap_or_default();
     let fake_wayland = wayland == root.join("wayland.sock").to_string_lossy()
-        || wayland.starts_with("/tmp/porthop-wl-");
+        || crate::migration::fake_wayland(&wayland);
     let fake_x = fs::read_to_string(root.join("display"))
         .ok()
         .is_some_and(|v| env::var("DISPLAY").ok().as_deref() == Some(v.trim()));
     let graphical = (env::var_os("DISPLAY").is_some() && !fake_x)
         || (!wayland.is_empty() && !fake_wayland)
         || env::var_os("WAYLAND_SOCKET").is_some();
-    if desktop && graphical && env::var("PORTHOP_OPEN_ON_MAC").as_deref() != Ok("1") {
+    if desktop && graphical && !crate::migration::forward_browser() {
         if let Some(native) = crate::native::find("xdg-open") {
             use std::os::unix::process::CommandExt;
             return Err(Command::new(native).args(args).env_remove("BROWSER").exec());
         }
         return Err(io::Error::other(
-            "desktop opener unavailable; use porthop-agent open URL for your Mac",
+            "desktop opener unavailable; use newport-agent open URL for your Mac",
         ));
     }
     if wire::web_url(&args[0]).is_none() {
         return Err(io::Error::other("only HTTP and HTTPS URLs are supported"));
     }
     let mut stream = UnixStream::connect(root.join("agent.sock"))
-        .map_err(|_| io::Error::other("enable Browser in Porthop’s Integration page first"))?;
+        .map_err(|_| io::Error::other("enable Browser in Newport’s Integration page first"))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     stream.set_read_timeout(Some(Duration::from_secs(25)))?;
     stream.write_all(args[0].as_bytes())?;
@@ -42,7 +42,7 @@ pub fn open(args: &[String], desktop: bool) -> io::Result<()> {
     let mut reply = String::new();
     stream.take(256).read_to_string(&mut reply)?;
     if let Some(warning) = reply.strip_prefix("ok\n") {
-        eprintln!("Porthop: {warning}");
+        eprintln!("Newport: {warning}");
     } else if reply != "ok" {
         return Err(io::Error::other(if reply.is_empty() {
             "browser connection closed"

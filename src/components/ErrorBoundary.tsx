@@ -26,7 +26,7 @@ export class ErrorBoundary extends Component<
         <h2>
           {this.props.scope === "workspace"
             ? "This workspace couldn’t be displayed"
-            : "Porthop couldn’t display this window"}
+            : "Newport couldn’t display this window"}
         </h2>
         <p>
           {this.props.scope === "workspace"

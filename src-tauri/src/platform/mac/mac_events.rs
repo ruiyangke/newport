@@ -14,7 +14,7 @@ pub fn install(notify: fn(Event)) -> anyhow::Result<()> {
     };
 
     // Install on Tauri's main thread; its AppKit run loop delivers both sources.
-    let store = SCDynamicStoreBuilder::new("Porthop network recovery")
+    let store = SCDynamicStoreBuilder::new("Newport network recovery")
         .callback_context(SCDynamicStoreCallBackContext {
             callout: |_, _, notify: &mut fn(Event)| {
                 log::debug!("Network configuration changed; notifying recovery tasks");

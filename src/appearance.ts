@@ -1,16 +1,11 @@
+import { appearanceKey, readAppearance } from "./migration";
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useSyncExternalStore } from "react";
 export type Appearance = "system" | "light" | "dark";
-const changed = "porthop-appearance-changed";
-const key = "porthop-appearance";
+const changed = "newport-appearance-changed";
 export function getAppearance(): Appearance {
-  try {
-    const value = localStorage.getItem(key);
-    return value === "light" || value === "dark" ? value : "system";
-  } catch {
-    return "system";
-  }
+  return readAppearance();
 }
 export function applyAppearance(value = getAppearance()) {
   const dark =
@@ -30,7 +25,7 @@ export function applyAppearance(value = getAppearance()) {
   window.dispatchEvent(new Event(changed));
 }
 export function setAppearance(value: Appearance) {
-  localStorage.setItem(key, value);
+  localStorage.setItem(appearanceKey, value);
   applyAppearance(value);
 }
 

@@ -1,4 +1,6 @@
-# Porthop
+# Newport
+
+[Website](https://newport.app) · [CLI domain](https://newport.sh)
 
 A macOS workspace for your remote servers. Manage SSH tunnels, monitor Linux hosts, open terminals, and transfer files from one app.
 
@@ -11,11 +13,11 @@ A macOS workspace for your remote servers. Manage SSH tunnels, monitor Linux hos
 - **Work remotely:** open an interactive SSH terminal and browse, preview, upload, or download files over SFTP.
 - **Integrate:** share your Mac clipboard with a trusted server and open its web links on your Mac, with X11, Wayland, and headless clipboard support.
 
-Porthop works as a regular Mac app, with a Dock icon, a menu-bar entry, light and dark themes, and optional launch at login. Closing the window keeps connections running; quitting disconnects them.
+Newport works as a regular Mac app, with a Dock icon, a menu-bar entry, light and dark themes, and optional launch at login. Closing the window keeps connections running; quitting disconnects them.
 
 ## Get started
 
-Porthop requires **macOS 14 or later**. Download the app from [GitHub Releases](https://github.com/ruiyangke/porthop/releases). Windows builds are experimental; see the compatibility notes below.
+Newport requires **macOS 14 or later**. Download the app from [GitHub Releases](https://github.com/ruiyangke/newport/releases). Windows builds are experimental; see the compatibility notes below.
 
 Once running:
 
@@ -35,7 +37,7 @@ On the server, read text with:
 xclip -selection clipboard -o
 ```
 
-Porthop installs one agent for clipboard sharing, headless X11/Wayland image paste, and opening server links on your Mac. Clipboard contents transfer on demand through the agent’s `xclip`/`wl-paste` aliases and managed displays. Clipboard and Browser can be enabled independently in Integration. The agent runs over SSH while either is enabled; no separate service is required.
+Newport installs one agent for clipboard sharing, headless X11/Wayland image paste, and opening server links on your Mac. Clipboard contents transfer on demand through the agent’s `xclip`/`wl-paste` aliases and managed displays. Clipboard and Browser can be enabled independently in Integration. The agent runs over SSH while either is enabled; no separate service is required.
 
 Only enable sharing for servers you trust: server applications can request copied passwords and other sensitive content while sharing is enabled. See [clipboard setup and behavior](docs/clipboard.md).
 

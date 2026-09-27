@@ -1,6 +1,6 @@
 # Storage and recovery
 
-Porthop saves its data in `~/Library/Application Support/Porthop` on macOS and `%LOCALAPPDATA%\Porthop` on Windows.
+Newport saves its data in `~/Library/Application Support/Newport` on macOS and `%LOCALAPPDATA%\Newport` on Windows.
 
 ## What is saved
 
@@ -22,7 +22,7 @@ Open **Settings → Cache** to see metrics storage size and clear recorded histo
 
 ## Backups
 
-A profile backup requires both the encrypted snapshot and its original vault key. Copying `profiles.stronghold` alone is insufficient. Porthop has no portable export or key-recovery interface.
+A profile backup requires both the encrypted snapshot and its original vault key. Copying `profiles.stronghold` alone is insufficient. Newport has no portable export or key-recovery interface.
 
 A missing key or damaged snapshot blocks edits instead of replacing existing data. Unsupported profile versions also block loading. Preserve the files and original Keychain or Credential Manager entries when troubleshooting; do not delete them to dismiss an error.
 
@@ -39,3 +39,11 @@ Renaming a server preserves active sessions. Connection and authentication chang
 Profile saves are verified before atomic replacement. The encrypted vault protects saved profiles, not everything on your computer or server. Metric measurements, external SSH files, old backups and legacy `SSHTunnelBar` files remain outside the vault.
 
 Remote clipboard files may remain after a lost connection. Database migrations cannot erase filesystem snapshots or old backups. See [clipboard cleanup](clipboard.md#reconnection-and-cleanup) and [security notes](security.md).
+
+## Upgrading from Porthop
+
+Newport adopts an existing `Porthop` profile folder in place. New installations use `Newport`. The folder name is kept for existing profiles because vault keys are tied to its canonical path; renaming it manually can prevent decryption. Servers, saved passwords, metrics, sidebar preferences, and integration identities remain together.
+
+New credential entries use `app.newport.profile-vault` on macOS and `app.newport/vault/…` on Windows. Migration verifies the existing encrypted snapshot and the newly saved key before switching. The old credential is retained as a recovery copy. Missing or inaccessible keys never cause a replacement vault to be created.
+
+`NEWPORT_DATA_DIR` selects an isolated profile. `PORTHOP_DATA_DIR` remains a compatibility alias, with the new variable taking precedence.

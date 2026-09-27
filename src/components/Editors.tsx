@@ -435,7 +435,7 @@ export function TunnelForm({
                 set({ ...t, autoConnect: checked === true })
               }
             />
-            <span>Connect when Porthop starts</span>
+            <span>Connect when Newport starts</span>
           </label>
           <label className="check-field">
             <Checkbox

@@ -53,7 +53,7 @@ pub fn get_startup_settings(app: tauri::AppHandle) -> Result<StartupSettings, St
     use tauri_plugin_autostart::ManagerExt;
     Ok(StartupSettings {
         enabled: app.autolaunch().is_enabled().map_err(|e| e.to_string())?,
-        available: !cfg!(debug_assertions) && std::env::var_os("PORTHOP_DATA_DIR").is_none(),
+        available: !cfg!(debug_assertions) && crate::migration::data_directory_override().is_none(),
     })
 }
 

@@ -22,12 +22,12 @@ async fn deploy(session: &ExecSession, force: bool) -> Result<String, String> {
     let platform = session.execute("uname -s; uname -m", None).await?;
     let mut lines = platform.lines();
     if lines.next() != Some("Linux") {
-        return Err("The Porthop agent requires Linux.".into());
+        return Err("The Newport agent requires Linux.".into());
     }
     let binary: &[u8] = match lines.next() {
-        Some("x86_64") => include_bytes!("../agents/porthop-agent-x86_64"),
-        Some("aarch64" | "arm64") => include_bytes!("../agents/porthop-agent-aarch64"),
-        _ => return Err("The Porthop agent supports x86_64 and ARM64 Linux servers.".into()),
+        Some("x86_64") => include_bytes!("../agents/newport-agent-x86_64"),
+        Some("aarch64" | "arm64") => include_bytes!("../agents/newport-agent-aarch64"),
+        _ => return Err("The Newport agent supports x86_64 and ARM64 Linux servers.".into()),
     };
     let hash = Sha256::digest(binary)
         .iter()
@@ -36,18 +36,18 @@ async fn deploy(session: &ExecSession, force: bool) -> Result<String, String> {
     if !force {
         let installed = session
             .execute(
-                "sha256sum \"$HOME/.local/bin/porthop-agent\" 2>/dev/null || true",
+                "sha256sum \"$HOME/.local/bin/newport-agent\" 2>/dev/null || true",
                 None,
             )
             .await?;
         if installed.split_whitespace().next() == Some(hash.as_str()) {
             return session
-                .execute("\"$HOME/.local/bin/porthop-agent\" install", None)
+                .execute("\"$HOME/.local/bin/newport-agent\" install", None)
                 .await;
         }
     }
     let command = format!(
-        "sh -c '{}' porthop-install {hash}",
+        "sh -c '{}' newport-install {hash}",
         include_str!("agent-install.sh").replace('\'', "'\"'\"'")
     );
     session.execute(&command, Some(binary)).await
@@ -125,7 +125,7 @@ impl Agent<tokio::io::Sink> {
             .await
             .map_err(|_| transport("agent startup timed out"))??;
         if kind != b'R' || data != wire::VERSION.as_bytes() {
-            return Err("Unsupported Porthop agent protocol.".into());
+            return Err("Unsupported Newport agent protocol.".into());
         }
         Ok(agent)
     }

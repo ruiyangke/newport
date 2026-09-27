@@ -11,8 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends openssh-server 
     && useradd -m -s /bin/bash fixture \
     && echo 'fixture:unused-container-only-password' | chpasswd \
     && mkdir -p /run/sshd /home/fixture/.ssh /srv/fixture \
-    && printf 'porthop remote fixture\n' > /srv/fixture/index.html
-COPY --from=probe /probe/target/release/porthop-arboard-probe /usr/local/bin/arboard-probe
+    && printf 'newport remote fixture\n' > /srv/fixture/index.html
+COPY --from=probe /probe/target/release/newport-arboard-probe /usr/local/bin/arboard-probe
 COPY sshd_config /etc/ssh/sshd_config
 COPY shell_setup.py /srv/fixture/shell_setup.py
 COPY start.sh /usr/local/bin/start-fixture

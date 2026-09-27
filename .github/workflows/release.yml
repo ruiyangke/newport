@@ -37,7 +37,7 @@ jobs:
   macos:
     needs: [resolve, checks]
     env:
-      PORTHOP_PREBUILT: "1"
+      NEWPORT_PREBUILT: "1"
     runs-on: macos-15
     timeout-minutes: 120
     steps:
@@ -91,7 +91,7 @@ jobs:
   windows:
     needs: [resolve, checks]
     env:
-      PORTHOP_PREBUILT: "1"
+      NEWPORT_PREBUILT: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -187,4 +187,4 @@ jobs:
           python3 scripts/merge-update-manifests.py release/latest.json release/windows-*.json --version "${RELEASE_TAG#v}" --output release/latest.json
           rm release/windows-*.json
           test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$RELEASE_COMMIT"
-          gh release create "$RELEASE_TAG" release/* --verify-tag --draft --title "Porthop $RELEASE_TAG" --generate-notes
+          gh release create "$RELEASE_TAG" release/* --verify-tag --draft --title "Newport $RELEASE_TAG" --generate-notes

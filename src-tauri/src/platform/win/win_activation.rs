@@ -13,7 +13,8 @@ impl Activation {
         let hash = Sha256::digest(path.as_os_str().as_encoded_bytes());
         let suffix: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
         let name = super::wide(std::ffi::OsStr::new(&format!(
-            "Local\\Porthop-activate-{suffix}"
+            "{}{suffix}",
+            crate::migration::legacy::ACTIVATION_PREFIX
         )));
         let handle = unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) };
         if handle.is_null() {

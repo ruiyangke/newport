@@ -17,8 +17,8 @@ mod recovery;
 fn server() -> Server {
     serde_json::from_value(serde_json::json!({
         "id": Uuid::new_v4(), "name": "Disposable Linux", "sshUser": "fixture",
-        "sshHost": "127.0.0.1", "sshPort": std::env::var("PORTHOP_TEST_SSH_PORT").unwrap().parse::<u16>().unwrap(),
-        "identityFile": std::env::var("PORTHOP_TEST_IDENTITY").unwrap()
+        "sshHost": "127.0.0.1", "sshPort": std::env::var("NEWPORT_TEST_SSH_PORT").unwrap().parse::<u16>().unwrap(),
+        "identityFile": std::env::var("NEWPORT_TEST_IDENTITY").unwrap()
     })).unwrap()
 }
 
@@ -114,7 +114,7 @@ async fn forwarding_roundtrip_and_shutdown() {
     .await
     .unwrap()
     .unwrap();
-    assert!(response.contains("200 OK") && response.contains("porthop remote fixture"));
+    assert!(response.contains("200 OK") && response.contains("newport remote fixture"));
     forwarding.shutdown().await;
     let _released = TcpListener::bind(("127.0.0.1", local)).await.unwrap();
 }
@@ -126,21 +126,21 @@ async fn deploy_reinstall_and_agent_protocol() {
     let session = ExecSession::connect(&server).await.unwrap();
     crate::agent::install(&session).await.unwrap();
     let hash = session
-        .execute("sha256sum ~/.local/bin/porthop-agent", None)
+        .execute("sha256sum ~/.local/bin/newport-agent", None)
         .await
         .unwrap();
     crate::agent::install(&session).await.unwrap();
     crate::agent::reinstall(&session).await.unwrap();
     assert_eq!(
         session
-            .execute("sha256sum ~/.local/bin/porthop-agent", None)
+            .execute("sha256sum ~/.local/bin/newport-agent", None)
             .await
             .unwrap(),
         hash
     );
     let mut stream = session
         .stream(&format!(
-            "exec ~/.local/bin/porthop-agent serve {} --clipboard --browser",
+            "exec ~/.local/bin/newport-agent serve {} --clipboard --browser",
             Uuid::new_v4()
         ))
         .await
@@ -159,7 +159,7 @@ async fn deploy_reinstall_and_agent_protocol() {
         .await
         .unwrap()
     }
-    assert_eq!(event(&mut stream, b'R').await, b"porthop-agent/5");
+    assert_eq!(event(&mut stream, b'R').await, b"newport-agent/5");
     let mut archive = tar::Builder::new(Vec::new());
     for (name, data) in [
         ("text/plain", "container clipboard 世界\n"),
@@ -269,11 +269,11 @@ async fn changed_host_key_is_rejected_and_restoration_recovers() {
             std::fs::write(&self.0, &self.1).unwrap();
         }
     }
-    let path = std::path::PathBuf::from(std::env::var("PORTHOP_TEST_KNOWN_HOSTS").unwrap());
+    let path = std::path::PathBuf::from(std::env::var("NEWPORT_TEST_KNOWN_HOSTS").unwrap());
     let restore = Restore(path.clone(), std::fs::read(&path).unwrap());
     let wrong = std::fs::read_to_string(format!(
         "{}.pub",
-        std::env::var("PORTHOP_TEST_IDENTITY").unwrap()
+        std::env::var("NEWPORT_TEST_IDENTITY").unwrap()
     ))
     .unwrap();
     std::fs::write(&path, format!("[127.0.0.1]:{} {wrong}", server().ssh_port)).unwrap();
@@ -340,12 +340,12 @@ async fn demand_clipboard_compression_freshness_and_failed_transfer_recovery() {
     crate::agent::install(&session).await.unwrap();
     let mut stream = session
         .stream(&format!(
-            "exec ~/.local/bin/porthop-agent serve {} --clipboard",
+            "exec ~/.local/bin/newport-agent serve {} --clipboard",
             Uuid::new_v4()
         ))
         .await
         .unwrap();
-    assert_eq!(receive(&mut stream, b'R').await, b"porthop-agent/5");
+    assert_eq!(receive(&mut stream, b'R').await, b"newport-agent/5");
     // A new offer invalidates the old cache. A failed transfer of that revision
     // must be retryable without another clipboard change.
     for (revision, corrupt) in [(100i64, false), (101, true), (101, false)] {
@@ -556,7 +556,7 @@ async fn native_x11_and_wayland_clients_fetch_png_on_demand() {
     crate::agent::install(&session).await.unwrap();
     let mut stream = session
         .stream(&format!(
-            "exec ~/.local/bin/porthop-agent serve {} --clipboard",
+            "exec ~/.local/bin/newport-agent serve {} --clipboard",
             Uuid::new_v4()
         ))
         .await
@@ -576,7 +576,7 @@ async fn native_x11_and_wayland_clients_fetch_png_on_demand() {
         )
         .await;
         receive(&mut stream, b'A').await;
-        let command = format!("eval \"$(~/.local/bin/porthop-agent env)\"; {client} | sha256sum");
+        let command = format!("eval \"$(~/.local/bin/newport-agent env)\"; {client} | sha256sum");
         let (output, ()) = tokio::join!(session.execute(&command, None), async {
             let request = String::from_utf8(receive(&mut stream, b'C').await).unwrap();
             let fields: Vec<_> = request.split('\n').collect();

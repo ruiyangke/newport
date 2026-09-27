@@ -14,7 +14,7 @@ use std::{
 
 pub fn user_path() -> Result<PathBuf> {
     #[cfg(test)]
-    if let Ok(path) = std::env::var("PORTHOP_TEST_KNOWN_HOSTS") {
+    if let Ok(path) = std::env::var("NEWPORT_TEST_KNOWN_HOSTS") {
         return Ok(path.into());
     }
     Ok(dirs::home_dir()
@@ -143,7 +143,7 @@ pub fn verify(
 mod tests {
     use super::*;
     fn key() -> PublicKey {
-        russh::keys::load_secret_key(std::env::var("PORTHOP_TEST_IDENTITY").unwrap(), None)
+        russh::keys::load_secret_key(std::env::var("NEWPORT_TEST_IDENTITY").unwrap(), None)
             .unwrap()
             .public_key()
             .clone()
@@ -182,7 +182,7 @@ mod tests {
         verify("host", 22, &key, &path, None).unwrap();
         assert_eq!(before, std::fs::read(&path).unwrap());
         let other = russh::keys::ssh_key::PublicKey::read_openssh_file(
-            std::env::var("PORTHOP_TEST_OTHER_KEY").unwrap(),
+            std::env::var("NEWPORT_TEST_OTHER_KEY").unwrap(),
         )
         .unwrap();
         assert!(verify("host", 22, &other, &path, None)

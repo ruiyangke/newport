@@ -495,11 +495,11 @@ test("integration switches are independent and setup is copyable", async ({
   await expect(section.getByText("Connected", { exact: true })).toBeVisible();
   await expect(clipboard).not.toBeChecked();
   const setupCommand = [
-    'if [ -x "$HOME/.local/bin/porthop-agent" ]; then',
-    '  if _porthop_env=$("$HOME/.local/bin/porthop-agent" env 2>/dev/null); then',
-    '    eval "$_porthop_env"',
+    'if [ -x "$HOME/.local/bin/newport-agent" ]; then',
+    '  if _newport_env=$("$HOME/.local/bin/newport-agent" env 2>/dev/null); then',
+    '    eval "$_newport_env"',
     "  fi",
-    "  unset _porthop_env",
+    "  unset _newport_env",
     "fi",
   ].join("\n");
   await expect(section.locator(".setup-code-block code")).toHaveText(
@@ -1809,7 +1809,7 @@ test("Settings is separate from server tools and saves appearance", async ({
   ).toBeVisible();
   await page.reload();
   expect(
-    await page.evaluate(() => localStorage.getItem("porthop-appearance")),
+    await page.evaluate(() => localStorage.getItem("newport-appearance")),
   ).toBe("light");
   await expect(page.locator("html")).not.toHaveClass(/dark/);
 });
@@ -2358,7 +2358,7 @@ test("discovered Node applications show useful project context without system de
   for (const width of [960, 640]) {
     await page.setViewportSize({ width, height: 680 });
     await table.scrollIntoViewIfNeeded();
-    await page.screenshot({ path: `/tmp/porthop-ports-${width}.png` });
+    await page.screenshot({ path: `/tmp/newport-ports-${width}.png` });
   }
   await table.getByRole("button", { name: "Forward", exact: true }).click();
   await expect(
@@ -2507,7 +2507,7 @@ test("process context highlights application and service details across runtimes
   for (const width of [960, 640]) {
     await page.setViewportSize({ width, height: 680 });
     await table.scrollIntoViewIfNeeded();
-    await page.screenshot({ path: `/tmp/porthop-context-${width}.png` });
+    await page.screenshot({ path: `/tmp/newport-context-${width}.png` });
   }
 });
 
@@ -2589,7 +2589,7 @@ test("connected tunnels show destination failure and recovery independently", as
   await expect(tunnels).toContainText("The server could not connect");
   for (const width of [960, 640]) {
     await page.setViewportSize({ width, height: 680 });
-    await page.screenshot({ path: `/tmp/porthop-health-${width}.png` });
+    await page.screenshot({ path: `/tmp/newport-health-${width}.png` });
   }
   await page.evaluate(() => {
     (window as any).__destination = "reachable";

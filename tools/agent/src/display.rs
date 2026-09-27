@@ -1,7 +1,7 @@
 //! Standalone X11 or Wayland display launcher.
 use crate::{wl_server, x_server};
 use std::{
-    env, io,
+    io,
     path::PathBuf,
     process::Command,
     sync::{
@@ -26,10 +26,7 @@ pub fn run(args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<i32> {
     let mut service = false;
     let mut socket = None;
     let mut command = Vec::new();
-    let mut snapshot = env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| io::Error::other("HOME is required"))?
-        .join(".cache/porthop/clipboard/snapshot.tar");
+    let mut snapshot = crate::paths::root()?.join("snapshot.tar");
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--service") => service = true,
@@ -68,7 +65,7 @@ pub fn run(args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<i32> {
                 break;
             }
             Some("--help") => {
-                println!("Usage: porthop-agent display [--backend x11|wayland] [--snapshot PATH] [--display NUMBER] [--service [--socket PATH]] [-- COMMAND ...]\n\nStarts a clipboard-only display. The default backend is x11.\n--service starts Wayland at the fixed socket; omit it when Porthop already manages the agent.");
+                println!("Usage: newport-agent display [--backend x11|wayland] [--snapshot PATH] [--display NUMBER] [--service [--socket PATH]] [-- COMMAND ...]\n\nStarts a clipboard-only display. The default backend is x11.\n--service starts Wayland at the fixed socket; omit it when Newport already manages the agent.");
                 return Ok(0);
             }
             _ => return Err(io::Error::other("unknown argument; use --help")),
@@ -95,12 +92,7 @@ pub fn run(args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<i32> {
     .map_err(io::Error::other)?;
     let bridge = if backend == Backend::Wayland {
         Bridge::Wayland(if service {
-            let socket = socket.unwrap_or(
-                env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .ok_or_else(|| io::Error::other("HOME is required"))?
-                    .join(".cache/porthop/clipboard/wayland.sock"),
-            );
+            let socket = socket.unwrap_or(crate::paths::root()?.join("wayland.sock"));
             wl_server::Server::start_fixed(&snapshot, &socket)?
         } else {
             wl_server::Server::start(&snapshot)?
@@ -109,7 +101,7 @@ pub fn run(args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<i32> {
         Bridge::X11(x_server::Server::start(&snapshot, display)?)
     };
     let (mut variables, removed) = bridge.environment();
-    variables.push(("PORTHOP_OPEN_ON_MAC", "1".into()));
+    variables.push(("NEWPORT_OPEN_ON_MAC", "1".into()));
     if command.is_empty() {
         for (key, value) in &variables {
             println!("export {key}='{}'", value.replace('\'', "'\\''"));
