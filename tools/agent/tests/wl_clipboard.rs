@@ -418,6 +418,13 @@ fn fixed_socket_preserves_live_listener_and_unrelated_files() {
         drop(pending);
     }
     drop(listener);
+    // Parallel tests spawn children, which can briefly inherit this listener
+    // between fork and exec despite CLOEXEC. Wait for the actual close.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while UnixStream::connect(&socket).is_ok() {
+        assert!(Instant::now() < deadline, "listener did not close");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     // A closed listener leaves a stale socket; only that case may be replaced.
     let server = Server::start_fixed(&path, &socket).unwrap();
     drop(server);

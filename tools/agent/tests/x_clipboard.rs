@@ -136,8 +136,10 @@ fn reads_formats_and_large_image_across_connections() {
     assert_eq!(read(&c, w, "image/png").unwrap(), image);
     let targets = read(&c, w, "TARGETS").unwrap();
     assert!(targets
-        .chunks_exact(4)
-        .any(|v| u32::from_ne_bytes(v.try_into().unwrap()) == atom(&c, "image/png")));
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|v| u32::from_ne_bytes(*v) == atom(&c, "image/png")));
     let second = connect(&server);
     assert_eq!(atom(&second, "image/png"), atom(&c, "image/png"));
     let w2 = window(&second);
