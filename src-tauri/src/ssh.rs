@@ -39,6 +39,7 @@ struct Handler {
     host: String,
     port: u16,
     error: Arc<Mutex<Option<String>>>,
+    disconnected: Arc<tokio::sync::Notify>,
 }
 impl client::Handler for Handler {
     type Error = anyhow::Error;
@@ -62,6 +63,7 @@ impl client::Handler for Handler {
     }
     async fn disconnected(&mut self, reason: client::DisconnectReason<Self::Error>) -> Result<()> {
         *self.error.lock().unwrap() = Some(format!("SSH connection closed: {reason:?}"));
+        self.disconnected.notify_one();
         Ok(())
     }
 }
@@ -69,6 +71,7 @@ struct Connection {
     handle: client::Handle<Handler>,
     transport: Transport,
     error: Arc<Mutex<Option<String>>>,
+    disconnected: Arc<tokio::sync::Notify>,
 }
 impl Drop for Connection {
     fn drop(&mut self) {
@@ -76,6 +79,9 @@ impl Drop for Connection {
     }
 }
 pub(crate) fn is_transient_connection_error(error: &anyhow::Error) -> bool {
+    if error.is::<auth::SelectedAgentUnavailable>() {
+        return true;
+    }
     error.chain().any(|cause| {
         // russh's transparent IO wrapper omits the inner error from source(),
         // so anyhow's chain alone cannot expose its ErrorKind.
@@ -136,17 +142,31 @@ where
     unreachable!()
 }
 
+#[derive(Clone, Copy)]
+enum ConnectionPolicy {
+    Request,
+    Integration,
+}
+
 impl Connection {
     async fn connect(server: &Server) -> Result<Self> {
+        Self::connect_with_policy(server, ConnectionPolicy::Request).await
+    }
+    async fn connect_with_policy(server: &Server, policy: ConnectionPolicy) -> Result<Self> {
         server.validate().map_err(anyhow::Error::msg)?;
         let started = std::time::Instant::now();
-        let result = tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            retry_connection(|| Self::connect_once(server), Duration::from_secs(2)),
-        )
-        .await
-        .context("SSH connection or authentication timed out after 20 seconds")
-        .and_then(|result| result);
+        let result = match policy {
+            ConnectionPolicy::Request => tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                retry_connection(|| Self::connect_once(server), Duration::from_secs(2)),
+            )
+            .await
+            .context("SSH connection or authentication timed out after 20 seconds")
+            .and_then(|result| result),
+            // Integration recovery owns backoff and cancellation. Agent approval
+            // can take as long as needed; do not restart its prompt on a timer.
+            ConnectionPolicy::Integration => Self::connect_once(server).await,
+        };
         crate::connectivity::report(
             server,
             started,
@@ -155,6 +175,19 @@ impl Connection {
         result
     }
     async fn connect_once(server: &Server) -> Result<Self> {
+        let mut connection = tokio::time::timeout(CONNECT_TIMEOUT, Self::handshake(server))
+            .await
+            .context("SSH socket connection or handshake timed out")??;
+        let (approval, waiting) = tokio::sync::watch::channel(false);
+        auth::with_network_deadline(
+            auth::authenticate(&mut connection.handle, server, approval),
+            waiting,
+            &connection.disconnected,
+        )
+        .await?;
+        Ok(connection)
+    }
+    async fn handshake(server: &Server) -> Result<Self> {
         let socket = TcpStream::connect((server.ssh_host.as_str(), server.ssh_port))
             .await
             .context("Cannot connect to SSH server")?;
@@ -162,10 +195,12 @@ impl Connection {
         let socket = socket.into_std()?;
         let transport = Transport(socket.try_clone()?);
         let error = Arc::new(Mutex::new(None));
+        let disconnected = Arc::new(tokio::sync::Notify::new());
         let handler = Handler {
             host: server.ssh_host.clone(),
             port: server.ssh_port,
             error: error.clone(),
+            disconnected: disconnected.clone(),
         };
         let config = Arc::new(client::Config {
             keepalive_interval: Some(Duration::from_secs(15)),
@@ -173,14 +208,14 @@ impl Connection {
             nodelay: true,
             ..Default::default()
         });
-        let mut handle = client::connect_stream(config, TcpStream::from_std(socket)?, handler)
+        let handle = client::connect_stream(config, TcpStream::from_std(socket)?, handler)
             .await
             .context("SSH handshake or host-key verification failed")?;
-        auth::authenticate(&mut handle, server).await?;
         Ok::<_, anyhow::Error>(Self {
             handle,
             transport,
             error,
+            disconnected,
         })
     }
     async fn close(&self) {
@@ -601,6 +636,28 @@ mod connection_retry_tests {
             let error = anyhow::Error::new(russh::Error::IO(std::io::Error::from(kind)))
                 .context("SSH handshake or host-key verification failed");
             assert_eq!(is_transient_connection_error(&error), retryable, "{kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_agent_recovers_and_exhaustion_is_bounded() {
+        for available_after in [2, 4] {
+            let mut attempts = 0;
+            let result = retry_connection(
+                || {
+                    attempts += 1;
+                    std::future::ready(if attempts >= available_after {
+                        Ok(())
+                    } else {
+                        Err(anyhow::Error::new(auth::SelectedAgentUnavailable)
+                            .context("SSH authentication"))
+                    })
+                },
+                Duration::ZERO,
+            )
+            .await;
+            assert_eq!(attempts, available_after.min(3));
+            assert_eq!(result.is_ok(), available_after <= 3);
         }
     }
 

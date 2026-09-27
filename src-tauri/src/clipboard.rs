@@ -165,8 +165,8 @@ pub fn client_identity(
 }
 
 // Retry transport failures and agent-declared temporary failures (including
-// exhausted disk space), never permission, ownership or authentication
-// failures. Each agent owns its files until the SSH channel closes or its lease expires.
+// exhausted disk space), and temporarily unavailable selected SSH agents.
+// Permission, ownership and other authentication failures remain permanent. Each agent owns its files until the SSH channel closes or its lease expires.
 async fn recover_connection<F, Fut>(
     mut attempt: F,
     mut cancel: watch::Receiver<bool>,
@@ -199,12 +199,13 @@ where
             result = attempt() => result,
         };
         let Err(error) = result else { return Ok(()) };
-        let transport_timeout = !error.starts_with("Remote command failed")
+        let retryable = !error.starts_with("Remote command failed")
             && !error.starts_with("Agent error:")
             && (error.contains("SSH transport interrupted:")
+                || error.starts_with("SSH agent unavailable:")
                 || error.contains("SSH command timed out")
                 || error.contains("SSH connection or authentication timed out"));
-        if !transport_timeout {
+        if !retryable {
             log::error!("Integration stopped after a non-retryable error");
             return Err(error);
         }
@@ -299,7 +300,7 @@ async fn run_once(
 ) -> Result<(), String> {
     let session = tokio::select! {
         _ = cancel.changed() => return Ok(()),
-        result = ExecSession::connect(&server) => result?,
+        result = ExecSession::connect_integration(&server) => result?,
     };
     let outcome = async {
         let installed = crate::agent::install(&session).await?;
@@ -407,6 +408,32 @@ async fn run_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_continues_beyond_request_deadline() {
+        let (_tx, rx) = watch::channel(false);
+        let mut attempts = 0;
+        let started = tokio::time::Instant::now();
+        recover_connection(
+            || {
+                attempts += 1;
+                std::future::ready(if attempts < 7 {
+                    Err("SSH transport interrupted: Disconnected".into())
+                } else {
+                    Ok(())
+                })
+            },
+            rx,
+            || {},
+            Duration::from_secs(2),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts, 7);
+        // 2 + 4 + 8 + 16 + 30 + 30: no total deadline, capped backoff.
+        assert_eq!(started.elapsed(), Duration::from_secs(90));
+    }
 
     #[tokio::test]
     async fn timeout_recovery_retries_but_preserves_permanent_errors() {
@@ -617,6 +644,29 @@ mod tests {
         .await
         .expect("Cancellation must interrupt in-flight work");
         result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn selected_ssh_agent_recovers_without_reenabling_sync() {
+        let (_tx, rx) = watch::channel(false);
+        let mut attempts = 0;
+        recover_connection(
+            || {
+                attempts += 1;
+                std::future::ready(if attempts == 1 {
+                    Err("SSH agent unavailable: Unlock the agent".into())
+                } else {
+                    Ok(())
+                })
+            },
+            rx,
+            || {},
+            Duration::ZERO,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts, 2);
     }
 
     #[tokio::test]
