@@ -1,3 +1,4 @@
+import { useWorkspaceState } from "../state/workspace";
 import {
   Table,
   TableHeader,
@@ -17,7 +18,6 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { useState } from "react";
 import {
   chartPoints,
   averageChartPoints,
@@ -254,16 +254,21 @@ function Chart({
   );
 }
 export function MetricGraphs({
+  id,
   history,
   minutes,
   onMinutesChange,
 }: {
+  id: string;
   history: MetricSample[];
   minutes: number;
   onMinutesChange: (minutes: number) => void;
 }) {
-  const [iface, setIface] = useState("");
-  const [showSamples, setShowSamples] = useState(false);
+  const [iface, setIface] = useWorkspaceState(id, "metrics.interface");
+  const [showSamples, setShowSamples] = useWorkspaceState(
+    id,
+    "metrics.samples",
+  );
   const latest = history.at(-1);
   const end = latest?.at ?? Date.now();
   const samples = history.filter((p) => p.at >= end - minutes * 60000);

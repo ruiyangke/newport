@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useWorkspaceState } from "../state/workspace";
 import { Search } from "lucide-react";
 import { Button, RefreshButton, Input, Select, SelectItem } from "./controls";
 import "./services.css";
@@ -15,17 +15,17 @@ export interface ServicesCollection {
 
 export type ServiceLog = Log;
 
-type ServiceFilter = "all" | "failed" | "active" | "inactive";
-
 export function ServicesPanel({
+  id,
   state,
   onLogs,
 }: {
+  id: string;
   state: ServicesCollection;
   onLogs: (log: ServiceLog, origin: HTMLElement) => void;
 }) {
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<ServiceFilter>("all");
+  const [query, setQuery] = useWorkspaceState(id, "services.query");
+  const [filter, setFilter] = useWorkspaceState(id, "services.filter");
   const normalizedQuery = query.trim().toLowerCase();
   const filtered = normalizedQuery !== "" || filter !== "all";
   const rows = state.data
@@ -89,7 +89,9 @@ export function ServicesPanel({
         <Select
           aria-label="Filter by service state"
           value={filter}
-          onValueChange={(value) => setFilter(value as ServiceFilter)}
+          onValueChange={(value) =>
+            setFilter(value as "all" | "failed" | "active" | "inactive")
+          }
         >
           <SelectItem value="all">All states</SelectItem>
           <SelectItem value="failed">Failed</SelectItem>

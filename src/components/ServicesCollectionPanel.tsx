@@ -14,7 +14,7 @@ export function ServicesCollectionPanel({
   const state = useCollection(id, "services", false, scopeRef);
   return (
     <div ref={scopeRef}>
-      <ServicesInventory state={state} onLogs={onLogs} />
+      <ServicesInventory id={id} state={state} onLogs={onLogs} />
     </div>
   );
 }

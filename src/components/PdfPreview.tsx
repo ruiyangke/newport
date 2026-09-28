@@ -11,6 +11,9 @@ import { Button } from "./controls";
 GlobalWorkerOptions.workerSrc = workerUrl;
 
 export default function PdfPreview({ content }: { content: string }) {
+  return <DocumentPreview key={content} content={content} />;
+}
+function DocumentPreview({ content }: { content: string }) {
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
   const [page, setPage] = useState(1);
   const [error, setError] = useState("");
@@ -55,7 +58,7 @@ export default function PdfPreview({ content }: { content: string }) {
       });
     return () => {
       active = false;
-      void task.destroy();
+      void task.destroy().catch(() => {});
     };
   }, [content]);
   useEffect(() => {

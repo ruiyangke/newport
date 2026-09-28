@@ -1,4 +1,6 @@
-import { useMutation } from "@tanstack/react-query";
+import { useWorkspaceState } from "../state/workspace";
+import { useSharedMutation } from "../hooks/useSharedMutation";
+import { keys, useServerScope } from "../query/keys";
 import { useRef, useState } from "react";
 import { desktop } from "../api/desktop";
 import { Search, MoreHorizontal, Layers, Box } from "lucide-react";
@@ -26,15 +28,19 @@ export function ContainersPanel({
   const scopeRef = useRef<HTMLDivElement>(null);
   const id = server.id;
   const state = useCollection(id, "containers", false, scopeRef);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [query, setQuery] = useState("");
+  const [collapsed, setCollapsed] = useWorkspaceState(
+    server.id,
+    "containers.collapsed",
+  );
+  const [query, setQuery] = useWorkspaceState(server.id, "containers.query");
   const [confirmation, setConfirmation] = useState<{
     project: string;
     action: "start" | "stop" | "restart";
     containers: Container[];
   } | null>(null);
-  const [notice, setNotice] = useState("");
-  const mutation = useMutation({
+  const scope = useServerScope(id);
+  const mutation = useSharedMutation({
+    mutationKey: [...keys.server(scope), "project-action"],
     mutationFn: async (target: NonNullable<typeof confirmation>) => {
       await desktop("cockpit_project_action", {
         id,
@@ -43,14 +49,16 @@ export function ContainersPanel({
         expectedIds: target.containers.map((c) => c.id),
       });
     },
-    onMutate: () => setNotice(""),
-    onSuccess: (_, target) => {
-      setNotice(`${target.project}: ${target.action} completed.`);
+    onSuccess: () => {
       setConfirmation(null);
     },
     // A failed command may have partially changed the project too.
     onSettled: () => state.refresh(),
   });
+  const notice =
+    mutation.isSuccess && mutation.variables
+      ? `${mutation.variables.project}: ${mutation.variables.action} completed.`
+      : "";
   const actionBusy = mutation.isPending;
   const actionError = mutation.error ? String(mutation.error) : "";
   const perform = () => {

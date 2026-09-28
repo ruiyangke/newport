@@ -2,7 +2,10 @@ import { useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { Button } from "./controls";
 
-export function CodeBlock({ code, label }: { code: string; label: string }) {
+export function CodeBlock(props: { code: string; label: string }) {
+  return <CopyableCode key={props.code} {...props} />;
+}
+function CopyableCode({ code, label }: { code: string; label: string }) {
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState(false);
   return (
@@ -17,6 +20,7 @@ export function CodeBlock({ code, label }: { code: string; label: string }) {
               setCopied(true);
               setError(false);
             } catch {
+              setCopied(false);
               setError(true);
             }
           }}

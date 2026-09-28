@@ -1,17 +1,13 @@
+import { useSharedMutation } from "../hooks/useSharedMutation";
 import { UpdateSettings } from "./UpdateSettings";
 import { useState } from "react";
-import {
-  queryOptions,
-  useQuery,
-  useQueryClient,
-  useMutation,
-} from "@tanstack/react-query";
+import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import { fileSize } from "../domain/files";
 import { keys } from "../query/keys";
 import { readIPC, refreshQuery } from "../query/client";
 import { isTauri } from "@tauri-apps/api/core";
 import { desktop } from "../api/desktop";
-import { getAppearance, setAppearance, type Appearance } from "../appearance";
+import { useAppearance, setAppearance, type Appearance } from "../appearance";
 import { Button, Checkbox, Select, SelectItem } from "./controls";
 import "./settings.css";
 
@@ -29,11 +25,13 @@ function MetricsCacheSettings() {
     refetchOnMount: "always",
     refetchInterval: 10_000,
   });
-  const mutation = useMutation({
+  const mutation = useSharedMutation({
+    mutationKey: ["settings", "clear-metrics"],
     mutationFn: () => desktop("clear_metrics_cache"),
     onMutate: () => client.cancelQueries({ queryKey: keys.metricsCache }),
-    onSuccess: (value) => client.setQueryData(keys.metricsCache, value),
-    onSettled: async () => {
+    onSuccess: async (value) => {
+      await client.cancelQueries({ queryKey: keys.metricsCache });
+      client.setQueryData(keys.metricsCache, value);
       // Drop both chart history and cached overview readings. Late IPC replies
       // must not bring samples from before the clear back into the charts.
       const metrics = {
@@ -45,8 +43,8 @@ function MetricsCacheSettings() {
       };
       await client.cancelQueries(metrics);
       client.removeQueries(metrics);
-      await client.invalidateQueries({ queryKey: keys.metricsCache });
     },
+    onSettled: () => client.invalidateQueries({ queryKey: keys.metricsCache }),
   });
   const error = mutation.error || cache.error;
   return (
@@ -103,7 +101,7 @@ function MetricsCacheSettings() {
 }
 
 export function SettingsPanel() {
-  const [appearance, updateAppearance] = useState(getAppearance);
+  const appearance = useAppearance();
   const client = useQueryClient();
   const [appearanceError, setError] = useState("");
   const options = queryOptions({
@@ -116,11 +114,15 @@ export function SettingsPanel() {
       ),
   });
   const query = useQuery({ ...options, refetchOnMount: "always" });
-  const mutation = useMutation({
+  const mutation = useSharedMutation({
+    mutationKey: ["settings", "startup"],
     mutationFn: (enabled: boolean) =>
       desktop("set_launch_at_login", { enabled }),
     onMutate: () => client.cancelQueries({ queryKey: keys.startup }),
-    onSuccess: (value) => client.setQueryData(keys.startup, value),
+    onSuccess: async (value) => {
+      await client.cancelQueries({ queryKey: keys.startup });
+      client.setQueryData(keys.startup, value);
+    },
     onError: () =>
       refreshQuery(client, options).then(
         () => {},
@@ -152,7 +154,6 @@ export function SettingsPanel() {
             onValueChange={(value) => {
               try {
                 setAppearance(value as Appearance);
-                updateAppearance(value as Appearance);
                 setError("");
               } catch {
                 setError(

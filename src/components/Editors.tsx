@@ -3,7 +3,13 @@ import { Label } from "./ui/label";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 import { Checkbox, Button, Input, Select, SelectItem } from "./controls";
 import { desktop } from "../api/desktop";
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { ArrowRight, X } from "lucide-react";
 import { parseRange, range, type Server, type Tunnel } from "../types";
 
@@ -206,8 +212,11 @@ export function ServerForm({
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const submitting = useRef(false);
   const submit = async (e: FormEvent) => {
     e.preventDefault();
+    if (submitting.current) return;
+    submitting.current = true;
     setBusy(true);
     setError("");
     try {
@@ -224,6 +233,7 @@ export function ServerForm({
     } catch (e) {
       setError(String(e));
     } finally {
+      submitting.current = false;
       setBusy(false);
     }
   };
@@ -356,8 +366,11 @@ export function TunnelForm({
   );
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const submitting = useRef(false);
   const submit = async (e: FormEvent) => {
     e.preventDefault();
+    if (submitting.current) return;
+    submitting.current = true;
     setError("");
     setBusy(true);
     try {
@@ -379,6 +392,7 @@ export function TunnelForm({
     } catch (e) {
       setError(String(e));
     } finally {
+      submitting.current = false;
       setBusy(false);
     }
   };

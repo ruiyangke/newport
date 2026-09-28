@@ -1,4 +1,5 @@
-import { lazy, Suspense, useRef, useState } from "react";
+import { useWorkspaceState } from "../state/workspace";
+import { lazy, Suspense, useRef } from "react";
 import { Search } from "lucide-react";
 import { Checkbox, Input, RefreshButton, Select, SelectItem } from "./controls";
 import {
@@ -85,10 +86,13 @@ function Gauge({
 }
 export function OverviewPanel({ id }: { id: string }) {
   const scopeRef = useRef<HTMLDivElement>(null);
-  const [auto, setAuto] = useState(true);
-  const [historyMinutes, setHistoryMinutes] = useState(5);
-  const [filter, setFilter] = useState("");
-  const [sort, setSort] = useState("cpu");
+  const [auto, setAuto] = useWorkspaceState(id, "overview.auto");
+  const [historyMinutes, setHistoryMinutes] = useWorkspaceState(
+    id,
+    "overview.historyMinutes",
+  );
+  const [filter, setFilter] = useWorkspaceState(id, "overview.filter");
+  const [sort, setSort] = useWorkspaceState(id, "overview.sort");
   const state = useCollection(id, "overview", auto, scopeRef);
   const history = useMetricHistory(
     id,
@@ -229,6 +233,7 @@ export function OverviewPanel({ id }: { id: string }) {
       {(d || history.samples.length > 0) && (
         <Suspense fallback={<p className="muted">Loading charts…</p>}>
           <MetricGraphs
+            id={id}
             history={history.samples}
             minutes={historyMinutes}
             onMinutesChange={setHistoryMinutes}

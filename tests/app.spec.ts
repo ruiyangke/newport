@@ -314,6 +314,7 @@ test.beforeEach(async ({ page }) => {
             if (cmd === "cockpit_logs")
               return "2026-09-20T10:21:04 worker[902]: database connection refused\n2026-09-20T10:21:05 systemd[1]: worker.service: Failed with result 'exit-code'.";
             if (cmd === "terminal_open") {
+              (window as any).__activeTerminal = args.session;
               terminals.set(args.session, [
                 { type: "ready" },
                 {
@@ -1362,7 +1363,7 @@ test("500-row collections render, scroll and filter responsively", async ({
   );
 });
 
-test("interactive terminal streams input, resizes and disconnects on navigation", async ({
+test("interactive terminal streams input, resizes and survives navigation", async ({
   page,
 }) => {
   await page.goto("/");
@@ -1439,9 +1440,15 @@ test("interactive terminal streams input, resizes and disconnects on navigation"
     () => (window as any).__terminalClosed.length,
   );
   await page.getByRole("tab", { name: "Connections", exact: true }).click();
-  await expect
-    .poll(() => page.evaluate(() => (window as any).__terminalClosed.length))
-    .toBeGreaterThan(before);
+  await page.getByRole("tab", { name: "Commands", exact: true }).click();
+  await expect(page.locator(".terminal-status")).toHaveText("Connected");
+  expect(
+    await page.evaluate(() => (window as any).__terminalClosed.length),
+  ).toBe(before);
+  await expect(page.locator(".xterm-accessibility-tree")).toContainText(
+    "Welcome to Development",
+  );
+  await expectTerminalFits();
 });
 
 test("terminal setup errors allow a fresh connection", async ({ page }) => {
@@ -1506,7 +1513,7 @@ test("table headers stick and collection refresh keeps the visible row and focus
   await expect(anchor.getByRole("button")).toBeFocused();
 });
 
-test("leaving during terminal setup closes a late session", async ({
+test("leaving during terminal setup preserves the session", async ({
   page,
 }) => {
   await page.goto("/");
@@ -1529,16 +1536,11 @@ test("leaving during terminal setup closes a late session", async ({
   await expect(page.locator(".terminal-status")).toHaveText("Connecting…");
   await page.getByRole("tab", { name: "Overview", exact: true }).click();
   await page.evaluate(() => (window as any).__finishTerminalOpen());
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () =>
-          (window as any).__terminalClosed.filter(
-            (id: string) => id === (window as any).__pendingTerminal,
-          ).length,
-      ),
-    )
-    .toBe(2);
+  await page.getByRole("tab", { name: "Commands", exact: true }).click();
+  await expect(page.locator(".terminal-status")).toHaveText("Connected");
+  expect(await page.evaluate(() => (window as any).__terminalClosed)).toEqual(
+    [],
+  );
 });
 
 test("port discovery identifies containers and explains unavailable ownership", async ({
@@ -2770,4 +2772,134 @@ test("Overview retains an old reading with its refresh error and clears it on re
     page.getByText("Connection interrupted", { exact: false }),
   ).toHaveCount(0);
   await expect(page.locator(".overview-refresh")).toContainText("Updated");
+});
+
+test("workspace filters survive page navigation", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Services", exact: true }).click();
+  const search = page.getByRole("textbox", {
+    name: "Filter services",
+    exact: true,
+  });
+  await search.fill("worker");
+  await page.getByRole("tab", { name: "Overview", exact: true }).click();
+  await page.getByRole("tab", { name: "Services", exact: true }).click();
+  await expect(search).toHaveValue("worker");
+  await expect(
+    page.getByText("ssh.service", { exact: true }),
+  ).not.toBeVisible();
+});
+
+test("terminal receives output while its page is detached", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Commands", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Connect terminal", exact: true })
+    .click();
+  await expect(page.locator(".terminal-status")).toHaveText("Connected");
+  await page.getByRole("tab", { name: "Overview", exact: true }).click();
+  await page.evaluate(async () => {
+    await (window as any).__TAURI_INTERNALS__.invoke("terminal_write", {
+      session: (window as any).__activeTerminal,
+      data: Array.from(
+        new TextEncoder().encode("\r\nbackground output retained\r\n"),
+      ),
+    });
+  });
+  await page.getByRole("tab", { name: "Services", exact: true }).click();
+  await page.getByRole("tab", { name: "Commands", exact: true }).click();
+  await expect(page.locator(".xterm-accessibility-tree")).toContainText(
+    "background output retained",
+  );
+  await expect(page.locator(".terminal-status")).toHaveText("Connected");
+  expect(await page.evaluate(() => (window as any).__terminalClosed)).toEqual(
+    [],
+  );
+});
+
+test("startup save remains pending after leaving Settings", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const bridge = (window as any).__TAURI_INTERNALS__;
+    const original = bridge.invoke;
+    bridge.invoke = (cmd: string, args: any) => {
+      if (cmd !== "set_launch_at_login") return original(cmd, args);
+      return new Promise((resolve) => {
+        (window as any).__finishStartup = () =>
+          resolve({ enabled: args.enabled, available: true });
+      });
+    };
+  });
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const checkbox = page.getByRole("checkbox", { name: /Launch at login/ });
+  await checkbox.click();
+  await expect(checkbox).toBeDisabled();
+  await page.getByRole("tab", { name: "Overview", exact: true }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(checkbox).toBeDisabled();
+  await expect(page.getByText("Saving…", { exact: true })).toBeVisible();
+  await page.evaluate(() => (window as any).__finishStartup());
+  await expect(checkbox).toBeEnabled();
+  await expect(checkbox).toBeChecked();
+});
+
+test("failed cache clearing retains cached overview readings", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.locator(".usage-gauge")).not.toHaveCount(0);
+  await page.evaluate(() => {
+    const bridge = (window as any).__TAURI_INTERNALS__;
+    const original = bridge.invoke;
+    bridge.invoke = (cmd: string, args: any) => {
+      if (cmd === "get_metrics_cache")
+        return Promise.resolve({ bytes: 65536, samples: 10 });
+      if (cmd === "clear_metrics_cache")
+        return Promise.reject("Cannot clear cache");
+      if (cmd === "cockpit_collect" || cmd === "cockpit_history")
+        return new Promise(() => {});
+      return original(cmd, args);
+    };
+  });
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Clear cache", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Cannot clear cache");
+  await page.getByRole("tab", { name: "Overview", exact: true }).click();
+  await expect(page.locator(".usage-gauge")).not.toHaveCount(0);
+});
+
+test("backend restart discards the old terminal session", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Commands", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Connect terminal", exact: true })
+    .click();
+  await expect(page.locator(".terminal-status")).toHaveText("Connected");
+  const previous = await page.evaluate(() => (window as any).__activeTerminal);
+  await page.evaluate(() => {
+    const bridge = (window as any).__TAURI_INTERNALS__;
+    const original = bridge.invoke;
+    bridge.invoke = async (cmd: string, args: any) => {
+      const value = await original(cmd, args);
+      return cmd === "snapshot"
+        ? { ...value, instanceId: "restarted-backend" }
+        : value;
+    };
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect(page.locator(".terminal-status")).toHaveText("Disconnected");
+  await expect
+    .poll(() => page.evaluate(() => (window as any).__terminalClosed))
+    .toContain(previous);
+  await page
+    .getByRole("button", { name: "Connect terminal", exact: true })
+    .click();
+  await expect(page.locator(".terminal-status")).toHaveText("Connected");
+  expect(await page.evaluate(() => (window as any).__activeTerminal)).not.toBe(
+    previous,
+  );
 });
