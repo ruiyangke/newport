@@ -412,3 +412,21 @@ test("files layout desktop, compact dark and PDF screenshots", async ({
   );
   expect(overflow).toBe(false);
 });
+
+test("file location and filter survive navigation", async ({ page }) => {
+  await page.getByRole("button", { name: "Documents", exact: true }).click();
+  const path = page.getByRole("textbox", { name: "Remote path", exact: true });
+  await expect(path).toHaveValue("/home/developer/Documents");
+  const filter = page.getByRole("textbox", {
+    name: "Filter files",
+    exact: true,
+  });
+  await filter.fill("design");
+  await page.getByRole("tab", { name: "Overview", exact: true }).click();
+  await page.getByRole("tab", { name: "Files", exact: true }).click();
+  await expect(path).toHaveValue("/home/developer/Documents");
+  await expect(filter).toHaveValue("design");
+  await expect(
+    page.getByRole("button", { name: "design-notes.md", exact: true }),
+  ).toBeVisible();
+});

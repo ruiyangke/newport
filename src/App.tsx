@@ -1,3 +1,6 @@
+import { retainWorkspaces } from "./state/workspace";
+import { retainTerminals } from "./terminal/registry";
+import { serverScope } from "./query/keys";
 import { WindowControls } from "./components/WindowControls";
 import appIcon from "../src-tauri/icons/icon.png";
 import { isCancelledError } from "@tanstack/react-query";
@@ -41,6 +44,7 @@ import { Cockpit } from "./components/Cockpit";
 import { Modal, ServerForm, TunnelForm } from "./components/Editors";
 import {
   useEffect,
+  useLayoutEffect,
   useState,
   useRef,
   lazy,
@@ -67,13 +71,7 @@ import {
   Settings2,
   X,
 } from "lucide-react";
-import {
-  displayName,
-  serverConnectionKey,
-  newServer,
-  type Server,
-  type Tunnel,
-} from "./types";
+import { displayName, newServer, type Server, type Tunnel } from "./types";
 
 const FilesPanel = lazy(() =>
   import("./components/FilesPanel").then((module) => ({
@@ -153,6 +151,28 @@ export default function App() {
       data.config.servers,
       loaded && !snapshotError && !data.loadError,
     );
+  useEffect(() => {
+    if (!loaded || snapshotError || data.loadError) return;
+    const valid = new Set(
+      data.config.servers.map(
+        (server) =>
+          serverScope(
+            server,
+            data.runtime.connectionRevisions?.[server.id] ?? 0,
+            data.instanceId,
+          ).connection,
+      ),
+    );
+    retainWorkspaces(valid);
+    retainTerminals(valid);
+  }, [
+    loaded,
+    snapshotError,
+    data.loadError,
+    data.config.servers,
+    data.runtime.connectionRevisions,
+    data.instanceId,
+  ]);
   const [commandOpen, setCommandOpen] = useState(false);
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
@@ -214,27 +234,34 @@ export default function App() {
   const health = server
     ? (data.runtime.health[server.id] ?? "unknown")
     : "unknown";
-  desktopAction.current = (action) => {
-    if (editor || deleting || commandOpen || hasOpenDialog()) return;
-    if (action === "app-settings") openSettings();
-    else if (action === "sidebar-toggle") sidebar.toggle();
-    else if (action === "server-new" && !blocked) addServer();
-    else if (action.startsWith("view-") && server) selectView(action.slice(5));
-    else if (server && action === "server-edit")
-      setEditor({ kind: "server", value: server, existing: true });
-    else if (server && action === "server-delete")
-      setDeleting({ kind: "server", id: server.id, name: displayName(server) });
-    else if (
-      server &&
-      action === "server-test" &&
-      !pending.has(`test-${selected}`)
-    )
-      void act(
-        `test-${selected}`,
-        () => desktop("test_connection", { id: selected }),
-        "SSH connection verified.",
-      );
-  };
+  useLayoutEffect(() => {
+    desktopAction.current = (action) => {
+      if (editor || deleting || commandOpen || hasOpenDialog()) return;
+      if (action === "app-settings") openSettings();
+      else if (action === "sidebar-toggle") sidebar.toggle();
+      else if (action === "server-new" && !blocked) addServer();
+      else if (action.startsWith("view-") && server)
+        selectView(action.slice(5));
+      else if (server && action === "server-edit")
+        setEditor({ kind: "server", value: server, existing: true });
+      else if (server && action === "server-delete")
+        setDeleting({
+          kind: "server",
+          id: server.id,
+          name: displayName(server),
+        });
+      else if (
+        server &&
+        action === "server-test" &&
+        !pending.has(`test-${selected}`)
+      )
+        void act(
+          `test-${selected}`,
+          () => desktop("test_connection", { id: selected }),
+          "SSH connection verified.",
+        );
+    };
+  });
   const openServerMenu = () => setServerMenuOpen(true);
   return (
     <Tabs
@@ -559,6 +586,7 @@ export default function App() {
                 <div className="detail">
                   <ServerScopeProvider
                     server={server}
+                    instanceId={data.instanceId}
                     revision={
                       data.runtime.connectionRevisions?.[server.id] ?? 0
                     }
@@ -566,7 +594,14 @@ export default function App() {
                     <TabsContent value={view} className="workspace-content">
                       {view === "files" ? (
                         <FilesPanel
-                          key={`${serverConnectionKey(server)}:${data.runtime.connectionRevisions?.[server.id] ?? 0}`}
+                          key={
+                            serverScope(
+                              server,
+                              data.runtime.connectionRevisions?.[server.id] ??
+                                0,
+                              data.instanceId,
+                            ).connection
+                          }
                           server={server}
                         />
                       ) : view === "integration" ? (
@@ -578,7 +613,14 @@ export default function App() {
                         />
                       ) : view !== "connections" ? (
                         <Cockpit
-                          key={`${serverConnectionKey(server)}:${data.runtime.connectionRevisions?.[server.id] ?? 0}`}
+                          key={
+                            serverScope(
+                              server,
+                              data.runtime.connectionRevisions?.[server.id] ??
+                                0,
+                              data.instanceId,
+                            ).connection
+                          }
                           server={server}
                           tab={view}
                         />

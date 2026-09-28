@@ -1,5 +1,6 @@
+import { useSharedMutation } from "../hooks/useSharedMutation";
 import { useEffect, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { isTauri } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { desktop } from "../api/desktop";
@@ -37,11 +38,13 @@ export function UpdateSettings() {
   const { data, error } = useUpdateStatus();
   const client = useQueryClient();
   const [confirm, setConfirm] = useState(false);
-  const check = useMutation({
+  const check = useSharedMutation({
+    mutationKey: ["updates", "check"],
     mutationFn: () => desktop("check_for_updates"),
     onSettled: () => client.invalidateQueries({ queryKey: updateKey }),
   });
-  const install = useMutation({
+  const install = useSharedMutation({
+    mutationKey: ["updates", "install"],
     mutationFn: () => desktop("install_update"),
     onSettled: () => client.invalidateQueries({ queryKey: updateKey }),
   });

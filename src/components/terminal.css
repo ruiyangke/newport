@@ -87,6 +87,13 @@
   color: var(--muted-foreground);
   font-size: 11px;
 }
+.terminal-mount {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
 .terminal-surface {
   flex: 1;
   min-height: 0;

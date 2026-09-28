@@ -1,3 +1,4 @@
+import { useWorkspaceState } from "../state/workspace";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { keys, useServerScope } from "../query/keys";
 import { fileListingOptions } from "../query/files";
@@ -155,19 +156,22 @@ export const FilesPanel = memo(function FilesPanel({
 }) {
   const cache = useQueryClient();
   const scope = useServerScope(server.id);
-  const [listingPath, setListingPath] = useState(".");
+  const [listingPath, setListingPath] = useWorkspaceState(
+    server.id,
+    "files.path",
+  );
   const { data: listing } = useQuery({
     ...fileListingOptions(scope, listingPath),
     enabled: false,
   });
-  const [pathInput, setPathInput] = useState("");
-  const [home, setHome] = useState("");
+  const [pathInput, setPathInput] = useWorkspaceState(server.id, "files.input");
+  const [home, setHome] = useWorkspaceState(server.id, "files.home");
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
-  const [query, setQuery] = useState("");
-  const [hidden, setHidden] = useState(false);
-  const [page, setPage] = useState(0);
-  const [tree, setTree] = useState(true);
+  const [query, setQuery] = useWorkspaceState(server.id, "files.query");
+  const [hidden, setHidden] = useWorkspaceState(server.id, "files.hidden");
+  const [page, setPage] = useWorkspaceState(server.id, "files.page");
+  const [tree, setTree] = useWorkspaceState(server.id, "files.tree");
   const [treeVersion, setTreeVersion] = useState(0);
   const [preview, setPreview] = useState<{
     entry: FileEntry;
@@ -181,11 +185,13 @@ export const FilesPanel = memo(function FilesPanel({
   } | null>(null);
   const operations = useRef(new Set<string>());
   const navigation = useRef(0);
-  const latestPath = useRef("");
-  const attemptedPath = useRef(".");
+  const latestPath = useRef(listingPath);
+  const initialPath = useRef(listingPath);
+  const [attemptedPath, setAttemptedPath] = useState(listingPath);
   const listElement = useRef<HTMLDivElement>(null);
   const previewOperation = useRef<string | null>(null);
   const transferOperation = transfer?.operation;
+  const activeTransfer = useRef<string | null>(null);
   const previewSequence = useRef(0);
   const mounted = useRef(false);
   const cancel = useCallback((operation: string) => {
@@ -216,7 +222,7 @@ export const FilesPanel = memo(function FilesPanel({
   const navigate = useCallback(
     async (path: string) => {
       const sequence = ++navigation.current;
-      attemptedPath.current = path;
+      setAttemptedPath(path);
       setBusy(true);
       setError("");
       try {
@@ -239,11 +245,20 @@ export const FilesPanel = memo(function FilesPanel({
         if (mounted.current && sequence === navigation.current) setBusy(false);
       }
     },
-    [load, cache, scope],
+    [
+      load,
+      cache,
+      scope,
+      setListingPath,
+      setPathInput,
+      setPage,
+      setQuery,
+      setHome,
+    ],
   );
   useEffect(() => {
     mounted.current = true;
-    void navigate(".");
+    void navigate(initialPath.current);
     const active = operations.current;
     const navigationSequence = navigation;
     const previews = previewSequence;
@@ -286,6 +301,7 @@ export const FilesPanel = memo(function FilesPanel({
     setPreview(null);
   }
   async function openPreview(entry: FileEntry) {
+    if (previewOperation.current) cancel(previewOperation.current);
     const sequence = ++previewSequence.current;
     setPreview({ entry });
     try {
@@ -305,8 +321,9 @@ export const FilesPanel = memo(function FilesPanel({
     }
   }
   async function transferFile(direction: "upload" | "download", path: string) {
-    if (transfer) return;
+    if (activeTransfer.current) return;
     const operation = crypto.randomUUID();
+    activeTransfer.current = operation;
     operations.current.add(operation);
     setTransfer({ operation, direction, progress: null });
     try {
@@ -334,7 +351,10 @@ export const FilesPanel = memo(function FilesPanel({
         toast.error(String(reason));
     } finally {
       operations.current.delete(operation);
-      if (mounted.current) setTransfer(null);
+      if (activeTransfer.current === operation) {
+        activeTransfer.current = null;
+        if (mounted.current) setTransfer(null);
+      }
     }
   }
   const entries = (listing?.entries ?? []).filter(
@@ -435,8 +455,8 @@ export const FilesPanel = memo(function FilesPanel({
       </div>
       {error && (
         <div className="file-error" role="alert">
-          Cannot open {attemptedPath.current}: {error}{" "}
-          <Button onClick={() => go(attemptedPath.current)}>Retry</Button>
+          Cannot open {attemptedPath}: {error}{" "}
+          <Button onClick={() => go(attemptedPath)}>Retry</Button>
         </div>
       )}
       <div className={`files-layout${tree ? "" : " files-no-tree"}`}>

@@ -1,10 +1,10 @@
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { serverConnectionKey, type Server } from "../types";
 
-export function serverScope(server: Server, revision = 0) {
+export function serverScope(server: Server, revision = 0, instanceId = "") {
   return {
     id: server.id,
-    connection: `${serverConnectionKey(server)}:${revision}`,
+    connection: `${serverConnectionKey(server)}:${revision}:${instanceId}`,
     destination: JSON.stringify([
       server.id,
       server.sshHost,
@@ -18,13 +18,19 @@ const Context = createContext<ServerScope | null>(null);
 export function ServerScopeProvider({
   server,
   revision = 0,
+  instanceId = "",
   children,
 }: {
   server: Server;
   revision?: number;
+  instanceId?: string;
   children: ReactNode;
 }) {
-  const { id, connection, destination } = serverScope(server, revision);
+  const { id, connection, destination } = serverScope(
+    server,
+    revision,
+    instanceId,
+  );
   const value = useMemo(
     () => ({ id, connection, destination }),
     [id, connection, destination],

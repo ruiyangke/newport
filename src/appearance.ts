@@ -33,6 +33,9 @@ function subscribe(listener: () => void) {
   window.addEventListener(changed, listener);
   return () => window.removeEventListener(changed, listener);
 }
+export function useAppearance() {
+  return useSyncExternalStore(subscribe, getAppearance);
+}
 export function useResolvedAppearance() {
   return useSyncExternalStore(subscribe, () =>
     document.documentElement.classList.contains("dark") ? "dark" : "light",
