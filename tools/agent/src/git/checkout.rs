@@ -8,6 +8,7 @@ use super::{
 use git2::{AttrCheckFlags, Index, Repository};
 use serde_json::{json, Value};
 use std::{
+    collections::HashSet,
     ffi::OsStr,
     fs,
     os::unix::{ffi::OsStrExt, fs::PermissionsExt},
@@ -25,32 +26,113 @@ fn uncertain() -> Error {
 }
 
 pub(super) fn supported_files(repo: &Repository, target: &git2::Tree<'_>) -> Result<(), Error> {
-    supported_attributes(repo, target, false)
+    supported_attributes(repo, target, false, None)
+}
+/// Selected-file restoration already checks working-tree attributes and file
+/// modes through discard::guard_path. Check the destination index's rules only
+/// for those paths, including attributes inherited from their parent directories.
+pub(super) fn supported_index_paths(
+    repo: &Repository,
+    target: &mut Index,
+    paths: &[Vec<u8>],
+) -> Result<(), Error> {
+    let destination = Repository::open(repo.path()).map_err(engine)?;
+    destination.set_index(target).map_err(engine)?;
+    for bytes in paths {
+        let path = Path::new(OsStr::from_bytes(bytes));
+        for attribute in ["filter", "working-tree-encoding"] {
+            let value = destination
+                .get_attr_bytes(path, attribute, AttrCheckFlags::INDEX_ONLY)
+                .map_err(engine)?;
+            if !matches!(
+                git2::AttrValue::from_bytes(value),
+                git2::AttrValue::Unspecified | git2::AttrValue::False
+            ) {
+                return Err(Error::new(
+                    "UNSUPPORTED_FILTER",
+                    "This file requires an unsupported filter or encoding.",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 pub(super) fn supported_merge_files(
     repo: &Repository,
     target: &git2::Tree<'_>,
 ) -> Result<(), Error> {
-    supported_attributes(repo, target, true)
+    supported_attributes(repo, target, true, None)
+}
+/// Validate every input tree while resolving working-tree attributes only once
+/// per path. The cache belongs to this preparation, never to the repository.
+pub(super) fn supported_merge_trees(
+    repo: &Repository,
+    targets: &[git2::Tree<'_>],
+) -> Result<(), Error> {
+    let mut checks = MergeChecks::new(repo);
+    for target in targets {
+        checks.check(target)?;
+    }
+    Ok(())
+}
+/// Reuse only during one read-only preparation phase. Tree objects are immutable;
+/// working-tree attributes must be checked afresh after any repository mutation.
+pub(super) struct MergeChecks<'repo> {
+    repo: &'repo Repository,
+    trees: HashSet<git2::Oid>,
+    current: HashSet<Vec<u8>>,
+}
+impl<'repo> MergeChecks<'repo> {
+    pub(super) fn new(repo: &'repo Repository) -> Self {
+        Self {
+            repo,
+            trees: HashSet::new(),
+            current: HashSet::new(),
+        }
+    }
+    pub(super) fn check(&mut self, target: &git2::Tree<'_>) -> Result<(), Error> {
+        if !self.trees.contains(&target.id()) {
+            supported_attributes(self.repo, target, true, Some(&mut self.current))?;
+            self.trees.insert(target.id());
+        }
+        Ok(())
+    }
 }
 fn supported_attributes(
     repo: &Repository,
     target: &git2::Tree<'_>,
     merging: bool,
+    mut checked_current: Option<&mut HashSet<Vec<u8>>>,
 ) -> Result<(), Error> {
     let target_repo = Repository::open(repo.path()).map_err(engine)?;
     let mut target_index = Index::new().map_err(engine)?;
     target_index.read_tree(target).map_err(engine)?;
     target_repo.set_index(&mut target_index).map_err(engine)?;
     let current_index = repo.index().map_err(engine)?;
-    if target_index.len() + current_index.len() > 20_000 {
-        return Err(Error::new(
-            "LIMIT_EXCEEDED",
-            "Checkout attribute validation exceeds the entry limit.",
-        ));
-    }
-    for entry in target_index.iter().chain(current_index.iter()) {
-        if entry.mode == 0o160000 {
+    // Index entries are path-sorted. Walk their union without building another
+    // repository-sized collection or checking shared paths twice. Inspect both
+    // modes when a path exists in both indexes (including file/submodule changes).
+    let mut destination = target_index.iter().peekable();
+    let mut current = current_index.iter().peekable();
+    loop {
+        let (entry, other_is_submodule) = match (destination.peek(), current.peek()) {
+            (Some(a), Some(b)) if a.path == b.path => {
+                let other = current.next().expect("peeked current entry");
+                (
+                    destination.next().expect("peeked destination entry"),
+                    other.mode == 0o160000,
+                )
+            }
+            (Some(a), Some(b)) if a.path < b.path => {
+                (destination.next().expect("peeked destination entry"), false)
+            }
+            (Some(_), Some(_)) | (None, Some(_)) => {
+                (current.next().expect("peeked current entry"), false)
+            }
+            (Some(_), None) => (destination.next().expect("peeked destination entry"), false),
+            (None, None) => break,
+        };
+        if entry.mode == 0o160000 || other_is_submodule {
             return Err(Error::new(
                 "UNSUPPORTED_CAPABILITY",
                 "Submodule checkout is not implemented yet.",
@@ -61,6 +143,13 @@ fn supported_attributes(
             (repo, AttrCheckFlags::FILE_THEN_INDEX),
             (&target_repo, AttrCheckFlags::INDEX_ONLY),
         ] {
+            if flags == AttrCheckFlags::FILE_THEN_INDEX {
+                if let Some(checked) = checked_current.as_mut() {
+                    if checked.contains(entry.path.as_slice()) {
+                        continue;
+                    }
+                }
+            }
             for attribute in ["filter", "working-tree-encoding", "merge"] {
                 if attribute == "merge" && !merging {
                     continue;
@@ -88,6 +177,11 @@ fn supported_attributes(
                     git2::AttrValue::Unspecified | git2::AttrValue::False
                 ) {
                     return Err(Error::new("UNSUPPORTED_FILTER", "Checkout requires a custom filter or encoding that is not implemented yet."));
+                }
+            }
+            if flags == AttrCheckFlags::FILE_THEN_INDEX {
+                if let Some(checked) = checked_current.as_mut() {
+                    checked.insert(entry.path.clone());
                 }
             }
         }
@@ -368,6 +462,78 @@ mod tests {
         assert_eq!(fs::read(temp.path().join("local")).unwrap(), b"my changes");
     }
     #[test]
+    fn checkout_ignores_missing_unrelated_checkout_but_preserves_its_reservation() {
+        let (temp, repo, old, new) = fixture();
+        let parent = tempfile::tempdir().unwrap();
+        let linked_path = parent.path().join("linked");
+        repo.worktree("linked", &linked_path, None).unwrap();
+        fs::remove_dir_all(&linked_path).unwrap();
+        let admin_head = repo.commondir().join("worktrees/linked/HEAD");
+        let registered_head = fs::read(&admin_head).unwrap();
+        let index = fs::read(repo.path().join("index")).unwrap();
+        assert_eq!(
+            run(
+                &repo,
+                CheckoutTarget::Branch {
+                    name: "linked".into(),
+                    expected_oid: new.to_string(),
+                }
+            )
+            .unwrap_err()
+            .code,
+            "BRANCH_IN_USE"
+        );
+        assert_eq!(repo.head().unwrap().target(), Some(new));
+        assert_eq!(fs::read(repo.path().join("index")).unwrap(), index);
+        run(
+            &repo,
+            CheckoutTarget::Branch {
+                name: "previous".into(),
+                expected_oid: old.to_string(),
+            },
+        )
+        .unwrap();
+        let reopened = Repository::open(temp.path()).unwrap();
+        assert_eq!(reopened.head().unwrap().shorthand().unwrap(), "previous");
+        assert_eq!(fs::read(temp.path().join("file")).unwrap(), b"base");
+        assert_eq!(fs::read(admin_head).unwrap(), registered_head);
+        assert!(!linked_path.exists());
+    }
+    #[test]
+    fn unreadable_registered_head_refuses_checkout_before_mutation() {
+        let (temp, repo, old, new) = fixture();
+        let parent = tempfile::tempdir().unwrap();
+        repo.worktree("linked", &parent.path().join("linked"), None)
+            .unwrap();
+        let head = repo.commondir().join("worktrees/linked/HEAD");
+        fs::remove_file(&head).unwrap();
+        let index = fs::read(repo.path().join("index")).unwrap();
+        for malformed in [
+            None,
+            Some("not a HEAD"),
+            Some("ref: refs/heads/invalid name\n"),
+        ] {
+            if let Some(contents) = malformed {
+                fs::write(&head, contents).unwrap();
+            }
+            assert_eq!(
+                run(
+                    &repo,
+                    CheckoutTarget::Branch {
+                        name: "previous".into(),
+                        expected_oid: old.to_string(),
+                    }
+                )
+                .unwrap_err()
+                .code,
+                "WORKTREE_METADATA_UNAVAILABLE"
+            );
+            assert_eq!(repo.head().unwrap().target(), Some(new));
+            assert_eq!(fs::read(repo.path().join("index")).unwrap(), index);
+            assert_eq!(fs::read(temp.path().join("file")).unwrap(), b"next");
+        }
+    }
+    #[test]
     fn checkout_conflicts_do_not_change_head_index_or_files() {
         let (temp, repo, old, new) = fixture();
         fs::write(temp.path().join("file"), "mine").unwrap();
@@ -548,6 +714,119 @@ mod tests {
             b"local branch commit"
         );
     }
+    #[test]
+    fn batched_merge_attributes_check_each_tree_and_do_not_cache_across_calls() {
+        let (temp, repo, _, new) = fixture();
+        let plain = repo.find_commit(new).unwrap().tree().unwrap();
+        let mut builder = repo.treebuilder(Some(&plain)).unwrap();
+        for (rule, code) in [
+            ("file filter=custom\n", "UNSUPPORTED_FILTER"),
+            ("file merge=custom\n", "UNSUPPORTED_MERGE_DRIVER"),
+        ] {
+            builder
+                .insert(
+                    ".gitattributes",
+                    repo.blob(rule.as_bytes()).unwrap(),
+                    0o100644,
+                )
+                .unwrap();
+            let target = repo.find_tree(builder.write().unwrap()).unwrap();
+            let mut checks = MergeChecks::new(&repo);
+            for _ in 0..2 {
+                assert_eq!(checks.check(&target).unwrap_err().code, code);
+            }
+            assert_eq!(
+                supported_merge_trees(&repo, &[plain.clone(), target])
+                    .unwrap_err()
+                    .code,
+                code
+            );
+        }
+        supported_merge_trees(&repo, &[plain.clone(), plain.clone()]).unwrap();
+        fs::write(temp.path().join(".gitattributes"), "file filter=custom\n").unwrap();
+        assert_eq!(
+            supported_merge_trees(&repo, &[plain.clone(), plain])
+                .unwrap_err()
+                .code,
+            "UNSUPPORTED_FILTER"
+        );
+    }
+
+    #[test]
+    fn batched_merge_attributes_check_paths_present_only_in_later_trees() {
+        let (temp, repo, _, new) = fixture();
+        let plain = repo.find_commit(new).unwrap().tree().unwrap();
+        let mut builder = repo.treebuilder(Some(&plain)).unwrap();
+        builder
+            .insert("restored", repo.blob(b"content").unwrap(), 0o100644)
+            .unwrap();
+        let restored = repo.find_tree(builder.write().unwrap()).unwrap();
+        fs::write(
+            temp.path().join(".gitattributes"),
+            "restored working-tree-encoding=UTF-16\n",
+        )
+        .unwrap();
+        supported_merge_files(&repo, &plain).unwrap();
+        assert_eq!(
+            supported_merge_trees(&repo, &[plain, restored])
+                .unwrap_err()
+                .code,
+            "UNSUPPORTED_FILTER"
+        );
+    }
+
+    #[test]
+    fn attribute_validation_walks_large_indexes_and_checks_late_target_rules() {
+        let (_temp, repo, _, _) = fixture();
+        let mut index = repo.index().unwrap();
+        let template = index.get_path(Path::new("file"), 0).unwrap();
+        for number in 0..20_001 {
+            let mut entry = index.get_path(Path::new("file"), 0).unwrap();
+            entry.path = format!("many/file-{number:05}").into_bytes();
+            index.add(&entry).unwrap();
+        }
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        supported_files(&repo, &repo.find_tree(tree_id).unwrap()).unwrap();
+
+        let mut attributes = template;
+        attributes.path = b".gitattributes".to_vec();
+        attributes.id = repo.blob(b"many/file-20000 filter=custom\n").unwrap();
+        index.add(&attributes).unwrap();
+        let filtered = index.write_tree().unwrap();
+        assert_eq!(
+            supported_files(&repo, &repo.find_tree(filtered).unwrap())
+                .unwrap_err()
+                .code,
+            "UNSUPPORTED_FILTER"
+        );
+    }
+
+    #[test]
+    fn attribute_union_checks_both_modes_for_shared_paths() {
+        let (_temp, repo, _, new) = fixture();
+        let target = repo.find_commit(new).unwrap().tree().unwrap();
+        let mut index = repo.index().unwrap();
+        let mut entry = index.get_path(Path::new("file"), 0).unwrap();
+        entry.mode = 0o160000;
+        entry.id = new;
+        index.add(&entry).unwrap();
+        index.write().unwrap();
+        assert_eq!(
+            supported_files(&repo, &target).unwrap_err().code,
+            "UNSUPPORTED_CAPABILITY"
+        );
+        let submodule_tree = index.write_tree().unwrap();
+        index.read_tree(&target).unwrap();
+        index.write().unwrap();
+        assert_eq!(
+            supported_files(&repo, &repo.find_tree(submodule_tree).unwrap())
+                .unwrap_err()
+                .code,
+            "UNSUPPORTED_CAPABILITY"
+        );
+    }
+
     #[test]
     fn rejects_destination_filters_and_stale_branches() {
         let (temp, repo, old, _) = fixture();

@@ -1,5 +1,7 @@
+import { gitErrorMessage } from "../git/errors";
 import {
   useId,
+  useMemo,
   useLayoutEffect,
   useRef,
   useState,
@@ -8,13 +10,14 @@ import {
 } from "react";
 import { Check, Copy } from "lucide-react";
 import { cn } from "cn";
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import type { GitPath } from "../domain/git";
-import {
-  appendGitPage,
-  type GitCommitFiles,
-  type GitHistory,
-} from "../domain/gitResponses";
+import { appendGitDiffPage } from "../domain/gitResponses";
+import { createDiffRenderer } from "../git/historicalDiff";
+import type { GitHistory } from "../domain/gitResponses";
+import { useGitPageLoader } from "../hooks/useGitPageLoader";
+import { GitLoadMore } from "./GitLoadMore";
+import { gitProjectsFor } from "../git/registry";
 import { gitQueries } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
 import { Button, Select, SelectItem } from "./controls";
@@ -140,14 +143,20 @@ function CommitBody({ body }: { body: string }) {
 
 export function GitCommitInspector({
   repoId,
-  commit,
+  commit: preview,
   actions,
 }: {
   repoId: string;
   commit: Commit;
   /** The commit's own actions, drawn in its header. */
-  actions?: ReactNode;
+  actions?: ReactNode | ((commit: Commit) => ReactNode);
 }) {
+  const scope = useCurrentServerScope();
+  const detail = useQuery({
+    ...gitQueries.commit(scope, repoId, preview.oid.hex),
+    enabled: preview.messageTruncated,
+  });
+  const commit = detail.data ?? preview;
   const [parentIndex, setParentIndex] = useState(0);
   const [copied, setCopied] = useState(false);
   const date = new Date(commit.time * 1000);
@@ -173,11 +182,24 @@ export function GitCommitInspector({
                 role="status"
                 className="mt-[4px] text-[11px] text-muted-foreground"
               >
-                The commit message is truncated.
+                {detail.isFetching
+                  ? "Loading full commit message…"
+                  : "The commit message is truncated."}
               </p>
             )}
+            {detail.isError && !detail.isFetching && (
+              <div
+                role="alert"
+                className="mt-[6px] text-[12px] text-destructive"
+              >
+                {gitErrorMessage(detail.error)}
+                <Button onClick={() => void detail.refetch()}>
+                  Retry commit message
+                </Button>
+              </div>
+            )}
           </div>
-          {actions}
+          {typeof actions === "function" ? actions(commit) : actions}
         </div>
         <div className="git-commit-identity mt-[8px] flex flex-wrap items-center gap-x-[10px] gap-y-[4px] text-[11px] leading-[16px] text-muted-foreground">
           <span className="text-foreground" title={commit.author.email}>
@@ -255,68 +277,38 @@ function CommitFiles({
   parentIndex: number;
 }) {
   const scope = useCurrentServerScope();
-  // Each page is its own read, keyed by the cursor that asked for it; these
-  // are the cursors of the pages after the first, in the order visited.
-  const [cursors, setCursors] = useState<string[]>([]);
-  // The page asked for. It is on screen once it, and each page before it,
-  // has arrived and continues the one before.
-  const [requested, setRequested] = useState(0);
   const stacked = useStacked();
   const statusId = useId();
-  // A selection belongs to the page it was made on, so it lapses when another
-  // page arrives.
+  const params = { repoId, commitOid, parentIndex };
+  const read = useQuery(gitQueries.commitFiles(scope, params));
+  const page = read.data ?? null;
+  const busy = read.isFetching;
+  const error = read.isError && !busy ? gitErrorMessage(read.error) : "";
+  const pages = useGitPageLoader({
+    queryKey: gitQueries.commitFiles(scope, params).queryKey,
+    page,
+    enabled: !busy && !read.isError,
+    read: (cursor, signal) =>
+      gitProjectsFor(scope)
+        .repositories.withSignal(signal)
+        .commitFiles({ ...params, cursor }),
+    entryKey: (file) =>
+      JSON.stringify([file.oldPath?.bytesB64, file.newPath?.bytesB64]),
+    prefetch: true,
+  });
+  // Appending pages preserves the selection and does not request another diff.
+  // A refreshed comparison retires the selection with its old snapshot.
   const [picked, setPicked] = useState<{
-    page: number;
+    snapshot: string;
     path: GitPath;
   } | null>(null);
-  const reads = useQueries({
-    queries: [undefined, ...cursors].map((cursor) =>
-      gitQueries.commitFiles(
-        scope,
-        cursor === undefined
-          ? { repoId, commitOid, parentIndex }
-          : { repoId, commitOid, parentIndex, cursor },
-      ),
-    ),
-  });
-  const pages: GitCommitFiles[] = [];
-  let failure: unknown = null;
-  for (const [index, read] of reads.slice(0, requested + 1).entries()) {
-    if (read.isError && !read.isFetching) failure = read.error;
-    if (!read.data || failure) break;
-    if (index > 0)
-      try {
-        appendGitPage(pages[index - 1], read.data, cursors[index - 1]);
-      } catch (error) {
-        failure = error;
-        break;
-      }
-    pages.push(read.data);
-  }
-  const busy = reads.slice(0, requested + 1).some((read) => read.isFetching);
-  const error = failure === null ? "" : errorMessage(failure);
-  const pageIndex = Math.max(0, pages.length - 1);
-  const page = pages[pageIndex];
-  // The first file is shown until another is chosen, so the pane opens on a
-  // diff rather than on an instruction to pick one.
   const first = page?.entries.find((file) => file.newPath ?? file.oldPath);
   const selected =
-    picked?.page === pageIndex
-      ? picked.path
+    picked?.snapshot === page?.snapshot
+      ? (picked?.path ?? null)
       : (first?.newPath ?? first?.oldPath ?? null);
   const setSelected = (path: GitPath | null) =>
-    setPicked(path && { page: pageIndex, path });
-  function next() {
-    if (!page?.nextCursor || busy) return;
-    const target = pageIndex + 1;
-    if (cursors[pageIndex] !== page.nextCursor)
-      setCursors([...cursors.slice(0, pageIndex), page.nextCursor]);
-    else if (reads[target]?.isError) void reads[target].refetch();
-    setRequested(target);
-  }
-  const offset = pages
-    .slice(0, pageIndex)
-    .reduce((count, page) => count + page.entries.length, 0);
+    setPicked(path && page ? { snapshot: page.snapshot, path } : null);
   const fileList = page && (
     <section
       className="flex h-full min-h-0 flex-1 flex-col overflow-hidden"
@@ -366,29 +358,18 @@ function CommitFiles({
               </li>
             );
           })}
+          <li>
+            <GitLoadMore
+              cursor={page.nextCursor}
+              loading={pages.loading}
+              error={pages.error}
+              disabled={busy}
+              onLoad={() => void pages.load()}
+              label="Load more files"
+              endLabel="All commit files loaded"
+            />
+          </li>
         </ul>
-      )}
-      {(page.nextCursor || pageIndex > 0) && (
-        <nav
-          className="git-commit-file-pages flex flex-none flex-wrap items-center gap-[8px] border-t border-border px-[12px] py-[8px] text-[12px]"
-          aria-label="Commit file pages"
-        >
-          <span>
-            {offset + 1}–{offset + page.entries.length}
-          </span>
-          <Button
-            disabled={busy || pageIndex === 0}
-            onClick={() => {
-              setRequested(pageIndex - 1);
-              setSelected(null);
-            }}
-          >
-            Previous files
-          </Button>
-          <Button disabled={busy || !page.nextCursor} onClick={next}>
-            Next files
-          </Button>
-        </nav>
       )}
     </section>
   );
@@ -416,10 +397,8 @@ function CommitFiles({
           {error}
           <Button
             onClick={() => {
-              setCursors([]);
-              setRequested(0);
               setSelected(null);
-              void reads[0].refetch();
+              void read.refetch();
             }}
             disabled={busy}
           >
@@ -484,13 +463,52 @@ function CommitDiff({
   path: GitPath;
 }) {
   const scope = useCurrentServerScope();
-  // A historical diff is fixed by the commit, so it is read once per file.
-  const diff = useQuery(
-    gitQueries.commitDiff(scope, { repoId, commitOid, parentIndex, path }),
+  const params = {
+    repoId,
+    commitOid,
+    parentIndex,
+    path,
+    pageSize: 5000,
+    maxBytes: 65536,
+  };
+  const query = gitQueries.commitDiffPage(scope, params);
+  const diff = useQuery(query);
+  const page = diff.data ?? null;
+  const pages = useGitPageLoader({
+    queryKey: query.queryKey,
+    page,
+    enabled: !diff.isFetching && !diff.isError,
+    read: (cursor, signal) =>
+      gitProjectsFor(scope)
+        .repositories.withSignal(signal)
+        .commitDiffPage({
+          ...params,
+          cursor,
+          maxBytes: 524288,
+        }),
+    entryKey: (file) => String(file.fileIndex),
+    merge: appendGitDiffPage,
+    prefetch: true,
+  });
+  const renderDiff = useMemo(() => createDiffRenderer(), []);
+  const rendered = useMemo(
+    () => (page ? renderDiff(page) : null),
+    [page, renderDiff],
+  );
+  const footer = page && (
+    <GitLoadMore
+      cursor={page.nextCursor}
+      loading={pages.loading}
+      error={pages.error}
+      disabled={diff.isFetching}
+      onLoad={() => void pages.load()}
+      label="Load more changes"
+      endLabel="All changes loaded"
+    />
   );
   const error =
     diff.isError && !diff.isFetching ? errorMessage(diff.error) : "";
-  const stat = diff.data?.files.reduce(
+  const stat = rendered?.files.reduce(
     (total, file) => ({
       additions: total.additions + file.additions,
       deletions: total.deletions + file.deletions,
@@ -518,8 +536,32 @@ function CommitDiff({
           {error}
           <Button onClick={() => void diff.refetch()}>Retry diff</Button>
         </GitNotice>
-      ) : diff.data ? (
-        <GitDiffView diff={diff.data} />
+      ) : rendered ? (
+        <>
+          {page?.entries.some(
+            (file) => file.omissionReason === "file_size_limit",
+          ) && (
+            <GitNotice tone="info">
+              This file exceeds the agent’s text diff size limit.
+            </GitNotice>
+          )}
+          {page?.entries.at(-1)?.hunks.at(-1)?.lines.at(-1)?.lineComplete ===
+            false && (
+            <p
+              role="status"
+              className="px-[12px] text-[11px] text-muted-foreground"
+            >
+              A long line continues on the next page.
+            </p>
+          )}
+          {page?.entries.every(
+            (file) => file.omissionReason === "file_size_limit",
+          ) ? (
+            footer
+          ) : (
+            <GitDiffView diff={rendered} footer={footer} />
+          )}
+        </>
       ) : (
         <p role="status" className="git-projects-empty">
           Loading historical diff…

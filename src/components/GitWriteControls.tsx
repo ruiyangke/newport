@@ -2,6 +2,9 @@ import type { GitStatus } from "../domain/gitResponses";
 import type { GitOperationReceipt, GitWriteAction } from "../domain/git";
 import { Button, Textarea } from "./controls";
 import { GitDiscardControl } from "./GitDiscardControl";
+import { useState } from "react";
+import { Modal } from "./Editors";
+import { Checkbox } from "./ui/checkbox";
 
 /** Helper copy in the recovery panel: small and muted. */
 const note = "text-[12px] text-muted-foreground";
@@ -143,6 +146,7 @@ export function GitWriteControls({
 const outcomeLabels: Record<GitOperationReceipt["state"], string> = {
   pending: "Outcome not yet confirmed",
   outcome_unknown: "Outcome unknown",
+  reviewed_unknown: "Reviewed · outcome unknown",
   succeeded: "Completed",
   failed: "Failed",
   rejected: "Not applied",
@@ -155,6 +159,7 @@ export function GitRecoveryPanel({
   busy,
   onCheck,
   onAcknowledge,
+  onReview,
   onRefresh,
 }: {
   receipts: GitOperationReceipt[] | null;
@@ -163,8 +168,15 @@ export function GitRecoveryPanel({
   busy: boolean;
   onCheck: (id: string) => void;
   onAcknowledge: (id: string) => void;
+  onReview?: (id: string) => void;
   onRefresh: () => void;
 }) {
+  const [reviewing, setReviewing] = useState<string | null>(null);
+  const [inspected, setInspected] = useState(false);
+  const review = receipts?.find(
+    (receipt) =>
+      receipt.operationId === reviewing && receipt.state === "outcome_unknown",
+  );
   if (!error && (!receipts || !receipts.length)) return null;
   return (
     <section
@@ -227,9 +239,62 @@ export function GitRecoveryPanel({
                 Dismiss outcome
               </Button>
             )}
+            {receipt.state === "outcome_unknown" && onReview && (
+              <Button
+                disabled={busy}
+                onClick={() => {
+                  setInspected(false);
+                  setReviewing(receipt.operationId);
+                }}
+              >
+                Review interrupted operation…
+              </Button>
+            )}
           </div>
         );
       })}
+      {review && onReview && (
+        <Modal
+          title="Review interrupted operation"
+          busy={busy}
+          onClose={() => setReviewing(null)}
+        >
+          <div className="grid gap-4 px-6 pb-6 text-sm">
+            <p>
+              {review.action} may have changed the repository before it stopped.
+              Inspect its branch, files, and remote state before allowing new
+              operations.
+            </p>
+            <p>
+              Recording this review keeps the original outcome unknown. It does
+              not retry the operation or mark it successful.
+            </p>
+            <label className="flex items-start gap-2">
+              <Checkbox
+                checked={inspected}
+                disabled={busy}
+                onCheckedChange={(value) => setInspected(value === true)}
+              />
+              I inspected the repository and am ready to allow new operations.
+            </label>
+            <footer className="flex justify-end gap-2">
+              <Button disabled={busy} onClick={() => setReviewing(null)}>
+                Cancel
+              </Button>
+              <Button
+                disabled={busy || !inspected}
+                onClick={() => {
+                  if (!inspected || busy) return;
+                  onReview(review.operationId);
+                  setReviewing(null);
+                }}
+              >
+                Record review
+              </Button>
+            </footer>
+          </div>
+        </Modal>
+      )}
     </section>
   );
 }

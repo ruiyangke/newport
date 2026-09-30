@@ -4,6 +4,16 @@ use git2::{DiffOptions, Index, Patch, Repository};
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
 
+fn digest_id(hash: Sha256) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut id = String::with_capacity(64);
+    for byte in hash.finalize() {
+        id.push(HEX[usize::from(byte >> 4)] as char);
+        id.push(HEX[usize::from(byte & 15)] as char);
+    }
+    id
+}
+
 fn engine(_: git2::Error) -> Error {
     Error::new(
         "HUNK_APPLY_FAILED",
@@ -28,7 +38,7 @@ pub(super) fn line_id(hunk: &str, ordinal: usize, line: &git2::DiffLine<'_>) -> 
     hash.update([line.origin() as u8]);
     hash.update((line.content().len() as u64).to_be_bytes());
     hash.update(line.content());
-    Some(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Some(digest_id(hash))
 }
 
 /// Split into lines that keep their terminators, so concatenation is lossless
@@ -140,7 +150,7 @@ pub(super) fn id(patch: &Patch<'_>, ordinal: usize) -> Result<String, Error> {
         hash.update((line.content().len() as u64).to_be_bytes());
         hash.update(line.content());
     }
-    Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(digest_id(hash))
 }
 
 /// Positions of changed diff lines as (hunk ordinal, line ordinal).
@@ -456,6 +466,21 @@ mod tests {
     use super::*;
     use crate::git::{operations, protocol::Action, repository};
     use std::fs;
+
+    #[test]
+    fn digest_encoding_preserves_existing_identifier_format() {
+        for value in 0u8..=255 {
+            let mut hash = Sha256::new();
+            hash.update([value]);
+            let expected: String = hash
+                .clone()
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            assert_eq!(digest_id(hash), expected);
+        }
+    }
 
     fn fixture() -> (tempfile::TempDir, Repository, String, String) {
         let temp = tempfile::tempdir().unwrap();

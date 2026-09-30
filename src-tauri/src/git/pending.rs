@@ -34,12 +34,17 @@ pub enum ReceiptState {
     Rejected,
     NeedsResolution,
     OutcomeUnknown,
+    ReviewedUnknown,
 }
 impl ReceiptState {
     fn complete(self) -> bool {
         matches!(
             self,
-            Self::Succeeded | Self::Failed | Self::Rejected | Self::NeedsResolution
+            Self::Succeeded
+                | Self::Failed
+                | Self::Rejected
+                | Self::NeedsResolution
+                | Self::ReviewedUnknown
         )
     }
 }
@@ -78,6 +83,7 @@ pub(super) fn remote_outcome(
         Some("failed") => Ok(ReceiptState::Failed),
         Some("needs_resolution") => Ok(ReceiptState::NeedsResolution),
         Some("outcome_unknown") => Ok(ReceiptState::OutcomeUnknown),
+        Some("reviewed_unknown") => Ok(ReceiptState::ReviewedUnknown),
         _ => Err(()),
     }
 }
@@ -171,13 +177,70 @@ impl PendingOperations {
             .iter_mut()
             .find(|row| row.operation_id == operation_id && row.server_id == server_id)
         {
-            if row.state.complete() && row.state != state {
+            if row.state == ReceiptState::ReviewedUnknown {
+                match state {
+                    ReceiptState::OutcomeUnknown | ReceiptState::ReviewedUnknown => return Ok(()),
+                    ReceiptState::Succeeded
+                    | ReceiptState::Failed
+                    | ReceiptState::NeedsResolution => {}
+                    _ => {
+                        return Err(
+                            "A reviewed operation cannot return to an unconfirmed state.".into(),
+                        )
+                    }
+                }
+            } else if row.state.complete() && row.state != state {
                 return Err("Git operation outcome changed unexpectedly.".into());
             }
             row.state = state;
             self.save(&rows)?;
         }
         Ok(())
+    }
+    fn review_ready(&self, server_id: Uuid, operation_id: Uuid) -> Result<(), String> {
+        let _guard = self
+            .access
+            .lock()
+            .map_err(|_| "Git recovery log is unavailable.")?;
+        let rows = self.read()?;
+        let row = rows
+            .iter()
+            .find(|row| row.server_id == server_id && row.operation_id == operation_id)
+            .ok_or("The saved operation does not belong to this server.")?;
+        if !matches!(
+            row.state,
+            ReceiptState::OutcomeUnknown | ReceiptState::ReviewedUnknown
+        ) {
+            return Err("Refresh this operation's outcome before reviewing it.".into());
+        }
+        Ok(())
+    }
+    /// Persist an operator acknowledgement only after remote journal confirmation.
+    /// The boolean is supplied by the native lookup flow, never by the frontend.
+    fn review(
+        &self,
+        server_id: Uuid,
+        operation_id: Uuid,
+        confirmed_reviewed_unknown: bool,
+    ) -> Result<(), String> {
+        if !confirmed_reviewed_unknown {
+            return Err("Only a remotely confirmed review can be saved.".into());
+        }
+        let _guard = self
+            .access
+            .lock()
+            .map_err(|_| "Git recovery log is unavailable.")?;
+        let mut rows = self.read()?;
+        let row = rows
+            .iter_mut()
+            .find(|row| row.server_id == server_id && row.operation_id == operation_id)
+            .ok_or("The saved operation does not belong to this server.")?;
+        match row.state {
+            ReceiptState::OutcomeUnknown => row.state = ReceiptState::ReviewedUnknown,
+            ReceiptState::ReviewedUnknown => return Ok(()),
+            _ => return Err("The operation outcome changed. Refresh it before reviewing.".into()),
+        }
+        self.save(&rows)
     }
     fn acknowledge(&self, server_id: Uuid, operation_id: Uuid) -> Result<(), String> {
         let _guard = self
@@ -227,6 +290,79 @@ pub async fn git_acknowledge_operation(
         .map_err(|e| e.to_string())?
 }
 
+async fn review_with_remote_confirmation<F, Fut>(
+    pending: PendingOperations,
+    server_id: Uuid,
+    operation_id: Uuid,
+    lookup: F,
+) -> Result<(), super::protocol::Error>
+where
+    F: FnOnce(super::protocol::Request) -> Fut,
+    Fut: std::future::Future<Output = Result<serde_json::Value, super::protocol::Error>>,
+{
+    let check = pending.clone();
+    tokio::task::spawn_blocking(move || check.review_ready(server_id, operation_id))
+        .await
+        .map_err(|_| {
+            super::protocol::Error::new(
+                "LOCAL_JOURNAL_UNAVAILABLE",
+                "Git recovery log is unavailable.",
+            )
+        })?
+        .map_err(|message| super::protocol::Error::new("OPERATION_NOT_REVIEWABLE", message))?;
+    let id = operation_id.to_string();
+    // Review is idempotent and never executes the original Git action.
+    let result = lookup(super::protocol::Request::Review {
+        operation_id: id.clone(),
+    })
+    .await?;
+    let confirmed_reviewed_unknown =
+        remote_outcome(&result, &id) == Ok(ReceiptState::ReviewedUnknown);
+    if !confirmed_reviewed_unknown {
+        return Err(super::protocol::Error::new(
+            "OPERATION_NOT_REVIEWABLE",
+            "The server did not confirm the operation review.",
+        ));
+    }
+    tokio::task::spawn_blocking(move || {
+        pending.review(server_id, operation_id, confirmed_reviewed_unknown)
+    })
+    .await
+    .map_err(|_| {
+        super::protocol::Error::new(
+            "LOCAL_JOURNAL_UNAVAILABLE",
+            "Git recovery log is unavailable.",
+        )
+    })?
+    .map_err(|message| super::protocol::Error::new("OPERATION_NOT_REVIEWABLE", message))
+}
+
+#[tauri::command]
+pub async fn git_review_operation(
+    app: tauri::AppHandle,
+    preferences: State<'_, crate::preferences::Preferences>,
+    state: State<'_, super::Shared>,
+    sessions: State<'_, super::Sessions>,
+    pending: State<'_, PendingOperations>,
+    server_id: Uuid,
+    operation_id: Uuid,
+) -> Result<(), super::protocol::Error> {
+    let ledger = pending.inner().clone();
+    review_with_remote_confirmation(ledger, server_id, operation_id, |request| {
+        super::git_request(
+            app,
+            preferences,
+            state,
+            sessions,
+            pending,
+            server_id,
+            request,
+            None,
+        )
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +392,190 @@ mod tests {
         assert_eq!(reopened.read().unwrap().len(), 1);
         reopened.acknowledge(server, operation).unwrap();
         assert!(reopened.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reviewed_unknown_is_persisted_nonblocking_and_cannot_be_replayed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("operations.json");
+        let store = PendingOperations::new(path.clone());
+        let server = Uuid::new_v4();
+        let operation = Uuid::new_v4();
+        store
+            .begin(server, operation, "pull.fast_forward".into())
+            .unwrap();
+        assert!(store.review(server, operation, true).is_err());
+        store
+            .observe(server, operation, ReceiptState::OutcomeUnknown)
+            .unwrap();
+        assert!(store.acknowledge(server, operation).is_err());
+        assert!(store.review(server, operation, false).is_err());
+        assert!(store.review(Uuid::new_v4(), operation, true).is_err());
+        store.review(server, operation, true).unwrap();
+        let reopened = PendingOperations::new(path.clone());
+        assert_eq!(
+            reopened.read().unwrap()[0].state,
+            ReceiptState::ReviewedUnknown
+        );
+        assert!(ReceiptState::ReviewedUnknown.complete());
+        assert!(String::from_utf8(fs::read(path).unwrap())
+            .unwrap()
+            .contains("reviewed_unknown"));
+        assert!(reopened
+            .begin(server, operation, "pull.fast_forward".into())
+            .is_err());
+        reopened
+            .observe(server, operation, ReceiptState::OutcomeUnknown)
+            .unwrap();
+        assert_eq!(
+            reopened.read().unwrap()[0].state,
+            ReceiptState::ReviewedUnknown
+        );
+        assert!(reopened
+            .observe(server, operation, ReceiptState::Pending)
+            .is_err());
+        assert!(reopened
+            .observe(server, operation, ReceiptState::Rejected)
+            .is_err());
+        assert_eq!(
+            reopened.read().unwrap()[0].state,
+            ReceiptState::ReviewedUnknown
+        );
+        reopened
+            .observe(server, operation, ReceiptState::Succeeded)
+            .unwrap();
+        assert_eq!(reopened.read().unwrap()[0].state, ReceiptState::Succeeded);
+    }
+
+    #[test]
+    fn reconnect_recovers_a_review_whose_response_was_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PendingOperations::new(dir.path().join("operations.json"));
+        let server = Uuid::new_v4();
+        let operation = Uuid::new_v4();
+        store
+            .begin(server, operation, "pull.fast_forward".into())
+            .unwrap();
+        store
+            .observe(server, operation, ReceiptState::OutcomeUnknown)
+            .unwrap();
+        let response = serde_json::json!({"operationId":operation,"state":"reviewed_unknown"});
+        store
+            .observe(
+                server,
+                operation,
+                remote_outcome(&response, &operation.to_string()).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            store.read().unwrap()[0].state,
+            ReceiptState::ReviewedUnknown
+        );
+        store.review(server, operation, true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn review_confirms_remote_journal_and_rejects_stale_or_uncertain_results() {
+        use super::super::protocol::{Error, Request};
+        let dir = tempfile::tempdir().unwrap();
+        let store = PendingOperations::new(dir.path().join("operations.json"));
+        let server = Uuid::new_v4();
+        let operation = Uuid::new_v4();
+        store
+            .begin(server, operation, "pull.fast_forward".into())
+            .unwrap();
+        store
+            .observe(server, operation, ReceiptState::OutcomeUnknown)
+            .unwrap();
+        let initial = fs::read(&store.path).unwrap();
+        for response in [
+            Err(Error::transport("connection lost")),
+            Err(Error::new("OPERATION_NOT_FOUND", "missing")),
+            Ok(serde_json::json!({"operationId":operation,"state":"running"})),
+            Ok(serde_json::json!({"operationId":operation,"state":"pending"})),
+            Ok(serde_json::json!({"operationId":operation,"state":"outcome_unknown"})),
+            Ok(serde_json::json!({"operationId":operation,"state":"succeeded"})),
+            Ok(serde_json::json!({"operationId":Uuid::new_v4(),"state":"outcome_unknown"})),
+        ] {
+            let result=review_with_remote_confirmation(store.clone(),server,operation,|request|async move {
+                assert!(matches!(request,Request::Review{operation_id} if operation_id==operation.to_string()));response
+            }).await;
+            assert!(result.is_err());
+            assert_eq!(fs::read(&store.path).unwrap(), initial);
+        }
+        let unknown = serde_json::json!({"operationId":operation,"state":"reviewed_unknown"});
+        assert!(review_with_remote_confirmation(
+            store.clone(),
+            Uuid::new_v4(),
+            operation,
+            |_| async { Ok(unknown.clone()) }
+        )
+        .await
+        .is_err());
+        assert_eq!(fs::read(&store.path).unwrap(), initial);
+        // A second observation finishing between lookup and persistence wins;
+        // a stale unknown response cannot overwrite a confirmed outcome.
+        assert!(
+            review_with_remote_confirmation(store.clone(), server, operation, |_| async {
+                store
+                    .observe(server, operation, ReceiptState::Failed)
+                    .unwrap();
+                Ok(unknown.clone())
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(store.read().unwrap()[0].state, ReceiptState::Failed);
+        let second = Uuid::new_v4();
+        store.begin(server, second, "merge".into()).unwrap();
+        store
+            .observe(server, second, ReceiptState::OutcomeUnknown)
+            .unwrap();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        review_with_remote_confirmation(store.clone(), server, second, |request| async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert!(
+                matches!(request,Request::Review{operation_id} if operation_id==second.to_string())
+            );
+            Ok(serde_json::json!({"operationId":second,"state":"reviewed_unknown"}))
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            store.read().unwrap()[1].state,
+            ReceiptState::ReviewedUnknown
+        );
+    }
+
+    #[tokio::test]
+    async fn review_preflight_rejects_pending_missing_and_other_servers_without_lookup() {
+        use super::super::protocol::Error;
+        let dir = tempfile::tempdir().unwrap();
+        let store = PendingOperations::new(dir.path().join("operations.json"));
+        let server = Uuid::new_v4();
+        let operation = Uuid::new_v4();
+        store.begin(server, operation, "fetch".into()).unwrap();
+        for (server_id, operation_id) in [
+            (server, operation),
+            (Uuid::new_v4(), operation),
+            (server, Uuid::new_v4()),
+        ] {
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            let result = review_with_remote_confirmation(
+                store.clone(),
+                server_id,
+                operation_id,
+                |_| async {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err(Error::transport("Unexpected lookup"))
+                },
+            )
+            .await;
+            assert_eq!(result.unwrap_err().code, "OPERATION_NOT_REVIEWABLE");
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+        assert_eq!(store.read().unwrap()[0].state, ReceiptState::Pending);
     }
     #[test]
     fn corrupt_logs_block_writes_without_erasing_evidence() {
@@ -477,6 +797,7 @@ mod tests {
         let repo_id = opened["repoId"].as_str().unwrap().to_owned();
         let Output::Json(status) = service
             .request(Request::Status {
+                filter: None,
                 repo_id: repo_id.clone(),
                 page_size: 100,
                 cursor: None,

@@ -17,6 +17,7 @@ use git2::{DiffOptions, Repository, StatusOptions};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashSet,
     ffi::OsStr,
     fs,
     io::Read,
@@ -24,17 +25,30 @@ use std::{
     path::Path,
     sync::Arc,
 };
+#[path = "blob_pages.rs"]
+mod blob_pages;
+#[path = "branch_listing.rs"]
+mod branch_listing;
+#[path = "commit_files.rs"]
+mod commit_files;
+#[path = "diff_pages.rs"]
+mod diff_pages;
+#[path = "history.rs"]
+mod history;
+#[path = "paged_rows.rs"]
+mod paged_rows;
+#[path = "remote_listing.rs"]
+mod remote_listing;
+#[path = "remote_names.rs"]
+mod remote_names;
+#[path = "status.rs"]
+mod status;
+#[path = "tag_listing.rs"]
+mod tag_listing;
+#[path = "worktree_listing.rs"]
+pub(super) mod worktree_listing;
+
 const MAX_ENTRIES: usize = 10_000;
-/// Working-tree status entries captured by one read. Exceeding this bound
-/// truncates the listing; it never fails the read, because a repository whose
-/// status cannot be read is a repository that cannot be inspected or written.
-/// Lowered under `cfg(test)` so the truncation path is exercised without
-/// creating ten thousand files per test.
-#[cfg(not(test))]
-const MAX_STATUS_ENTRIES: usize = MAX_ENTRIES;
-#[cfg(test)]
-const MAX_STATUS_ENTRIES: usize = 32;
-const MAX_HISTORY: usize = 50_000;
 const CACHE_BYTES: usize = 32 * 1024 * 1024;
 /// The index is read in full for every fingerprint; this bounds that read.
 const MAX_INDEX_BYTES: u64 = 256 * 1024 * 1024;
@@ -83,26 +97,22 @@ fn head(repo: &Repository) -> Result<Value, Error> {
     }
 }
 
-/// One listing as captured: its rows, the fingerprint that identifies it, and
-/// the metadata that travels with every page.
-struct Listing {
-    rows: Vec<Value>,
-    fingerprint: String,
-    metadata: Value,
-    bytes: usize,
-}
 #[derive(Default)]
 pub struct Service {
     journal: Option<Journal>,
-    /// Recently captured listings by snapshot token, most recent last. An
-    /// optimisation for paging, never an authority: writes and diffs always
-    /// re-read the repository.
-    cache: Vec<(String, Arc<Listing>)>,
+    remote_cache: remote_listing::Cache,
+    remote_names_cache: remote_names::Cache,
+    commit_files_cache: commit_files::Cache,
+    diff_cache: diff_pages::Cache,
+    blob_cache: blob_pages::Cache,
+    history_cache: history::Cache,
+    worktree_cache: worktree_listing::Cache,
+    branch_cache: branch_listing::Cache,
+    status_cache: status::Cache,
+    tag_cache: tag_listing::Cache,
+    stash_cache: super::stash::Cache,
 }
-pub enum Output {
-    Json(Value),
-    Diff { snapshot: String, bytes: Vec<u8> },
-}
+pub use super::protocol::Output;
 impl Service {
     pub fn with_journal(journal: Journal) -> Self {
         Self {
@@ -150,16 +160,43 @@ impl Service {
                 repo_id,
                 page_size,
                 cursor,
-            } => self
-                .page(repo_id, "worktrees".into(), page_size, cursor)
-                .map(Output::Json),
+                filter,
+                branch,
+                name,
+                at_snapshot,
+            } => {
+                let query = worktree_listing::query(filter, branch, name)?;
+                if let Some(at_snapshot) = at_snapshot {
+                    if cursor.is_some() {
+                        return Err(Error::invalid("atSnapshot and cursor cannot be combined."));
+                    }
+                    worktree_listing::anchored_page(
+                        &mut self.worktree_cache,
+                        RepoRef::decode(&repo_id)?,
+                        query,
+                        page_size,
+                        &at_snapshot,
+                    )
+                    .map(Output::Json)
+                } else {
+                    self.page(repo_id, query, page_size, cursor)
+                        .map(Output::Json)
+                }
+            }
             Request::Tags {
                 repo_id,
                 page_size,
                 cursor,
-            } => self
-                .page(repo_id, "tags".into(), page_size, cursor)
-                .map(Output::Json),
+                message_bytes,
+            } => {
+                let query = tag_listing::query(message_bytes)?;
+                self.page(repo_id, query, page_size, cursor)
+                    .map(Output::Json)
+            }
+            Request::Tag { repo_id, oid } => {
+                let repo = RepoRef::decode(&repo_id)?.open()?;
+                super::tags::detail(&repo, &oid).map(Output::Json)
+            }
             Request::Stashes {
                 repo_id,
                 page_size,
@@ -167,6 +204,19 @@ impl Service {
             } => self
                 .page(repo_id, "stashes".into(), page_size, cursor)
                 .map(Output::Json),
+            Request::BlobPage {
+                repo_id,
+                oid,
+                max_bytes,
+                cursor,
+            } => blob_pages::read(
+                &mut self.blob_cache,
+                RepoRef::decode(&repo_id)?,
+                &oid,
+                max_bytes,
+                cursor,
+            )
+            .map(Output::Json),
             Request::Blob {
                 repo_id,
                 oid: object_id,
@@ -196,16 +246,24 @@ impl Service {
                 remote,
                 expected_token,
                 for_push,
+                filter,
                 page_size,
                 cursor,
             } => {
-                let query = format!(
-                    "remote_refs:{}",
-                    serde_json::to_string(&(remote, expected_token, for_push))
-                        .map_err(|_| limit())?
-                );
+                let query = remote_listing::query(&remote, &expected_token, for_push, &filter)?;
                 self.page(repo_id, query, page_size, cursor)
                     .map(Output::Json)
+            }
+            Request::RemoteNames {
+                repo_id,
+                filter,
+                page_size,
+                cursor,
+            } => self
+                .page(repo_id, remote_names::query(&filter)?, page_size, cursor)
+                .map(Output::Json),
+            Request::Remote { repo_id, name } => {
+                super::remotes::selected(&self.repo(&repo_id)?, &name).map(Output::Json)
             }
             Request::Remotes { repo_id } => {
                 super::remotes::list(&self.repo(&repo_id)?).map(Output::Json)
@@ -227,6 +285,15 @@ impl Service {
                 .get(&operation_id)
                 .and_then(|record| serde_json::to_value(record).map_err(|_| limit()))
                 .map(Output::Json),
+            Request::Review { operation_id } => self
+                .journal
+                .as_ref()
+                .ok_or_else(|| {
+                    Error::new("JOURNAL_UNAVAILABLE", "Operation journal is unavailable.")
+                })?
+                .review(&operation_id)
+                .and_then(|record| serde_json::to_value(record).map_err(|_| limit()))
+                .map(Output::Json),
             Request::Open { path } => self.open(path).map(Output::Json),
             // Nothing is held open, so closing releases nothing. It is still a
             // method of the protocol, so it is still validated.
@@ -234,32 +301,48 @@ impl Service {
                 RepoRef::decode(&repo_id)?;
                 Ok(Output::Json(json!({"closed":true})))
             }
+            Request::StatusSummary { repo_id, path } => {
+                let repo = match (repo_id, path) {
+                    (Some(id), None) => self.repo(&id)?,
+                    (None, Some(path)) => discover(path)?,
+                    _ => return Err(Error::invalid("Specify exactly one repository ID or path.")),
+                };
+                status::summary(&repo).map(Output::Json)
+            }
             Request::Status {
+                filter,
                 repo_id,
                 page_size,
                 cursor,
             } => self
-                .page(repo_id, "status".into(), page_size, cursor)
+                .page(repo_id, status::query(filter.as_ref())?, page_size, cursor)
                 .map(Output::Json),
             Request::Branches {
                 repo_id,
                 page_size,
                 cursor,
-            } => self
-                .page(repo_id, "branches".into(), page_size, cursor)
-                .map(Output::Json),
+                filter,
+                branch_kind,
+            } => {
+                let query = branch_listing::query(&filter, branch_kind.as_deref())?;
+                self.page(repo_id, query, page_size, cursor)
+                    .map(Output::Json)
+            }
             Request::History {
                 repo_id,
                 page_size,
                 cursor,
                 revision,
+                message_bytes,
             } => {
-                if revision.len() > 1024 || revision.contains('\0') {
-                    return Err(Error::invalid("Invalid revision."));
-                }
-                self.page(repo_id, format!("history:{revision}"), page_size, cursor)
+                let query = history::query(&revision, message_bytes)?;
+                self.page(repo_id, query, page_size, cursor)
                     .map(Output::Json)
             }
+            Request::Commit {
+                repo_id,
+                commit_oid,
+            } => history::commit(RepoRef::decode(&repo_id)?, &commit_oid).map(Output::Json),
             Request::CommitFiles {
                 repo_id,
                 commit_oid,
@@ -276,6 +359,29 @@ impl Service {
                 )
                 .map(Output::Json)
             }
+            Request::CommitDiffPage {
+                repo_id,
+                commit_oid,
+                path,
+                parent_index,
+                context_lines,
+                page_size,
+                max_bytes,
+                cursor,
+                line_encoding,
+            } => diff_pages::read_cached(
+                &mut self.diff_cache,
+                line_encoding.is_some(),
+                RepoRef::decode(&repo_id)?,
+                &commit_oid,
+                path,
+                parent_index,
+                context_lines,
+                page_size,
+                max_bytes,
+                cursor,
+            )
+            .map(Output::Json),
             Request::CommitDiff {
                 path,
                 repo_id,
@@ -302,6 +408,29 @@ impl Service {
                     bytes,
                 })
             }
+            Request::DiffPage {
+                repo_id,
+                snapshot,
+                entry_id,
+                side,
+                context_lines,
+                page_size,
+                max_bytes,
+                cursor,
+                line_encoding,
+            } => diff_pages::read_working_cached(
+                &mut self.diff_cache,
+                line_encoding.is_some(),
+                RepoRef::decode(&repo_id)?,
+                SnapshotRef::decode(&snapshot)?,
+                &entry_id,
+                side,
+                context_lines,
+                page_size,
+                max_bytes,
+                cursor,
+            )
+            .map(Output::Json),
             Request::Diff {
                 repo_id,
                 snapshot,
@@ -368,17 +497,6 @@ impl Service {
                     "Read the required listing before starting this operation.",
                 )
             })?;
-        let current_fingerprint = if worktree_action {
-            super::worktrees::token(&repo)?
-        } else {
-            fingerprint(&repo)?
-        };
-        if current_fingerprint != snapshot.f {
-            return Err(Error::new(
-                "STALE_SNAPSHOT",
-                "The repository changed. Refresh before applying this operation.",
-            ));
-        }
         let ids = match &action {
             Action::Stage { entry_ids, .. }
             | Action::Unstage { entry_ids, .. }
@@ -386,6 +504,25 @@ impl Service {
             | Action::Discard { entry_ids, .. } => entry_ids.as_slice(),
             _ => &[],
         };
+        // Share this scan between snapshot validation and entry resolution.
+        // Native mutation guards still rescan under their lock and before
+        // publication; this only removes the adjacent duplicate preflight.
+        let selected_scan = if ids.is_empty() {
+            None
+        } else {
+            Some(statuses(&repo)?)
+        };
+        let current_fingerprint = if worktree_action {
+            super::worktrees::token(&repo)?
+        } else {
+            fingerprint_scan(&repo, &repo.path().join("index"), selected_scan.as_ref())?
+        };
+        if current_fingerprint != snapshot.f {
+            return Err(Error::new(
+                "STALE_SNAPSHOT",
+                "The repository changed. Refresh before applying this operation.",
+            ));
+        }
         if (matches!(
             action,
             Action::Stage { .. }
@@ -399,12 +536,11 @@ impl Service {
                 "Select at least one file within the supported entry limit.",
             ));
         }
-        let mut paths = Vec::new();
-        for id in ids {
-            paths.extend(Self::entry_paths_now(&repo, id)?);
-        }
-        paths.sort();
-        paths.dedup();
+        let paths = match selected_scan.as_ref() {
+            Some(scan) => Self::selected_paths_from_scan(scan, ids)?,
+            None => Vec::new(),
+        };
+        drop(selected_scan);
         let mut record = journal.begin(&operation_id, hash, identity)?;
         match operations::apply(&repo, &action, &paths, &snapshot.f) {
             Ok(result) => {
@@ -433,12 +569,7 @@ impl Service {
         serde_json::to_value(record).map_err(|_| limit())
     }
     fn open(&self, path: WirePath) -> Result<Value, Error> {
-        let bytes = path.decode()?;
-        let path = Path::new(OsStr::from_bytes(&bytes));
-        if !path.is_absolute() {
-            return Err(Error::invalid("Repository path must be absolute."));
-        }
-        let repo = Repository::discover(path).map_err(engine)?;
+        let repo = discover(path)?;
         let git_dir = repo.path().canonicalize().map_err(io_error)?;
         let root = repo
             .workdir()
@@ -474,131 +605,154 @@ impl Service {
             return Err(Error::invalid("pageSize must be between 1 and 200."));
         }
         let repository = RepoRef::decode(&repo_id)?;
-        let (snapshot, offset) = match cursor {
+        let (snapshot, offset, key) = match cursor {
             Some(cursor) => {
                 let cursor = CursorRef::decode(&cursor)?;
                 if cursor.s.r != repository || cursor.s.q != query {
                     return Err(Error::invalid("Cursor does not match this query."));
                 }
-                (Some(cursor.s), cursor.o)
+                if cursor.s.p.is_some()
+                    && !query.starts_with("history:")
+                    && !query.starts_with("history_summary:")
+                {
+                    return Err(Error::invalid(
+                        "Pinned revisions are only valid for history cursors.",
+                    ));
+                }
+                (Some(cursor.s), cursor.o, cursor.k)
             }
-            None => (None, 0),
+            None => (None, 0, None),
         };
-        let (token, listing) = match snapshot {
-            Some(snapshot) => {
-                let token = snapshot.encode();
-                let listing = self.continued(&repository, &snapshot, &token)?;
-                (token, listing)
-            }
-            None => self.first(&repository, &query)?,
-        };
-        if offset > listing.rows.len() {
-            return Err(Error::invalid("Cursor is past the end of this listing."));
+        if query == "tags" || query.starts_with("tags_summary:") {
+            return tag_listing::page(
+                &mut self.tag_cache,
+                repository,
+                query,
+                count,
+                snapshot,
+                offset,
+                key,
+            );
         }
-        let mut end = offset;
-        let mut size = 0;
-        while end < listing.rows.len() && end - offset < count {
-            let row_size = serde_json::to_vec(&listing.rows[end])
-                .map_err(|_| limit())?
-                .len();
-            if row_size > MAX_FRAME / 2 {
-                return Err(limit());
-            }
-            if size + row_size > MAX_FRAME / 2 {
-                break;
-            }
-            size += row_size;
-            end += 1;
-        }
-        let next = (end < listing.rows.len()).then(|| {
-            CursorRef {
-                s: SnapshotRef::decode(&token).expect("issued here"),
-                o: end,
-            }
-            .encode()
-        });
-        Ok(
-            json!({"snapshot":token,"entries":listing.rows[offset..end],"nextCursor":next,"metadata":listing.metadata}),
-        )
-    }
-    /// Captures a listing for its first page and issues its snapshot token.
-    fn first(
-        &mut self,
-        repository: &RepoRef,
-        query: &str,
-    ) -> Result<(String, Arc<Listing>), Error> {
-        let repo = repository.open()?;
-        let listing = capture(&repo, query)?;
-        // History resolves its revision once; later pages walk from that
-        // commit, which cannot change, rather than from a branch that can.
-        let position = query
-            .starts_with("history:")
-            .then(|| {
-                listing.metadata["resolvedRevision"]["hex"]
-                    .as_str()
-                    .map(str::to_owned)
-            })
-            .flatten();
-        let snapshot = SnapshotRef {
-            r: repository.clone(),
-            q: query.into(),
-            f: listing.fingerprint.clone(),
-            p: position,
-        };
-        let token = snapshot.encode();
-        let listing = Arc::new(listing);
-        self.remember(&token, &listing);
-        Ok((token, listing))
-    }
-    /// The listing a cursor continues. Served as captured when this process
-    /// still has it; otherwise recaptured, and accepted only if it is the same
-    /// listing -- a page from a different listing would mix two versions.
-    fn continued(
-        &mut self,
-        repository: &RepoRef,
-        snapshot: &SnapshotRef,
-        token: &str,
-    ) -> Result<Arc<Listing>, Error> {
-        if let Some(index) = self.cache.iter().position(|(key, _)| key == token) {
-            let entry = self.cache.remove(index);
-            let listing = entry.1.clone();
-            self.cache.push(entry);
-            return Ok(listing);
-        }
-        let repo = repository.open()?;
-        let query = match (&snapshot.p, snapshot.q.starts_with("history:")) {
-            (Some(commit), true) => format!("history:{commit}"),
-            _ => snapshot.q.clone(),
-        };
-        let listing = capture(&repo, &query)?;
-        if listing.fingerprint != snapshot.f {
-            return Err(Error::new(
-                "SNAPSHOT_EXPIRED",
-                "The listing changed. Restart it from the first page.",
+        if key.is_some() {
+            return Err(Error::invalid(
+                "Cursor key is not supported for this query.",
             ));
         }
-        let listing = Arc::new(listing);
-        self.remember(token, &listing);
-        Ok(listing)
-    }
-    fn remember(&mut self, token: &str, listing: &Arc<Listing>) {
-        self.cache.retain(|(key, _)| key != token);
-        self.cache.push((token.to_owned(), listing.clone()));
-        while self.cache.len() > CACHE_ENTRIES
-            || self.cache.iter().map(|(_, l)| l.bytes).sum::<usize>() > CACHE_BYTES
-        {
-            self.cache.remove(0);
+        if query == "worktrees" || query.starts_with("worktrees:") {
+            return worktree_listing::page(
+                &mut self.worktree_cache,
+                repository,
+                query,
+                count,
+                snapshot,
+                offset,
+            );
         }
+        if query == "stashes" {
+            return super::stash::page(&mut self.stash_cache, repository, count, snapshot, offset);
+        }
+        if query == "status" || query.starts_with("status:") {
+            return status::page(
+                &mut self.status_cache,
+                repository,
+                query,
+                count,
+                snapshot,
+                offset,
+            );
+        }
+        if query.starts_with("history:") || query.starts_with("history_summary:") {
+            return history::page(
+                &mut self.history_cache,
+                repository,
+                query,
+                count,
+                snapshot,
+                offset,
+            );
+        }
+        if query.starts_with("branches:") {
+            return branch_listing::page(
+                &mut self.branch_cache,
+                repository,
+                query,
+                count,
+                snapshot,
+                offset,
+            );
+        }
+        if query.starts_with("commit_files:") {
+            return commit_files::page(
+                &mut self.commit_files_cache,
+                repository,
+                query,
+                count,
+                snapshot,
+                offset,
+            );
+        }
+        if query.starts_with("remote_names:") {
+            return remote_names::page(
+                &mut self.remote_names_cache,
+                repository,
+                query,
+                count,
+                snapshot,
+                offset,
+            );
+        }
+        if query.starts_with("remote_refs:") {
+            return remote_listing::page(
+                &mut self.remote_cache,
+                repository,
+                query,
+                count,
+                snapshot,
+                offset,
+            );
+        }
+        Err(Error::invalid("Unsupported listing query."))
     }
     /// Confirms paths name exactly one entry of the repository's current
     /// status. Called only after the snapshot's fingerprint has been matched,
     /// so the current status is the status the entry was read from.
+    #[cfg(test)]
     fn entry_paths_now(repo: &Repository, entry: &str) -> Result<Vec<Vec<u8>>, Error> {
-        let paths = EntryRef::decode(entry)?.paths()?;
-        let known = statuses(repo)?.iter().any(|e| entry_paths(&e) == paths);
-        if !known {
+        Self::selected_paths_now(repo, &[entry.to_owned()])
+    }
+
+    /// Validate the entire selection against one status scan. Match complete
+    /// entries, including both rename paths, before flattening and deduplicating.
+    #[cfg(test)]
+    fn selected_paths_now(repo: &Repository, entries: &[String]) -> Result<Vec<Vec<u8>>, Error> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        Self::selected_paths_from_scan(&statuses(repo)?, entries)
+    }
+
+    fn selected_paths_from_scan(
+        scan: &StatusScan<'_>,
+        entries: &[String],
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        let requested = entries
+            .iter()
+            .map(|entry| EntryRef::decode(entry)?.paths())
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut remaining: HashSet<_> = requested.iter().cloned().collect();
+        for entry in scan.iter() {
+            remaining.remove(&entry_paths(&entry));
+            if remaining.is_empty() {
+                break;
+            }
+        }
+        if !remaining.is_empty() {
             return Err(Error::invalid("File entry is not in this snapshot."));
         }
+        let mut paths: Vec<_> = requested.into_iter().flatten().collect();
+        paths.sort();
+        paths.dedup();
         Ok(paths)
     }
     fn diff(
@@ -609,54 +763,11 @@ impl Service {
         side: Side,
         context: u32,
     ) -> Result<Output, Error> {
-        if context > 100 {
-            return Err(Error::invalid("contextLines exceeds 100."));
-        }
         let repository = RepoRef::decode(repo_id)?;
         let snapshot = SnapshotRef::decode(snapshot_id)?;
-        if snapshot.r != repository || snapshot.q != "status" {
-            return Err(Error::invalid(
-                "Diff requires a status snapshot from this repository.",
-            ));
-        }
-        let repo = repository.open()?;
-        if fingerprint(&repo)? != snapshot.f {
-            return Err(Error::new(
-                "STALE_SNAPSHOT",
-                "The working tree changed. Refresh changes.",
-            ));
-        }
-        let path = &Self::entry_paths_now(&repo, entry_id)?;
-        let mut options = DiffOptions::new();
-        options
-            .context_lines(context)
-            .include_untracked(true)
-            .recurse_untracked_dirs(true)
-            .show_untracked_content(true)
-            .disable_pathspec_match(true);
-        for name in path {
-            options.pathspec(name);
-        }
-        // Bound libgit2's text diff work; larger/binary files return metadata.
-        options.max_size(2 * 1024 * 1024);
-        let tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-        let mut diff = match side {
-            Side::HeadToIndex => repo.diff_tree_to_index(tree.as_ref(), None, Some(&mut options)),
-            Side::IndexToWorktree => repo.diff_index_to_workdir(None, Some(&mut options)),
-            Side::HeadToWorktree => {
-                repo.diff_tree_to_workdir_with_index(tree.as_ref(), Some(&mut options))
-            }
-        }
-        .map_err(engine)?;
-        diff.find_similar(Some(git2::DiffFindOptions::new().renames(true)))
-            .map_err(engine)?;
-        let value = diff_value(&diff, None)?;
-        if fingerprint(&repo)? != snapshot.f {
-            return Err(Error::new(
-                "STALE_SNAPSHOT",
-                "The file changed while its diff was being read.",
-            ));
-        }
+        let value = working_comparison(&repository, &snapshot, entry_id, side, context, |diff| {
+            diff_value(diff, None)
+        })?;
         let bytes = serde_json::to_vec(&value).map_err(|_| limit())?;
         if bytes.len() > MAX_DIFF {
             return Err(limit());
@@ -668,6 +779,77 @@ impl Service {
     }
 }
 
+/// Use the same discovery rules for opening an editor and display-only reads.
+fn discover(path: WirePath) -> Result<Repository, Error> {
+    let bytes = path.decode()?;
+    let path = Path::new(OsStr::from_bytes(&bytes));
+    if !path.is_absolute() {
+        return Err(Error::invalid("Repository path must be absolute."));
+    }
+    Repository::discover(path).map_err(engine)
+}
+
+/// Keep both snapshot checks around rendering. Callers may collect a bounded
+/// page or a capture, but must not publish/cache it before this returns.
+fn working_comparison(
+    repository: &RepoRef,
+    snapshot: &SnapshotRef,
+    entry_id: &str,
+    side: Side,
+    context: u32,
+    render: impl FnOnce(&git2::Diff<'_>) -> Result<Value, Error>,
+) -> Result<Value, Error> {
+    if context > 100 {
+        return Err(Error::invalid("contextLines exceeds 100."));
+    }
+    if snapshot.r != *repository || snapshot.q != "status" || snapshot.p.is_some() {
+        return Err(Error::invalid(
+            "Diff requires a status snapshot from this repository.",
+        ));
+    }
+    let repo = repository.open()?;
+    let scan = statuses(&repo)?;
+    if fingerprint_scan(&repo, &repo.path().join("index"), Some(&scan))? != snapshot.f {
+        return Err(Error::new(
+            "STALE_SNAPSHOT",
+            "The working tree changed. Refresh changes.",
+        ));
+    }
+    let paths = Service::selected_paths_from_scan(&scan, &[entry_id.to_owned()])?;
+    drop(scan);
+    let mut options = DiffOptions::new();
+    options
+        .context_lines(context)
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .show_untracked_content(true)
+        .disable_pathspec_match(true);
+    for name in &paths {
+        options.pathspec(name);
+    }
+    // Bound libgit2's text diff work; larger/binary files return metadata.
+    options.max_size(2 * 1024 * 1024);
+    let tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+    let mut diff = match side {
+        Side::HeadToIndex => repo.diff_tree_to_index(tree.as_ref(), None, Some(&mut options)),
+        Side::IndexToWorktree => repo.diff_index_to_workdir(None, Some(&mut options)),
+        Side::HeadToWorktree => {
+            repo.diff_tree_to_workdir_with_index(tree.as_ref(), Some(&mut options))
+        }
+    }
+    .map_err(engine)?;
+    diff.find_similar(Some(git2::DiffFindOptions::new().renames(true)))
+        .map_err(engine)?;
+    let value = render(&diff)?;
+    if fingerprint(&repo)? != snapshot.f {
+        return Err(Error::new(
+            "STALE_SNAPSHOT",
+            "The file changed while its diff was being read.",
+        ));
+    }
+    Ok(value)
+}
+
 /// History objects are immutable: no working-tree snapshot or index is read.
 fn commit_diff(
     repo: &Repository,
@@ -676,7 +858,7 @@ fn commit_diff(
     context: u32,
     path: Option<&[u8]>,
 ) -> Result<Value, Error> {
-    commit_comparison(repo, commit_oid, parent_index, context, |diff| {
+    commit_comparison_for_path(repo, commit_oid, parent_index, context, path, |diff| {
         diff_value(diff, path)
     })
 }
@@ -685,6 +867,16 @@ fn commit_comparison(
     commit_oid: &str,
     parent_index: usize,
     context: u32,
+    render: impl FnOnce(&git2::Diff<'_>) -> Result<Value, Error>,
+) -> Result<Value, Error> {
+    commit_comparison_for_path(repo, commit_oid, parent_index, context, None, render)
+}
+fn commit_comparison_for_path(
+    repo: &Repository,
+    commit_oid: &str,
+    parent_index: usize,
+    context: u32,
+    selected: Option<&[u8]>,
     render: impl FnOnce(&git2::Diff<'_>) -> Result<Value, Error>,
 ) -> Result<Value, Error> {
     if context > 100 {
@@ -720,15 +912,25 @@ fn commit_comparison(
     repo.set_index(&mut attributes).map_err(engine)?;
     let mut options = DiffOptions::new();
     options.context_lines(context).max_size(2 * 1024 * 1024);
+    // With FIND_RENAMES (without rewrite/copy detection), an existing blob
+    // whose type stays the same cannot be a rename source or destination.
+    // Restrict only that case: additions/deletions and type changes still
+    // need the complete candidate set to preserve rename semantics.
+    let exact = selected.filter(|path| same_blob_type(before.as_ref(), &after, path));
+    if let Some(path) = exact {
+        options.disable_pathspec_match(true).pathspec(path);
+    }
     let mut diff = repo
         .diff_tree_to_tree(before.as_ref(), Some(&after), Some(&mut options))
         .map_err(engine)?;
-    diff.find_similar(Some(
-        git2::DiffFindOptions::new()
-            .renames(true)
-            .rename_limit(1000),
-    ))
-    .map_err(engine)?;
+    if exact.is_none() {
+        diff.find_similar(Some(
+            git2::DiffFindOptions::new()
+                .renames(true)
+                .rename_limit(1000),
+        ))
+        .map_err(engine)?;
+    }
     let mut value = render(&diff)?;
     value["commitOid"] = oid(commit.id());
     value["parentOid"] = parent.as_ref().map(|p| oid(p.id())).unwrap_or(Value::Null);
@@ -740,6 +942,16 @@ fn commit_comparison(
     value["parents"] = commit.parent_ids().map(oid).collect::<Vec<_>>().into();
     Ok(value)
 }
+fn same_blob_type(before: Option<&git2::Tree<'_>>, after: &git2::Tree<'_>, path: &[u8]) -> bool {
+    let path = Path::new(OsStr::from_bytes(path));
+    let old = before.and_then(|tree| tree.get_path(path).ok());
+    let new = after.get_path(path).ok();
+    matches!((old, new), (Some(old), Some(new))
+        if old.kind() == Some(git2::ObjectType::Blob)
+            && new.kind() == Some(git2::ObjectType::Blob)
+            && old.filemode() & 0o170000 == new.filemode() & 0o170000)
+}
+
 fn delta_metadata(delta: &git2::DiffDelta<'_>) -> Value {
     json!({"oldPath":delta.old_file().path().map(wire_path),"newPath":delta.new_file().path().map(wire_path),"status":format!("{:?}",delta.status()),"oldOid":(!delta.old_file().id().is_zero()).then(||oid(delta.old_file().id())),"newOid":(!delta.new_file().id().is_zero()).then(||oid(delta.new_file().id())),"oldMode":i32::from(delta.old_file().mode()),"newMode":i32::from(delta.new_file().mode())})
 }
@@ -831,19 +1043,15 @@ fn entry_paths(entry: &git2::StatusEntry<'_>) -> Vec<Vec<u8>> {
     names
 }
 
-/// One bounded working-tree scan. `total` is what libgit2 reported before the
-/// bound was applied, so callers can say honestly that the listing is partial.
+/// Native status ordering spans the complete repository; pagination is applied
+/// only when serializing rows, never when computing write guards.
 struct StatusScan<'repo> {
     entries: git2::Statuses<'repo>,
     total: usize,
-    truncated: bool,
 }
 impl StatusScan<'_> {
-    /// libgit2 emits status entries in a stable path order, so the bounded
-    /// prefix is the same for the same repository state. Fingerprints computed
-    /// over this prefix therefore stay stable across reads.
     fn iter(&self) -> impl Iterator<Item = git2::StatusEntry<'_>> {
-        self.entries.iter().take(MAX_STATUS_ENTRIES)
+        self.entries.iter()
     }
 }
 fn statuses(repo: &Repository) -> Result<StatusScan<'_>, Error> {
@@ -861,11 +1069,7 @@ fn statuses(repo: &Repository) -> Result<StatusScan<'_>, Error> {
         .renames_index_to_workdir(true);
     let entries = repo.statuses(Some(&mut options)).map_err(engine)?;
     let total = entries.len();
-    Ok(StatusScan {
-        entries,
-        total,
-        truncated: total > MAX_STATUS_ENTRIES,
-    })
+    Ok(StatusScan { entries, total })
 }
 pub(super) fn fingerprint(repo: &Repository) -> Result<String, Error> {
     fingerprint_index(repo, &repo.path().join("index"))
@@ -874,6 +1078,13 @@ pub(super) fn fingerprint(repo: &Repository) -> Result<String, Error> {
 // The caller has attached this prepared index to repo. Capture the intended
 // post-operation state before publishing it and releasing the native index lock.
 pub(super) fn fingerprint_index(repo: &Repository, index_path: &Path) -> Result<String, Error> {
+    fingerprint_scan(repo, index_path, None)
+}
+fn fingerprint_scan(
+    repo: &Repository,
+    index_path: &Path,
+    captured: Option<&StatusScan<'_>>,
+) -> Result<String, Error> {
     let mut hash = Sha256::new();
     hash.update(serde_json::to_vec(&head(repo)?).map_err(|_| limit())?);
     hash.update(format!("{:?}", repo.state()));
@@ -908,13 +1119,19 @@ pub(super) fn fingerprint_index(repo: &Repository, index_path: &Path) -> Result<
     }
     hash.update(super::rebase::native_hash(repo)?);
     if let Some(root) = repo.workdir() {
-        // A working tree too large to enumerate must still be fingerprintable:
-        // a repository that cannot be fingerprinted cannot be written at all.
-        // Bind the hash to the full entry count so growth past the bound still
-        // invalidates the snapshot, then hash the deterministic bounded prefix.
-        let scan = statuses(repo)?;
+        let fresh;
+        let scan = match captured {
+            Some(scan) => scan,
+            None => {
+                fresh = statuses(repo)?;
+                &fresh
+            }
+        };
         hash.update((scan.total as u64).to_be_bytes());
-        hash.update([u8::from(scan.truncated)]);
+        // Version the old truncation marker while retaining identical hashes
+        // for formerly complete listings.
+        hash.update([0]);
+        let canonical_root = root.canonicalize().map_err(io_error)?;
         for entry in scan.iter() {
             hash.update(entry.status().bits().to_be_bytes());
             for name in entry_paths(&entry) {
@@ -934,7 +1151,7 @@ pub(super) fn fingerprint_index(repo: &Repository, index_path: &Path) -> Result<
                 while let Some(directory) = parent {
                     match directory.canonicalize() {
                         Ok(canonical) => {
-                            if !canonical.starts_with(root.canonicalize().map_err(io_error)?) {
+                            if !canonical.starts_with(&canonical_root) {
                                 return Err(Error::new(
                                     "PERMISSION_DENIED",
                                     "File path leaves the worktree.",
@@ -1085,311 +1302,125 @@ pub(super) fn worktree_metadata(path: &Path) -> Result<Vec<u8>, Error> {
     }
     Ok(bytes)
 }
-pub(super) fn worktree_rows(repo: &Repository) -> Result<Vec<Value>, Error> {
+pub(super) fn worktree_main(repo: &Repository) -> Result<Value, Error> {
     let common = repo.commondir().canonicalize().map_err(io_error)?;
     let current = repo.path().canonicalize().map_err(io_error)?;
     let main = Repository::open(&common).map_err(engine)?;
-    let mut rows = vec![
-        json!({"name":null,"kind":if main.is_bare(){"bare"}else{"main"},"path":wire_path(main.workdir().unwrap_or(&common)),"gitDir":wire_path(&common),"current":current==common,"state":"available","head":head(&main)?,"locked":false,"lockReason":null,"prunable":false}),
-    ];
-    let registry = common.join("worktrees");
-    let entries = match fs::read_dir(&registry) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(rows),
-        Err(e) => return Err(io_error(e)),
-    };
-    let mut names = Vec::new();
-    for entry in entries {
-        names.push(entry.map_err(io_error)?.file_name());
-        if names.len() > 1000 {
-            return Err(limit());
-        }
-    }
-    names.sort();
-    for name in names {
-        let admin = registry.join(&name);
-        let mut row = json!({"name":WirePath::new(name.as_bytes()),"kind":"linked","path":null,"gitDir":wire_path(&admin),"current":current==admin,"state":"invalid","head":null,"locked":null,"lockReason":null,"prunable":null});
-        // Keep corrupt/incomplete registry entries visible rather than silently
-        // dropping them from libgit2's list of valid worktree records.
-        if !fs::symlink_metadata(&admin).is_ok_and(|m| m.is_dir()) {
-            rows.push(row);
-            continue;
-        }
-        match fs::symlink_metadata(admin.join("locked")) {
-            Ok(_) => {
-                row["locked"] = true.into();
-                match worktree_metadata(&admin.join("locked")) {
-                    Ok(reason) => row["lockReason"] = json!(WirePath::new(&reason)),
-                    Err(_) => row["lockReasonUnavailable"] = true.into(),
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => row["locked"] = false.into(),
-            Err(_) => {
-                row["state"] = "unreadable".into();
-                rows.push(row);
-                continue;
-            }
-        }
-        // Never hand unbounded administrative files to libgit2's parser.
-        if ["gitdir", "commondir", "HEAD"]
-            .iter()
-            .any(|file| worktree_metadata(&admin.join(file)).is_err())
-        {
-            rows.push(row);
-            continue;
-        }
-        let Some(name) = name.to_str() else {
-            row["state"] = "unsupported".into();
-            row["errorCode"] = "UNSUPPORTED_ENCODING".into();
-            rows.push(row);
-            continue;
-        };
-        let worktree = repo.find_worktree(name).ok();
-        if let Some(worktree) = worktree {
-            row["path"] = json!(wire_path(worktree.path()));
-            row["state"] = match fs::metadata(worktree.path()) {
-                Ok(_) if worktree.validate().is_ok() => "available",
-                Ok(_) => "invalid",
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => "missing",
-                Err(_) => "unreadable",
-            }
-            .into();
-            if let Ok(linked) = Repository::open_from_worktree(&worktree) {
-                // A substituted checkout must not be represented as this tree.
-                if linked.commondir().canonicalize().ok().as_ref() == Some(&common)
-                    && linked.path().canonicalize().ok().as_ref() == Some(&admin)
-                {
-                    row["head"] = head(&linked).unwrap_or(Value::Null);
-                } else {
-                    row["state"] = "invalid".into();
-                }
-            }
-        }
-        if row["locked"] == true {
-            row["prunable"] = false.into();
-        } else if row["locked"] == false
-            && matches!(row["state"].as_str(), Some("available" | "missing"))
-        {
-            row["prunable"] = (row["state"] == "missing").into();
-        }
-        rows.push(row);
-    }
-    if serde_json::to_vec(&rows).map_err(|_| limit())?.len() > 16 * 1024 * 1024 {
-        return Err(limit());
-    }
-    Ok(rows)
+    let row = json!({"name":null,"kind":if main.is_bare(){"bare"}else{"main"},"path":wire_path(main.workdir().unwrap_or(&common)),"gitDir":wire_path(&common),"current":current==common,"state":"available","head":head(&main)?,"locked":false,"lockReason":null,"prunable":false});
+    Ok(row)
 }
-
-fn capture(repo: &Repository, query: &str) -> Result<Listing, Error> {
-    let mut result = Listing {
-        rows: Vec::new(),
-        fingerprint: String::new(),
-        metadata: json!({}),
-        bytes: 0,
+pub(super) fn worktree_row(
+    repo: &Repository,
+    common: &Path,
+    current: &Path,
+    registry: &Path,
+    name: &OsStr,
+) -> Result<Value, Error> {
+    let admin = registry.join(name);
+    let mut row = json!({"name":WirePath::new(name.as_bytes()),"kind":"linked","path":null,"gitDir":wire_path(&admin),"current":current==admin,"state":"invalid","head":null,"locked":null,"lockReason":null,"prunable":null});
+    // Keep corrupt/incomplete registry entries visible rather than silently
+    // dropping them from libgit2's list of valid worktree records.
+    if !fs::symlink_metadata(&admin).is_ok_and(|m| m.is_dir()) {
+        return Ok(row);
+    }
+    match fs::symlink_metadata(admin.join("locked")) {
+        Ok(_) => {
+            row["locked"] = true.into();
+            match worktree_metadata(&admin.join("locked")) {
+                Ok(reason) => row["lockReason"] = json!(WirePath::new(&reason)),
+                Err(_) => row["lockReasonUnavailable"] = true.into(),
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => row["locked"] = false.into(),
+        Err(_) => {
+            row["state"] = "unreadable".into();
+            return Ok(row);
+        }
+    }
+    // Never hand unbounded administrative files to libgit2's parser.
+    if ["gitdir", "commondir", "HEAD"]
+        .iter()
+        .any(|file| worktree_metadata(&admin.join(file)).is_err())
+    {
+        return Ok(row);
+    }
+    let Some(name) = name.to_str() else {
+        row["state"] = "unsupported".into();
+        row["errorCode"] = "UNSUPPORTED_ENCODING".into();
+        return Ok(row);
     };
-    if query == "status" {
-        if repo.is_bare() {
-            return Err(Error::new(
-                "UNSUPPORTED_CAPABILITY",
-                "Bare repositories have no working tree.",
-            ));
+    let worktree = repo.find_worktree(name).ok();
+    if let Some(worktree) = worktree {
+        row["path"] = json!(wire_path(worktree.path()));
+        row["state"] = match fs::metadata(worktree.path()) {
+            Ok(_) if worktree.validate().is_ok() => "available",
+            Ok(_) => "invalid",
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "missing",
+            Err(_) => "unreadable",
         }
-        result.fingerprint = fingerprint(repo)?;
-        let index = repo.index().map_err(engine)?;
-        let scan = statuses(repo)?;
-        let (total_entries, truncated) = (scan.total, scan.truncated);
-        for entry in scan.iter() {
-            // Named by its own paths, so the id means the same file to every
-            // agent process and needs no table to resolve.
-            let key = EntryRef::new(&entry_paths(&entry)).encode();
-            let flags = entry.status();
-            let conflict = if flags.is_conflicted() {
-                entry_paths(&entry).iter().find_map(|path| index.conflict_get(Path::new(OsStr::from_bytes(path))).ok()).map(|c| {
-                    let side = |entry: Option<git2::IndexEntry>| entry.map(|e|json!({"oid":oid(e.id),"path":WirePath::new(&e.path),"mode":e.mode}));
-                    json!({"base":side(c.ancestor),"ours":side(c.our),"theirs":side(c.their)})
-                })
-            } else {
-                None
-            };
-
-            result.rows.push(json!({"entryId":key,"path":entry.index_to_workdir().or_else(||entry.head_to_index()).and_then(|d|d.new_file().path()).map(wire_path),"flags":flags.bits(),"staged":flags.intersects(git2::Status::INDEX_NEW|git2::Status::INDEX_MODIFIED|git2::Status::INDEX_DELETED|git2::Status::INDEX_RENAMED|git2::Status::INDEX_TYPECHANGE),"unstaged":flags.intersects(git2::Status::WT_MODIFIED|git2::Status::WT_DELETED|git2::Status::WT_RENAMED|git2::Status::WT_TYPECHANGE),"untracked":flags.is_wt_new(),"conflicted":flags.is_conflicted(),"conflict":conflict,"oldPath":entry.head_to_index().and_then(|d|d.old_file().path()).map(wire_path)}));
-        }
-        let tracking = repo
-            .head()
-            .ok()
-            .filter(|h| h.is_branch())
-            .and_then(|h| {
-                h.shorthand()
-                    .ok()
-                    .and_then(|s| repo.find_branch(s, git2::BranchType::Local).ok())
-            })
-            .and_then(|b| b.upstream().ok());
-        let upstream = tracking.as_ref().and_then(|b| b.get().target());
-        let counts = repo
-            .head()
-            .ok()
-            .and_then(|h| h.target())
-            .zip(upstream)
-            .and_then(|(a, b)| repo.graph_ahead_behind(a, b).ok());
-        result.metadata = json!({"head":head(repo)?,"operationState":format!("{:?}",repo.state()),"integration":super::integration::status(repo),"ahead":counts.map(|c|c.0),"behind":counts.map(|c|c.1),"basis":"stored_refs","upstreamRef":tracking.as_ref().map(|b|WirePath::new(b.get().name_bytes())),"truncated":truncated,"totalEntries":total_entries,"entryLimit":MAX_STATUS_ENTRIES});
-        if fingerprint(repo)? != result.fingerprint {
-            return Err(Error::new(
-                "REPOSITORY_BUSY",
-                "Working tree changed while reading status.",
-            ));
-        }
-    } else if let Some(selection) = query.strip_prefix("commit_files:") {
-        let (commit, parent) = selection
-            .rsplit_once(':')
-            .ok_or_else(|| Error::invalid("Invalid commit selection."))?;
-        let parent = parent
-            .parse::<usize>()
-            .map_err(|_| Error::invalid("Invalid parent selection."))?;
-        let mut listing = commit_comparison(repo, commit, parent, 0, |diff| {
-            let mut entries = Vec::new();
-            let mut bytes = 0;
-            for delta in diff.deltas() {
-                let row = delta_metadata(&delta);
-                bytes += serde_json::to_vec(&row).map_err(|_| limit())?.len();
-                if entries.len() >= MAX_HISTORY || bytes > CACHE_BYTES / 2 {
-                    break;
-                }
-                entries.push(row);
-            }
-            Ok(
-                json!({"totalFiles":diff.deltas().len(),"truncated":entries.len()<diff.deltas().len(),"entries":entries}),
-            )
-        })?;
-        if let Value::Array(rows) = listing["entries"].take() {
-            result.rows = rows;
-        }
-        listing
-            .as_object_mut()
-            .expect("comparison object")
-            .remove("entries");
-        result.metadata = listing;
-    } else if let Some(parameters) = query.strip_prefix("remote_refs:") {
-        let (remote, token, for_push): (String, String, bool) = serde_json::from_str(parameters)
-            .map_err(|_| Error::invalid("Invalid remote listing query."))?;
-        let (rows, metadata) = super::remotes::references(repo, &remote, &token, for_push)?;
-        result.rows = rows;
-        result.metadata = metadata;
-    } else if query == "worktrees" {
-        result.rows = worktree_rows(repo)?;
-        result.fingerprint =
-            super::journal::hash(&serde_json::to_vec(&result.rows).map_err(|_| limit())?);
-        result.metadata = json!({"listToken":result.fingerprint});
-    } else if query == "tags" {
-        result.rows = super::tags::list(repo)?;
-    } else if query == "stashes" {
-        let (rows, token) = super::stash::list(repo)?;
-        result.rows = rows;
-        result.metadata = json!({"listToken":token});
-    } else if query == "branches" {
-        // One configuration snapshot and one load of each remote for the whole
-        // listing; remote-tracking branches have no upstream to resolve.
-        let config = repo
-            .config()
-            .and_then(|mut config| config.snapshot())
-            .map_err(engine)?;
-        let mut remotes = std::collections::HashMap::new();
-        for branch in repo.branches(None).map_err(engine)? {
-            let (branch, kind) = branch.map_err(engine)?;
-            let local = kind == git2::BranchType::Local;
-            let name = branch.name().ok().flatten().map(str::to_owned);
-            let tracking = if local {
-                name.as_deref()
-                    .map(|name| super::branches::tracking_in(&config, name))
-                    .transpose()?
-            } else {
-                None
-            };
-            let upstream = match (local, name.as_deref()) {
-                (false, _) => None,
-                (true, Some(name)) => {
-                    super::branches::upstream_in(repo, &config, &mut remotes, name)
-                }
-                // A name that is not UTF-8 cannot be a configuration key the
-                // snapshot can look up; libgit2 resolves it the slow way.
-                (true, None) => branch
-                    .upstream()
-                    .ok()
-                    .map(|b| b.get().name_bytes().to_vec()),
-            };
-            result.rows.push(json!({"tracking":tracking,"name":WirePath::new(branch.name_bytes().map_err(engine)?),"reference":WirePath::new(branch.get().name_bytes()),"oid":branch.get().target().map(oid),"remote":!local,"current":branch.is_head(),"upstream":upstream.map(|bytes|WirePath::new(&bytes))}));
-            if result.rows.len() > MAX_ENTRIES {
-                return Err(Error::new(
-                    "LIMIT_EXCEEDED",
-                    format!(
-                        "This repository has more than {MAX_ENTRIES} branches, local and remote together, too many to list at once."
-                    ),
-                ));
-            }
-        }
-    } else if let Some(revision) = query.strip_prefix("history:") {
-        let object = match repo.revparse_single(revision) {
-            Ok(o) => Some(o),
-            Err(_)
-                if revision == "HEAD"
-                    && repo
-                        .head()
-                        .is_err_and(|e| e.code() == git2::ErrorCode::UnbornBranch) =>
+        .into();
+        if let Ok(linked) = Repository::open_from_worktree(&worktree) {
+            // A substituted checkout must not be represented as this tree.
+            if linked.commondir().canonicalize().ok().as_ref() == Some(&common.to_path_buf())
+                && linked.path().canonicalize().ok().as_ref() == Some(&admin)
             {
-                None
-            }
-            Err(e) => return Err(engine(e)),
-        };
-        if let Some(object) = object {
-            let commit = object.peel_to_commit().map_err(engine)?;
-            result.metadata = json!({"resolvedRevision":oid(commit.id()),"truncated":false});
-            let mut walk = repo.revwalk().map_err(engine)?;
-            walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
-                .map_err(engine)?;
-            walk.push(commit.id()).map_err(engine)?;
-            let mut bytes = 0usize;
-            for (i, hash) in walk.enumerate() {
-                if i == MAX_HISTORY {
-                    result.metadata["truncated"] = true.into();
-                    break;
-                }
-                let commit = repo.find_commit(hash.map_err(engine)?).map_err(engine)?;
-                let message = commit.message_bytes();
-                let message_truncated = message.len() > 16384;
-                let row = json!({"oid":oid(commit.id()),"parents":commit.parent_ids().map(oid).collect::<Vec<_>>(),"message":WirePath::new(&message[..message.len().min(16384)]),"messageTruncated":message_truncated,"author":{"name":String::from_utf8_lossy(commit.author().name_bytes()),"email":String::from_utf8_lossy(commit.author().email_bytes())},"time":commit.time().seconds(),"offsetMinutes":commit.time().offset_minutes()});
-                bytes += serde_json::to_vec(&row).map_err(|_| limit())?.len();
-                if bytes > CACHE_BYTES / 2 {
-                    result.metadata["truncated"] = true.into();
-                    break;
-                }
-                result.rows.push(row);
+                row["head"] = head(&linked).unwrap_or(Value::Null);
+            } else {
+                row["state"] = "invalid".into();
             }
         }
     }
-    result.bytes = serde_json::to_vec(&result.rows).map_err(|_| limit())?.len();
-    if result.bytes > CACHE_BYTES {
-        return Err(Error::new(
-            "LIMIT_EXCEEDED",
-            format!(
-                "This {} listing is larger than {} MiB, too large to read at once.",
-                query.split(':').next().unwrap_or(query),
-                CACHE_BYTES / (1024 * 1024)
-            ),
-        ));
+    if row["locked"] == true {
+        row["prunable"] = false.into();
+    } else if row["locked"] == false
+        && matches!(row["state"].as_str(), Some("available" | "missing"))
+    {
+        row["prunable"] = (row["state"] == "missing").into();
     }
-    // Status and worktrees carry a repository fingerprint already. Every other
-    // listing is identified by its own content, which is what a cursor has to
-    // find again to continue it.
-    if result.fingerprint.is_empty() {
-        result.fingerprint = super::journal::hash(
-            &serde_json::to_vec(&json!([result.rows, result.metadata])).map_err(|_| limit())?,
-        );
-    }
-    Ok(result)
+    Ok(row)
+}
+#[cfg(test)]
+pub(super) fn worktree_rows(repo: &Repository) -> Result<Vec<Value>, Error> {
+    let mut rows = Vec::new();
+    worktree_listing::scan(repo, |row, _| {
+        rows.push(row);
+        Ok(())
+    })?;
+    Ok(rows)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn review_protocol_dispatch_preserves_unknown_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = Journal::open(temp.path().join("journal"), id()).unwrap();
+        let operation_id = id();
+        let guard = journal.lock_repository("repo").unwrap();
+        journal
+            .begin(&operation_id, "hash".into(), "repo".into())
+            .unwrap();
+        drop(guard);
+        let unknown = journal.get(&operation_id).unwrap();
+        let request = || {
+            serde_json::from_value::<Request>(
+                json!({"method":"operation.review", "params":{"operationId":operation_id}}),
+            )
+            .unwrap()
+        };
+        assert!(crate::git::protocol::METHODS.contains(&"operation.review"));
+        assert!(Service::default().request(request()).is_err());
+        let mut service = Service::with_journal(journal);
+        let reviewed = json(&mut service, request());
+        assert_eq!(reviewed["state"], "reviewed_unknown");
+        assert_eq!(
+            reviewed["error"],
+            serde_json::to_value(unknown.error).unwrap()
+        );
+        assert_eq!(json(&mut service, request()), reviewed);
+        assert_eq!(json(&mut service, Request::Get { operation_id }), reviewed);
+    }
     fn id() -> String {
         uuid::Uuid::new_v4().to_string()
     }
@@ -1424,6 +1455,125 @@ mod tests {
             .unwrap()
             .into()
     }
+    #[test]
+    fn listing_cursors_reject_history_only_fields_outside_history() {
+        let temp = tempfile::tempdir().unwrap();
+        Repository::init(temp.path()).unwrap();
+        let mut service = Service::default();
+        let id = open(&mut service, temp.path());
+        for query in ["status", "stashes"] {
+            let first = service.page(id.clone(), query.into(), 20, None).unwrap();
+            let mut snapshot = SnapshotRef::decode(first["snapshot"].as_str().unwrap()).unwrap();
+            snapshot.p = Some("a".repeat(40));
+            let cursor = CursorRef {
+                s: snapshot,
+                o: 0,
+                k: None,
+            }
+            .encode();
+            let result = service.page(id.clone(), query.into(), 20, Some(cursor));
+            assert!(
+                matches!(result, Err(Error {code,..}) if code == "INVALID_REQUEST"),
+                "history field accepted for {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn bulk_selection_validates_complete_entries_and_deduplicates_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        fs::write(temp.path().join("a"), "a").unwrap();
+        fs::write(temp.path().join("b"), "b").unwrap();
+        let a = EntryRef::new(&[b"a".to_vec()]).encode();
+        let b = EntryRef::new(&[b"b".to_vec()]).encode();
+        assert_eq!(
+            Service::selected_paths_now(&repo, &[b.clone(), a.clone(), a.clone()]).unwrap(),
+            vec![b"a".to_vec(), b"b".to_vec()]
+        );
+        // Individually valid paths cannot be forged into a rename entry.
+        let combined = EntryRef::new(&[b"a".to_vec(), b"b".to_vec()]).encode();
+        assert!(Service::selected_paths_now(&repo, &[a.clone(), combined]).is_err());
+        fs::remove_file(temp.path().join("b")).unwrap();
+        assert!(Service::selected_paths_now(&repo, &[a, b]).is_err());
+        assert!(Service::selected_paths_now(&repo, &["invalid".into()]).is_err());
+        assert!(Service::selected_paths_now(&repo, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn working_comparison_rejects_changes_during_render_for_every_side() {
+        for side in [
+            Side::HeadToIndex,
+            Side::IndexToWorktree,
+            Side::HeadToWorktree,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = Repository::init(temp.path()).unwrap();
+            let file = temp.path().join("a");
+            fs::write(&file, "original\n").unwrap();
+            commit(&repo, "initial");
+            fs::write(&file, "staged\n").unwrap();
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("a")).unwrap();
+            index.write().unwrap();
+            fs::write(&file, "working\n").unwrap();
+            let mut service = Service::default();
+            let repository = RepoRef::decode(&open(&mut service, temp.path())).unwrap();
+            let snapshot = SnapshotRef {
+                r: repository.clone(),
+                q: "status".into(),
+                f: fingerprint(&repo).unwrap(),
+                p: None,
+            };
+            let entry = EntryRef::new(&[b"a".to_vec()]).encode();
+            let index_before = fs::read(repo.path().join("index")).unwrap();
+            let mut rendered = false;
+            let result =
+                working_comparison(&repository, &snapshot, &entry, side.clone(), 3, |diff| {
+                    let value = diff_value(diff, None)?;
+                    assert!(!value["files"].as_array().unwrap().is_empty());
+                    rendered = true;
+                    fs::write(&file, "changed while rendering\n").unwrap();
+                    Ok(value)
+                });
+            assert!(rendered);
+            assert_eq!(result.unwrap_err().code, "STALE_SNAPSHOT");
+            assert_eq!(fs::read(repo.path().join("index")).unwrap(), index_before);
+            // A stale initial snapshot must fail before any capture/render work.
+            let result = working_comparison(&repository, &snapshot, &entry, side, 3, |_| {
+                panic!("stale snapshot reached renderer")
+            });
+            assert_eq!(result.unwrap_err().code, "STALE_SNAPSHOT");
+        }
+    }
+
+    #[test]
+    fn working_comparison_rejects_foreign_snapshot_scope_before_rendering() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        fs::write(temp.path().join("a"), "untracked\n").unwrap();
+        let mut service = Service::default();
+        let repository = RepoRef::decode(&open(&mut service, temp.path())).unwrap();
+        let entry = EntryRef::new(&[b"a".to_vec()]).encode();
+        for (query, parameter) in [("history", None), ("status", Some("unexpected".into()))] {
+            let snapshot = SnapshotRef {
+                r: repository.clone(),
+                q: query.into(),
+                f: fingerprint(&repo).unwrap(),
+                p: parameter,
+            };
+            let result = working_comparison(
+                &repository,
+                &snapshot,
+                &entry,
+                Side::IndexToWorktree,
+                3,
+                |_| panic!("invalid snapshot reached renderer"),
+            );
+            assert_eq!(result.unwrap_err().code, "INVALID_REQUEST");
+        }
+    }
+
     #[test]
     fn opening_aliases_returns_one_canonical_project_root() {
         let temp = tempfile::tempdir().unwrap();
@@ -1467,6 +1617,10 @@ mod tests {
             let listing = json(
                 service,
                 Request::Worktrees {
+                    at_snapshot: None,
+                    filter: String::new(),
+                    branch: None,
+                    name: None,
                     repo_id: repo_id.clone(),
                     page_size: 100,
                     cursor: None,
@@ -1534,6 +1688,10 @@ mod tests {
             let listing = json(
                 service,
                 Request::Worktrees {
+                    at_snapshot: None,
+                    filter: String::new(),
+                    branch: None,
+                    name: None,
                     repo_id: repo_id.into(),
                     page_size: 100,
                     cursor: None,
@@ -1658,6 +1816,10 @@ mod tests {
                 let listing = json(
                     service,
                     Request::Worktrees {
+                        at_snapshot: None,
+                        filter: String::new(),
+                        branch: None,
+                        name: None,
                         repo_id: repo_id.clone(),
                         page_size: 100,
                         cursor: None,
@@ -1765,6 +1927,10 @@ mod tests {
             let listing = json(
                 service,
                 Request::Worktrees {
+                    at_snapshot: None,
+                    filter: String::new(),
+                    branch: None,
+                    name: None,
                     repo_id: repo_id.clone(),
                     page_size: 100,
                     cursor: None,
@@ -1832,6 +1998,10 @@ mod tests {
             json(
                 service,
                 Request::Worktrees {
+                    at_snapshot: None,
+                    filter: String::new(),
+                    branch: None,
+                    name: None,
                     repo_id: repo_id.clone(),
                     page_size: 100,
                     cursor: None,
@@ -1917,6 +2087,10 @@ mod tests {
         let listing = json(
             &mut service,
             Request::Worktrees {
+                at_snapshot: None,
+                filter: String::new(),
+                branch: None,
+                name: None,
                 repo_id: bare_id.clone(),
                 page_size: 100,
                 cursor: None,
@@ -1948,6 +2122,10 @@ mod tests {
         let mut service = Service::default();
         let main_id = open(&mut service, main.workdir().unwrap());
         let request = |repo_id: String, cursor| Request::Worktrees {
+            at_snapshot: None,
+            filter: String::new(),
+            branch: None,
+            name: None,
             repo_id,
             page_size: 1,
             cursor,
@@ -1976,6 +2154,10 @@ mod tests {
         let from_linked = json(
             &mut service,
             Request::Worktrees {
+                at_snapshot: None,
+                filter: String::new(),
+                branch: None,
+                name: None,
                 repo_id: linked_id,
                 page_size: 100,
                 cursor: None,
@@ -1990,6 +2172,10 @@ mod tests {
         let missing = json(
             &mut service,
             Request::Worktrees {
+                at_snapshot: None,
+                filter: String::new(),
+                branch: None,
+                name: None,
                 repo_id: main_id.clone(),
                 page_size: 100,
                 cursor: None,
@@ -2071,6 +2257,7 @@ mod tests {
         let mut service = Service::default();
         let repo_id = open(&mut service, local.workdir().unwrap());
         let request = |cursor, for_push, expected_token: String| Request::RemoteRefs {
+            filter: String::new(),
             repo_id: repo_id.clone(),
             remote: "origin".into(),
             expected_token,
@@ -2086,6 +2273,11 @@ mod tests {
             .delete()
             .unwrap();
         let cursor = first["nextCursor"].as_str().unwrap().to_owned();
+        let mut filtered_request = request(Some(cursor.clone()), false, token.clone());
+        if let Request::RemoteRefs { filter, .. } = &mut filtered_request {
+            *filter = "topic".into();
+        }
+        assert!(service.request(filtered_request).is_err());
         assert!(service
             .request(request(Some(cursor.clone()), true, token.clone()))
             .is_err());
@@ -2150,6 +2342,7 @@ mod tests {
         let status = json(
             &mut service,
             Request::Status {
+                filter: None,
                 repo_id: repo_id.clone(),
                 page_size: 100,
                 cursor: None,
@@ -2191,6 +2384,7 @@ mod tests {
         let status = json(
             &mut reconnected,
             Request::Status {
+                filter: None,
                 repo_id: new_id.clone(),
                 page_size: 100,
                 cursor: None,
@@ -2239,6 +2433,7 @@ mod tests {
         let status = json(
             &mut service,
             Request::Status {
+                filter: None,
                 repo_id: repo_id.clone(),
                 page_size: 100,
                 cursor: None,
@@ -2341,6 +2536,91 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(paths.len(), 205);
         assert!(!paths.contains("new"));
+    }
+    #[test]
+    fn commit_files_can_continue_past_old_truncation_limit_after_reconnect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = Repository::init_bare(tmp.path()).unwrap();
+        let mut tree = repo.treebuilder(None).unwrap();
+        let blob = repo.blob(b"contents\n").unwrap();
+        for index in 0..50_005 {
+            tree.insert(format!("file-{index:05}"), blob, 0o100644)
+                .unwrap();
+        }
+        let tree = repo.find_tree(tree.write().unwrap()).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.test").unwrap();
+        let commit = repo
+            .commit(Some("HEAD"), &sig, &sig, "large", &tree, &[])
+            .unwrap();
+        let mut service = Service::default();
+        let repo_id = open(&mut service, tmp.path());
+        let request = |cursor| Request::CommitFiles {
+            repo_id: repo_id.clone(),
+            commit_oid: commit.to_string(),
+            parent_index: 0,
+            page_size: 100,
+            cursor,
+        };
+        let first = json(&mut service, request(None));
+        assert_eq!(first["metadata"]["totalFiles"], 50_005);
+        assert_eq!(first["metadata"]["truncated"], false);
+        let mut cursor = CursorRef::decode(first["nextCursor"].as_str().unwrap()).unwrap();
+        cursor.o = 50_000;
+        let last = json(&mut Service::default(), request(Some(cursor.encode())));
+        assert_eq!(last["entries"].as_array().unwrap().len(), 5);
+        assert_eq!(last["entries"][0]["newPath"]["display"], "file-50000");
+        assert_eq!(last["snapshot"], first["snapshot"]);
+        assert!(last["nextCursor"].is_null());
+    }
+    #[test]
+    fn commit_files_byte_budget_preserves_all_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = Repository::init_bare(tmp.path()).unwrap();
+        let mut tree = repo.treebuilder(None).unwrap();
+        let blob = repo.blob(b"contents\n").unwrap();
+        for index in 0..205 {
+            tree.insert(
+                format!("file-{index:03}-{}", "x".repeat(2000)),
+                blob,
+                0o100644,
+            )
+            .unwrap();
+        }
+        let tree = repo.find_tree(tree.write().unwrap()).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.test").unwrap();
+        let commit = repo
+            .commit(Some("HEAD"), &sig, &sig, "wide paths", &tree, &[])
+            .unwrap();
+        let mut service = Service::default();
+        let repo_id = open(&mut service, tmp.path());
+        let mut cursor = None;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut pages = 0;
+        loop {
+            let page = json(
+                &mut service,
+                Request::CommitFiles {
+                    repo_id: repo_id.clone(),
+                    commit_oid: commit.to_string(),
+                    parent_index: 0,
+                    page_size: 200,
+                    cursor,
+                },
+            );
+            assert!(serde_json::to_vec(&page).unwrap().len() < MAX_FRAME);
+            let rows = page["entries"].as_array().unwrap();
+            assert!(!rows.is_empty());
+            for row in rows {
+                assert!(seen.insert(row["newPath"]["bytesB64"].as_str().unwrap().to_owned()));
+            }
+            pages += 1;
+            cursor = page["nextCursor"].as_str().map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(seen.len(), 205);
+        assert!(pages > 2);
     }
     #[test]
     fn selected_history_file_is_reachable_beyond_whole_diff_file_limit() {
@@ -2494,6 +2774,118 @@ mod tests {
         );
     }
     #[test]
+    fn selected_diff_matches_full_comparison_for_paths_types_attributes_and_parents() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = Repository::init_bare(temp.path()).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.test").unwrap();
+        let make = |parents: &[git2::Oid], changed: bool| {
+            let mut builder = repo.treebuilder(None).unwrap();
+            let content: &[u8] = if changed { b"after\n" } else { b"before\n" };
+            for path in [
+                b"selected".as_slice(),
+                b"[x]*.txt",
+                b"nonutf8-\xff",
+                b"binary.data",
+            ] {
+                builder
+                    .insert(path, repo.blob(content).unwrap(), 0o100644)
+                    .unwrap();
+            }
+            builder
+                .insert(
+                    ".gitattributes",
+                    repo.blob(b"*.data -diff\n").unwrap(),
+                    0o100644,
+                )
+                .unwrap();
+            builder
+                .insert(
+                    "executable",
+                    repo.blob(b"same\n").unwrap(),
+                    if changed { 0o100755 } else { 0o100644 },
+                )
+                .unwrap();
+            builder
+                .insert("link", repo.blob(content).unwrap(), 0o120000)
+                .unwrap();
+            builder
+                .insert(
+                    "type-change",
+                    repo.blob(content).unwrap(),
+                    if changed { 0o120000 } else { 0o100644 },
+                )
+                .unwrap();
+            builder
+                .insert(
+                    if changed {
+                        "renamed-new"
+                    } else {
+                        "renamed-old"
+                    },
+                    repo.blob(b"unchanged rename content\n").unwrap(),
+                    0o100644,
+                )
+                .unwrap();
+            let tree = repo.find_tree(builder.write().unwrap()).unwrap();
+            let parents = parents
+                .iter()
+                .map(|id| repo.find_commit(*id).unwrap())
+                .collect::<Vec<_>>();
+            repo.commit(
+                None,
+                &sig,
+                &sig,
+                "comparison",
+                &tree,
+                &parents.iter().collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        let base = make(&[], false);
+        let alternate = make(&[base], false);
+        let tip = make(&[base, alternate], true);
+        for parent in 0..2 {
+            for path in [
+                b"selected".as_slice(),
+                b"[x]*.txt",
+                b"nonutf8-\xff",
+                b"binary.data",
+                b"executable",
+                b"link",
+                b"type-change",
+                b"renamed-new",
+                b"renamed-old",
+            ] {
+                let full = commit_comparison(&repo, &tip.to_string(), parent, 3, |diff| {
+                    diff_value(diff, Some(path))
+                })
+                .unwrap();
+                let selected = commit_diff(&repo, &tip.to_string(), parent, 3, Some(path)).unwrap();
+                assert_eq!(selected, full, "path {:?}, parent {parent}", path);
+            }
+        }
+        let before = repo.find_commit(base).unwrap().tree().unwrap();
+        let after = repo.find_commit(tip).unwrap().tree().unwrap();
+        for path in [
+            b"selected".as_slice(),
+            b"[x]*.txt",
+            b"nonutf8-\xff",
+            b"executable",
+            b"link",
+        ] {
+            assert!(same_blob_type(Some(&before), &after, path));
+        }
+        for path in [
+            b"type-change".as_slice(),
+            b"renamed-new",
+            b"renamed-old",
+            b"missing",
+        ] {
+            assert!(!same_blob_type(Some(&before), &after, path));
+        }
+    }
+
+    #[test]
     fn commit_diff_reports_renames_binary_blobs_and_mode_changes() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = Repository::init(tmp.path()).unwrap();
@@ -2548,6 +2940,110 @@ mod tests {
         );
     }
     #[test]
+    fn history_pages_obey_byte_budget_and_replay_without_loss() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        fs::write(temp.path().join("a"), "a").unwrap();
+        for i in 0..40 {
+            commit(&repo, &format!("{i} {}", "m".repeat(16384)));
+        }
+        let mut service = Service::default();
+        let repo_id = open(&mut service, temp.path());
+        let request = |cursor| Request::History {
+            message_bytes: None,
+            repo_id: repo_id.clone(),
+            revision: "HEAD".into(),
+            page_size: 200,
+            cursor,
+        };
+        let mut cursor = None;
+        let mut seen = Vec::new();
+        loop {
+            // Reconnect on every page to exercise stateless continuation.
+            let value = json(&mut Service::default(), request(cursor));
+            assert!(serde_json::to_vec(&value).unwrap().len() < MAX_FRAME);
+            assert_eq!(value["metadata"]["truncated"], false);
+            seen.extend(
+                value["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|entry| entry["oid"]["hex"].as_str().unwrap().to_owned()),
+            );
+            cursor = value["nextCursor"].as_str().map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        let mut walk = repo.revwalk().unwrap();
+        walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
+            .unwrap();
+        walk.push_head().unwrap();
+        assert_eq!(
+            seen,
+            walk.map(|oid| oid.unwrap().to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn sha256_history_cursor_survives_reconnect() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut options = git2::RepositoryInitOptions::new();
+        options.object_format(git2::ObjectFormat::Sha256);
+        let repo = Repository::init_opts(temp.path(), &options).unwrap();
+        fs::write(temp.path().join("a"), "a").unwrap();
+        commit(&repo, "one");
+        let base = repo.head().unwrap().target().unwrap();
+        commit(&repo, "two");
+        let mut service = Service::default();
+        let repo_id = open(&mut service, temp.path());
+        let request = |cursor| Request::History {
+            message_bytes: None,
+            repo_id: repo_id.clone(),
+            revision: "HEAD".into(),
+            page_size: 1,
+            cursor,
+        };
+        let first = json(&mut service, request(None));
+        let last = json(
+            &mut Service::default(),
+            request(first["nextCursor"].as_str().map(str::to_owned)),
+        );
+        assert_eq!(last["entries"][0]["oid"]["hex"], base.to_string());
+        assert_eq!(last["entries"][0]["oid"]["algorithm"], "sha256");
+        assert!(last["nextCursor"].is_null());
+    }
+
+    #[test]
+    fn history_cursor_rejects_changed_shallow_boundaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        fs::write(temp.path().join("a"), "a").unwrap();
+        commit(&repo, "one");
+        let base = repo.head().unwrap().target().unwrap();
+        commit(&repo, "two");
+        let mut service = Service::default();
+        let repo_id = open(&mut service, temp.path());
+        let request = |cursor| Request::History {
+            message_bytes: None,
+            repo_id: repo_id.clone(),
+            revision: "HEAD".into(),
+            page_size: 1,
+            cursor,
+        };
+        let value = json(&mut service, request(None));
+        fs::write(repo.path().join("shallow"), format!("{base}\n")).unwrap();
+        assert_eq!(
+            service
+                .request(request(value["nextCursor"].as_str().map(str::to_owned)))
+                .err()
+                .unwrap()
+                .code,
+            "SNAPSHOT_EXPIRED"
+        );
+    }
+
+    #[test]
     fn history_pages_remain_anchored_after_new_commits() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = Repository::init(tmp.path()).unwrap();
@@ -2558,6 +3054,7 @@ mod tests {
         let mut service = Service::default();
         let repo_id = open(&mut service, tmp.path());
         let request = |cursor| Request::History {
+            message_bytes: None,
             repo_id: repo_id.clone(),
             page_size: 1,
             cursor,
@@ -2571,7 +3068,7 @@ mod tests {
         let repeated = json(&mut service, request(Some(cursor.clone())));
         assert_eq!(second, repeated);
         assert!(
-            matches!(service.request(Request::Branches {repo_id:repo_id.clone(),page_size:1,cursor:Some(cursor)}),Err(Error {code,..}) if code=="INVALID_REQUEST")
+            matches!(service.request(Request::Branches { filter: String::new(), branch_kind: None,repo_id:repo_id.clone(),page_size:1,cursor:Some(cursor)}),Err(Error {code,..}) if code=="INVALID_REQUEST")
         );
         // Stateless: a process that never saw the first page -- a reconnect, a
         // second channel -- continues the same cursor from the same anchored
@@ -2595,6 +3092,7 @@ mod tests {
             json(
                 &mut service,
                 Request::History {
+                    message_bytes: None,
                     repo_id: repo_id.clone(),
                     page_size: 10,
                     cursor: None,
@@ -2608,14 +3106,13 @@ mod tests {
         fs::rename(&gitdir, tmp.path().join("old-git")).unwrap();
         Repository::init(&path).unwrap();
         assert!(
-            matches!(service.request(Request::Branches {repo_id,page_size:10,cursor:None}),Err(Error {code,..}) if code=="REPO_REPLACED")
+            matches!(service.request(Request::Branches { filter: String::new(), branch_kind: None,repo_id,page_size:10,cursor:None}),Err(Error {code,..}) if code=="REPO_REPLACED")
         );
         let bare_path = tmp.path().join("bare");
         Repository::init_bare(&bare_path).unwrap();
         let bare = open(&mut service, &bare_path);
-        assert!(
-            matches!(service.request(Request::Status {repo_id:bare,page_size:10,cursor:None}),Err(Error {code,..}) if code=="UNSUPPORTED_CAPABILITY")
-        );
+        assert!(matches!(service.request(Request::Status {
+filter: None,repo_id:bare,page_size:10,cursor:None}),Err(Error {code,..}) if code=="UNSUPPORTED_CAPABILITY"));
     }
     #[test]
     fn deleted_parent_and_staged_rename_can_be_inspected() {
@@ -2631,6 +3128,7 @@ mod tests {
         let status = json(
             &mut service,
             Request::Status {
+                filter: None,
                 repo_id: repo_id.clone(),
                 page_size: 100,
                 cursor: None,
@@ -2644,6 +3142,7 @@ mod tests {
         let status = json(
             &mut service,
             Request::Status {
+                filter: None,
                 repo_id: repo_id.clone(),
                 page_size: 100,
                 cursor: None,
@@ -2702,6 +3201,7 @@ mod tests {
         let history = json(
             &mut service,
             Request::History {
+                message_bytes: None,
                 repo_id: repo_id.clone(),
                 revision: "HEAD".into(),
                 page_size: 10,
@@ -2709,6 +3209,15 @@ mod tests {
             },
         );
         assert_eq!(history["entries"][0]["oid"]["algorithm"], "sha256");
+        let detail = json(
+            &mut service,
+            Request::Commit {
+                repo_id: repo_id.clone(),
+                commit_oid: history["entries"][0]["oid"]["hex"].as_str().unwrap().into(),
+            },
+        );
+        assert_eq!(detail, history["entries"][0]);
+
         assert_eq!(
             history["entries"][0]["oid"]["hex"].as_str().unwrap().len(),
             64
@@ -2716,6 +3225,8 @@ mod tests {
         let branches = json(
             &mut service,
             Request::Branches {
+                filter: String::new(),
+                branch_kind: None,
                 repo_id: repo_id.clone(),
                 page_size: 10,
                 cursor: None,
@@ -2725,6 +3236,7 @@ mod tests {
         let status = json(
             &mut service,
             Request::Status {
+                filter: None,
                 repo_id: repo_id.clone(),
                 page_size: 10,
                 cursor: None,
@@ -2784,7 +3296,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_working_tree_reads_as_truncated_and_stays_fingerprintable() {
+    fn status_pages_cover_all_entries_and_stay_fingerprintable() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("repo");
         let repo = Repository::init(&root).unwrap();
@@ -2793,15 +3305,14 @@ mod tests {
         fs::write(root.join("tracked"), "two\n").unwrap();
         // Untracked files at the root, so collapsing cannot hide them: this is a
         // working tree genuinely larger than one read can carry.
-        let untracked = MAX_STATUS_ENTRIES + 9;
+        let untracked = 41;
         for i in 0..untracked {
             fs::write(root.join(format!("untracked-{i:05}")), "x").unwrap();
         }
         let total = untracked + 1;
         let scan = statuses(&repo).unwrap();
         assert_eq!(scan.total, total);
-        assert!(scan.truncated);
-        assert_eq!(scan.iter().count(), MAX_STATUS_ENTRIES);
+        assert_eq!(scan.iter().count(), total);
         // A repository that cannot be fingerprinted cannot be written at all.
         let stable = fingerprint(&repo).unwrap();
         assert_eq!(stable, fingerprint(&repo).unwrap());
@@ -2818,31 +3329,33 @@ mod tests {
         let status = json(
             &mut service,
             Request::Status {
+                filter: None,
                 repo_id: repo_id.clone(),
-                page_size: 200,
+                page_size: 7,
                 cursor: None,
             },
         );
-        assert_eq!(status["metadata"]["truncated"], true);
+        assert_eq!(status["metadata"]["truncated"], false);
         assert_eq!(status["metadata"]["totalEntries"], total as u64);
-        assert_eq!(status["metadata"]["entryLimit"], MAX_STATUS_ENTRIES as u64);
+        assert!(status["metadata"].get("entryLimit").is_none());
         let mut seen = status["entries"].as_array().unwrap().len();
         let mut cursor = status["nextCursor"].as_str().map(str::to_owned);
         while let Some(next) = cursor {
             let page = json(
                 &mut service,
                 Request::Status {
+                    filter: None,
                     repo_id: repo_id.clone(),
-                    page_size: 200,
+                    page_size: 7,
                     cursor: Some(next),
                 },
             );
-            assert_eq!(page["metadata"]["truncated"], true);
+            assert_eq!(page["metadata"]["truncated"], false);
             assert_eq!(page["metadata"]["totalEntries"], total as u64);
             seen += page["entries"].as_array().unwrap().len();
             cursor = page["nextCursor"].as_str().map(str::to_owned);
         }
-        assert_eq!(seen, MAX_STATUS_ENTRIES);
+        assert_eq!(seen, total);
     }
 
     #[test]
@@ -2859,6 +3372,7 @@ mod tests {
         let status = json(
             &mut service,
             Request::Status {
+                filter: None,
                 repo_id,
                 page_size: 200,
                 cursor: None,
@@ -2889,6 +3403,7 @@ mod tests {
         let status = json(
             &mut service,
             Request::Status {
+                filter: None,
                 repo_id: repo_id.clone(),
                 page_size: 200,
                 cursor: None,
@@ -2946,6 +3461,7 @@ mod tests {
         let status = json(
             &mut service,
             Request::Status {
+                filter: None,
                 repo_id: repo_id.clone(),
                 page_size: 200,
                 cursor: None,
@@ -2998,6 +3514,7 @@ mod tests {
         let status = json(
             &mut service,
             Request::Status {
+                filter: None,
                 repo_id: repo_id.clone(),
                 page_size: 200,
                 cursor: None,
@@ -3032,6 +3549,7 @@ mod tests {
         json(
             service,
             Request::Status {
+                filter: None,
                 repo_id: repo_id.into(),
                 page_size: page,
                 cursor,
@@ -3099,6 +3617,8 @@ mod tests {
         let listing = json(
             &mut service,
             Request::Branches {
+                filter: String::new(),
+                branch_kind: None,
                 repo_id,
                 page_size: 100,
                 cursor: None,
@@ -3183,6 +3703,8 @@ mod tests {
             let branches = json(
                 &mut service,
                 Request::Branches {
+                    filter: String::new(),
+                    branch_kind: None,
                     repo_id: repo_id.clone(),
                     page_size: 100,
                     cursor: None,
@@ -3193,6 +3715,10 @@ mod tests {
             json(
                 &mut service,
                 Request::Worktrees {
+                    at_snapshot: None,
+                    filter: String::new(),
+                    branch: None,
+                    name: None,
                     repo_id: repo_id.clone(),
                     page_size: 100,
                     cursor: None,
@@ -3288,6 +3814,7 @@ mod tests {
         let mut elsewhere = Service::default();
         assert_eq!(
             code(elsewhere.request(Request::Status {
+                filter: None,
                 repo_id: repo_id.clone(),
                 page_size: 1,
                 cursor: Some(cursor.clone()),
@@ -3355,6 +3882,8 @@ mod tests {
         // A snapshot handed over as a repository is a different kind of token.
         assert_eq!(
             code(service.request(Request::Branches {
+                filter: String::new(),
+                branch_kind: None,
                 repo_id: snapshot.clone(),
                 page_size: 10,
                 cursor: None,
@@ -3461,6 +3990,8 @@ mod tests {
             json(
                 &mut service,
                 Request::Branches {
+                    filter: String::new(),
+                    branch_kind: None,
                     repo_id,
                     page_size: 10,
                     cursor: None,
@@ -3483,6 +4014,8 @@ mod tests {
         fs::remove_dir_all(&path).unwrap();
         assert_eq!(
             code(Service::default().request(Request::Branches {
+                filter: String::new(),
+                branch_kind: None,
                 repo_id,
                 page_size: 10,
                 cursor: None

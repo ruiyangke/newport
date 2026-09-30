@@ -9,6 +9,7 @@ import {
   gitResources,
   resetGitProjects,
   retainGitProjects,
+  releaseGitHotAdapters,
 } from "./registry";
 import {
   forgetRepositories,
@@ -144,4 +145,19 @@ it("a write never re-runs a content-addressed read or the remote one", async () 
   // Fixed by its key, and the one that would contact the remote.
   expect(stale(blob)).toBe(false);
   expect(stale(refs)).toBe(false);
+});
+
+it("replaces hot adapters without disconnecting their native session", async () => {
+  const previous = gitProjectsFor(scope("hot"));
+  const dispose = vi.spyOn(previous, "dispose");
+  releaseGitHotAdapters();
+  const next = gitProjectsFor(scope("hot"));
+  expect(next).not.toBe(previous);
+  expect(dispose).not.toHaveBeenCalled();
+  expect(invoke.mock.calls.some(([name]) => name === "git_disconnect")).toBe(
+    false,
+  );
+  // An existing caller can still finish through its original adapter.
+  await previous.list();
+  expect(invoke).toHaveBeenCalledWith("git_projects_list", { serverId: "hot" });
 });

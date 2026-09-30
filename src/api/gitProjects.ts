@@ -126,11 +126,15 @@ export class GitProjects {
     }
   }
 
-  async open(project: GitProject) {
+  async open(project: GitProject, signal?: AbortSignal) {
     this.checkProject(project);
-    const client = this.repositories;
+    signal?.throwIfAborted();
+    const client = signal
+      ? this.repositories.withSignal(signal)
+      : this.repositories;
     const repository = await client.open(project.path);
     try {
+      signal?.throwIfAborted();
       this.current();
       return repository;
     } catch (error) {

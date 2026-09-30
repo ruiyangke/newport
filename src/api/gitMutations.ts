@@ -35,17 +35,10 @@ export class GitMutations {
 
   private dispatch(action: (client: Client) => ReturnType<Client["start"]>) {
     return this.exclusive(async () => {
-      const receipts = await this.receipts();
-      if (
-        receipts.some(
-          (receipt) =>
-            receipt.state === "pending" || receipt.state === "outcome_unknown",
-        )
-      ) {
-        throw new Error(
-          "Check the earlier Git operation’s outcome before making more changes on this server.",
-        );
-      }
+      // Receipts are server-wide and older records have no repository identity.
+      // The agent checks unresolved operations under the common-repository lock;
+      // applying this check here would freeze unrelated repositories as well.
+      await this.receipts();
       this.ensureCurrent();
       // The native boundary records intent before dispatch. Never replay implicitly.
       return action(this.getClient());
@@ -66,6 +59,18 @@ export class GitMutations {
       this.ensureCurrent();
       // Native storage checks the latest receipt; stale UI state cannot dismiss uncertainty.
       await desktop("git_acknowledge_operation", {
+        serverId: this.serverId,
+        operationId,
+      });
+      this.ensureCurrent();
+    });
+  }
+
+  /** Explicit operator review; native code verifies the operation has stopped. */
+  review(operationId: string) {
+    return this.exclusive(async () => {
+      this.ensureCurrent();
+      await desktop("git_review_operation", {
         serverId: this.serverId,
         operationId,
       });

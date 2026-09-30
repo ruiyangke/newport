@@ -5,7 +5,7 @@
  * bundle. The views display the agent's lines and never compute a diff; every
  * selection they report is a list of the agent's line ids.
  */
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import {
@@ -26,6 +26,7 @@ import {
 export interface GitDiffEditorProps {
   file: DiffFile;
   layout: "unified" | "split";
+  footer?: ReactNode;
   /** Present only where the comparison can stage lines and hunks. */
   hunkLabel?: string;
   lineLabel?: string;
@@ -105,6 +106,7 @@ function useDiffEditor({
 export default function GitDiffEditor({
   file,
   layout,
+  footer,
   hunkLabel,
   lineLabel,
   canDiscard = false,
@@ -134,13 +136,26 @@ export default function GitDiffEditor({
   }, [onToggle, onApplyHunk, onDiscardHunk]);
   const ui = useMemo(() => ({ selected, disabled }), [selected, disabled]);
   return layout === "split" ? (
-    <SplitDiff file={file} controls={controls} handlers={handlers} ui={ui} />
+    <SplitDiff
+      file={file}
+      controls={controls}
+      handlers={handlers}
+      ui={ui}
+      footer={footer}
+    />
   ) : (
-    <UnifiedDiff file={file} controls={controls} handlers={handlers} ui={ui} />
+    <UnifiedDiff
+      file={file}
+      controls={controls}
+      handlers={handlers}
+      ui={ui}
+      footer={footer}
+    />
   );
 }
 
 type ViewProps = {
+  footer?: ReactNode;
   file: DiffFile;
   controls: DiffControls | null;
   handlers: { current: DiffHandlers };
@@ -151,7 +166,7 @@ const pathOf = (file: DiffFile, side: "old" | "new") =>
     ? (file.oldPath?.display ?? file.newPath?.display ?? null)
     : (file.newPath?.display ?? file.oldPath?.display ?? null);
 
-function UnifiedDiff({ file, controls, handlers, ui }: ViewProps) {
+function UnifiedDiff({ file, controls, handlers, ui, footer }: ViewProps) {
   const model = useMemo(() => buildUnified(file, !!controls), [file, controls]);
   const { parent } = useDiffEditor({
     model,
@@ -167,11 +182,12 @@ function UnifiedDiff({ file, controls, handlers, ui }: ViewProps) {
   return (
     <div className="git-diff-code" role="region" aria-label="Diff lines">
       <div ref={parent} data-diff-layout="unified" />
+      {footer}
     </div>
   );
 }
 
-function SplitDiff({ file, controls, handlers, ui }: ViewProps) {
+function SplitDiff({ file, controls, handlers, ui, footer }: ViewProps) {
   const models = useMemo(() => buildSplit(file, !!controls), [file, controls]);
   const before = useDiffEditor({
     model: models.old,
@@ -238,6 +254,7 @@ function SplitDiff({ file, controls, handlers, ui }: ViewProps) {
           note="Not in the new version"
         />
       </div>
+      {footer}
     </div>
   );
 }

@@ -11,7 +11,7 @@ import {
 import { lineAt } from "./diff/diffExtensions";
 import { GitChangesSplit } from "./diff/GitChangesSplit";
 import { decodeGitDiff } from "../domain/gitResponses";
-import { gitPath } from "../domain/git";
+import { gitPath, type GitRequest } from "../domain/git";
 import { GitRepositoryClient } from "../api/gitRepository";
 import {
   GitTestProviders,
@@ -95,6 +95,49 @@ function wire(text: string, lines = 1, binary = false) {
     },
   };
 }
+function paged(
+  value: ReturnType<typeof wire> | ReturnType<typeof selectable>,
+  request?: GitRequest,
+  entryId = "one",
+) {
+  const params = request?.method === "repo.diff_page" ? request.params : null;
+  return {
+    snapshot: "diff-page",
+    nextCursor: null,
+    metadata: {
+      sourceSnapshot: params?.snapshot ?? "s",
+      entryId: params?.entryId ?? entryId,
+      side: params?.side ?? "index_to_worktree",
+      contextLines: params?.contextLines ?? 3,
+      readOnly: false,
+      hasOmissions: false,
+      totalFiles: value.diff.files.length,
+      totalUnits: value.diff.files.reduce(
+        (n, f) => n + f.hunks.reduce((n, h) => n + h.lines.length, 0),
+        0,
+      ),
+    },
+    entries: value.diff.files.map((f, fileIndex) => ({
+      ...f,
+      fileIndex,
+      omissionReason: null,
+      hunks: f.hunks.map((h, index) => ({
+        ...h,
+        id: "a".repeat(64),
+        index,
+        totalLines: h.lines.length,
+        lines: h.lines.map((l, lineIndex) => ({
+          ...l,
+          id: "id" in l ? l.id : "b".repeat(64),
+          lineIndex,
+          byteOffset: 0,
+          lineComplete: true,
+          contentBytesB64: l.content.bytesB64,
+        })),
+      })),
+    })),
+  };
+}
 /** The diff's editor. CodeMirror in jsdom draws only its first screenful, so
     whole-document facts are read from the editor state. */
 function editor() {
@@ -174,8 +217,8 @@ it("ignores a previous selection's late response", async () => {
       ),
     ),
   );
-  await act(async () => callbacks[1](wire("current")));
-  await act(async () => callbacks[0](wire("stale")));
+  await act(async () => callbacks[1](paged(wire("current"), undefined, "two")));
+  await act(async () => callbacks[0](paged(wire("stale"))));
   expect(host.textContent).toContain("current 1");
   expect(host.textContent).not.toContain("stale 1");
 });
@@ -219,7 +262,7 @@ function button(prefix: string) {
 it.each([false, true])(
   "sends exact snapshot, hunk and comparison context (unstage=%s)",
   async (unstage) => {
-    const request = vi.fn(async () => editable());
+    const request = vi.fn(async (r: GitRequest) => paged(editable(), r));
     const client = new GitRepositoryClient({ request, forget: vi.fn() });
     let resolve!: (value: boolean) => void;
     const onAction = vi.fn(
@@ -263,6 +306,7 @@ it.each([false, true])(
           contextLines: 3,
         }),
       }),
+      expect.any(AbortSignal),
     );
     await act(async () => resolve(true));
     expect(button(label)).toBeUndefined();
@@ -271,7 +315,7 @@ it.each([false, true])(
 it("removes obsolete hunk actions immediately when the snapshot changes", async () => {
   const request = vi
     .fn()
-    .mockResolvedValueOnce(editable())
+    .mockResolvedValueOnce(paged(editable()))
     .mockImplementation(() => new Promise(() => {}));
   const client = new GitRepositoryClient({ request, forget: vi.fn() });
   const onAction = vi.fn(async () => true);
@@ -326,7 +370,7 @@ it.each(["truncated", "binary", "mode", "rename", "missing-id", "history"])(
 );
 it("disables writes for recovery and does not offer them on conflicts", async () => {
   const client = new GitRepositoryClient({
-    request: vi.fn(async () => editable()),
+    request: vi.fn(async (r: GitRequest) => paged(editable(), r)),
     forget: vi.fn(),
   });
   const onAction = vi.fn(async () => true);
@@ -387,7 +431,7 @@ it("keeps a long hunk actionable and every line tied to it", async () => {
 });
 
 it("shows a failed hunk request without replaying it and lets the user reread the diff", async () => {
-  const request = vi.fn(async () => editable());
+  const request = vi.fn(async (r: GitRequest) => paged(editable(), r));
   const client = new GitRepositoryClient({ request, forget: vi.fn() });
   const onAction = vi.fn(async () => {
     throw new Error("Refresh changes: this hunk is stale.");
@@ -450,7 +494,7 @@ function checkbox(index: number) {
 it.each([false, true])(
   "sends the exact selected lines with their hunks (unstage=%s)",
   async (unstage) => {
-    const request = vi.fn(async () => selectable());
+    const request = vi.fn(async (r: GitRequest) => paged(selectable(), r));
     const client = new GitRepositoryClient({ request, forget: vi.fn() });
     const onAction = vi.fn(async () => true);
     await act(async () =>
@@ -486,7 +530,7 @@ it.each([false, true])(
 );
 
 it("omits lines entirely when a whole hunk is staged", async () => {
-  const request = vi.fn(async () => selectable());
+  const request = vi.fn(async (r: GitRequest) => paged(selectable(), r));
   const client = new GitRepositoryClient({ request, forget: vi.fn() });
   const onAction = vi.fn(async () => true);
   await act(async () =>
@@ -572,7 +616,7 @@ it.each(["Added", "Untracked", "Deleted"])(
 );
 
 it("confirms before discarding a hunk and sends the unstaged source", async () => {
-  const request = vi.fn(async () => selectable());
+  const request = vi.fn(async (r: GitRequest) => paged(selectable(), r));
   const client = new GitRepositoryClient({ request, forget: vi.fn() });
   const onAction = vi.fn(async () => true);
   await act(async () =>
@@ -608,7 +652,7 @@ it("confirms before discarding a hunk and sends the unstaged source", async () =
 });
 
 it("discards exactly the selected lines", async () => {
-  const request = vi.fn(async () => selectable());
+  const request = vi.fn(async (r: GitRequest) => paged(selectable(), r));
   const client = new GitRepositoryClient({ request, forget: vi.fn() });
   const onAction = vi.fn(async () => true);
   await act(async () =>
@@ -654,7 +698,7 @@ afterEach(() => setViewportWidth(viewportWidth));
 
 it("says which comparison the diff shows, next to the selector", async () => {
   const client = new GitRepositoryClient({
-    request: vi.fn(async () => editable()),
+    request: vi.fn(async (r: GitRequest) => paged(editable(), r)),
     forget: vi.fn(),
   });
   const show = (key: string, entry: typeof changedEntry) =>
@@ -699,7 +743,7 @@ it("says which comparison the diff shows, next to the selector", async () => {
 });
 
 it("offers no discard on the staged comparison", async () => {
-  const request = vi.fn(async () => selectable());
+  const request = vi.fn(async (r: GitRequest) => paged(selectable(), r));
   const client = new GitRepositoryClient({ request, forget: vi.fn() });
   await act(async () =>
     root.render(
@@ -729,7 +773,7 @@ it("hands the list width and the narrow flow to a surrounding GitChangesSplit", 
     disconnect() {}
   };
   const client = new GitRepositoryClient({
-    request: vi.fn(async () => editable()),
+    request: vi.fn(async (r: GitRequest) => paged(editable(), r)),
     forget: vi.fn(),
   });
   const render = () =>
@@ -779,4 +823,57 @@ it("hands the list width and the narrow flow to a surrounding GitChangesSplit", 
   await act(async () => window.dispatchEvent(new Event("resize")));
   expect(host.querySelectorAll('[role="separator"]')).toHaveLength(1);
   expect(host.textContent).toContain("change 1");
+});
+
+it("keeps partial content on page failure and enables staging only after retry completes the hunk", async () => {
+  const full = paged(selectable());
+  const first = structuredClone(full);
+  const second = structuredClone(full);
+  const initial = { ...first, nextCursor: "next" };
+  initial.entries[0].hunks[0].lines = first.entries[0].hunks[0].lines.slice(
+    0,
+    1,
+  );
+  second.entries[0].hunks[0].lines = full.entries[0].hunks[0].lines.slice(1);
+  let fail = true;
+  const request = vi.fn(async (r: GitRequest) => {
+    if (r.method !== "repo.diff_page") throw new Error("Unexpected request");
+    if (!r.params.cursor) return initial;
+    if (fail) throw new Error("Connection interrupted");
+    return second;
+  });
+  const onAction = vi.fn(async () => true);
+  const client = new GitRepositoryClient({ request, forget: vi.fn() });
+  await act(async () =>
+    root.render(
+      inGit(
+        client,
+        <GitChangesPreview
+          repoId="repo"
+          snapshot="s"
+          entry={changedEntry}
+          onAction={onAction}
+        />,
+      ),
+    ),
+  );
+  expect(editor()!.state.doc.toString()).toContain("change 1");
+  expect(button("Stage hunk")).toBeUndefined();
+  await act(async () => button("Load more changes").click());
+  expect(host.textContent).toContain("Connection interrupted");
+  expect(editor()!.state.doc.toString()).toContain("change 1");
+  expect(button("Stage hunk")).toBeUndefined();
+  fail = false;
+  await act(async () => button("Retry: load more changes").click());
+  expect(editor()!.state.doc.toString()).toContain("change 2");
+  expect(host.textContent).toContain("All changes loaded");
+  await act(async () => button("Stage hunk").click());
+  expect(onAction).toHaveBeenCalledWith(
+    {
+      kind: "stage",
+      entryIds: ["one"],
+      hunks: { ids: ["a".repeat(64)], contextLines: 3 },
+    },
+    "s",
+  );
 });

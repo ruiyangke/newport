@@ -54,6 +54,10 @@ export interface UpdateStatus {
   error: string | null;
 }
 interface Commands {
+  git_review_operation: Command<
+    { serverId: string; operationId: string },
+    void
+  >;
   git_pending_operations: Command<{ serverId: string }, GitOperationReceipt[]>;
   git_acknowledge_operation: Command<
     { serverId: string; operationId: string },
@@ -65,7 +69,12 @@ interface Commands {
   git_connect: Command<{ serverId: string }, GitConnection>;
   // One shared connection per server, so requests name the server, not a
   // connection: the native side connects, or reconnects, before sending.
-  git_request: Command<{ serverId: string; request: GitRequest }, unknown>;
+  git_request: Command<
+    { serverId: string; request: GitRequest; readId?: string },
+    unknown
+  >;
+  git_register_read: Command<{ serverId: string }, string>;
+  git_cancel_read: Command<{ serverId: string; readId: string }, void>;
   git_disconnect: Command<{ serverId: string }, void>;
   update_status: Command<undefined, UpdateStatus>;
   check_for_updates: Command<undefined, void>;

@@ -85,3 +85,70 @@ it("keeps unresolved outcomes queryable but cannot dismiss them", async () => {
   expect(onCheck).toHaveBeenCalledWith("saved-id");
   expect(onAcknowledge).not.toHaveBeenCalled();
 });
+
+it("requires explicit inspection before recording an unknown outcome review", async () => {
+  const onReview = vi.fn();
+  const onCheck = vi.fn();
+  const onAcknowledge = vi.fn();
+  await act(async () =>
+    root.render(
+      <GitRecoveryPanel
+        receipts={[
+          {
+            operationId: "uncertain",
+            serverId: "server",
+            action: "pull.fast_forward",
+            state: "outcome_unknown",
+          },
+        ]}
+        error=""
+        busy={false}
+        onCheck={onCheck}
+        onAcknowledge={onAcknowledge}
+        onRefresh={() => {}}
+        onReview={onReview}
+      />,
+    ),
+  );
+  const button = (text: string) =>
+    [...document.querySelectorAll("button")].find(
+      (b) => b.textContent === text,
+    )!;
+  await act(async () => button("Review interrupted operation…").click());
+  expect(button("Record review").disabled).toBe(true);
+  expect(document.body.textContent).toContain("does not retry the operation");
+  await act(async () => button("Record review").click());
+  expect(onReview).not.toHaveBeenCalled();
+  await act(async () =>
+    (document.querySelector('[role="checkbox"]') as HTMLButtonElement).click(),
+  );
+  await act(async () => button("Record review").click());
+  expect(onReview).toHaveBeenCalledExactlyOnceWith("uncertain");
+  expect(onCheck).not.toHaveBeenCalled();
+  expect(onAcknowledge).not.toHaveBeenCalled();
+});
+
+it("does not offer review for an operation whose outcome has not been checked", async () => {
+  await act(async () =>
+    root.render(
+      <GitRecoveryPanel
+        receipts={[
+          {
+            operationId: "pending",
+            serverId: "server",
+            action: "pull.fast_forward",
+            state: "pending",
+          },
+        ]}
+        error=""
+        busy={false}
+        onCheck={vi.fn()}
+        onAcknowledge={vi.fn()}
+        onRefresh={() => {}}
+        onReview={vi.fn()}
+      />,
+    ),
+  );
+  expect(host.textContent).not.toContain("Review interrupted operation…");
+  expect(host.textContent).toContain("Check outcome");
+});

@@ -1,3 +1,4 @@
+import { gitErrorMessage } from "../git/errors";
 import { useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, ChevronDown, RefreshCw } from "lucide-react";
@@ -50,19 +51,13 @@ export function GitSyncControl({
   const upstreamRef = metadata?.upstreamRef?.display ?? null;
   const upstream = upstreamRef ? upstreamParts(upstreamRef) : null;
 
-  /**
-   * Resolve the remote's configuration token only when an action is actually
-   * requested. Reading it on every status refresh would spend a round trip on
-   * the server for something the user may never use. The read is the same
-   * cached remotes query the Remotes dialog shows: a fresh copy answers without
-   * a round trip, and a stale or retired one is read again rather than being
-   * held for the life of the toolbar.
-   */
+  // Fetch only the selected remote when needed. Repository writes invalidate
+  // this query together with the other repository reads.
   async function ensureToken(remote: string) {
     const value = await queryClient.fetchQuery(
-      gitQueries.remotes(scope, repository.repoId),
+      gitQueries.remote(scope, repository.repoId, remote),
     );
-    return value.entries.find((entry) => entry.name === remote)?.token ?? null;
+    return value.token;
   }
 
   const ahead = metadata?.ahead ?? 0;
@@ -99,7 +94,13 @@ export function GitSyncControl({
   }
   async function transfer(kind: "fetch" | "pull" | "push") {
     if (!upstream) return;
-    const expectedToken = await ensureToken(upstream.remote);
+    let expectedToken: string;
+    try {
+      expectedToken = await ensureToken(upstream.remote);
+    } catch (cause) {
+      setError(gitErrorMessage(cause));
+      return;
+    }
     if (!expectedToken) {
       setError("This remote’s configuration could not be read.");
       return;

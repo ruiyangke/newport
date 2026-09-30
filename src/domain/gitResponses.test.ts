@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  decodeGitRemotes,
+  decodeGitBlobPage,
+  decodeGitBlob,
   decodeGitBytes,
   decodeGitDiff,
   decodeGitBranches,
@@ -9,8 +12,33 @@ import {
   decodeGitOid,
   decodeGitRepository,
   decodeGitStatus,
+  decodeGitStashes,
+  decodeGitOperation,
+  decodeGitWorktrees,
 } from "./gitResponses";
 import { gitPath } from "./git";
+
+it("preserves reviewed interruption as an unknown outcome", () => {
+  const outcome = decodeGitOperation(
+    {
+      operationId: "op",
+      repository: "repo",
+      payloadHash: "hash",
+      state: "reviewed_unknown",
+      seq: 3,
+      result: null,
+      error: {
+        code: "OUTCOME_UNKNOWN",
+        message: "Interrupted",
+        retry: "never",
+      },
+    },
+    "op",
+  );
+  expect(outcome.state).toBe("reviewed_unknown");
+  expect(outcome.result).toBeNull();
+  expect(outcome.error?.code).toBe("OUTCOME_UNKNOWN");
+});
 
 const oid = { algorithm: "sha1", hex: "a".repeat(40) };
 const sha256Oid = { algorithm: "sha256" as const, hex: "b".repeat(64) };
@@ -143,6 +171,26 @@ describe("Git response validation", () => {
       appendGitPage(first, { ...next, nextCursor: "next" }, "next"),
     ).toThrow();
     expect(() => appendGitPage(next, next, "next")).toThrow();
+  });
+  it("continues past fifty thousand entries without an artificial end boundary", () => {
+    const first = {
+      snapshot: "large",
+      entries: Array.from({ length: 50000 }, (_, i) => i),
+      nextCursor: "tail",
+      metadata: { total: 50005 },
+    };
+    const last = {
+      ...first,
+      entries: [50000, 50001, 50002, 50003, 50004],
+      nextCursor: null,
+    };
+    const joined = appendGitPage(first, last, "tail");
+    expect(joined.entries).toHaveLength(50005);
+    expect(joined.entries.slice(-6)).toEqual([
+      49999, 50000, 50001, 50002, 50003, 50004,
+    ]);
+    expect(joined.nextCursor).toBeNull();
+    expect(first.entries).toHaveLength(50000);
   });
   it("preserves diff truncation, binary files and missing line numbers", () => {
     const file = {
@@ -309,4 +357,201 @@ describe("Git response validation", () => {
       expect(() => decodeGitBytes({ bytesB64, display: "f" })).toThrow();
     }
   });
+});
+
+describe("Git HTTPS authentication capability", () => {
+  it.each(["anonymous", "server_helpers"])("accepts %s agents", (https) => {
+    expect(
+      decodeGitRemotes({
+        entries: [],
+        authentication: { ssh: "server_agent", https },
+      }).authentication.https,
+    ).toBe(https);
+  });
+  it("rejects unknown authentication modes", () => {
+    expect(() =>
+      decodeGitRemotes({
+        entries: [],
+        authentication: { ssh: "server_agent", https: "prompt" },
+      }),
+    ).toThrow();
+  });
+});
+
+it("validates optional stash totals while accepting older agents", () => {
+  const page = {
+    snapshot: "s",
+    nextCursor: null,
+    entries: [],
+    metadata: { listToken: "token" },
+  };
+  expect(decodeGitStashes(page).metadata).toEqual({ listToken: "token" });
+  expect(
+    decodeGitStashes({
+      ...page,
+      metadata: { ...page.metadata, totalEntries: 20000 },
+    }).metadata.totalEntries,
+  ).toBe(20000);
+  for (const totalEntries of [-1, 1.5, "20000", null]) {
+    expect(() =>
+      decodeGitStashes({
+        ...page,
+        metadata: { ...page.metadata, totalEntries },
+      }),
+    ).toThrow();
+  }
+});
+
+it("validates filtered worktree totals independently of the current page", () => {
+  const page = {
+    snapshot: "s",
+    nextCursor: null,
+    entries: [],
+    metadata: { listToken: "t" },
+  };
+  for (const metadata of [
+    { totalEntries: -1 },
+    { matchingEntries: 0.5 },
+    { totalEntries: 1, matchingEntries: 2 },
+    { current: {} },
+    { main: {} },
+  ])
+    expect(() =>
+      decodeGitWorktrees({
+        ...page,
+        metadata: { ...page.metadata, ...metadata },
+      }),
+    ).toThrow();
+  expect(
+    decodeGitWorktrees({
+      ...page,
+      metadata: {
+        ...page.metadata,
+        totalEntries: 10000,
+        matchingEntries: 0,
+        current: null,
+        main: null,
+      },
+    }).metadata,
+  ).toMatchObject({ totalEntries: 10000, matchingEntries: 0 });
+  expect(decodeGitWorktrees(page).metadata).toEqual({ listToken: "t" });
+});
+
+it("accepts every canonical one- and two-byte value and rejects nonzero padding bits", () => {
+  for (let length = 1; length <= 2; length++) {
+    const count = length === 1 ? 256 : 65536;
+    for (let value = 0; value < count; value++) {
+      const raw =
+        length === 1
+          ? String.fromCharCode(value)
+          : String.fromCharCode(value >> 8, value & 255);
+      const bytesB64 = btoa(raw);
+      const result = decodeGitBytes({ bytesB64, display: "" });
+      if (result.bytesB64 !== bytesB64)
+        throw new Error("Canonical bytes changed");
+    }
+  }
+  const alphabet =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  for (let index = 0; index < alphabet.length; index++) {
+    for (const [value, valid] of [
+      [`A${alphabet[index]}==`, index % 16 === 0],
+      [`AA${alphabet[index]}=`, index % 4 === 0],
+    ] as const) {
+      if (valid)
+        expect(decodeGitBytes({ bytesB64: value, display: "" }).bytesB64).toBe(
+          value,
+        );
+      else
+        expect(() =>
+          decodeGitBytes({ bytesB64: value, display: "" }),
+        ).toThrow();
+    }
+  }
+});
+
+it("rejects illegal alphabet, misplaced padding, and trailing whitespace", () => {
+  for (const bytesB64 of [
+    "A",
+    "AAA",
+    "=AAA",
+    "A=AA",
+    "AA=A",
+    "====",
+    "AA==AAAA",
+    "AAAA=",
+    "AAAA====",
+    "AA\u0000A",
+    "AAA-",
+    "AAA_",
+    "AAéA",
+    "AA=\n",
+    "AAA\n",
+    "AAA\r",
+    "AAA\u2028",
+    "AAA\u2029",
+    "AA==\n",
+    "AA==    ",
+    " AA=",
+    "AA=\t",
+  ]) {
+    expect(() => decodeGitBytes({ bytesB64, display: "" })).toThrow();
+  }
+});
+
+it("computes byte lengths for every padding case without decoding text", () => {
+  for (const raw of [
+    "",
+    "a",
+    "ab",
+    "abc",
+    "abcd",
+    "\0\xff\x80",
+    "x".repeat(393001),
+  ]) {
+    const bytesB64 = btoa(raw);
+    const decoded = decodeGitBlob({
+      oid,
+      size: raw.length,
+      truncated: false,
+      bytesB64,
+    });
+    expect(decoded.bytesB64).toBe(bytesB64);
+    const page = decodeGitBlobPage({
+      snapshot: "blob",
+      nextCursor: null,
+      metadata: { oid, size: raw.length },
+      entries: raw ? [{ offset: 0, bytesB64 }] : [],
+    });
+    expect(page.entries[0]?.byteLength ?? 0).toBe(raw.length);
+    expect(() =>
+      decodeGitBlob({ oid, size: raw.length + 1, truncated: false, bytesB64 }),
+    ).toThrow();
+    if (raw)
+      expect(() =>
+        decodeGitBlobPage({
+          snapshot: "blob",
+          nextCursor: null,
+          metadata: { oid, size: raw.length + 1 },
+          entries: [{ offset: 0, bytesB64 }],
+        }),
+      ).toThrow();
+  }
+});
+
+it("validates matching status counts independently of repository totals", () => {
+  expect(
+    decodeGitStatus({
+      ...status,
+      metadata: { ...metadata, totalEntries: 20000, matchedEntries: 0 },
+    }).metadata.matchedEntries,
+  ).toBe(0);
+  for (const matchedEntries of [-1, 2, 0.5]) {
+    expect(() =>
+      decodeGitStatus({
+        ...status,
+        metadata: { ...metadata, totalEntries: 1, matchedEntries },
+      }),
+    ).toThrow();
+  }
 });

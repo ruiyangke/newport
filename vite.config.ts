@@ -9,6 +9,20 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
-    watch: { ignored: ["**/src-tauri/**", "**/.build/**"] },
+    watch: {
+      ignored: [
+        "**/src-tauri/**",
+        "**/.build/**",
+        "**/tools/**",
+        "**/scripts/**",
+        "**/docs/**",
+        "**/website/**",
+        "**/.claude/**",
+        "**/.impeccable/**",
+        "**/tests/**",
+        "**/*.test.{ts,tsx}",
+        "**/PRODUCT.md",
+      ],
+    },
   },
 });

@@ -220,3 +220,201 @@ it("never contacts the remote again because the repository's reads were retired"
     host.remove();
   }
 });
+
+it("appends references while writes are blocked, retries page errors, and discards an old page after refresh", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const page = (
+    names: string[],
+    nextCursor: string | null,
+    snapshot = "listing",
+  ) =>
+    decodeGitRemoteRefs({
+      snapshot,
+      nextCursor,
+      metadata: {
+        remote: "origin",
+        remoteToken: "config",
+        forPush: true,
+        basis: "remote_advertisement",
+        truncated: false,
+      },
+      entries: names.map((name) => ({
+        reference: gitPath(`refs/heads/${name}`),
+        kind: "branch",
+        oid: { algorithm: "sha1", hex: "a".repeat(40) },
+        symbolicTarget: null,
+      })),
+    });
+  let resolveOld: ((value: ReturnType<typeof page>) => void) | undefined;
+  const remoteRefs = vi
+    .fn()
+    .mockResolvedValueOnce(page(["first"], "second"))
+    .mockRejectedValueOnce({
+      code: "CONNECTION_FAILED",
+      message: "Connection interrupted",
+    })
+    .mockResolvedValueOnce(page(["first", "second"], "third"))
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }),
+    )
+    .mockResolvedValueOnce(page(["fresh"], null, "fresh-listing"));
+  seedGitClient({ remoteRefs } as unknown as GitRepositoryClient);
+  const queryClient = createTestQueryClient();
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const button = (name: string) =>
+    [...host.querySelectorAll("button")].find((b) => b.textContent === name)!;
+  try {
+    await act(async () =>
+      root.render(
+        <GitTestProviders queryClient={queryClient}>
+          <TooltipProvider>
+            <GitRemoteRefs
+              repoId="repo"
+              remote={{
+                name: "origin",
+                token: "config",
+                url: "git@example.test:repo",
+                pushUrl: null,
+              }}
+              disabled
+              busy={false}
+              snapshot="status"
+              onAction={vi.fn()}
+              onBack={vi.fn()}
+            />
+          </TooltipProvider>
+        </GitTestProviders>,
+      ),
+    );
+    expect(button("Delete…").disabled).toBe(true);
+    expect(button("Load more references").disabled).toBe(false);
+    await act(async () => button("Load more references").click());
+    expect(host.textContent).toContain("Connection interrupted");
+    expect(host.textContent).not.toContain("[object Object]");
+    await act(async () => button("Retry: load more references").click());
+    expect(
+      [...host.querySelectorAll("strong")]
+        .map((n) => n.textContent)
+        .filter((n) => n?.startsWith("refs/")),
+    ).toEqual(["refs/heads/first", "refs/heads/second"]);
+    await act(async () => button("Load more references").click());
+    expect(button("Refresh remote references").disabled).toBe(false);
+    await act(async () => button("Refresh remote references").click());
+    await act(async () => resolveOld!(page(["obsolete"], null)));
+    expect(host.textContent).toContain("refs/heads/fresh");
+    expect(host.textContent).not.toContain("refs/heads/obsolete");
+    expect(host.textContent).toContain("All remote references loaded");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
+it("searches beyond loaded references and ignores a superseded search", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const page = (name: string) =>
+    decodeGitRemoteRefs({
+      snapshot: `remote-${name}`,
+      nextCursor: null,
+      metadata: {
+        remote: "origin",
+        remoteToken: "config",
+        forPush: true,
+        basis: "remote_advertisement",
+        truncated: false,
+      },
+      entries: name
+        ? [
+            {
+              reference: gitPath(`refs/heads/${name}`),
+              kind: "branch",
+              oid: { algorithm: "sha1", hex: "e".repeat(40) },
+              symbolicTarget: null,
+            },
+          ]
+        : [],
+    });
+  let resolveOld!: (value: ReturnType<typeof page>) => void;
+  const old = new Promise<ReturnType<typeof page>>((resolve) => {
+    resolveOld = resolve;
+  });
+  const remoteRefs = vi.fn(({ filter }: { filter?: string }) => {
+    if (filter === "old") return old;
+    if (filter === "failure")
+      return Promise.reject(new Error("Network unavailable"));
+    return Promise.resolve(
+      page(filter === "missing" ? "" : (filter ?? "initial")),
+    );
+  });
+  seedGitClient({ remoteRefs } as unknown as GitRepositoryClient);
+  const queryClient = createTestQueryClient();
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const inputValue = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "value",
+  )!.set!;
+  async function search(value: string) {
+    await act(async () => {
+      const input = host.querySelector("input")!;
+      inputValue.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(host.querySelector("li")).toBeNull();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 220));
+    });
+  }
+  try {
+    await act(async () =>
+      root.render(
+        <GitTestProviders queryClient={queryClient}>
+          <TooltipProvider>
+            <GitRemoteRefs
+              repoId="repo"
+              remote={{
+                name: "origin",
+                token: "config",
+                url: null,
+                pushUrl: null,
+              }}
+              snapshot="original"
+              disabled={false}
+              busy={false}
+              onAction={vi.fn()}
+              onBack={vi.fn()}
+            />
+          </TooltipProvider>
+        </GitTestProviders>,
+      ),
+    );
+    await search("old");
+    await search(" LATE ");
+    expect(remoteRefs).toHaveBeenLastCalledWith(
+      expect.objectContaining({ filter: "late" }),
+    );
+    expect(host.textContent).toContain("refs/heads/late");
+    await act(async () => resolveOld(page("old")));
+    expect(host.textContent).not.toContain("refs/heads/old");
+    await search("missing");
+    expect(host.textContent).toContain("No matching remote references.");
+    expect(host.textContent).toContain("All matching references loaded");
+    await search("failure");
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain(
+      "Network unavailable",
+    );
+    expect(host.querySelector("input")?.value).toBe("failure");
+    await search("");
+    expect(host.textContent).toContain("refs/heads/initial");
+  } finally {
+    await act(async () => root.unmount());
+    queryClient.clear();
+    host.remove();
+  }
+});

@@ -311,3 +311,30 @@ it("does not create a bookmark or repeat creation when opening the created repos
   ).toBe(false);
   await workspace.dispose();
 });
+
+it("forwards cancellation while opening a repository for a summary", async () => {
+  const normal = invoke.getMockImplementation()!;
+  let release!: (value: typeof repository) => void;
+  invoke.mockImplementation((command, args) => {
+    if (command === "git_register_read") return Promise.resolve("summary-open");
+    if (command === "git_request" && args.request?.method === "repo.open")
+      return new Promise((resolve) => {
+        release = resolve;
+      });
+    return normal(command, args);
+  });
+  const workspace = new GitProjects("server");
+  const controller = new AbortController();
+  const pending = workspace
+    .open(project, controller.signal)
+    .catch((error) => error);
+  await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+  controller.abort();
+  release(repository);
+  expect(await pending).toMatchObject({ name: "AbortError" });
+  expect(invoke).toHaveBeenCalledWith("git_cancel_read", {
+    serverId: "server",
+    readId: "summary-open",
+  });
+  await workspace.dispose();
+});

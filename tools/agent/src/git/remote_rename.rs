@@ -1,5 +1,5 @@
 //! Rename local remote configuration and tracking refs without force replacement.
-use super::{protocol::Error, remotes, repository};
+use super::{config_keys::in_section, protocol::Error, remotes, repository};
 use git2::{ConfigLevel, Repository};
 use serde_json::{json, Value};
 use std::{
@@ -149,13 +149,13 @@ pub fn apply(
         }
         let entry = entry.map_err(engine)?;
         let key = entry.name().map_err(|_| unsupported())?;
-        if key.starts_with(&new_prefix) {
+        if in_section(key.as_bytes(), &new_prefix) {
             return Err(Error::new(
                 "REMOTE_EXISTS",
                 "Destination remote settings already exist.",
             ));
         }
-        let remote_field = key.starts_with(&old_prefix);
+        let remote_field = in_section(key.as_bytes(), &old_prefix);
         let branch_field = (key.starts_with("branch.")
             && (key.ends_with(".remote") || key.ends_with(".pushremote")))
             || key == "remote.pushdefault";
@@ -397,6 +397,34 @@ mod tests {
     fn run(repo: &Repository, action: Action) -> Result<Value, Error> {
         operations::apply(repo, &action, &[], &repository::fingerprint(repo).unwrap())
     }
+    #[test]
+    fn rename_does_not_rewrite_a_dotted_neighbor_remote() {
+        for neighbor in ["origin.backup", "upstream.backup"] {
+            let (_temp, repo, id) = fixture();
+            repo.remote(neighbor, "https://neighbor.invalid/untouched.git")
+                .unwrap();
+            let reference = format!("refs/remotes/{neighbor}/main");
+            repo.reference(&reference, id, true, "neighbor").unwrap();
+            let token = remotes::token(&repo.find_remote(neighbor).unwrap()).unwrap();
+            let log = std::fs::read(repo.commondir().join("logs").join(&reference)).unwrap();
+            run(&repo, request(&repo, "upstream")).unwrap();
+            let fresh = Repository::open(repo.path()).unwrap();
+            assert_eq!(
+                remotes::token(&fresh.find_remote(neighbor).unwrap()).unwrap(),
+                token
+            );
+            assert_eq!(fresh.refname_to_id(&reference).unwrap(), id);
+            assert_eq!(
+                std::fs::read(repo.commondir().join("logs").join(&reference)).unwrap(),
+                log
+            );
+            assert_eq!(
+                fresh.find_remote("upstream").unwrap().url().unwrap(),
+                "https://example.test/project.git"
+            );
+        }
+    }
+
     #[test]
     fn rename_preserves_custom_multivars_tracking_symbols_and_reflogs() {
         let (tmp, repo, id) = fixture();

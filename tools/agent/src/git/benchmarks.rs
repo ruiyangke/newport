@@ -50,6 +50,7 @@ fn large_repository_benchmark() {
         (
             "status.first",
             Request::Status {
+                filter: None,
                 repo_id: repo_id.clone(),
                 page_size: 20,
                 cursor: None,
@@ -58,6 +59,7 @@ fn large_repository_benchmark() {
         (
             "history.first",
             Request::History {
+                message_bytes: None,
                 repo_id: repo_id.clone(),
                 page_size: 20,
                 cursor: None,
@@ -67,6 +69,8 @@ fn large_repository_benchmark() {
         (
             "branches.first",
             Request::Branches {
+                filter: String::new(),
+                branch_kind: None,
                 repo_id: repo_id.clone(),
                 page_size: 20,
                 cursor: None,
@@ -75,6 +79,7 @@ fn large_repository_benchmark() {
         (
             "tags.first",
             Request::Tags {
+                message_bytes: None,
                 repo_id: repo_id.clone(),
                 page_size: 20,
                 cursor: None,
@@ -90,6 +95,24 @@ fn large_repository_benchmark() {
                 panic!()
             };
             samples.push(json!({"operation":label,"round":round,"elapsedMs":start.elapsed().as_secs_f64()*1000.0,"responseJsonBytes":serde_json::to_vec(&value).unwrap().len(),"rows":value["entries"].as_array().unwrap().len()}));
+            if label == "history.first" {
+                for reconnect in [false, true] {
+                    let request = Request::History {
+                        message_bytes: None,
+                        repo_id: repo_id.clone(),
+                        revision: "HEAD".into(),
+                        page_size: 20,
+                        cursor: value["nextCursor"].as_str().map(str::to_owned),
+                    };
+                    let mut fresh = Service::default();
+                    let target = if reconnect { &mut fresh } else { &mut service };
+                    let start = Instant::now();
+                    let Output::Json(page) = target.request(request).unwrap() else {
+                        panic!()
+                    };
+                    samples.push(json!({"operation":if reconnect {"history.next.reconnect"} else {"history.next.cached"},"round":round,"elapsedMs":start.elapsed().as_secs_f64()*1000.0,"responseJsonBytes":serde_json::to_vec(&page).unwrap().len(),"rows":page["entries"].as_array().unwrap().len()}));
+                }
+            }
         }
     }
     let entries: Vec<_> = statuses(&repo)
@@ -100,13 +123,10 @@ fn large_repository_benchmark() {
         .collect();
     for round in 0..5 {
         let start = Instant::now();
-        let mut paths = Vec::new();
-        for entry in &entries {
-            paths.extend(Service::entry_paths_now(&repo, entry).unwrap());
-        }
+        let paths = Service::selected_paths_now(&repo, &entries).unwrap();
         samples.push(json!({"operation":"selection.validate_30","round":round,"elapsedMs":start.elapsed().as_secs_f64()*1000.0,"paths":paths.len()}));
     }
-    let report = json!({"fixture":{"trackedFiles":2000,"changedFiles":2000,"commits":3001,"branches":1001,"tags":1000,"statusLimitInTestBuild":MAX_STATUS_ENTRIES},"measurement":"agent computation plus response construction; no SSH or JSON serialization in elapsed time","samples":samples});
+    let report = json!({"fixture":{"trackedFiles":2000,"changedFiles":2000,"commits":3001,"branches":1001,"tags":1000},"measurement":"agent computation plus response construction; no SSH or JSON serialization in elapsed time","samples":samples});
     if let Some(path) = std::env::var_os("NEWPORT_GIT_BENCHMARK_PATH") {
         fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }

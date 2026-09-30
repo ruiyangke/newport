@@ -7,8 +7,11 @@ use crate::git::{
 
 /// Optional test-only wire capture for exercising the TypeScript boundary against
 /// real agent responses. This wrapper is never part of production RPC traffic.
+#[path = "git_metrics.rs"]
+mod metrics;
 struct Client<S> {
-    inner: TransportClient<S>,
+    inner: TransportClient<metrics::Stream<S>>,
+    counters: std::sync::Arc<metrics::Counters>,
     trace: Option<std::fs::File>,
 }
 impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Client<S> {
@@ -20,6 +23,8 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Client<S> {
         identity: String,
     ) -> Result<(Self, serde_json::Value), crate::git::protocol::Error> {
         use std::os::unix::fs::OpenOptionsExt;
+        let stream = metrics::Stream::new(stream);
+        let counters = stream.counters.clone();
         let (inner, info) = TransportClient::start_with_identity(stream, identity).await?;
         let trace = std::env::var_os("NEWPORT_GIT_TRACE_PATH").map(|path| {
             std::fs::OpenOptions::new()
@@ -29,7 +34,14 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Client<S> {
                 .open(path)
                 .expect("open explicit Git test trace")
         });
-        Ok((Self { inner, trace }, info))
+        Ok((
+            Self {
+                inner,
+                counters,
+                trace,
+            },
+            info,
+        ))
     }
     async fn request(
         &mut self,
@@ -37,12 +49,18 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Client<S> {
     ) -> Result<serde_json::Value, crate::git::protocol::Error> {
         use std::io::Write;
         let captured = serde_json::to_value(&request).unwrap();
+        let before = self.counters.snapshot();
+        let started = std::time::Instant::now();
         let result = self.inner.request(request).await;
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let after = self.counters.snapshot();
+        let measurements = serde_json::json!({"elapsedMs":elapsed_ms,"requestBytes":after[0]-before[0],"responseBytes":after[1]-before[1],"requestFrames":after[2]-before[2],"responseFrames":after[3]-before[3]});
         if let Some(trace) = &mut self.trace {
-            let row = match &result {
+            let mut row = match &result {
                 Ok(response) => serde_json::json!({"request":captured,"response":response}),
                 Err(error) => serde_json::json!({"request":captured,"error":error}),
             };
+            row["measurements"] = measurements;
             serde_json::to_writer(&mut *trace, &row).expect("write Git test trace");
             trace
                 .write_all(b"\n")
@@ -78,6 +96,8 @@ async fn git_rpc_roundtrip() {
         .map(|i| format!("line {i}: content for streaming\n"))
         .collect::<String>();
     std::fs::write(temporary.path().join("sample.txt"), changed).unwrap();
+    let blob_content = "pageable blob content\n".repeat(30_000);
+    let pageable_blob = repo.blob(blob_content.as_bytes()).unwrap();
     let mut archive = tar::Builder::new(Vec::new());
     archive.append_dir_all(".", temporary.path()).unwrap();
     let bytes = archive.into_inner().unwrap();
@@ -126,20 +146,68 @@ async fn git_rpc_roundtrip() {
         .await
         .unwrap();
     let repo_id = opened["repoId"].as_str().unwrap().to_owned();
+    let mut blob_cursor = None;
+    let mut blob_bytes = Vec::new();
+    loop {
+        let page = client
+            .request(Request::BlobPage {
+                repo_id: repo_id.clone(),
+                oid: pageable_blob.to_string(),
+                max_bytes: Some(if blob_cursor.is_none() { 4096 } else { 524288 }),
+                cursor: blob_cursor,
+            })
+            .await
+            .unwrap();
+        assert_eq!(page["metadata"]["size"], blob_content.len());
+        for entry in page["entries"].as_array().unwrap() {
+            assert_eq!(entry["offset"], blob_bytes.len());
+            blob_bytes.extend(
+                base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    entry["bytesB64"].as_str().unwrap(),
+                )
+                .unwrap(),
+            );
+        }
+        blob_cursor = page["nextCursor"].as_str().map(str::to_owned);
+        if blob_cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(blob_bytes, blob_content.as_bytes());
     let status = client
         .request(Request::Status {
+            filter: None,
             repo_id: repo_id.clone(),
             page_size: 100,
             cursor: None,
         })
         .await
         .unwrap();
+    let summary = client
+        .request(Request::StatusSummary {
+            repo_id: Some(repo_id.clone()),
+            path: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(summary["totalEntries"], status["metadata"]["totalEntries"]);
+    assert!(summary.get("entries").is_none());
+    let by_path = client
+        .request(Request::StatusSummary {
+            repo_id: None,
+            path: Some(serde_json::from_value(opened["root"].clone()).unwrap()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(summary, by_path);
+
     assert_eq!(status["entries"].as_array().unwrap().len(), 1);
     let entry_id = status["entries"][0]["entryId"].as_str().unwrap().to_owned();
     let diff_request = Request::Diff {
         repo_id: repo_id.clone(),
         snapshot: status["snapshot"].as_str().unwrap().into(),
-        entry_id,
+        entry_id: entry_id.clone(),
         side: Side::IndexToWorktree,
         context_lines: 3,
     };
@@ -152,8 +220,57 @@ async fn git_rpc_roundtrip() {
             .len()
             > 5000
     );
+    let mut cursor = None;
+    let mut paged_lines = Vec::new();
+    loop {
+        let page = client
+            .request(Request::DiffPage {
+                line_encoding: Some(crate::git::protocol::DiffLineEncoding::TupleV1),
+                repo_id: repo_id.clone(),
+                snapshot: status["snapshot"].as_str().unwrap().into(),
+                entry_id: entry_id.clone(),
+                side: Side::IndexToWorktree,
+                context_lines: 3,
+                page_size: 5000,
+                max_bytes: Some(65536),
+                cursor,
+            })
+            .await
+            .unwrap();
+        assert_eq!(page["metadata"]["sourceSnapshot"], status["snapshot"]);
+        for file in page["entries"].as_array().unwrap() {
+            for hunk in file["hunks"].as_array().unwrap() {
+                for line in hunk["lines"].as_array().unwrap() {
+                    assert_eq!(line[2], true);
+                    paged_lines.push((hunk["id"].clone(), line[7].clone(), line[6].clone()));
+                }
+            }
+        }
+        cursor = page["nextCursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    let legacy_lines: Vec<_> = diff["diff"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|file| {
+            file["hunks"].as_array().unwrap().iter().flat_map(|hunk| {
+                hunk["lines"].as_array().unwrap().iter().map(|line| {
+                    (
+                        hunk["id"].clone(),
+                        line["id"].clone(),
+                        line["content"]["bytesB64"].clone(),
+                    )
+                })
+            })
+        })
+        .collect();
+    assert_eq!(paged_lines, legacy_lines);
     let history = client
         .request(Request::History {
+            message_bytes: None,
             repo_id: repo_id.clone(),
             page_size: 10,
             cursor: None,
@@ -165,8 +282,33 @@ async fn git_rpc_roundtrip() {
         history["entries"][0]["message"]["display"],
         "Fixture commit"
     );
+    let summary = client
+        .request(Request::History {
+            message_bytes: Some(7),
+            repo_id: repo_id.clone(),
+            page_size: 10,
+            cursor: None,
+            revision: "HEAD".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(summary["entries"][0]["message"]["display"], "Fixture");
+    assert_eq!(summary["entries"][0]["messageTruncated"], true);
+    assert_eq!(summary["entries"][0]["oid"], history["entries"][0]["oid"]);
+    let detail = client
+        .request(Request::Commit {
+            repo_id: repo_id.clone(),
+            commit_oid: history["entries"][0]["oid"]["hex"].as_str().unwrap().into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(detail, history["entries"][0]);
+    assert_eq!(detail["messageTruncated"], false);
+
     let branches = client
         .request(Request::Branches {
+            filter: String::new(),
+            branch_kind: None,
             repo_id: repo_id.clone(),
             page_size: 100,
             cursor: None,
@@ -187,6 +329,7 @@ async fn git_rpc_roundtrip() {
     sha256_repository(&mut client, &session, &root).await;
     let status = client
         .request(Request::Status {
+            filter: None,
             repo_id: repo_id.clone(),
             page_size: 100,
             cursor: None,
@@ -205,13 +348,142 @@ async fn git_rpc_roundtrip() {
     };
     let result = client.request(operation.clone()).await.unwrap();
     assert_eq!(result["state"], "succeeded", "{result}");
-    assert_eq!(client.request(operation).await.unwrap(), result);
+    assert_eq!(client.request(operation.clone()).await.unwrap(), result);
     assert_eq!(
-        client.request(Request::Get { operation_id }).await.unwrap(),
+        client
+            .request(Request::Get {
+                operation_id: operation_id.clone()
+            })
+            .await
+            .unwrap(),
         result
     );
+    // Only the disposable fixture's journal is altered: simulate an interrupted
+    // record without killing a process in the middle of a Git write.
+    assert_eq!(
+        client
+            .request(Request::Review {
+                operation_id: operation_id.clone()
+            })
+            .await
+            .unwrap_err()
+            .code,
+        "OPERATION_NOT_REVIEWABLE"
+    );
+    let before_review = client
+        .request(Request::Status {
+            filter: None,
+            repo_id: repo_id.clone(),
+            page_size: 100,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let script = "import json,os,pathlib,sys; data=json.load(sys.stdin); p=pathlib.Path.home()/'.local/state/newport/git/records'/data['file']; r=json.loads(p.read_text()); assert r['state']=='succeeded'; r['state']='running'; p.write_text(json.dumps(r))";
+    let payload =
+        serde_json::to_vec(&serde_json::json!({"file":format!("{client_id}-{operation_id}.json")}))
+            .unwrap();
+    session
+        .execute(
+            &format!("python3 -c '{}'", script.replace('\'', "'\\''")),
+            Some(&payload),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .request(Request::Review {
+                operation_id: operation_id.clone()
+            })
+            .await
+            .unwrap_err()
+            .code,
+        "OPERATION_NOT_REVIEWABLE"
+    );
+    let interrupted = client
+        .request(Request::Get {
+            operation_id: operation_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(interrupted["state"], "outcome_unknown");
+    let reviewed = client
+        .request(Request::Review {
+            operation_id: operation_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(reviewed["state"], "reviewed_unknown");
+    assert_eq!(
+        reviewed["seq"].as_u64().unwrap(),
+        interrupted["seq"].as_u64().unwrap() + 1
+    );
+    assert_eq!(reviewed["result"], interrupted["result"]);
+    assert_eq!(reviewed["error"], interrupted["error"]);
+    assert_eq!(
+        client
+            .request(Request::Review {
+                operation_id: operation_id.clone()
+            })
+            .await
+            .unwrap(),
+        reviewed
+    );
+    let (mut stranger, _) = Client::start(
+        session
+            .stream("exec \"$HOME/.local/bin/newport-agent\" git-rpc --stdio")
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stranger
+            .request(Request::Review {
+                operation_id: operation_id.clone()
+            })
+            .await
+            .unwrap_err()
+            .code,
+        "OPERATION_NOT_FOUND"
+    );
+    drop(stranger);
+    let (mut reconnected, _) = Client::start_with_identity(
+        session
+            .stream("exec \"$HOME/.local/bin/newport-agent\" git-rpc --stdio")
+            .await
+            .unwrap(),
+        client_id.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reconnected
+            .request(Request::Review {
+                operation_id: operation_id.clone()
+            })
+            .await
+            .unwrap(),
+        reviewed
+    );
+    drop(reconnected);
+    assert_eq!(client.request(operation).await.unwrap(), reviewed);
+    assert_eq!(
+        client
+            .request(Request::Status {
+                filter: None,
+                repo_id: repo_id.clone(),
+                page_size: 100,
+                cursor: None
+            })
+            .await
+            .unwrap(),
+        before_review
+    );
+
     let status = client
         .request(Request::Status {
+            filter: None,
             repo_id: repo_id.clone(),
             page_size: 100,
             cursor: None,
@@ -263,6 +535,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(client.request(commit_request).await.unwrap(), committed);
     let history = client
         .request(Request::History {
+            message_bytes: None,
             repo_id: repo_id.clone(),
             revision: "HEAD".into(),
             page_size: 100,
@@ -293,6 +566,7 @@ async fn git_rpc_roundtrip() {
     ] {
         let status = client
             .request(Request::Status {
+                filter: None,
                 repo_id: repo_id.clone(),
                 page_size: 100,
                 cursor: None,
@@ -315,6 +589,7 @@ async fn git_rpc_roundtrip() {
         .to_owned();
     let status = client
         .request(Request::Status {
+            filter: None,
             repo_id: repo_id.clone(),
             page_size: 100,
             cursor: None,
@@ -335,6 +610,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(client.request(checkout).await.unwrap(), result);
     let status = client
         .request(Request::Status {
+            filter: None,
             repo_id: repo_id.clone(),
             page_size: 100,
             cursor: None,
@@ -360,6 +636,29 @@ async fn git_rpc_roundtrip() {
         })
         .await
         .unwrap();
+    let selected_remote = client
+        .request(Request::Remote {
+            repo_id: repo_id.clone(),
+            name: "origin".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(selected_remote, remotes["entries"][0]);
+    let remote_names = client
+        .request(Request::RemoteNames {
+            repo_id: repo_id.clone(),
+            filter: "ORIGIN".into(),
+            page_size: 1,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        remote_names["entries"],
+        serde_json::json!([{"name":"origin"}])
+    );
+    assert!(remote_names["nextCursor"].is_null());
+
     let remote_token = remotes["entries"][0]["token"].as_str().unwrap().to_owned();
     for action in [
         crate::git::protocol::Action::Push {
@@ -380,6 +679,7 @@ async fn git_rpc_roundtrip() {
     ] {
         let status = client
             .request(Request::Status {
+                filter: None,
                 repo_id: repo_id.clone(),
                 page_size: 100,
                 cursor: None,
@@ -398,6 +698,8 @@ async fn git_rpc_roundtrip() {
     }
     let refreshed = client
         .request(Request::Branches {
+            filter: String::new(),
+            branch_kind: None,
             repo_id: repo_id.clone(),
             page_size: 100,
             cursor: None,
@@ -430,6 +732,7 @@ async fn git_rpc_roundtrip() {
         .unwrap();
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -495,6 +798,7 @@ async fn git_rpc_roundtrip() {
     ] {
         let status = ssh_client
             .request(Request::Status {
+                filter: None,
                 repo_id: ssh_repo.clone(),
                 page_size: 100,
                 cursor: None,
@@ -539,6 +843,7 @@ async fn git_rpc_roundtrip() {
     ] {
         let status = ssh_client
             .request(Request::Status {
+                filter: None,
                 repo_id: ssh_repo.clone(),
                 page_size: 100,
                 cursor: None,
@@ -557,6 +862,8 @@ async fn git_rpc_roundtrip() {
     }
     let branches = ssh_client
         .request(Request::Branches {
+            filter: String::new(),
+            branch_kind: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -643,6 +950,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(merged["state"], "needs_resolution", "{merged}");
     let before_abort = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -661,6 +969,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(ssh_client.request(abort_request).await.unwrap(), aborted);
     let after_abort = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -677,6 +986,7 @@ async fn git_rpc_roundtrip() {
 
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -736,6 +1046,7 @@ async fn git_rpc_roundtrip() {
     );
     let cleared = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -880,6 +1191,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(unstaged["state"], "succeeded", "{unstaged}");
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -914,6 +1226,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(tagged["state"], "succeeded", "{tagged}");
     let tags = ssh_client
         .request(Request::Tags {
+            message_bytes: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -924,6 +1237,30 @@ async fn git_rpc_roundtrip() {
         tags["entries"][0]["message"]["display"],
         "Remote release notes"
     );
+    let summary = ssh_client
+        .request(Request::Tags {
+            repo_id: ssh_repo.clone(),
+            page_size: 100,
+            cursor: None,
+            message_bytes: Some(6),
+        })
+        .await
+        .unwrap();
+    assert_eq!(summary["entries"][0]["message"]["display"], "Remote");
+    assert_eq!(summary["entries"][0]["messageTruncated"], true);
+    let mut detail = ssh_client
+        .request(Request::Tag {
+            repo_id: ssh_repo.clone(),
+            oid: tags["entries"][0]["oid"]["hex"].as_str().unwrap().into(),
+        })
+        .await
+        .unwrap();
+    for field in ["name", "reference", "symbolicTarget"] {
+        assert!(detail.get(field).is_none());
+        detail[field] = tags["entries"][0][field].clone();
+    }
+    assert_eq!(detail, tags["entries"][0]);
+
     let remotes = ssh_client
         .request(Request::Remotes {
             repo_id: ssh_repo.clone(),
@@ -941,6 +1278,7 @@ async fn git_rpc_roundtrip() {
     for for_push in [false, true] {
         let advertised = ssh_client
             .request(Request::RemoteRefs {
+                filter: String::new(),
                 repo_id: ssh_repo.clone(),
                 remote: "origin".into(),
                 expected_token: remotes["entries"][0]["token"].as_str().unwrap().into(),
@@ -979,6 +1317,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(removed["state"], "succeeded", "{removed}");
     let local_tags = ssh_client
         .request(Request::Tags {
+            message_bytes: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -994,6 +1333,7 @@ async fn git_rpc_roundtrip() {
         .unwrap();
     let remote_tags = ssh_client
         .request(Request::Tags {
+            message_bytes: None,
             repo_id: bare["repoId"].as_str().unwrap().into(),
             page_size: 100,
             cursor: None,
@@ -1034,6 +1374,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(reverted["result"]["integrationCompleted"], "revert");
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1063,6 +1404,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(conflicted["state"], "needs_resolution", "{conflicted}");
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1097,6 +1439,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(resumed["result"]["integrationCompleted"], "cherry_pick");
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1128,6 +1471,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(ssh_client.request(amend_request).await.unwrap(), amended);
     let history = ssh_client
         .request(Request::History {
+            message_bytes: None,
             repo_id: ssh_repo.clone(),
             revision: "HEAD".into(),
             page_size: 1,
@@ -1149,6 +1493,8 @@ async fn git_rpc_roundtrip() {
     );
     let branches = ssh_client
         .request(Request::Branches {
+            filter: String::new(),
+            branch_kind: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1163,6 +1509,7 @@ async fn git_rpc_roundtrip() {
         .unwrap();
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1185,6 +1532,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(ssh_client.request(upstream_request).await.unwrap(), tracked);
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1231,6 +1579,7 @@ async fn git_rpc_roundtrip() {
     );
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1252,6 +1601,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(ssh_client.request(rebase_request).await.unwrap(), rebased);
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1334,6 +1684,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(mixed["state"], "succeeded", "{mixed}");
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1368,6 +1719,7 @@ async fn git_rpc_roundtrip() {
     session.execute(&format!("printf 'working discard\\n' > {root}/sample.txt && printf 'new\\n' > {root}/discard-new.txt"),None).await.unwrap();
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1404,6 +1756,7 @@ async fn git_rpc_roundtrip() {
     );
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1438,6 +1791,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(discarded["state"], "succeeded", "{discarded}");
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1509,7 +1863,7 @@ async fn git_rpc_roundtrip() {
             commit_oid: completed["result"]["commitOid"].as_str().unwrap().into(),
             parent_index: 0,
             context_lines: 3,
-            path: Some(selected),
+            path: Some(selected.clone()),
         })
         .await
         .unwrap();
@@ -1518,6 +1872,49 @@ async fn git_rpc_roundtrip() {
         selected_diff["diff"]["files"][0]["newOid"],
         commit_files["entries"][0]["newOid"]
     );
+    let mut cursor = None;
+    let mut snapshot = None;
+    let mut units = 0;
+    loop {
+        let page = ssh_client
+            .request(Request::CommitDiffPage {
+                line_encoding: Some(crate::git::protocol::DiffLineEncoding::TupleV1),
+                repo_id: ssh_repo.clone(),
+                commit_oid: completed["result"]["commitOid"].as_str().unwrap().into(),
+                parent_index: 0,
+                context_lines: 3,
+                path: selected.clone(),
+                page_size: 1,
+                max_bytes: Some(65536),
+                cursor,
+            })
+            .await
+            .unwrap();
+        assert_eq!(page["metadata"]["readOnly"], true);
+        if let Some(previous) = &snapshot {
+            assert_eq!(previous, &page["snapshot"]);
+        }
+        snapshot = Some(page["snapshot"].clone());
+        for file in page["entries"].as_array().unwrap() {
+            let hunks = file["hunks"].as_array().unwrap();
+            units += if hunks.is_empty() {
+                1
+            } else {
+                hunks
+                    .iter()
+                    .map(|h| h["lines"].as_array().unwrap().len())
+                    .sum::<usize>()
+            };
+        }
+        cursor = page["nextCursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            assert_eq!(
+                units as u64,
+                page["metadata"]["totalUnits"].as_u64().unwrap()
+            );
+            break;
+        }
+    }
     let remotes = ssh_client
         .request(Request::Remotes {
             repo_id: ssh_repo.clone(),
@@ -1535,6 +1932,7 @@ async fn git_rpc_roundtrip() {
         .to_owned();
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1627,6 +2025,7 @@ async fn git_rpc_roundtrip() {
     };
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1701,6 +2100,8 @@ async fn git_rpc_roundtrip() {
     );
     let branches = ssh_client
         .request(Request::Branches {
+            filter: String::new(),
+            branch_kind: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1767,6 +2168,8 @@ async fn git_rpc_roundtrip() {
     );
     let branches = ssh_client
         .request(Request::Branches {
+            filter: String::new(),
+            branch_kind: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1782,6 +2185,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(saved["oid"]["hex"], raced_oid);
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1811,6 +2215,8 @@ async fn git_rpc_roundtrip() {
     );
     let branches = ssh_client
         .request(Request::Branches {
+            filter: String::new(),
+            branch_kind: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1848,6 +2254,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(zero_tag["error"]["code"], "INVALID_REQUEST", "{zero_tag}");
     let local_tags_before = ssh_client
         .request(Request::Tags {
+            message_bytes: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1875,6 +2282,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(raced_tag["error"]["code"], "PUSH_REJECTED", "{raced_tag}");
     let remote_tags = ssh_client
         .request(Request::Tags {
+            message_bytes: None,
             repo_id: bare["repoId"].as_str().unwrap().into(),
             page_size: 100,
             cursor: None,
@@ -1890,6 +2298,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(preserved_tag["oid"]["hex"], raced_oid);
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1913,6 +2322,7 @@ async fn git_rpc_roundtrip() {
     );
     let remote_tags = ssh_client
         .request(Request::Tags {
+            message_bytes: None,
             repo_id: bare["repoId"].as_str().unwrap().into(),
             page_size: 100,
             cursor: None,
@@ -1934,6 +2344,7 @@ async fn git_rpc_roundtrip() {
     );
     let local_tags_after = ssh_client
         .request(Request::Tags {
+            message_bytes: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1950,6 +2361,10 @@ async fn git_rpc_roundtrip() {
     assert_eq!(branch["state"], "succeeded", "{branch}");
     let before_add = ssh_client
         .request(Request::Worktrees {
+            at_snapshot: None,
+            filter: String::new(),
+            branch: None,
+            name: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1975,6 +2390,10 @@ async fn git_rpc_roundtrip() {
     assert_eq!(ssh_client.request(add_request).await.unwrap(), added);
     let worktrees = ssh_client
         .request(Request::Worktrees {
+            at_snapshot: None,
+            filter: String::new(),
+            branch: None,
+            name: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -1998,6 +2417,10 @@ async fn git_rpc_roundtrip() {
     let linked_id = linked["repoId"].as_str().unwrap().to_owned();
     let from_linked = ssh_client
         .request(Request::Worktrees {
+            at_snapshot: None,
+            filter: String::new(),
+            branch: None,
+            name: None,
             repo_id: linked_id.clone(),
             page_size: 100,
             cursor: None,
@@ -2026,6 +2449,10 @@ async fn git_rpc_roundtrip() {
     assert_eq!(ssh_client.request(unlock).await.unwrap(), unlocked);
     let unlocked_list = ssh_client
         .request(Request::Worktrees {
+            at_snapshot: None,
+            filter: String::new(),
+            branch: None,
+            name: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -2051,6 +2478,10 @@ async fn git_rpc_roundtrip() {
         .unwrap();
     let missing = ssh_client
         .request(Request::Worktrees {
+            at_snapshot: None,
+            filter: String::new(),
+            branch: None,
+            name: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -2077,6 +2508,10 @@ async fn git_rpc_roundtrip() {
     assert_eq!(unlock_missing["state"], "succeeded", "{unlock_missing}");
     let repair_listing = ssh_client
         .request(Request::Worktrees {
+            at_snapshot: None,
+            filter: String::new(),
+            branch: None,
+            name: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -2099,6 +2534,10 @@ async fn git_rpc_roundtrip() {
     assert_eq!(ssh_client.request(repair_request).await.unwrap(), repaired);
     let repaired_listing = ssh_client
         .request(Request::Worktrees {
+            at_snapshot: None,
+            filter: String::new(),
+            branch: None,
+            name: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -2128,6 +2567,10 @@ async fn git_rpc_roundtrip() {
         .unwrap();
     let stale_worktrees = ssh_client
         .request(Request::Worktrees {
+            at_snapshot: None,
+            filter: String::new(),
+            branch: None,
+            name: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -2152,6 +2595,10 @@ async fn git_rpc_roundtrip() {
         .unwrap();
     let worktrees = ssh_client
         .request(Request::Worktrees {
+            at_snapshot: None,
+            filter: String::new(),
+            branch: None,
+            name: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -2179,6 +2626,10 @@ async fn git_rpc_roundtrip() {
     assert_eq!(recreated["state"], "succeeded", "{recreated}");
     let worktrees = ssh_client
         .request(Request::Worktrees {
+            at_snapshot: None,
+            filter: String::new(),
+            branch: None,
+            name: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -2207,6 +2658,10 @@ async fn git_rpc_roundtrip() {
     let agent_root = format!("{root}-agent-task");
     let worktrees = ssh_client
         .request(Request::Worktrees {
+            at_snapshot: None,
+            filter: String::new(),
+            branch: None,
+            name: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -2278,6 +2733,7 @@ async fn git_rpc_roundtrip() {
     let new_repo = opened["repoId"].as_str().unwrap().to_owned();
     let history = ssh_client
         .request(Request::History {
+            message_bytes: None,
             repo_id: new_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -2288,6 +2744,7 @@ async fn git_rpc_roundtrip() {
     assert!(history["entries"].as_array().unwrap().is_empty());
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: new_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -2309,6 +2766,8 @@ async fn git_rpc_roundtrip() {
     assert_eq!(first_commit["state"], "succeeded", "{first_commit}");
     let branch = ssh_client
         .request(Request::Branches {
+            filter: String::new(),
+            branch_kind: None,
             repo_id: new_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -2355,6 +2814,7 @@ async fn git_rpc_roundtrip() {
     let cloned_id = cloned_open["repoId"].as_str().unwrap().to_owned();
     let cloned_status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: cloned_id.clone(),
             page_size: 100,
             cursor: None,
@@ -2432,6 +2892,7 @@ async fn git_rpc_roundtrip() {
     assert_eq!(advanced["result"]["fastForwarded"], true);
     let status = ssh_client
         .request(Request::Status {
+            filter: None,
             repo_id: ssh_repo.clone(),
             page_size: 100,
             cursor: None,
@@ -2468,6 +2929,7 @@ async fn git_rpc_roundtrip() {
     // repository and reading it still works.
     client
         .request(Request::Status {
+            filter: None,
             repo_id,
             page_size: 100,
             cursor: None,
@@ -2485,6 +2947,7 @@ async fn run_operation<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
 ) -> serde_json::Value {
     let status = client
         .request(Request::Status {
+            filter: None,
             repo_id: repo_id.into(),
             page_size: 100,
             cursor: None,
@@ -2544,6 +3007,7 @@ async fn sha256_repository<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unp
 
     let history = client
         .request(Request::History {
+            message_bytes: None,
             repo_id: repo_id.clone(),
             revision: "HEAD".into(),
             page_size: 10,
@@ -2561,6 +3025,7 @@ async fn sha256_repository<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unp
         .unwrap();
     let status = client
         .request(Request::Status {
+            filter: None,
             repo_id: repo_id.clone(),
             page_size: 10,
             cursor: None,
@@ -2595,6 +3060,7 @@ async fn line_selection_roundtrip<S: tokio::io::AsyncRead + tokio::io::AsyncWrit
     ) -> (String, String, serde_json::Value) {
         let status = client
             .request(Request::Status {
+                filter: None,
                 repo_id: repo_id.into(),
                 page_size: 100,
                 cursor: None,
@@ -2708,6 +3174,7 @@ async fn partial_staging_roundtrip<S: tokio::io::AsyncRead + tokio::io::AsyncWri
     for unstage in [false, true] {
         let status = client
             .request(Request::Status {
+                filter: None,
                 repo_id: repo_id.into(),
                 page_size: 100,
                 cursor: None,

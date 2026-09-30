@@ -302,15 +302,26 @@ async function mountBranches(
     localBranch("main", "a", true),
     localBranch("topic", "b"),
   ],
+  read?: GitRepositoryClient["branches"],
 ) {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-  const branches = vi.fn().mockResolvedValue(
-    decodeGitBranches({
-      snapshot: "branches",
-      nextCursor: null,
-      metadata: {},
-      entries,
-    }),
+  const branches = vi.fn().mockImplementation(
+    read ??
+      ((_repo, _cursor, options) =>
+        Promise.resolve(
+          decodeGitBranches({
+            snapshot: `branches:${options?.filter ?? ""}`,
+            nextCursor: null,
+            metadata: {},
+            entries: entries.filter(
+              (entry) =>
+                !options?.filter ||
+                entry.name.display
+                  .toLowerCase()
+                  .includes(options.filter.toLowerCase()),
+            ),
+          }),
+        )),
   );
   const repository = decodeGitRepository({
     repoId: "repo",
@@ -368,6 +379,7 @@ async function mountBranches(
   };
   return {
     onAction,
+    branches,
     button,
     tick,
     openPopover,
@@ -403,6 +415,32 @@ const key = (target: Element, init: KeyboardEventInit) =>
       }),
     );
   });
+
+it("keeps filter and toolbar keys from checking out the highlighted branch", async () => {
+  const ui = await mountBranches();
+  try {
+    await ui.openPopover();
+    await key(ui.filter(), { key: "ArrowDown" });
+    expect(ui.filter().getAttribute("aria-activedescendant")).toBe(
+      row("topic").id,
+    );
+    await key(ui.button("New branch"), { key: "Enter" });
+    expect(ui.onAction).not.toHaveBeenCalled();
+    await key(ui.button("Branch type"), { key: "Enter" });
+    await ui.tick();
+    const remote = [
+      ...document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ].find((item) => item.textContent === "Remote branches")!;
+    expect(remote).toBeDefined();
+    await key(remote, { key: "Enter" });
+    await ui.tick();
+    expect(ui.button("Branch type").textContent).toBe("Remote branches");
+    expect(ui.onAction).not.toHaveBeenCalled();
+    expect(ui.popover()).not.toBeNull();
+  } finally {
+    await ui.done();
+  }
+});
 
 it("keeps the branch popover open while a row's context menu is in use, and switches from a row once", async () => {
   const { onAction, button, tick, openPopover, popover, menu, filter, done } =
@@ -474,6 +512,9 @@ it("keeps the branch popover open while a row's context menu is in use, and swit
         "value",
       )!.set!.call(filter(), "TOP");
       filter().dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 220));
     });
     expect(
       [...document.querySelectorAll('[role="option"]')].map(
@@ -688,6 +729,9 @@ it("asks for no menu from the keyboard when no row is highlighted", async () => 
       )!.set!.call(filter(), "nothing matches");
       filter().dispatchEvent(new Event("input", { bubbles: true }));
     });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 220));
+    });
     expect(document.querySelectorAll('[role="option"]')).toHaveLength(0);
     let handled = true;
     await act(async () => {
@@ -706,3 +750,236 @@ it("asks for no menu from the keyboard when no row is highlighted", async () => 
     await done();
   }
 });
+
+it("searches beyond the loaded page on the server after debounce", async () => {
+  const entries = Array.from({ length: 120 }, (_, index) =>
+    localBranch(`topic-${index}`, "b"),
+  );
+  const ui = await mountBranches(entries, async (_repo, _cursor, options) =>
+    decodeGitBranches({
+      snapshot: `branches:${options?.filter ?? ""}`,
+      nextCursor: null,
+      metadata: {},
+      entries: options?.filter
+        ? entries.filter((entry) =>
+            entry.name.display.includes(options.filter!),
+          )
+        : entries.slice(0, 100),
+    }),
+  );
+  try {
+    await ui.openPopover();
+    expect(row("topic-119")).toBeUndefined();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!.call(ui.filter(), "topic-119");
+      ui.filter().dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(ui.branches).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 220));
+    });
+    expect(ui.branches).toHaveBeenLastCalledWith("repo", undefined, {
+      filter: "topic-119",
+      branchKind: "all",
+    });
+    expect(row("topic-119")).toBeDefined();
+  } finally {
+    await ui.done();
+  }
+});
+
+it("prefetches only one page ahead and reuses it without blocking branch actions", async () => {
+  const ui = await mountBranches(undefined, async (_repo, cursor) =>
+    decodeGitBranches({
+      snapshot: "paged",
+      nextCursor:
+        cursor === "third" ? null : cursor === "second" ? "third" : "second",
+      metadata: {},
+      entries:
+        cursor === "third"
+          ? [localBranch("last", "c")]
+          : cursor === "second"
+            ? [localBranch("topic", "b"), localBranch("more", "c")]
+            : [localBranch("main", "a", true), localBranch("topic", "b")],
+    }),
+  );
+  try {
+    await ui.openPopover();
+    expect(ui.branches).toHaveBeenCalledTimes(2);
+    expect(row("more")).toBeUndefined();
+    expect(ui.button("New branch").disabled).toBe(false);
+    await act(async () => ui.button("Load more branches").click());
+    expect(row("more")).toBeDefined();
+    expect(document.querySelectorAll('[role="option"]')).toHaveLength(3);
+    expect(ui.branches).toHaveBeenCalledTimes(3);
+    expect(row("last")).toBeUndefined();
+    await act(async () => ui.button("Load more branches").click());
+    expect(row("last")).toBeDefined();
+    expect(ui.branches).toHaveBeenCalledTimes(3);
+    expect(document.body.textContent).toContain("All matching branches loaded");
+  } finally {
+    await ui.done();
+  }
+});
+
+it("shows structured RPC errors and keeps branch changes blocked", async () => {
+  const ui = await mountBranches(undefined, async () => {
+    throw {
+      code: "INVALID_REQUEST",
+      message: "Branch filtering is unavailable on this agent.",
+    };
+  });
+  try {
+    await ui.openPopover();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      "Branch filtering is unavailable on this agent. (INVALID_REQUEST)",
+    );
+    expect(document.body.textContent).not.toContain("[object Object]");
+    expect(ui.button("New branch").disabled).toBe(true);
+    expect(ui.button("Retry branches")).toBeDefined();
+  } finally {
+    await ui.done();
+  }
+});
+
+it("shows structured continuation errors while retaining loaded branches", async () => {
+  const ui = await mountBranches(undefined, async (_repo, cursor) => {
+    if (cursor)
+      throw { code: "INVALID_REQUEST", message: "The branch cursor expired." };
+    return decodeGitBranches({
+      snapshot: "paged",
+      nextCursor: "next",
+      metadata: {},
+      entries: [localBranch("main", "a", true)],
+    });
+  });
+  try {
+    await ui.openPopover();
+    await act(async () => ui.button("Load more branches").click());
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      "The branch cursor expired. (INVALID_REQUEST)",
+    );
+    expect(row("main")).toBeDefined();
+    expect(document.body.textContent).not.toContain("[object Object]");
+  } finally {
+    await ui.done();
+  }
+});
+
+it.each(["held", "free", "error", "cancelled"])(
+  "checks the exact selected branch before checkout: %s",
+  async (outcome) => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    const oid = { algorithm: "sha1", hex: "a".repeat(40) };
+    const repository = decodeGitRepository({
+      repoId: "repo",
+      commonRepoId: "common",
+      root: gitPath("/repo"),
+      bare: false,
+      objectFormat: "sha1",
+      head: {
+        name: gitPath("refs/heads/main"),
+        oid,
+        detached: false,
+        unborn: false,
+      },
+      operationState: "Clean",
+      integration: null,
+      capabilities: { readOnly: false, workingTree: true },
+    });
+    seedGitClient({
+      branches: vi.fn(async () =>
+        decodeGitBranches({
+          snapshot: "b",
+          nextCursor: null,
+          metadata: {},
+          entries: [
+            {
+              name: gitPath("topic"),
+              reference: gitPath("refs/heads/topic"),
+              oid,
+              current: false,
+              remote: false,
+              upstream: null,
+              tracking: null,
+            },
+          ],
+        }),
+      ),
+    });
+    const queryClient = createTestQueryClient();
+    const onAction = vi.fn(async () => true);
+    let finish: (() => void) | undefined;
+    const openIfHeld = vi.fn(
+      async (_reference: string, isCurrent: () => boolean) => {
+        expect(isCurrent()).toBe(true);
+        if (outcome === "cancelled") {
+          await new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+          expect(isCurrent()).toBe(false);
+          return false;
+        }
+        if (outcome === "error")
+          throw new Error("Worktree lookup failed. Retry selection.");
+        return outcome === "held";
+      },
+    );
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () =>
+        root.render(
+          <GitTestProviders queryClient={queryClient}>
+            <GitBranchControls
+              repository={repository}
+              snapshot="s"
+              busy={false}
+              writable
+              error=""
+              onAction={onAction}
+              worktrees={{ openIfHeld }}
+            />
+          </GitTestProviders>,
+        ),
+      );
+      await act(async () =>
+        host
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Branches: main"]',
+          )!
+          .click(),
+      );
+      await act(async () => row("topic").click());
+      if (outcome === "cancelled") {
+        await act(async () =>
+          host
+            .querySelector<HTMLButtonElement>(
+              'button[aria-label="Branches: main"]',
+            )!
+            .click(),
+        );
+        await act(async () => {
+          finish?.();
+        });
+      }
+      expect(openIfHeld).toHaveBeenCalledWith(
+        "refs/heads/topic",
+        expect.any(Function),
+      );
+      expect(onAction).toHaveBeenCalledTimes(outcome === "free" ? 1 : 0);
+      if (outcome === "error")
+        expect(document.body.textContent).toContain(
+          "Worktree lookup failed. Retry selection.",
+        );
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      queryClient.clear();
+    }
+  },
+);

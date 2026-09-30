@@ -96,7 +96,6 @@ pub fn apply(
     if mode != ResetMode::Soft {
         let tree = commit.tree().map_err(engine)?;
         let temporary = if mode == ResetMode::Hard {
-            checkout::supported_files(repo, &tree)?;
             checkout::supported_files(
                 repo,
                 &repo
@@ -122,15 +121,9 @@ pub fn apply(
                 index.read_tree(&source).map_err(engine)?;
                 paths.extend(index.iter().map(|e| e.path));
             }
-            if paths.len() > 20_000 {
-                return Err(Error::new(
-                    "LIMIT_EXCEEDED",
-                    "Reset exceeds the tracked path limit.",
-                ));
-            }
             // Hard reset discards tracked changes only. Untracked/ignored collisions
-            // are refused before the shared restore helper writes working files.
-            integration::guard_paths(repo, &paths, false)?;
+            // and target attributes are validated by restore_paths before any
+            // working-file writes. Avoid repeating those repository-wide scans.
             integration::restore_paths(repo, target, &paths)?
         } else {
             let tmp = tempfile::tempdir_in(repo.path()).map_err(io_error)?;
@@ -259,6 +252,69 @@ mod tests {
         assert!(!tmp.path().join("added").exists());
         assert!(!tmp.path().join("staged-new").exists());
     }
+    #[test]
+    fn hard_reset_restores_equal_sized_edits_even_when_git_does_not_trust_ctime() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tmp, repo, _, tip) = fixture();
+        repo.config()
+            .unwrap()
+            .set_bool("core.trustctime", false)
+            .unwrap();
+        let path = tmp.path().join("file");
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        // Equal-sized content and a restored mtime must still be detected.
+        fs::write(&path, "bad").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let mode_path = tmp.path().join("added");
+        fs::set_permissions(&mode_path, fs::Permissions::from_mode(0o755)).unwrap();
+        run(&repo, tip, tip, ResetMode::Hard).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"tip");
+        assert_eq!(
+            fs::metadata(&mode_path).unwrap().permissions().mode() & 0o111,
+            0
+        );
+        assert_eq!(
+            repo.index().unwrap().write_tree().unwrap(),
+            repo.find_commit(tip).unwrap().tree_id()
+        );
+    }
+
+    #[test]
+    fn hard_reset_validates_target_attributes_before_publishing_any_changes() {
+        let (tmp, repo, base, tip) = fixture();
+        let parent = repo.find_commit(base).unwrap();
+        let tree = parent.tree().unwrap();
+        let mut builder = repo.treebuilder(Some(&tree)).unwrap();
+        builder
+            .insert(
+                ".gitattributes",
+                repo.blob(b"file filter=custom\n").unwrap(),
+                0o100644,
+            )
+            .unwrap();
+        let tree = repo.find_tree(builder.write().unwrap()).unwrap();
+        let signature = git2::Signature::now("Fixture", "fixture@example.test").unwrap();
+        let target = repo
+            .commit(None, &signature, &signature, "filtered", &tree, &[&parent])
+            .unwrap();
+        fs::write(tmp.path().join("file"), "local changes").unwrap();
+        let before = repository::fingerprint(&repo).unwrap();
+        let index = fs::read(repo.path().join("index")).unwrap();
+        assert_eq!(
+            run(&repo, target, tip, ResetMode::Hard).unwrap_err().code,
+            "UNSUPPORTED_FILTER"
+        );
+        assert_eq!(repository::fingerprint(&repo).unwrap(), before);
+        assert_eq!(fs::read(repo.path().join("index")).unwrap(), index);
+        assert_eq!(fs::read(tmp.path().join("file")).unwrap(), b"local changes");
+        assert!(!tmp.path().join(".gitattributes").exists());
+    }
+
     #[test]
     fn stale_files_and_locked_recovery_reference_leave_state_unchanged() {
         let (tmp, repo, base, tip) = fixture();

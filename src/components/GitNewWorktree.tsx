@@ -1,7 +1,11 @@
-import { useId, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { readSharedQuery } from "../query/client";
+import { gitErrorMessage } from "../git/errors";
+import { useEffect, useId, useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { gitPath, type GitWorktreeAction } from "../domain/git";
-import type { GitRepository } from "../domain/gitResponses";
+import type { GitRepository, decodeGitBranches } from "../domain/gitResponses";
+import { useGitPageLoader } from "../hooks/useGitPageLoader";
+import { GitLoadMore } from "./GitLoadMore";
 import { gitQueries } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
 import {
@@ -24,6 +28,7 @@ import {
   SelectValue,
 } from "./ui/select";
 
+type BranchEntry = ReturnType<typeof decodeGitBranches>["entries"][number];
 const NOTE = "text-[12px] text-muted-foreground";
 
 /**
@@ -59,17 +64,85 @@ export function GitNewWorktree({
 }) {
   const scope = useCurrentServerScope();
   const formId = useId();
+  const queryClient = useQueryClient();
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setFilter(search.trim()), 200);
+    return () => clearTimeout(timer);
+  }, [search]);
+  const branchOptions = useMemo(
+    () => (filter ? { filter } : undefined),
+    [filter],
+  );
+  const branchQuery = gitQueries.branches(
+    scope,
+    repository.repoId,
+    undefined,
+    branchOptions,
+  );
   const worktrees = useQuery({
-    ...gitQueries.worktreeList(scope, repository.repoId),
+    ...gitQueries.worktrees(scope, repository.repoId, undefined, {
+      pageSize: 1,
+    }),
     refetchOnMount: "always",
   });
   const branches = useQuery({
-    ...gitQueries.branches(scope, repository.repoId),
+    ...branchQuery,
     refetchOnMount: "always",
   });
+  const pages = useGitPageLoader({
+    queryKey: branchQuery.queryKey,
+    page: branches.data ?? null,
+    enabled:
+      !branches.isFetching && !branches.isError && search.trim() === filter,
+    entryKey: (entry: BranchEntry) => entry.reference.bytesB64,
+    read: (cursor, signal) =>
+      readSharedQuery(
+        queryClient,
+        {
+          ...gitQueries.branches(
+            scope,
+            repository.repoId,
+            cursor,
+            branchOptions,
+          ),
+          staleTime: Infinity,
+        },
+        signal,
+      ),
+  });
+  useEffect(() => {
+    if (
+      !branches.data?.nextCursor ||
+      branches.isFetching ||
+      branches.isError ||
+      search.trim() !== filter
+    )
+      return;
+    void queryClient.prefetchQuery({
+      ...gitQueries.branches(
+        scope,
+        repository.repoId,
+        branches.data.nextCursor,
+        branchOptions,
+      ),
+      staleTime: Infinity,
+    });
+  }, [
+    branches.data?.nextCursor,
+    branches.isFetching,
+    branches.isError,
+    search,
+    filter,
+    queryClient,
+    scope,
+    repository.repoId,
+    branchOptions,
+  ]);
   const rows = useMemo(() => worktrees.data?.entries ?? [], [worktrees.data]);
   const inUse = useMemo(() => worktreeByBranch(rows), [rows]);
-  const main = mainWorktree(rows);
+  const main = worktrees.data?.metadata.main ?? mainWorktree(rows);
   const mainRoot = main?.path?.display ?? repository.root.display;
   const currentBranch =
     repository.head.detached || !repository.head.name
@@ -81,6 +154,10 @@ export function GitNewWorktree({
   const [existing, setExisting] = useState("");
   // Starting point: a branch reference, local or remote-tracking.
   const [base, setBase] = useState<string | null>(null);
+  const [selectedBase, setSelectedBase] = useState<BranchEntry | null>(null);
+  const [selectedExisting, setSelectedExisting] = useState<BranchEntry | null>(
+    null,
+  );
   const [name, setName] = useState<string | null>(null);
   const [path, setPath] = useState<string | null>(null);
   const [openAfter, setOpenAfter] = useState(true);
@@ -88,10 +165,20 @@ export function GitNewWorktree({
   const [browsing, setBrowsing] = useState(false);
   const [localError, setLocalError] = useState("");
 
-  const entries = useMemo(
-    () => branches.data?.entries.filter((entry) => entry.oid) ?? [],
-    [branches.data],
-  );
+  const entries = useMemo(() => {
+    const loaded = branches.data?.entries.filter((entry) => entry.oid) ?? [];
+    const seen = new Set(loaded.map((entry) => entry.reference.bytesB64));
+    return [
+      ...loaded,
+      ...[selectedBase, selectedExisting].filter(
+        (entry): entry is BranchEntry => {
+          if (!entry || seen.has(entry.reference.bytesB64)) return false;
+          seen.add(entry.reference.bytesB64);
+          return true;
+        },
+      ),
+    ];
+  }, [branches.data, selectedBase, selectedExisting]);
   const local = entries.filter((entry) => !entry.remote);
   const remote = entries.filter((entry) => entry.remote);
   const baseRef =
@@ -108,7 +195,34 @@ export function GitNewWorktree({
   const effectiveName = name ?? derivedName;
   const effectivePath =
     path ?? (effectiveName ? defaultWorktreePath(mainRoot, effectiveName) : "");
-  const nameTaken = rows.some((row) => row.name?.display === effectiveName);
+  const [checkedName, setCheckedName] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setCheckedName(effectiveName), 200);
+    return () => clearTimeout(timer);
+  }, [effectiveName]);
+  const nameLookup = useQuery({
+    ...gitQueries.worktrees(scope, repository.repoId, undefined, {
+      name: checkedName,
+      pageSize: 1,
+    }),
+    enabled: !!checkedName,
+    staleTime: 0,
+  });
+  const branchLookup = useQuery({
+    ...gitQueries.worktrees(scope, repository.repoId, undefined, {
+      branch: `refs/heads/${chosenBranch}`,
+      pageSize: 1,
+    }),
+    enabled: !!chosenBranch && mode === "existing",
+    staleTime: 0,
+  });
+  const nameTaken =
+    nameLookup.data?.entries.some(
+      (row) => row.name?.display === effectiveName,
+    ) ?? false;
+  const holder = branchLookup.data?.entries.find(
+    (row) => row.head?.name?.display === `refs/heads/${chosenBranch}`,
+  );
   const branchTaken =
     mode === "new" &&
     local.some((entry) => entry.name.display === branch.trim());
@@ -117,11 +231,25 @@ export function GitNewWorktree({
   const ready =
     !busy &&
     !blockedReason &&
+    !branches.isFetching &&
+    !branches.isError &&
+    search.trim() === filter &&
+    !worktrees.isFetching &&
+    !worktrees.isError &&
     !!worktrees.data &&
     !!chosenBranch &&
     !!expectedOid &&
     !!effectiveName &&
     !nameTaken &&
+    checkedName === effectiveName &&
+    !nameLookup.isFetching &&
+    !nameLookup.isError &&
+    !!nameLookup.data &&
+    (mode !== "existing" ||
+      (!branchLookup.isFetching &&
+        !branchLookup.isError &&
+        !!branchLookup.data &&
+        !holder)) &&
     !branchTaken &&
     effectivePath.startsWith("/");
 
@@ -143,13 +271,15 @@ export function GitNewWorktree({
         openAfter,
       );
     } catch (reason) {
-      setLocalError(reason instanceof Error ? reason.message : String(reason));
+      setLocalError(gitErrorMessage(reason));
     }
   }
 
   const readError =
-    (worktrees.isError && String(worktrees.error)) ||
-    (branches.isError && String(branches.error)) ||
+    (worktrees.isError && gitErrorMessage(worktrees.error)) ||
+    (branches.isError && gitErrorMessage(branches.error)) ||
+    (nameLookup.isError && gitErrorMessage(nameLookup.error)) ||
+    (branchLookup.isError && gitErrorMessage(branchLookup.error)) ||
     "";
 
   return (
@@ -208,6 +338,35 @@ export function GitNewWorktree({
               </Button>
             ))}
           </div>
+          <label>
+            Find a branch
+            <Input
+              aria-label="Find a branch"
+              placeholder="Search all branches"
+              value={search}
+              disabled={busy}
+              onChange={(event) => {
+                // Keep the explicit starting point and its expected OID while
+                // searching another page; the backend revalidates it on write.
+                if (baseEntry) {
+                  setSelectedBase(baseEntry);
+                  setBase(baseRef);
+                }
+                if (existingEntry) setSelectedExisting(existingEntry);
+                setSearch(event.target.value);
+              }}
+            />
+          </label>
+          {(branches.isFetching || search.trim() !== filter) && (
+            <p role="status" className={NOTE}>
+              Finding branches…
+            </p>
+          )}
+          {branches.isError && (
+            <Button onClick={() => void branches.refetch()}>
+              Retry branches
+            </Button>
+          )}
           {mode === "new" ? (
             <>
               <label>
@@ -233,7 +392,15 @@ export function GitNewWorktree({
                   value={baseRef}
                   // Radix reports "" while the options are still arriving;
                   // that is not a choice, and must not replace the default.
-                  onValueChange={(value) => value && setBase(value)}
+                  onValueChange={(value) => {
+                    if (!value) return;
+                    setBase(value);
+                    setSelectedBase(
+                      entries.find(
+                        (entry) => entry.reference.display === value,
+                      ) ?? null,
+                    );
+                  }}
                   disabled={busy || branches.isPending}
                 >
                   <SelectTrigger aria-label="Start from">
@@ -288,7 +455,13 @@ export function GitNewWorktree({
               Branch
               <Select
                 value={existing}
-                onValueChange={(value) => value && setExisting(value)}
+                onValueChange={(value) => {
+                  if (!value) return;
+                  setExisting(value);
+                  setSelectedExisting(
+                    local.find((entry) => entry.name.display === value) ?? null,
+                  );
+                }}
                 disabled={busy || branches.isPending}
               >
                 <SelectTrigger aria-label="Existing branch">
@@ -311,9 +484,27 @@ export function GitNewWorktree({
                 </SelectContent>
               </Select>
               <small>
-                A branch can be checked out in one worktree at a time.
+                {holder
+                  ? `Already checked out in ${worktreeLabel(holder)}.`
+                  : "A branch can be checked out in one worktree at a time."}
               </small>
             </label>
+          )}
+          {branches.data && (
+            <GitLoadMore
+              cursor={branches.data.nextCursor}
+              loading={pages.loading}
+              error={pages.error}
+              disabled={
+                branches.isFetching ||
+                branches.isError ||
+                search.trim() !== filter
+              }
+              automatic={false}
+              onLoad={() => void pages.load()}
+              label="Load more branches"
+              endLabel="All matching branches loaded"
+            />
           )}
           <label>
             Worktree name

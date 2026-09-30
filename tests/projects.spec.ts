@@ -174,7 +174,14 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
               serverId: "server",
               info: {
                 capabilities: {
-                  features: ["stash.entry_index"],
+                  features: [
+                    "status_summary.path",
+                    "status.filter",
+                    "stash.entry_index",
+                    "branches.filter",
+                    "worktrees.filter",
+                    "worktrees.snapshot_filter",
+                  ],
                   actions: [
                     "stage",
                     "unstage",
@@ -215,17 +222,26 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
                     "operation.get",
                     "repo.open",
                     "repo.status",
+                    "repo.status_summary",
                     "repo.history",
+                    "repo.commit",
                     "repo.branches",
+                    "repo.worktrees",
                     "repo.remotes",
+                    "repo.remote",
+                    "repo.remote_names",
                     "repo.remote_refs",
                     "repo.stashes",
                     "repo.tags",
+                    "repo.tag",
                     "repo.close",
                     "repo.diff",
+                    "repo.diff_page",
                     "repo.commit_files",
                     "repo.commit_diff",
+                    "repo.commit_diff_page",
                     "repo.blob",
+                    "repo.blob_page",
                   ],
                 },
               },
@@ -537,6 +553,39 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
               );
               return result;
             }
+            if (args.request.method === "repo.worktrees") {
+              const row = {
+                kind: "main",
+                name: null,
+                path: path("/srv/web-app"),
+                gitDir: path("/srv/web-app/.git"),
+                state: "available",
+                current: true,
+                head: { ...head },
+                locked: false,
+                lockReason: null,
+                prunable: false,
+              };
+              const matches =
+                !args.request.params.branch ||
+                args.request.params.branch === head.name.display;
+              return {
+                snapshot: `worktrees${revision}`,
+                entries: matches ? [row] : [],
+                nextCursor: null,
+                metadata: {
+                  listToken: `trees${revision}`,
+                  totalEntries: 1,
+                  matchingEntries: matches ? 1 : 0,
+                  current: row,
+                  main: row,
+                },
+              };
+            }
+            if (args.request.method === "repo.tag")
+              return tags.find(
+                (tag) => tag.oid.hex === args.request.params.oid,
+              );
             if (args.request.method === "repo.tags") {
               const offset = args.request.params.cursor ? 1 : 0;
               return {
@@ -571,6 +620,28 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
                 },
               };
             }
+            if (args.request.method === "repo.remote_names") {
+              const filter = String(
+                args.request.params.filter ?? "",
+              ).toLowerCase();
+              const entries = remotes
+                .filter((r) => r.name.toLowerCase().includes(filter))
+                .map((r) => ({ name: r.name }));
+              return {
+                snapshot: `remotes${revision}:${filter}`,
+                entries,
+                nextCursor: null,
+                metadata: { totalEntries: entries.length },
+              };
+            }
+            if (args.request.method === "repo.remote") {
+              const remote = remotes.find(
+                (remote) => remote.name === args.request.params.name,
+              );
+              if (!remote)
+                throw { code: "REMOTE_NOT_FOUND", message: "Remote not found" };
+              return remote;
+            }
             if (args.request.method === "repo.remotes")
               return {
                 entries: remotes,
@@ -581,19 +652,31 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
                 snapshot: `branches${revision}`,
                 nextCursor: null,
                 metadata: {},
-                entries: branchNames.map((name) => ({
-                  name: path(name),
-                  reference: path(`refs/heads/${name}`),
-                  oid: oid("a"),
-                  remote: false,
-                  current: head.name.display === `refs/heads/${name}`,
-                  upstream: upstreams[name] ? path(upstreams[name]!) : null,
-                  tracking: {
-                    token: `tracking${revision}`,
-                    editable: true,
-                    configuration: { remote: [], merge: [] },
-                  },
-                })),
+                entries: branchNames
+                  .filter(
+                    (name) =>
+                      args.request.params.branchKind !== "remote" &&
+                      name
+                        .toLowerCase()
+                        .includes(
+                          String(
+                            args.request.params.filter ?? "",
+                          ).toLowerCase(),
+                        ),
+                  )
+                  .map((name) => ({
+                    name: path(name),
+                    reference: path(`refs/heads/${name}`),
+                    oid: oid("a"),
+                    remote: false,
+                    current: head.name.display === `refs/heads/${name}`,
+                    upstream: upstreams[name] ? path(upstreams[name]!) : null,
+                    tracking: {
+                      token: `tracking${revision}`,
+                      editable: true,
+                      configuration: { remote: [], merge: [] },
+                    },
+                  })),
               };
             if (args.request.method === "repo.open")
               return {
@@ -607,8 +690,11 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
                 integration,
                 capabilities: { readOnly: false, workingTree: true },
               };
-            if (args.request.method === "repo.status")
-              return {
+            if (
+              args.request.method === "repo.status" ||
+              args.request.method === "repo.status_summary"
+            ) {
+              const result = {
                 snapshot: `s${revision}`,
                 entries:
                   committed && !integration
@@ -655,6 +741,53 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
                   upstreamRef: null,
                 },
               };
+              if (args.request.method === "repo.status_summary")
+                return {
+                  ...result.metadata,
+                  totalEntries: result.entries.length,
+                  truncated: false,
+                };
+              const { text = "", group = "all" } =
+                args.request.params.filter ?? {};
+              const entries = result.entries.filter(
+                (entry) =>
+                  entry.path.display.toLowerCase().includes(text) &&
+                  (group === "all" ||
+                    (group === "conflicted" && entry.conflicted) ||
+                    (group === "staged" && entry.staged && !entry.conflicted) ||
+                    (group === "unstaged" &&
+                      entry.unstaged &&
+                      !entry.conflicted)),
+              );
+              return {
+                ...result,
+                entries,
+                metadata: {
+                  ...result.metadata,
+                  totalEntries: result.entries.length,
+                  matchedEntries: entries.length,
+                  groupCounts: {
+                    staged: result.entries.filter((e) => e.staged).length,
+                    unstaged: result.entries.filter(
+                      (e) => e.unstaged && !e.conflicted,
+                    ).length,
+                    untracked: 0,
+                    conflicted: result.entries.filter((e) => e.conflicted)
+                      .length,
+                  },
+                },
+              };
+            }
+            if (args.request.method === "repo.blob_page")
+              return {
+                snapshot: "blob",
+                nextCursor: null,
+                metadata: {
+                  oid: { algorithm: "sha1", hex: args.request.params.oid },
+                  size: 8,
+                },
+                entries: [{ offset: 0, bytesB64: btoa("theirs\n\n") }],
+              };
             if (args.request.method === "repo.blob")
               return {
                 oid: { algorithm: "sha1", hex: args.request.params.oid },
@@ -662,8 +795,11 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
                 truncated: false,
                 bytesB64: btoa("theirs\n\n"),
               };
-            if (args.request.method === "repo.diff")
-              return {
+            if (
+              args.request.method === "repo.diff" ||
+              args.request.method === "repo.diff_page"
+            ) {
+              const legacy = {
                 snapshot: `s${revision}`,
                 diff: {
                   truncated: false,
@@ -710,6 +846,60 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
                   ],
                 },
               };
+              if (args.request.method === "repo.diff") return legacy;
+              return {
+                snapshot: `diff-${revision}`,
+                nextCursor: null,
+                metadata: {
+                  sourceSnapshot: args.request.params.snapshot,
+                  entryId: args.request.params.entryId,
+                  side: args.request.params.side,
+                  contextLines: args.request.params.contextLines ?? 3,
+                  readOnly: false,
+                  hasOmissions: false,
+                  totalFiles: 1,
+                  totalUnits: 2,
+                },
+                entries: legacy.diff.files.map((f, fileIndex) => ({
+                  ...f,
+                  fileIndex,
+                  omissionReason: null,
+                  hunks: f.hunks.map((h, index) => ({
+                    ...h,
+                    index,
+                    id: "a".repeat(64),
+                    totalLines: h.lines.length,
+                    lines: h.lines.map((l, lineIndex) => ({
+                      ...l,
+                      lineIndex,
+                      id: (lineIndex ? "b" : "c").repeat(64),
+                      byteOffset: 0,
+                      lineComplete: true,
+                      contentBytesB64: l.content.bytesB64,
+                    })),
+                  })),
+                })),
+              };
+            }
+            if (args.request.method === "repo.commit") {
+              const hex = args.request.params.commitOid;
+              const stash = ["e", "9", "f"].some(
+                (char) => hex === oid(char).hex,
+              );
+              return {
+                ...commit(hex === oid("d").hex || hex === oid("f").hex),
+                oid: { algorithm: "sha1", hex },
+                ...(stash
+                  ? {
+                      parents:
+                        hex === oid("f").hex
+                          ? []
+                          : [oid("b"), oid("c"), oid("f")],
+                      message: path("Saved stash content"),
+                    }
+                  : {}),
+              };
+            }
             if (args.request.method === "repo.history")
               return {
                 snapshot: "h",
@@ -730,14 +920,22 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
                         message: path("Saved stash content"),
                       },
                     ]
-                  : [commit(), commit(true)],
-                nextCursor: null,
+                  : args.request.params.cursor
+                    ? [commit(true)]
+                    : [commit()],
+                nextCursor:
+                  args.request.params.revision === "HEAD" &&
+                  !args.request.params.cursor
+                    ? "history-next"
+                    : null,
                 metadata: { resolvedRevision: oid("a"), truncated: false },
               };
             if (
-              ["repo.commit_files", "repo.commit_diff"].includes(
-                args.request.method,
-              )
+              [
+                "repo.commit_files",
+                "repo.commit_diff",
+                "repo.commit_diff_page",
+              ].includes(args.request.method)
             ) {
               const params = args.request.params;
               const root = [oid("d").hex, oid("f").hex].includes(
@@ -774,6 +972,51 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
                   entries: [file],
                   nextCursor: params.cursor ? null : "next",
                   metadata: { ...comparison, totalFiles: 2, truncated: false },
+                };
+              if (args.request.method === "repo.commit_diff_page")
+                return {
+                  snapshot: params.commitOid,
+                  nextCursor: null,
+                  metadata: {
+                    ...comparison,
+                    contextLines: 3,
+                    selectedPath: params.path,
+                    readOnly: true,
+                    hasOmissions: false,
+                    totalUnits: 1,
+                  },
+                  entries: [
+                    {
+                      ...file,
+                      fileIndex: 0,
+                      binary: false,
+                      omissionReason: null,
+                      additions: 1,
+                      deletions: 0,
+                      hunks: [
+                        {
+                          index: 0,
+                          oldStart: 0,
+                          oldLines: 0,
+                          newStart: 1,
+                          newLines: 1,
+                          lines: [
+                            {
+                              lineIndex: 0,
+                              byteOffset: 0,
+                              lineComplete: true,
+                              origin: "+",
+                              oldLine: null,
+                              newLine: 1,
+                              contentBytesB64: path(
+                                `Historical parent ${params.parentIndex + 1}\n`,
+                              ).bytesB64,
+                            },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
                 };
               return {
                 snapshot: params.commitOid,
@@ -910,6 +1153,29 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   await expect(
     page.getByRole("button", { name: "src/App.tsx", exact: true }).first(),
   ).toBeVisible();
+  const changedSearch = page.getByRole("textbox", {
+    name: "Filter changed files",
+  });
+  await changedSearch.fill("missing-path");
+  await expect(
+    page.getByText("0 of 0 matching files loaded.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("No files match your current filters", { exact: true }),
+  ).toBeVisible();
+  // No matches is not a clean tree and must not hide the search box.
+  await expect(changedSearch).toBeFocused();
+  await changedSearch.fill("APP");
+  await expect(
+    page.getByText("1 of 1 matching files loaded.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "src/App.tsx", exact: true }).first(),
+  ).toBeVisible();
+  await changedSearch.fill("");
+  await expect(
+    page.getByText("Searching changed files…", { exact: true }),
+  ).toHaveCount(0);
   // A clipped path stays reachable: the column is too narrow for a long one.
   await expect(page.locator(".git-change-path").first()).toHaveAttribute(
     "title",
@@ -942,7 +1208,7 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Stage file", exact: true }),
-  ).toBeDisabled();
+  ).toBeEnabled();
   await expect(
     page.getByRole("button", { name: "Dismiss outcome", exact: true }),
   ).toHaveCount(0);
@@ -955,19 +1221,12 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   await page
     .getByRole("button", { name: "Branches: main", exact: true })
     .click();
+  // A receipt must not block navigation or every repository on the server.
+  // The agent's operation journal enforces the repository-specific write guard.
   await expect(
-    page.getByText(
-      "Check the saved operation’s outcome before changing branches.",
-      { exact: true },
-    ),
+    page.getByPlaceholder("Filter branches", { exact: true }),
   ).toBeVisible();
-  await page.screenshot({
-    animations: "disabled",
-    path: `.impeccable/screenshots/projects-branches-blocked-${info.project.name}.png`,
-  });
-  await page
-    .getByRole("button", { name: "View saved outcomes", exact: true })
-    .click();
+  await page.keyboard.press("Escape");
   await page
     .getByRole("button", { name: "Check outcome", exact: true })
     .click();
@@ -1279,7 +1538,7 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
     .getByLabel("Filter branches", { exact: true })
     .fill("does-not-exist");
   await expect(
-    page.getByText("No matching branches in the loaded results.", {
+    page.getByText("No matching branches.", {
       exact: true,
     }),
   ).toBeVisible();
@@ -1386,6 +1645,26 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   await expect(
     page.getByRole("button", { name: "Fetch origin", exact: true }),
   ).toBeEnabled();
+  await page.getByRole("combobox", { name: "Remote", exact: true }).click();
+  await page
+    .getByRole("combobox", { name: "Search remotes", exact: true })
+    .fill("ORIGIN");
+  await expect(
+    page.getByRole("option", { name: "origin", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("combobox", { name: "Search remotes", exact: true })
+    .fill("no-match");
+  await expect(
+    page.getByText("No matching remotes.", { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("combobox", { name: "Search remotes", exact: true })
+    .fill("origin");
+  await page.getByRole("option", { name: "origin", exact: true }).click();
+  await expect(
+    page.getByRole("combobox", { name: "Remote", exact: true }),
+  ).toContainText("origin");
   await page.screenshot({
     animations: "disabled",
     path: `.impeccable/screenshots/projects-remotes-${info.project.name}.png`,
@@ -1396,9 +1675,9 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   await page
     .getByRole("menuitem", { name: "Remote branches and tags…", exact: true })
     .click();
-  await page
-    .getByRole("button", { name: "Next references", exact: true })
-    .click();
+  await expect(
+    page.getByText("All remote references loaded", { exact: true }),
+  ).toBeVisible();
   await expect(
     page
       .getByRole("listitem")
@@ -1418,9 +1697,6 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
     remoteDialogBounds!.x + remoteDialogBounds!.width,
   );
 
-  await page
-    .getByRole("button", { name: "Previous references", exact: true })
-    .click();
   await page
     .getByRole("button", { name: "Push with lease…", exact: true })
     .click();
@@ -1514,7 +1790,9 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   await page.getByRole("button", { name: "Create tag", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await openGitAction(page, "Tags…");
-  await page.getByRole("button", { name: "Next tags", exact: true }).click();
+  await expect(
+    page.getByText("All tags loaded", { exact: true }),
+  ).toBeVisible();
   await page.getByRole("button", { name: /v1.0.0 Annotated/ }).click();
   await expect(
     page.getByText("First stable release", { exact: false }),
@@ -1534,14 +1812,16 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   await page.getByRole("button", { name: "Push tag", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await openGitAction(page, "Tags…");
-  await page.getByRole("button", { name: "Next tags", exact: true }).click();
-  await page
-    .getByRole("button", { name: "Previous tags", exact: true })
-    .click();
+  await expect(
+    page.getByText("All tags loaded", { exact: true }),
+  ).toBeVisible();
+
   await expect(
     page.getByRole("button", { name: /v0.1.0 Lightweight/ }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Next tags", exact: true }).click();
+  await expect(
+    page.getByText("All tags loaded", { exact: true }),
+  ).toBeVisible();
   await page.getByRole("button", { name: /v1.0.0 Annotated/ }).click();
   await page
     .getByRole("button", { name: "Delete local tag…", exact: true })
@@ -1593,6 +1873,11 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
     .click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.getByRole("tab", { name: "History", exact: true }).click();
+  // The short first page fills the viewport automatically without a manual click.
+  await expect(
+    page.getByRole("button", { name: /Initial commit/ }),
+  ).toBeVisible();
+  await expect(page.getByText("End of history", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /Merge feature/ }).click();
   await page
     .getByRole("button", { name: "historical.txt", exact: true })
@@ -1650,13 +1935,13 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
     () => new Promise((done) => requestAnimationFrame(() => done(null))),
   );
   await page.setViewportSize({ width: 960, height: 680 });
-  await page.getByRole("button", { name: "Next files", exact: true }).click();
+  await expect(
+    page.getByText("All commit files loaded", { exact: true }),
+  ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "second.txt", exact: true }),
   ).toBeVisible();
-  await page
-    .getByRole("button", { name: "Previous files", exact: true })
-    .click();
+
   await expect(
     page.getByRole("button", { name: "historical.txt", exact: true }),
   ).toBeVisible();
@@ -1735,6 +2020,11 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
     page.getByRole("region", { name: "Active Git operation" }),
   ).toHaveCount(0);
   await page.getByRole("tab", { name: "History", exact: true }).click();
+  // The short first page fills the viewport automatically without a manual click.
+  await expect(
+    page.getByRole("button", { name: /Initial commit/ }),
+  ).toBeVisible();
+  await expect(page.getByText("End of history", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /Merge feature/ }).click();
   await page
     .getByRole("button", { name: "Commit actions", exact: true })

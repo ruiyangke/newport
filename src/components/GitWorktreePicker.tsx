@@ -1,3 +1,4 @@
+import { readSharedQuery } from "../query/client";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FolderTree, GitBranch, Lock, Plus, TriangleAlert } from "lucide-react";
@@ -15,6 +16,9 @@ import {
   type WorktreeRow,
 } from "../git/worktrees";
 import { Button } from "./controls";
+import { useGitPageLoader } from "../hooks/useGitPageLoader";
+import { GitLoadMore } from "./GitLoadMore";
+import { gitErrorMessage } from "../git/errors";
 import { GitPicker } from "./GitPicker";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import {
@@ -92,8 +96,8 @@ function StatusFact({ summary }: { summary?: Summary }) {
  * one branch each, so this is how a person follows them: pick one and the
  * whole page -- changes, history, commit, push -- is that checkout.
  *
- * Status is read only when asked ("Check status"), one worktree at a time on
- * the server's one connection, and never inferred: an unread worktree shows
+ * Status is read only when asked, with at most two checkouts in flight,
+ * and never inferred: an unread worktree shows
  * nothing rather than "clean".
  */
 export function GitWorktreePicker({
@@ -127,9 +131,57 @@ export function GitWorktreePicker({
   const [search, setSearch] = useState("");
   const [checking, setChecking] = useState(false);
   const hintId = useId();
-  const listing = useQuery(gitQueries.worktreeList(scope, repository.repoId));
+  const [filter, setFilter] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setFilter(search.trim()), 200);
+    return () => clearTimeout(timer);
+  }, [search]);
+  const baseline = useQuery(gitQueries.worktrees(scope, repository.repoId));
+  const options = useMemo(
+    () =>
+      filter ? { filter, atSnapshot: baseline.data?.snapshot } : undefined,
+    [filter, baseline.data?.snapshot],
+  );
+  const query = gitQueries.worktrees(
+    scope,
+    repository.repoId,
+    undefined,
+    options,
+  );
+  const listing = useQuery({
+    ...query,
+    enabled:
+      !filter ||
+      (open && !!baseline.data && !baseline.isFetching && !baseline.isError),
+  });
+  const listingError = baseline.error ?? listing.error;
+  const stale =
+    baseline.isFetching ||
+    !!listingError ||
+    listing.isFetching ||
+    search.trim() !== filter;
+  const pages = useGitPageLoader({
+    queryKey: query.queryKey,
+    page: listing.data ?? null,
+    enabled: open && !busy && !stale,
+    prefetch: true,
+    entryKey: worktreeKey,
+    read: (cursor, signal) =>
+      readSharedQuery(
+        queryClient,
+        {
+          ...gitQueries.worktrees(scope, repository.repoId, cursor, options),
+          staleTime: Infinity,
+        },
+        signal,
+      ),
+  });
   const rows = useMemo(() => listing.data?.entries ?? [], [listing.data]);
-  const current = rows.find((row) => row.current) ?? null;
+  const current =
+    baseline.data?.metadata.current ??
+    listing.data?.metadata.current ??
+    baseline.data?.entries.find((row) => row.current) ??
+    null;
   const targets = useMemo(
     () =>
       rows.flatMap((row) => {
@@ -138,7 +190,7 @@ export function GitWorktreePicker({
       }),
     [rows, scope.id],
   );
-  // Reads nothing on its own: each is enabled only by "Check status".
+  // Reads nothing on its own: each is enabled only by "Check loaded".
   const summaries = useQueries({
     queries: targets.map(({ target }) => ({
       ...gitQueries.checkout(scope, target),
@@ -156,18 +208,45 @@ export function GitWorktreePicker({
   // The current run; closing the picker ends it, since nothing it reads is
   // on screen any more and every read holds the connection for the page.
   const run = useRef(0);
-  useEffect(() => () => void (run.current += 1), []);
+  const checkingRead = useRef<AbortController | null>(null);
+  useEffect(
+    () => () => {
+      run.current += 1;
+      checkingRead.current?.abort();
+    },
+    [],
+  );
   async function checkAll() {
     const mine = ++run.current;
+    checkingRead.current?.abort();
+    const controller = new AbortController();
+    checkingRead.current = controller;
     setChecking(true);
     try {
-      for (const { target } of targets) {
-        if (mine !== run.current) return;
-        await queryClient
-          .fetchQuery({ ...gitQueries.checkout(scope, target), staleTime: 0 })
-          .catch(() => undefined);
-      }
+      const remaining = [...targets];
+      const worker = async () => {
+        while (mine === run.current) {
+          const next = remaining.shift();
+          if (!next) return;
+          const query = gitQueries.checkout(scope, next.target);
+          await queryClient
+            .fetchQuery({
+              ...query,
+              // Disabled row observers keep the cache mounted. Explicitly
+              // forward cancellation instead of relying on unsubscription.
+              queryFn: (context) =>
+                query.queryFn!({
+                  ...context,
+                  signal: AbortSignal.any([context.signal, controller.signal]),
+                }),
+              staleTime: 0,
+            })
+            .catch(() => undefined);
+        }
+      };
+      await Promise.all([worker(), worker()]);
     } finally {
+      if (checkingRead.current === controller) checkingRead.current = null;
       if (mine === run.current) setChecking(false);
     }
   }
@@ -179,10 +258,14 @@ export function GitWorktreePicker({
       toast.error(`Could not copy the path: ${String(reason)}`);
     }
   }
-  const linked = rows.filter((row) => row.kind === "linked").length;
-  // An agent too old to list worktrees has nothing to pick from; the picker
-  // steps aside rather than standing in the toolbar with an error in it.
-  if (listing.isError && !listing.data) return null;
+  const total = listing.data?.metadata.totalEntries;
+  const matching = listing.data?.metadata.matchingEntries;
+  // Navigation or a search change stops scheduling the previous rows immediately.
+  useEffect(() => {
+    run.current += 1;
+    checkingRead.current?.abort();
+    setChecking(false);
+  }, [search, repository.repoId, scope.connection]);
   const title = current
     ? worktreeLabel(current)
     : repository.root.display === project.path.display
@@ -197,13 +280,17 @@ export function GitWorktreePicker({
           setOpen(next);
           if (!next) {
             run.current += 1;
+            checkingRead.current?.abort();
             setChecking(false);
           }
           if (next) {
             setSearch("");
-            // Opening reads the list afresh: agents add and remove worktrees
-            // behind the page's back.
-            void listing.refetch();
+            setFilter("");
+            // Refetch the unfiltered first page only; never drain the listing.
+            void queryClient.invalidateQueries({
+              queryKey: gitQueries.worktrees(scope, repository.repoId).queryKey,
+              exact: true,
+            });
           }
         }}
       >
@@ -218,9 +305,9 @@ export function GitWorktreePicker({
             value={
               <>
                 {title}
-                {linked > 0 && (
+                {total !== undefined && total > 1 && (
                   <span className="ml-[6px] rounded-full bg-[color-mix(in_srgb,var(--foreground)_9%,transparent)] px-[5px] text-[10px] leading-[16px] font-semibold text-muted-foreground tabular-nums">
-                    {linked + 1}
+                    {total.toLocaleString()}
                   </span>
                 )}
               </>
@@ -237,14 +324,7 @@ export function GitWorktreePicker({
         >
           <Command
             label="Filter worktrees"
-            filter={(_value, query, keywords) =>
-              (keywords ?? [])
-                .join(" ")
-                .toLocaleLowerCase()
-                .includes(query.toLocaleLowerCase())
-                ? 1
-                : 0
-            }
+            shouldFilter={false}
             className="size-auto min-h-0 flex-1 rounded-none! bg-transparent p-0"
           >
             <span id={hintId} className="sr-only">
@@ -268,7 +348,7 @@ export function GitWorktreePicker({
                 }}
               />
               <Button
-                disabled={busy}
+                disabled={busy || stale}
                 className="gap-[5px]"
                 onClick={() => {
                   setOpen(false);
@@ -279,16 +359,21 @@ export function GitWorktreePicker({
                 New worktree
               </Button>
             </div>
-            {listing.isError && (
+            {listingError && (
               <p
                 role="alert"
                 className="mx-[12px] mb-[8px] flex flex-wrap items-center gap-[8px] rounded-[6px] border border-destructive px-[8px] py-[6px] text-[12px] text-destructive"
               >
-                {String(
-                  (listing.error as { message?: string })?.message ??
-                    listing.error,
-                )}
-                <Button onClick={() => void listing.refetch()}>Retry</Button>
+                {gitErrorMessage(listingError)}
+                <Button
+                  onClick={() => {
+                    setSearch("");
+                    setFilter("");
+                    void baseline.refetch();
+                  }}
+                >
+                  Refresh worktrees
+                </Button>
               </p>
             )}
             {listing.isPending && (
@@ -327,7 +412,7 @@ export function GitWorktreePicker({
                           row.path?.display ?? "",
                         ]}
                         onSelect={() => {
-                          if (!canOpen || busy) return;
+                          if (!canOpen || busy || stale) return;
                           setOpen(false);
                           onOpen(row);
                         }}
@@ -443,7 +528,7 @@ export function GitWorktreePicker({
                           <ContextMenuSeparator />
                           {row.locked !== null && (
                             <ContextMenuItem
-                              disabled={busy}
+                              disabled={busy || stale}
                               onSelect={() => {
                                 setOpen(false);
                                 onManage({
@@ -457,7 +542,7 @@ export function GitWorktreePicker({
                           )}
                           {row.state === "missing" && (
                             <ContextMenuItem
-                              disabled={busy}
+                              disabled={busy || stale}
                               onSelect={() => {
                                 setOpen(false);
                                 onManage({ kind: "repair", row });
@@ -469,7 +554,7 @@ export function GitWorktreePicker({
                           {!row.current && row.locked === false && (
                             <ContextMenuItem
                               variant="destructive"
-                              disabled={busy}
+                              disabled={busy || stale}
                               onSelect={() => {
                                 setOpen(false);
                                 onManage({
@@ -492,25 +577,44 @@ export function GitWorktreePicker({
                   </ContextMenu>
                 );
               })}
+              {listing.data && (
+                <GitLoadMore
+                  cursor={listing.data.nextCursor}
+                  loading={pages.loading}
+                  error={pages.error}
+                  disabled={busy || stale}
+                  onLoad={pages.load}
+                  label="Load more worktrees"
+                  endLabel={
+                    filter
+                      ? "All matching worktrees loaded"
+                      : "All worktrees loaded"
+                  }
+                />
+              )}
             </CommandList>
             <footer className="flex flex-none items-center gap-[8px] border-t border-border px-[12px] py-[8px]">
               <p className="min-w-0 flex-1 text-[11px] text-muted-foreground">
-                {rows.length === 1
-                  ? "Worktrees are separate checkouts of this repository, one branch each — how agents work side by side."
-                  : `${rows.length} checkouts of this repository. Right-click one for more.`}
+                {rows.length.toLocaleString()} loaded
+                {matching === undefined
+                  ? ""
+                  : ` · ${matching.toLocaleString()}${filter ? " matching" : " total"}`}
+                {total !== undefined && filter
+                  ? ` · ${total.toLocaleString()} total`
+                  : ""}
               </p>
               {targets.length > 0 && (
                 <Button
-                  disabled={busy || checking}
+                  disabled={busy || checking || stale}
                   onClick={() => void checkAll()}
                   className="flex-none"
                 >
-                  {checking ? "Checking…" : "Check status"}
+                  {checking ? "Checking…" : "Check loaded"}
                 </Button>
               )}
               <Button
                 variant="ghost"
-                disabled={busy}
+                disabled={busy || stale}
                 className="flex-none"
                 onClick={() => {
                   setOpen(false);

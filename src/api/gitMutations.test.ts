@@ -51,16 +51,21 @@ it("checks persisted receipts before sending a write and preserves its exact ID"
 });
 
 it.each(["pending", "outcome_unknown"])(
-  "blocks a write while a saved outcome is %s",
+  "lets the agent enforce repository-scoped recovery when a receipt is %s",
   async (state) => {
     invoke.mockResolvedValue([
       { operationId: "older", serverId: "server", action: "commit", state },
     ]);
     const { mutations, client } = setup();
-    await expect(mutations.start(params)).rejects.toThrow(
-      "earlier Git operation",
-    );
-    expect(client.start).not.toHaveBeenCalled();
+    await mutations.start(params);
+    expect(client.start).toHaveBeenCalledExactlyOnceWith(params);
+    expect(
+      invoke.mock.calls.some(
+        ([command]) =>
+          command === "git_acknowledge_operation" ||
+          command === "git_review_operation",
+      ),
+    ).toBe(false);
   },
 );
 
@@ -120,7 +125,7 @@ it("releases its in-flight guard after failure without automatically retrying", 
   await expect(mutations.check("operation")).resolves.toBe(result);
 });
 
-it("applies the unresolved-outcome guard to repository creation too", async () => {
+it("allows an unrelated repository creation while preserving saved outcomes", async () => {
   invoke.mockResolvedValue([
     {
       operationId: "older",
@@ -139,8 +144,8 @@ it("applies the unresolved-outcome guard to repository creation too", async () =
         initialBranch: "main",
       },
     }),
-  ).rejects.toThrow("earlier Git operation");
-  expect(client.bootstrap).not.toHaveBeenCalled();
+  ).resolves.toBeDefined();
+  expect(client.bootstrap).toHaveBeenCalledTimes(1);
 });
 it("dispatches cloning once without acknowledging the saved outcome", async () => {
   const { client, mutations } = setup();
@@ -185,6 +190,53 @@ it("permits a corrected creation after rejection without dismissing or replaying
   expect(
     invoke.mock.calls.some(
       ([command]) => command === "git_acknowledge_operation",
+    ),
+  ).toBe(false);
+});
+
+it("records explicit review without replaying or dismissing the original operation", async () => {
+  const { mutations, client } = setup();
+  await mutations.review("interrupted");
+  expect(invoke).toHaveBeenCalledWith("git_review_operation", {
+    serverId: "server",
+    operationId: "interrupted",
+  });
+  expect(client.start).not.toHaveBeenCalled();
+  expect(client.bootstrap).not.toHaveBeenCalled();
+  expect(
+    invoke.mock.calls.some(
+      ([method]) => method === "git_acknowledge_operation",
+    ),
+  ).toBe(false);
+});
+
+it("permits a separately requested write after explicit review", async () => {
+  const { mutations, client } = setup();
+  invoke.mockResolvedValue([
+    {
+      operationId: "old",
+      serverId: "server",
+      action: "pull.fast_forward",
+      state: "reviewed_unknown",
+    },
+  ]);
+  await mutations.start(params);
+  expect(client.start).toHaveBeenCalledExactlyOnceWith(params);
+  expect(client.operation).not.toHaveBeenCalled();
+});
+
+it("surfaces repository recovery refusal without reviewing or replaying it", async () => {
+  const { mutations, client } = setup();
+  client.start.mockRejectedValueOnce(
+    new Error("RECOVERY_REQUIRED: inspect interrupted operation"),
+  );
+  await expect(mutations.start(params)).rejects.toThrow("RECOVERY_REQUIRED");
+  expect(client.start).toHaveBeenCalledTimes(1);
+  expect(
+    invoke.mock.calls.some(
+      ([command]) =>
+        command === "git_acknowledge_operation" ||
+        command === "git_review_operation",
     ),
   ).toBe(false);
 });

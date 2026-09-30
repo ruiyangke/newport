@@ -1,20 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { MoreHorizontal } from "lucide-react";
 import { gitPath, type GitWriteAction } from "../domain/git";
 import type { GitRemotes, GitRepository } from "../domain/gitResponses";
-import { gitKeys, gitQueries } from "../query/git";
+import { gitKeys } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
 import { Button, Input } from "./controls";
 import { Modal } from "./Editors";
 import { GitRemoteRefs } from "./GitRemoteRefs";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "./ui/select";
+import { GitRemotePicker } from "./GitRemotePicker";
+import { useGitRemoteSelection } from "../hooks/useGitRemoteSelection";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -125,35 +120,19 @@ function RemotesDialog({
   const [editor, setEditor] = useState<Editor | null>(null);
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
-  const query = useQuery({
-    ...gitQueries.remotes(scope, repoId),
-    refetchOnMount: "always",
-  });
-  // A new status snapshot re-reads the remotes while the dialog is open.
+  const selection = useGitRemoteSelection(repoId, storedSelection, setSelected);
+  const { selected, remote, loading, error: readError } = selection;
   const seenSnapshot = useRef(snapshot);
   useEffect(() => {
     if (seenSnapshot.current === snapshot) return;
     seenSnapshot.current = snapshot;
     void queryClient.invalidateQueries({
-      queryKey: gitKeys.remotes(scope, repoId),
+      queryKey: [...gitKeys.repo(scope, repoId), "remote-names"],
     });
-  }, [queryClient, scope, repoId, snapshot]);
-  // A list being (re)read is not offered, as before: nothing can be acted on
-  // until the read that replaces it has landed.
-  const loading = query.isFetching;
-  const remotes: GitRemotes | null =
-    loading || query.isError ? null : (query.data ?? null);
-  const readError = !loading && query.error ? String(query.error) : "";
-  // The remote the dialog shows: the one chosen, while it still exists, else
-  // origin, else the first.
-  const selected = remotes?.entries.some(
-    (remote) => remote.name === storedSelection,
-  )
-    ? storedSelection
-    : (remotes?.entries.find((remote) => remote.name === "origin")?.name ??
-      remotes?.entries[0]?.name ??
-      "");
-  const remote = remotes?.entries.find((remote) => remote.name === selected);
+    void queryClient.invalidateQueries({
+      queryKey: gitKeys.remote(scope, repoId, selected),
+    });
+  }, [queryClient, scope, repoId, snapshot, selected]);
   const disabled = busy || loading || !!blockedReason;
   const attached =
     !!current &&
@@ -301,17 +280,14 @@ function RemotesDialog({
             {readError && (
               <p role="alert">
                 {readError}{" "}
-                <Button
-                  disabled={busy || loading}
-                  onClick={() => void query.refetch()}
-                >
+                <Button disabled={busy || loading} onClick={selection.refresh}>
                   Retry remotes
                 </Button>
               </p>
             )}
-            {remotes && (
+            {!loading && !readError && (
               <>
-                {remotes.entries.length === 0 ? (
+                {selection.empty ? (
                   <p>
                     No remotes configured. Add one to fetch and publish
                     branches.
@@ -320,22 +296,12 @@ function RemotesDialog({
                   <>
                     <label className="git-remote-selection grid gap-[6px] text-[12px]">
                       Remote
-                      <Select
+                      <GitRemotePicker
+                        repoId={repoId}
                         value={selected}
-                        onValueChange={setSelected}
+                        onChange={setSelected}
                         disabled={busy}
-                      >
-                        <SelectTrigger aria-label="Remote" className="w-full">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {remotes.entries.map((remote) => (
-                            <SelectItem key={remote.name} value={remote.name}>
-                              {remote.name}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                      />
                     </label>
                     {remote && (
                       <>
@@ -352,7 +318,7 @@ function RemotesDialog({
                                 size="icon"
                                 variant="ghost"
                                 aria-label={`Actions for remote ${remote.name}`}
-                                disabled={disabled}
+                                disabled={busy || loading}
                               >
                                 <MoreHorizontal size={16} />
                               </Button>
@@ -366,6 +332,7 @@ function RemotesDialog({
                                 Remote branches and tags…
                               </DropdownMenuItem>
                               <DropdownMenuItem
+                                disabled={disabled}
                                 onSelect={() => {
                                   setName(remote.name);
                                   setEditor({ kind: "rename", remote });
@@ -374,6 +341,7 @@ function RemotesDialog({
                                 Rename…
                               </DropdownMenuItem>
                               <DropdownMenuItem
+                                disabled={disabled}
                                 onSelect={() => {
                                   setUrl("");
                                   setEditor({ kind: "url", remote });
@@ -382,6 +350,7 @@ function RemotesDialog({
                                 Change URL…
                               </DropdownMenuItem>
                               <DropdownMenuItem
+                                disabled={disabled}
                                 onSelect={() =>
                                   setEditor({ kind: "remove", remote })
                                 }
@@ -485,8 +454,8 @@ function RemotesDialog({
                     Add remote
                   </Button>
                   <p className="flex-1">
-                    SSH uses the server’s SSH agent. HTTPS supports anonymous
-                    access.
+                    SSH uses the server’s SSH agent. HTTPS uses the repository’s
+                    configured credentials on the server.
                   </p>
                 </div>
               </>

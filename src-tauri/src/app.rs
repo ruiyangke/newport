@@ -156,9 +156,12 @@ pub fn run() -> anyhow::Result<()> {
         .invoke_handler(tauri::generate_handler![
             crate::git::git_connect,
             crate::git::git_request,
+            crate::git::git_register_read,
+            crate::git::git_cancel_read,
             crate::git::git_disconnect,
             crate::git::pending::git_pending_operations,
             crate::git::pending::git_acknowledge_operation,
+            crate::git::pending::git_review_operation,
             crate::updates::update_status,
             crate::updates::check_for_updates,
             crate::updates::install_update,

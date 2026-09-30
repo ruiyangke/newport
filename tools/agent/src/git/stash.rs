@@ -9,6 +9,8 @@ use git2::{Reflog, Repository};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{cell::Cell, ffi::OsStr, fs, os::unix::ffi::OsStrExt, path::Path};
+#[path = "stash_stream.rs"]
+mod streaming;
 const STASH: &str = "refs/stash";
 fn engine(_: git2::Error) -> Error {
     Error::new("STASH_ERROR", "The stash could not be prepared.")
@@ -20,9 +22,14 @@ fn unknown() -> Error {
     Error::new("OUTCOME_UNKNOWN", "The stash operation may have changed files, its index or stash references. Inspect it before retrying.")
 }
 fn log(repo: &Repository) -> Result<Option<Reflog>, Error> {
-    if fs::metadata(repo.commondir().join("logs/refs/stash"))
-        .is_ok_and(|m| m.len() > 16 * 1024 * 1024)
-    {
+    let metadata = match fs::metadata(repo.commondir().join("logs/refs/stash")) {
+        Ok(metadata) => metadata,
+        // libgit2 creates a missing reflog while reading it. Listing and failed
+        // selections must remain read-only, including an orphan stash ref.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error(error)),
+    };
+    if metadata.len() > 16 * 1024 * 1024 {
         return Err(Error::new(
             "LIMIT_EXCEEDED",
             "The stash log exceeds the supported size.",
@@ -34,14 +41,13 @@ fn log(repo: &Repository) -> Result<Option<Reflog>, Error> {
         Ok(_) => repo.reflog(STASH).map(Some).map_err(engine),
     }
 }
-fn rows(log: Option<&Reflog>) -> Result<(Vec<Value>, String), Error> {
-    let mut rows = Vec::new();
+fn scan(
+    log: Option<&Reflog>,
+    mut visit: impl FnMut(usize, &git2::ReflogEntry<'_>),
+) -> Result<String, Error> {
     let mut token = Sha256::new();
     token.update(b"newport-stash-list-v2\0");
     if let Some(log) = log {
-        if log.len() > 10_000 {
-            return Err(Error::new("LIMIT_EXCEEDED", "Too many stash entries."));
-        }
         for (index, entry) in log.iter().enumerate() {
             let message = entry.message_bytes().unwrap_or_default();
             let committer = entry.committer();
@@ -53,20 +59,148 @@ fn rows(log: Option<&Reflog>) -> Result<(Vec<Value>, String), Error> {
                 token.update((bytes.len() as u64).to_be_bytes());
                 token.update(bytes);
             }
-            rows.push(json!({"index":index,"oid":entry.id_new().to_string(),"previousOid":entry.id_old().to_string(),"message":String::from_utf8_lossy(&message[..message.len().min(1024)]),"messageTruncated":message.len()>1024,"time":entry.committer().when().seconds()}));
+            visit(index, &entry);
         }
     }
-    Ok((
-        rows,
-        token
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
-    ))
+    Ok(token
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
+fn list_token(log: Option<&Reflog>) -> Result<String, Error> {
+    scan(log, |_, _| {})
+}
+#[cfg(test)]
 pub fn list(repo: &Repository) -> Result<(Vec<Value>, String), Error> {
-    rows(log(repo)?.as_ref())
+    let log = log(repo)?;
+    rows(log.as_ref())
+}
+#[cfg(test)]
+fn rows(log: Option<&Reflog>) -> Result<(Vec<Value>, String), Error> {
+    let mut rows = Vec::new();
+    let token = scan(log, |index, entry| {
+        let message = entry.message_bytes().unwrap_or_default();
+        rows.push(json!({"index":index,"oid":entry.id_new().to_string(),"previousOid":entry.id_old().to_string(),"message":String::from_utf8_lossy(&message[..message.len().min(1024)]),"messageTruncated":message.len()>1024,"time":entry.committer().when().seconds()}));
+    })?;
+    Ok((rows, token))
+}
+
+#[derive(Default)]
+pub(super) struct Cache(Vec<(String, std::sync::Arc<streaming::Captured>)>);
+#[derive(Clone)]
+struct Row {
+    index: usize,
+    oid: git2::Oid,
+    previous: git2::Oid,
+    message: Vec<u8>,
+    truncated: bool,
+    time: i64,
+}
+impl Row {
+    fn json(&self) -> Value {
+        json!({"index":self.index,"oid":self.oid.to_string(),"previousOid":self.previous.to_string(),"message":String::from_utf8_lossy(&self.message),"messageTruncated":self.truncated,"time":self.time})
+    }
+}
+#[cfg(not(test))]
+const CACHE_INDEX_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(test)]
+const CACHE_INDEX_BYTES: usize = 32 * 1024;
+fn render(
+    snapshot: super::tokens::SnapshotRef,
+    entries: &[Row],
+    offset: usize,
+    total: usize,
+    count: usize,
+) -> Result<Value, Error> {
+    let mut rows = Vec::new();
+    let mut bytes = 0;
+    for entry in entries.iter().take(count) {
+        let row = entry.json();
+        let size = serde_json::to_vec(&row)
+            .map_err(|_| Error::invalid("Invalid stash metadata."))?
+            .len();
+        if bytes + size > super::protocol::MAX_FRAME / 2 {
+            break;
+        }
+        bytes += size;
+        rows.push(row);
+    }
+    let end = offset + rows.len();
+    let token = snapshot.encode();
+    let list_token = snapshot.f.clone();
+    let next = (end < total).then(|| {
+        super::tokens::CursorRef {
+            s: snapshot,
+            o: end,
+            k: None,
+        }
+        .encode()
+    });
+    Ok(
+        json!({"snapshot":token,"entries":rows,"nextCursor":next,"metadata":{"listToken":list_token,"totalEntries":total}}),
+    )
+}
+pub(super) fn page(
+    cache: &mut Cache,
+    repository: super::tokens::RepoRef,
+    count: usize,
+    snapshot: Option<super::tokens::SnapshotRef>,
+    offset: usize,
+) -> Result<Value, Error> {
+    let repo = repository.open()?;
+    if let Some(snapshot) = &snapshot {
+        let token = snapshot.encode();
+        if let Some(position) = cache.0.iter().position(|(t, _)| t == &token) {
+            let cached = cache.0.remove(position);
+            let captured = cached.1.clone();
+            cache.0.push(cached);
+            if offset > captured.entries.len() {
+                return Err(Error::invalid("Cursor is past the end of this listing."));
+            }
+            return render(
+                snapshot.clone(),
+                &captured.rows(offset, count)?,
+                offset,
+                captured.entries.len(),
+                count,
+            );
+        }
+    }
+    let streaming::Read {
+        token: fingerprint,
+        total,
+        selected,
+        captured,
+    } = streaming::read(&repo, offset, count)?;
+    if offset > total {
+        return Err(Error::invalid("Cursor is past the end of this listing."));
+    }
+    if snapshot.as_ref().is_some_and(|s| s.f != fingerprint) {
+        return Err(Error::new(
+            "SNAPSHOT_EXPIRED",
+            "The stash list changed. Restart from the first page.",
+        ));
+    }
+    let snapshot = snapshot.unwrap_or(super::tokens::SnapshotRef {
+        r: repository,
+        q: "stashes".into(),
+        f: fingerprint,
+        p: None,
+    });
+    if let Some(mut captured) = captured {
+        captured.entries.shrink_to_fit();
+        let token = snapshot.encode();
+        captured.bytes += token.len();
+        cache.0.retain(|(t, _)| t != &token);
+        cache.0.push((token, std::sync::Arc::new(captured)));
+        while cache.0.len() > 8
+            || cache.0.iter().map(|(_, c)| c.bytes).sum::<usize>() > 32 * 1024 * 1024
+        {
+            cache.0.remove(0);
+        }
+    }
+    render(snapshot, &selected, offset, total, count)
 }
 
 fn drop_locked(
@@ -257,7 +391,7 @@ pub fn apply(source: &Repository, action: &Action, expected: &str) -> Result<Val
     stash_lock.lock_ref(STASH).map_err(busy)?;
     let log = log(&repo)?
         .ok_or_else(|| Error::new("STASH_NOT_FOUND", "The selected stash no longer exists."))?;
-    if rows(Some(&log))?.1 != *expected_token {
+    if list_token(Some(&log))? != *expected_token {
         return Err(Error::new(
             "STALE_STASH_LIST",
             "The stash list changed. Refresh before continuing.",
@@ -293,10 +427,14 @@ pub fn apply(source: &Repository, action: &Action, expected: &str) -> Result<Val
         return Ok(json!({"oid":selected.to_string(),"dropped":true,"refreshRequired":true}));
     }
     let stash_commit = repo.find_commit(selected).map_err(engine)?;
-    checkout::supported_merge_files(&repo, &stash_commit.tree().map_err(engine)?)?;
+    // Validate every distinct stash tree, but resolve current attributes once
+    // per path during this read-only preparation. Never retain it across writes.
+    let mut attributes = checkout::MergeChecks::new(&repo);
+    attributes.check(&stash_commit.tree().map_err(engine)?)?;
     for parent in stash_commit.parents().skip(1) {
-        checkout::supported_merge_files(&repo, &parent.tree().map_err(engine)?)?;
+        attributes.check(&parent.tree().map_err(engine)?)?;
     }
+    drop(attributes);
     guard_apply(&repo, &stash_commit)?;
     drop(stash_commit);
     let mut lock = IndexLock::acquire(&repo)?;
@@ -422,6 +560,53 @@ mod tests {
         )
     }
     #[test]
+    #[ignore = "manual release benchmark"]
+    fn benchmark_stash_token_validation() {
+        use std::{hint::black_box, time::Instant};
+        let (_temp, repo) = fixture();
+        let oid = repo.head().unwrap().target().unwrap();
+        let signature = git2::Signature::now("Fixture", "fixture@example.test").unwrap();
+        for count in [20, 1000, 10_000] {
+            let mut log = repo.reflog(STASH).unwrap();
+            while log.len() < count {
+                log.append(oid, &signature, Some(&"x".repeat(1024)))
+                    .unwrap();
+            }
+            let mut before = Vec::new();
+            let mut after = Vec::new();
+            for round in 0..9 {
+                for full in if round % 2 == 0 {
+                    [true, false]
+                } else {
+                    [false, true]
+                } {
+                    let start = Instant::now();
+                    let token = if full {
+                        let (rows, token) = rows(Some(&log)).unwrap();
+                        black_box(rows);
+                        token
+                    } else {
+                        list_token(Some(&log)).unwrap()
+                    };
+                    black_box(token);
+                    if full {
+                        before.push(start.elapsed());
+                    } else {
+                        after.push(start.elapsed());
+                    }
+                }
+            }
+            before.sort();
+            after.sort();
+            assert_eq!(rows(Some(&log)).unwrap().1, list_token(Some(&log)).unwrap());
+            println!(
+                "stash entries={count} old_rows_median_us={} token_only_median_us={}",
+                before[4].as_micros(),
+                after[4].as_micros()
+            );
+        }
+    }
+    #[test]
     fn stash_token_covers_message_bytes_hidden_by_display_truncation() {
         let (temp, repo) = fixture();
         fs::write(temp.path().join("file"), "saved").unwrap();
@@ -438,11 +623,13 @@ mod tests {
             .unwrap();
         log.write().unwrap();
         let first = list(&repo).unwrap();
+        assert_eq!(first.1, list_token(Some(&log)).unwrap());
         log.remove(0, false).unwrap();
         log.append(oid, &signature, Some(&format!("{}B", "x".repeat(1024))))
             .unwrap();
         log.write().unwrap();
         let second = list(&repo).unwrap();
+        assert_eq!(second.1, list_token(Some(&log)).unwrap());
         assert_eq!(first.0, second.0);
         assert_ne!(first.1, second.1);
     }
@@ -584,6 +771,36 @@ mod tests {
     }
 
     #[test]
+    fn applying_stash_checks_attributes_in_its_index_parent() {
+        let (temp, repo) = fixture();
+        fs::write(temp.path().join(".gitattributes"), "file merge=custom\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(".gitattributes")).unwrap();
+        index.write().unwrap();
+        fs::write(temp.path().join(".gitattributes"), "").unwrap();
+        fs::write(temp.path().join("file"), "saved content").unwrap();
+        let saved = save(&repo, false, false);
+        let repo = Repository::open(temp.path()).unwrap();
+        let token = list(&repo).unwrap().1;
+        let before = repository::fingerprint(&repo).unwrap();
+        let error = apply(
+            &repo,
+            &Action::StashApply {
+                index: Some(0),
+                oid: saved["oid"].as_str().unwrap().into(),
+                expected_token: token.clone(),
+                reinstate_index: true,
+            },
+            &before,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "UNSUPPORTED_MERGE_DRIVER");
+        assert_eq!(repository::fingerprint(&repo).unwrap(), before);
+        assert_eq!(list(&repo).unwrap().1, token);
+        assert_eq!(fs::read(temp.path().join("file")).unwrap(), b"base\n");
+    }
+
+    #[test]
     fn stash_roundtrip_restores_staged_unstaged_and_untracked_content() {
         let (temp, repo) = fixture();
         fs::write(temp.path().join("file"), "staged\n").unwrap();
@@ -714,5 +931,91 @@ mod tests {
             .index()
             .unwrap()
             .has_conflicts());
+    }
+    #[test]
+    fn stash_pages_exceed_ten_thousand_without_eager_json_or_stale_selection() {
+        use super::super::{
+            protocol::Request,
+            repository::{Output, Service},
+            tokens::CursorRef,
+        };
+        let (dir, repo) = fixture();
+        let oid = repo.head().unwrap().target().unwrap();
+        repo.reference(STASH, oid, false, "fixture").unwrap();
+        let path = repo.commondir().join("logs/refs/stash");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut contents = String::new();
+        for n in 0..20_001 {
+            contents.push_str(&format!(
+                "{oid} {oid} Fixture <fixture@example.test> {} +0100\tstash {n}\n",
+                1700000000 + n
+            ));
+        }
+        fs::write(&path, &contents).unwrap();
+        let mut service = Service::default();
+        let Output::Json(opened) = service
+            .request(Request::Open {
+                path: super::super::protocol::Path::new(dir.path().as_os_str().as_bytes()),
+            })
+            .unwrap()
+        else {
+            panic!()
+        };
+        let id = opened["repoId"].as_str().unwrap().to_owned();
+        let request = |cursor| Request::Stashes {
+            repo_id: id.clone(),
+            page_size: 2,
+            cursor,
+        };
+        let Output::Json(first) = service.request(request(None)).unwrap() else {
+            panic!()
+        };
+        assert_eq!(first["metadata"]["totalEntries"], 20_001);
+        assert_eq!(first["entries"][0]["message"], "stash 20000");
+        let expected_token = list_token(log(&repo).unwrap().as_ref()).unwrap();
+        assert_eq!(first["metadata"]["listToken"], expected_token);
+        let mut cursor = CursorRef::decode(first["nextCursor"].as_str().unwrap()).unwrap();
+        cursor.o = 10_000;
+        let Output::Json(late) = Service::default()
+            .request(request(Some(cursor.encode())))
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(late["entries"][0]["index"], 10_000);
+        assert_eq!(late["entries"][0]["message"], "stash 10000");
+        contents.push_str(&format!(
+            "{oid} {oid} Fixture <fixture@example.test> 1800000000 +0100\tnew duplicate\n"
+        ));
+        fs::write(&path, &contents).unwrap();
+        assert!(
+            matches!(Service::default().request(request(Some(cursor.encode()))),Err(Error{code,..})if code=="SNAPSHOT_EXPIRED")
+        );
+        assert_eq!(
+            apply(
+                &repo,
+                &Action::StashDrop {
+                    oid: oid.to_string(),
+                    expected_token,
+                    index: Some(10_000)
+                },
+                &repository::fingerprint(&repo).unwrap()
+            )
+            .unwrap_err()
+            .code,
+            "STALE_STASH_LIST"
+        );
+    }
+    #[test]
+    fn missing_stash_reflog_listing_never_creates_it() {
+        let (_dir, repo) = fixture();
+        let oid = repo.head().unwrap().target().unwrap();
+        repo.reference(STASH, oid, false, "fixture").unwrap();
+        let path = repo.commondir().join("logs/refs/stash");
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+        assert!(list(&repo).unwrap().0.is_empty());
+        assert!(!path.exists());
     }
 }

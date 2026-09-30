@@ -1,15 +1,24 @@
+import { createDiffRenderer } from "../git/historicalDiff";
+import { useGitPageLoader } from "../hooks/useGitPageLoader";
+import { gitProjectsFor } from "../git/registry";
+import { GitLoadMore } from "./GitLoadMore";
 import {
   Suspense,
   lazy,
   useCallback,
   useContext,
   useRef,
+  useMemo,
   useState,
   type ReactNode,
 } from "react";
 import { ChevronLeft } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { GitDiff, GitStatus } from "../domain/gitResponses";
+import {
+  appendGitDiffPage,
+  type GitDiff,
+  type GitStatus,
+} from "../domain/gitResponses";
 import type { GitReadRequest, GitWriteAction } from "../domain/git";
 import { gitQueries } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
@@ -112,18 +121,46 @@ export function GitChangesPreview({
   ]);
   // A working diff is fixed by the snapshot it was read at, so a new snapshot
   // is a new read and a late answer for an old one lands under its own key.
-  const read = gitQueries.diff(scope, {
+  const params = {
     repoId,
     snapshot,
     entryId: entry.entryId,
     side,
     contextLines: context,
-  });
+    pageSize: 5000,
+    maxBytes: 65536,
+  };
+  const read = gitQueries.diffPage(scope, params);
   const diff = useQuery({ ...read, enabled: !entry.conflicted });
   // After a write that changed the file, the hunks on screen are spent: the
   // diff stays hidden until the next snapshot brings the next read.
   const [spent, setSpent] = useState<string | null>(null);
-  const currentDiff = spent === queryKey ? null : (diff.data ?? null);
+  const page = spent === queryKey ? null : (diff.data ?? null);
+  const pages = useGitPageLoader({
+    queryKey: read.queryKey,
+    page,
+    enabled:
+      !entry.conflicted &&
+      !diff.isFetching &&
+      !diff.isError &&
+      spent !== queryKey,
+    read: (cursor, signal) =>
+      gitProjectsFor(scope)
+        .repositories.withSignal(signal)
+        .diffPage({
+          ...params,
+          cursor,
+          maxBytes: 524288,
+        }),
+    entryKey: (file) => String(file.fileIndex),
+    merge: appendGitDiffPage,
+    prefetch: true,
+  });
+  const renderDiff = useMemo(() => createDiffRenderer(), []);
+  const currentDiff = useMemo(
+    () => (page ? renderDiff(page) : null),
+    [page, renderDiff],
+  );
   // A failed write is shown against the diff it was made from.
   const [writeError, setWriteError] = useState<{
     key: string;
@@ -306,6 +343,20 @@ export function GitChangesPreview({
         <GitDiffView
           key={queryKey}
           diff={currentDiff}
+          hasMore={page?.nextCursor != null}
+          footer={
+            page && (
+              <GitLoadMore
+                cursor={page.nextCursor}
+                loading={pages.loading}
+                error={pages.error}
+                disabled={diff.isFetching || applying}
+                onLoad={() => void pages.load()}
+                label="Load more changes"
+                endLabel="All changes loaded"
+              />
+            )
+          }
           hunkAction={
             onAction && !entry.conflicted && side !== "head_to_worktree"
               ? {
@@ -392,8 +443,12 @@ function hunksSupported(diff: GitDiff, file: DiffFile) {
 export function GitDiffView({
   diff,
   hunkAction,
+  footer,
+  hasMore = false,
 }: {
   diff: GitDiff;
+  footer?: ReactNode;
+  hasMore?: boolean;
   hunkAction?: HunkAction;
 }) {
   const [fileIndex, setFileIndex] = useState(0);
@@ -483,8 +538,9 @@ export function GitDiffView({
         )}
       {hunkAction && !supportsHunks && (
         <GitNotice tone="info">
-          Individual hunks are unavailable for this comparison. Use the file
-          actions in the header.
+          {hasMore
+            ? "Load the remaining changes to select complete hunks."
+            : "Individual hunks are unavailable for this comparison. Use the file actions in the header."}
         </GitNotice>
       )}
       {action && picked.length > 0 && (
@@ -528,12 +584,17 @@ export function GitDiffView({
           )}
         </div>
       )}
+      {(file.binary || !hasLines) && footer}
       {file.binary ? (
         <p className="git-projects-empty">
           Binary file changed. A text diff is not available.
         </p>
       ) : !hasLines ? (
-        <p className="git-projects-empty">No text changes to display.</p>
+        <p className="git-projects-empty">
+          {hasMore
+            ? "Load more changes to finish this line."
+            : "No text changes to display."}
+        </p>
       ) : (
         <Suspense
           fallback={
@@ -544,6 +605,7 @@ export function GitDiffView({
         >
           <GitDiffEditor
             file={file}
+            footer={footer}
             layout={layout}
             hunkLabel={action?.label}
             lineLabel={action?.lineLabel}

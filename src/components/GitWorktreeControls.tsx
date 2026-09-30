@@ -1,17 +1,15 @@
 import { useState } from "react";
-import { useQueries, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { gitPath, type GitPath, type GitWorktreeAction } from "../domain/git";
-import {
-  appendGitPage,
-  type GitPage,
-  type GitWorktrees,
-  type GitRepository,
-} from "../domain/gitResponses";
+import { type GitWorktrees, type GitRepository } from "../domain/gitResponses";
 import { gitQueries, invalidateRepository } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
 import { Button, Input, Checkbox } from "./controls";
 import { Modal } from "./Editors";
-import { Pagination, PaginationContent, PaginationItem } from "./ui/pagination";
+import { useGitPageLoader } from "../hooks/useGitPageLoader";
+import { gitErrorMessage } from "../git/errors";
+import { gitProjectsFor } from "../git/registry";
+import { GitLoadMore } from "./GitLoadMore";
 import {
   Select,
   SelectContent,
@@ -35,49 +33,6 @@ function usable(path: GitPath | null) {
   } catch {
     return false;
   }
-}
-type Read<T> = {
-  data: T | undefined;
-  error: unknown;
-  isError: boolean;
-  isFetching: boolean;
-  isFetchedAfterMount: boolean;
-};
-/**
- * The page on screen, out of pages read one cursor at a time. A page is shown
- * once it and each page before it were read for this opening and each
- * continues the one before; until then the last such page stays, as it did
- * while the next was being fetched.
- */
-function paged<T extends GitPage<unknown, unknown>>(
-  reads: Read<T>[],
-  cursors: string[],
-  requested: number,
-) {
-  const pages: T[] = [];
-  let failure = "";
-  for (const [index, read] of reads.slice(0, requested + 1).entries()) {
-    if (read.isError && !read.isFetching) {
-      failure = String(read.error);
-      break;
-    }
-    if (!read.data || !read.isFetchedAfterMount) break;
-    if (index > 0)
-      try {
-        appendGitPage(pages[index - 1], read.data, cursors[index - 1]);
-      } catch (error) {
-        failure = String(error);
-        break;
-      }
-    pages.push(read.data);
-  }
-  const index = Math.max(0, pages.length - 1);
-  return {
-    index,
-    page: pages[index] as T | undefined,
-    error: failure,
-    loading: reads.slice(0, requested + 1).some((read) => read.isFetching),
-  };
 }
 type Props = {
   repository: GitRepository;
@@ -129,56 +84,69 @@ function WorktreeDialog({
   const scope = useCurrentServerScope();
   const queryClient = useQueryClient();
   const repoId = repository.repoId;
-  // Each page is its own read, keyed by its cursor: these are the cursors of
-  // the pages after the first, and the page asked for.
-  const [cursors, setCursors] = useState<string[]>([]);
-  const [requested, setRequested] = useState(0);
   const [editing, setEditing] = useState<Editing | null>(initial ?? null);
   const [formError, setFormError] = useState("");
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
   const [reason, setReason] = useState("");
   const [locked, setLocked] = useState(false);
-  const [branchCursors, setBranchCursors] = useState<string[]>([]);
-  const [branchRequested, setBranchRequested] = useState(0);
-  // A branch choice belongs to the page it was made on.
+  const [branchSelectOpen, setBranchSelectOpen] = useState(false);
   const [branchPick, setBranchPick] = useState<{
-    page: number;
+    snapshot: string;
     name: string;
   } | null>(null);
-  const worktreeReads = useQueries({
-    queries: [undefined, ...cursors].map((cursor) => ({
-      ...gitQueries.worktrees(scope, repoId, cursor),
-      refetchOnMount: "always" as const,
-    })),
+  const worktreeQuery = useQuery({
+    ...gitQueries.worktrees(scope, repoId),
+    refetchOnMount: "always",
   });
-  // Branches are read only while adding, and afresh each time the form opens.
+  const page = worktreeQuery.data;
+  const loading =
+    worktreeQuery.isFetching || !worktreeQuery.isFetchedAfterMount;
+  const listError = worktreeQuery.isError
+    ? gitErrorMessage(worktreeQuery.error)
+    : "";
+  const worktreePages = useGitPageLoader({
+    queryKey: gitQueries.worktrees(scope, repoId).queryKey,
+    page: page ?? null,
+    enabled: !loading && !worktreeQuery.isError && !editing,
+    prefetch: true,
+    entryKey: (row: Worktree) => row.gitDir.bytesB64,
+    read: (cursor, signal) =>
+      gitProjectsFor(scope)
+        .repositories.withSignal(signal)
+        .worktrees(repoId, cursor),
+  });
   const adding = editing?.kind === "add";
-  const branchReads = useQueries({
-    queries: adding
-      ? [undefined, ...branchCursors].map((cursor) => ({
-          ...gitQueries.branches(scope, repoId, cursor),
-          refetchOnMount: "always" as const,
-        }))
-      : [],
+  const branchQuery = useQuery({
+    ...gitQueries.branches(scope, repoId),
+    enabled: adding,
+    staleTime: 0,
   });
-  const {
-    index: pageIndex,
-    page,
-    error: listError,
-    loading,
-  } = paged(worktreeReads, cursors, requested);
-  const {
-    index: branchPageIndex,
-    page: branchPage,
-    error: branchError,
-    loading: branchLoading,
-  } = paged(branchReads, branchCursors, branchRequested);
+  const branchPage = branchQuery.data;
+  const branchLoading =
+    branchQuery.isFetching || !branchQuery.isFetchedAfterMount;
+  const branchError = branchQuery.isError
+    ? gitErrorMessage(branchQuery.error)
+    : "";
+  const branchPages = useGitPageLoader({
+    queryKey: gitQueries.branches(scope, repoId).queryKey,
+    page: branchPage ?? null,
+    enabled:
+      adding && branchSelectOpen && !branchLoading && !branchQuery.isError,
+    prefetch: true,
+    entryKey: (row) => row.reference.bytesB64,
+    read: (cursor, signal) =>
+      gitProjectsFor(scope)
+        .repositories.withSignal(signal)
+        .branches(repoId, cursor),
+  });
   const readError = formError || listError || (adding ? branchError : "");
   const branchName =
-    branchPick?.page === branchPageIndex ? branchPick.name : "";
+    branchPick?.snapshot === branchPage?.snapshot
+      ? (branchPick?.name ?? "")
+      : "";
   const setBranchName = (name: string) =>
-    setBranchPick({ page: branchPageIndex, name });
+    branchPage && setBranchPick({ snapshot: branchPage.snapshot, name });
   const branches =
     branchPage?.entries.filter(
       (branch) =>
@@ -188,7 +156,8 @@ function WorktreeDialog({
         usable(branch.name),
     ) ?? [];
   const branch = branches.find((branch) => branch.name.bytesB64 === branchName);
-  const disabled = busy || loading || !!blockedReason || !page;
+  const disabled =
+    busy || loading || worktreeQuery.isError || !!blockedReason || !page;
   const titles = {
     add: "Add worktree",
     lock: "Lock worktree",
@@ -197,43 +166,25 @@ function WorktreeDialog({
     prune: "Remove missing registration",
     repair: "Locate moved worktree",
   };
-  /** Back to the first page, read afresh. */
   function restart() {
     setFormError("");
-    setCursors([]);
-    setRequested(0);
+    setBranchPick(null);
   }
   async function submit(action: GitWorktreeAction) {
     if (disabled || !page) return;
-    await onAction(action, page.snapshot);
-    setEditing(null);
-    restart();
-    void invalidateRepository(queryClient, scope, repoId);
-  }
-  function next(branches: boolean) {
-    const selected = branches ? branchPage : page;
-    if (!selected?.nextCursor || busy || (branches ? branchLoading : loading))
-      return;
-    const index = branches ? branchPageIndex : pageIndex;
-    const known = branches ? branchCursors : cursors;
-    const reads = branches ? branchReads : worktreeReads;
-    setFormError("");
-    // A page already visited is shown at once; one that failed is asked for
-    // again; otherwise the next one is read.
-    if (known[index] !== selected.nextCursor)
-      (branches ? setBranchCursors : setCursors)([
-        ...known.slice(0, index),
-        selected.nextCursor,
-      ]);
-    else if (reads[index + 1]?.isError) void reads[index + 1].refetch();
-    (branches ? setBranchRequested : setRequested)(index + 1);
+    try {
+      if (!(await onAction(action, page.snapshot))) return;
+      setEditing(null);
+      restart();
+      void invalidateRepository(queryClient, scope, repoId);
+    } catch (error) {
+      setFormError(gitErrorMessage(error));
+    }
   }
   function edit(kind: Exclude<Editing["kind"], "add">, row: Worktree) {
     setReason("");
     setPath("");
     setFormError("");
-    // Stop asking for a page that has not arrived.
-    setRequested(pageIndex);
     setEditing({ kind, row });
   }
   return (
@@ -257,7 +208,7 @@ function WorktreeDialog({
               onClick={() => {
                 setEditing(null);
                 restart();
-                void worktreeReads[0].refetch();
+                void worktreeQuery.refetch();
               }}
             >
               Refresh worktrees
@@ -272,7 +223,13 @@ function WorktreeDialog({
               if (disabled) return;
               try {
                 if (editing.kind === "add") {
-                  if (!branch?.oid || branchLoading || !name.trim()) return;
+                  if (
+                    !branch?.oid ||
+                    branchLoading ||
+                    branchQuery.isError ||
+                    !name.trim()
+                  )
+                    return;
                   if (!path.startsWith("/"))
                     throw new Error(
                       "Enter an absolute destination on the server.",
@@ -311,9 +268,7 @@ function WorktreeDialog({
                     });
                 }
               } catch (error) {
-                setFormError(
-                  error instanceof Error ? error.message : String(error),
-                );
+                setFormError(gitErrorMessage(error));
               }
             }}
           >
@@ -349,6 +304,8 @@ function WorktreeDialog({
                 <label>
                   Local branch
                   <Select
+                    open={branchSelectOpen}
+                    onOpenChange={setBranchSelectOpen}
                     value={branchName}
                     onValueChange={setBranchName}
                     disabled={busy || branchLoading}
@@ -365,6 +322,20 @@ function WorktreeDialog({
                           {branch.name.display}
                         </SelectItem>
                       ))}
+                      <div onKeyDown={(event) => event.stopPropagation()}>
+                        {branchPage && (
+                          <GitLoadMore
+                            cursor={branchPage.nextCursor}
+                            loading={branchPages.loading}
+                            error={branchPages.error}
+                            disabled={branchLoading || branchQuery.isError}
+                            automatic={branchSelectOpen}
+                            onLoad={branchPages.load}
+                            label="Load more branches"
+                            endLabel="All branches loaded"
+                          />
+                        )}
+                      </div>
                     </SelectContent>
                   </Select>
                 </label>
@@ -375,42 +346,10 @@ function WorktreeDialog({
                 )}
                 {branchPage && !branches.length && (
                   <p className={NOTE}>
-                    No available local branches on this page.
+                    No available local branches in the loaded results.
                     {!repository.bare && " The current branch cannot be used."}
                   </p>
                 )}
-                {branchPage &&
-                  (branchPageIndex > 0 || branchPage.nextCursor) && (
-                    <Pagination
-                      aria-label="Branch pages"
-                      className="git-worktree-actions mx-0 my-[12px] flex flex-wrap items-center justify-normal gap-[8px]"
-                    >
-                      <PaginationContent className="flex-wrap gap-[8px]">
-                        <PaginationItem>
-                          <Button
-                            disabled={
-                              busy || branchLoading || branchPageIndex === 0
-                            }
-                            onClick={() =>
-                              setBranchRequested(branchPageIndex - 1)
-                            }
-                          >
-                            Previous branches
-                          </Button>
-                        </PaginationItem>
-                        <PaginationItem>
-                          <Button
-                            disabled={
-                              busy || branchLoading || !branchPage.nextCursor
-                            }
-                            onClick={() => next(true)}
-                          >
-                            Next branches
-                          </Button>
-                        </PaginationItem>
-                      </PaginationContent>
-                    </Pagination>
-                  )}
                 <label className="git-checkbox-row">
                   <Checkbox
                     checked={locked}
@@ -492,7 +431,11 @@ function WorktreeDialog({
                 disabled={
                   disabled ||
                   (editing.kind === "add" &&
-                    (branchLoading || !branch || !name.trim() || !path)) ||
+                    (branchLoading ||
+                      branchQuery.isError ||
+                      !branch ||
+                      !name.trim() ||
+                      !path)) ||
                   (editing.kind === "repair" && !path)
                 }
               >
@@ -513,8 +456,6 @@ function WorktreeDialog({
                   setName("");
                   setPath("");
                   setLocked(false);
-                  setBranchCursors([]);
-                  setBranchRequested(0);
                   setBranchPick(null);
                   setEditing({ kind: "add" });
                 }}
@@ -617,33 +558,16 @@ function WorktreeDialog({
                 );
               })}
             </ul>
-            {page && (pageIndex > 0 || page.nextCursor) && (
-              <Pagination
-                aria-label="Worktree pages"
-                className="git-worktree-pagination mx-0 my-[12px] flex flex-wrap items-center justify-between gap-[8px]"
-              >
-                <PaginationContent className="w-full flex-wrap justify-between gap-[8px]">
-                  <PaginationItem>
-                    <Button
-                      disabled={busy || loading || pageIndex === 0}
-                      onClick={() => setRequested(pageIndex - 1)}
-                    >
-                      Previous worktrees
-                    </Button>
-                  </PaginationItem>
-                  <PaginationItem>
-                    <span aria-current="page">Page {pageIndex + 1}</span>
-                  </PaginationItem>
-                  <PaginationItem>
-                    <Button
-                      disabled={busy || loading || !page.nextCursor}
-                      onClick={() => next(false)}
-                    >
-                      Next worktrees
-                    </Button>
-                  </PaginationItem>
-                </PaginationContent>
-              </Pagination>
+            {page && (
+              <GitLoadMore
+                cursor={page.nextCursor}
+                loading={worktreePages.loading}
+                error={worktreePages.error}
+                disabled={loading || worktreeQuery.isError}
+                onLoad={worktreePages.load}
+                label="Load more worktrees"
+                endLabel="All worktrees loaded"
+              />
             )}
           </>
         )}

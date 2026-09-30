@@ -2,6 +2,27 @@ import { expect, it, vi } from "vitest";
 import { GitRepositoryClient } from "./gitRepository";
 import { gitPath } from "../domain/git";
 
+it("passes cancellation through a scoped client without changing the shared client", async () => {
+  const session = {
+    request: vi.fn().mockRejectedValue(new Error("offline")),
+    forget: vi.fn(),
+  };
+  const client = new GitRepositoryClient(session);
+  const signal = new AbortController().signal;
+  await expect(client.withSignal(signal).status("repo")).rejects.toThrow(
+    "offline",
+  );
+  expect(session.request).toHaveBeenLastCalledWith(
+    { method: "repo.status", params: { repoId: "repo", cursor: undefined } },
+    signal,
+  );
+  await expect(client.status("repo")).rejects.toThrow("offline");
+  expect(session.request).toHaveBeenLastCalledWith({
+    method: "repo.status",
+    params: { repoId: "repo", cursor: undefined },
+  });
+});
+
 it("closes malformed sessions and does not retry the read", async () => {
   const session = {
     request: vi.fn().mockResolvedValue({}),
@@ -214,9 +235,37 @@ it("preserves query and cursor when requesting another history page", async () =
       repoId: "repo",
       revision: "refs/heads/main",
       cursor: "opaque-cursor",
+      messageBytes: 512,
     },
   });
   expect(session.forget).not.toHaveBeenCalled();
+});
+
+it("sends branch filters and page size to the server with the continuation cursor", async () => {
+  const session = {
+    request: vi.fn().mockResolvedValue({
+      snapshot: "s",
+      entries: [],
+      nextCursor: null,
+      metadata: {},
+    }),
+    forget: vi.fn(),
+  };
+  await new GitRepositoryClient(session).branches("repo", "next", {
+    filter: "feature/",
+    branchKind: "remote",
+    pageSize: 75,
+  });
+  expect(session.request).toHaveBeenCalledWith({
+    method: "repo.branches",
+    params: {
+      repoId: "repo",
+      cursor: "next",
+      filter: "feature/",
+      branchKind: "remote",
+      pageSize: 75,
+    },
+  });
 });
 
 it("retains the operation ID when a write returns malformed data", async () => {
@@ -334,3 +383,227 @@ it.each(["repo.init", "repo.clone"] as const)(
     expect(session.forget).toHaveBeenCalledOnce();
   },
 );
+
+it("validates the identity of a directly loaded commit", async () => {
+  const entry = {
+    oid: commit,
+    parents: [parent],
+    message: gitPath("Complete message"),
+    messageTruncated: false,
+    author: { name: "Author", email: "a@example.test" },
+    time: 0,
+    offsetMinutes: 0,
+  };
+  const { client, session } = clientWith(entry);
+  await expect(client.commit("repo", commit.hex)).resolves.toMatchObject({
+    message: gitPath("Complete message"),
+  });
+  expect(session.request).toHaveBeenCalledWith({
+    method: "repo.commit",
+    params: { repoId: "repo", commitOid: commit.hex },
+  });
+  await expect(client.commit("repo", parent.hex)).rejects.toMatchObject({
+    code: "PROTOCOL_ERROR",
+  });
+  expect(session.forget).toHaveBeenCalledOnce();
+});
+
+it("requests compact annotations and validates directly loaded tag objects", async () => {
+  const { client, session } = clientWith({
+    snapshot: "tags",
+    entries: [],
+    nextCursor: null,
+    metadata: {},
+  });
+  await client.tags("repo", "next");
+  expect(session.request).toHaveBeenCalledWith({
+    method: "repo.tags",
+    params: { repoId: "repo", cursor: "next", messageBytes: 512 },
+  });
+  session.request.mockResolvedValue({
+    oid: commit,
+    annotated: true,
+    detailsOmitted: false,
+    message: gitPath("Full annotation"),
+    messageTruncated: false,
+  });
+  await expect(client.tag("repo", commit.hex)).resolves.toMatchObject({
+    oid: commit,
+    message: gitPath("Full annotation"),
+  });
+  await expect(client.tag("repo", parent.hex)).rejects.toMatchObject({
+    code: "PROTOCOL_ERROR",
+  });
+  expect(session.forget).toHaveBeenCalledOnce();
+});
+
+it("preserves worktree filters, cursor and page size at the wire boundary", async () => {
+  const { client, session } = clientWith({
+    snapshot: "snapshot",
+    nextCursor: null,
+    entries: [],
+    metadata: {
+      listToken: "token",
+      totalEntries: 1001,
+      matchingEntries: 0,
+      current: null,
+      main: null,
+    },
+  });
+  const options = {
+    filter: "late",
+    branch: "refs/heads/late",
+    name: "late",
+    pageSize: 20,
+  };
+  await expect(
+    client.worktrees("repo", "cursor", options),
+  ).resolves.toMatchObject({
+    metadata: { totalEntries: 1001, matchingEntries: 0 },
+  });
+  expect(session.request).toHaveBeenCalledWith({
+    method: "repo.worktrees",
+    params: { repoId: "repo", cursor: "cursor", ...options },
+  });
+});
+
+it("uses a snapshot only to begin a worktree search, then follows its cursor", async () => {
+  const { client, session } = clientWith({
+    snapshot: "snapshot",
+    nextCursor: null,
+    entries: [],
+    metadata: { listToken: "token" },
+  });
+  const options = { filter: "late", atSnapshot: "capture" };
+  await client.worktrees("repo", undefined, options);
+  await client.worktrees("repo", "filtered-next", options);
+  expect(session.request.mock.calls[0][0]).toEqual({
+    method: "repo.worktrees",
+    params: {
+      repoId: "repo",
+      cursor: undefined,
+      filter: "late",
+      atSnapshot: "capture",
+    },
+  });
+  expect(session.request.mock.calls[1][0]).toEqual({
+    method: "repo.worktrees",
+    params: { repoId: "repo", cursor: "filtered-next", filter: "late" },
+  });
+});
+
+it("reads only the named remote and rejects mismatched response identity", async () => {
+  const remote = {
+    name: "origin",
+    url: "https://example.test/repo",
+    pushUrl: null,
+    token: "token",
+  };
+  const session = {
+    request: vi.fn().mockResolvedValue(remote),
+    forget: vi.fn().mockResolvedValue(undefined),
+  };
+  const client = new GitRepositoryClient(session);
+  await expect(client.remote("repo", "origin")).resolves.toEqual(remote);
+  expect(session.request).toHaveBeenCalledExactlyOnceWith({
+    method: "repo.remote",
+    params: { repoId: "repo", name: "origin" },
+  });
+  session.request.mockResolvedValue({ ...remote, name: "other" });
+  await expect(client.remote("repo", "origin")).rejects.toMatchObject({
+    code: "PROTOCOL_ERROR",
+  });
+  expect(session.forget).toHaveBeenCalledOnce();
+});
+
+it("validates remote picker page size, totals, duplicates, and completion", async () => {
+  const params = { repoId: "repo", pageSize: 2, filter: "o" };
+  const response = {
+    snapshot: "snapshot",
+    entries: [{ name: "origin" }],
+    nextCursor: null,
+    metadata: { totalEntries: 1 },
+  };
+  const session = {
+    request: vi.fn().mockResolvedValue(response),
+    forget: vi.fn().mockResolvedValue(undefined),
+  };
+  const client = new GitRepositoryClient(session);
+  await expect(client.remoteNames(params)).resolves.toEqual(response);
+  expect(session.request).toHaveBeenCalledExactlyOnceWith({
+    method: "repo.remote_names",
+    params,
+  });
+  for (const malformed of [
+    { ...response, metadata: { totalEntries: 2 } },
+    { ...response, nextCursor: "next" },
+    {
+      ...response,
+      entries: [],
+      nextCursor: "next",
+      metadata: { totalEntries: 2 },
+    },
+    {
+      ...response,
+      entries: [{ name: "same" }, { name: "same" }],
+      metadata: { totalEntries: 2 },
+    },
+    {
+      ...response,
+      entries: [{ name: "a" }, { name: "b" }, { name: "c" }],
+      metadata: { totalEntries: 3 },
+    },
+  ]) {
+    session.request.mockResolvedValue(malformed);
+    await expect(client.remoteNames(params)).rejects.toMatchObject({
+      code: "PROTOCOL_ERROR",
+    });
+  }
+  session.request.mockResolvedValue({
+    ...response,
+    metadata: { totalEntries: 3 },
+  });
+  await expect(
+    client.remoteNames({ ...params, cursor: "last" }),
+  ).resolves.toMatchObject({ entries: [{ name: "origin" }] });
+});
+
+it("requests only status metadata and rejects incomplete summary counts", async () => {
+  const metadata = {
+    head: {
+      name: gitPath("refs/heads/main"),
+      oid: null,
+      unborn: true,
+      detached: false,
+    },
+    operationState: "Clean",
+    integration: null,
+    ahead: 2,
+    behind: 1,
+    upstreamRef: null,
+    basis: "stored_refs",
+    totalEntries: 25000,
+    truncated: false,
+  };
+  const session = {
+    request: vi.fn().mockResolvedValue(metadata),
+    forget: vi.fn(),
+  };
+  const client = new GitRepositoryClient(session);
+  const signal = new AbortController().signal;
+  expect(
+    (await client.withSignal(signal).statusSummary("repo")).totalEntries,
+  ).toBe(25000);
+  expect(session.request).toHaveBeenCalledWith(
+    { method: "repo.status_summary", params: { repoId: "repo" } },
+    signal,
+  );
+  session.request.mockResolvedValue({ ...metadata, totalEntries: undefined });
+  await expect(client.statusSummary("repo")).rejects.toMatchObject({
+    code: "PROTOCOL_ERROR",
+  });
+  session.request.mockResolvedValue({ ...metadata, truncated: true });
+  await expect(client.statusSummary("repo")).rejects.toMatchObject({
+    code: "PROTOCOL_ERROR",
+  });
+});

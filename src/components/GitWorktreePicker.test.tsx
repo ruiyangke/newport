@@ -100,6 +100,7 @@ function statusOf(count: number) {
       conflict: null,
     })),
     metadata: {
+      totalEntries: count,
       head: head("main"),
       operationState: "Clean",
       integration: null,
@@ -125,13 +126,20 @@ afterEach(async () => {
   document.body.innerHTML = "";
 });
 
-function setup(worktrees: () => Promise<unknown>) {
+function setup(
+  worktrees: (
+    repoId: string,
+    cursor?: string,
+    options?: { filter?: string },
+  ) => Promise<unknown>,
+) {
   const opened: string[] = [];
   const client = {
     worktrees: vi.fn(worktrees),
-    status: vi.fn(async (repoId: string) =>
-      statusOf(repoId === "repo:/app-agent-fix" ? 3 : 0),
-    ),
+    statusSummary: vi.fn(async (path: GitPath) => {
+      opened.push(path.display);
+      return statusOf(path.display === "/app-agent-fix" ? 3 : 0).metadata;
+    }),
   } as unknown as GitRepositoryClient;
   const scope = seedGitClient(client);
   // The summary read opens each worktree by path, as GitProjects does.
@@ -198,19 +206,202 @@ it("reads each worktree's status only when asked, and never a missing one", asyn
   await render();
   await act(async () => button("Worktrees: Main worktree").click());
   // Listing is not reading: no status was asked for on sight.
-  expect(client.status).not.toHaveBeenCalled();
+  expect(client.statusSummary).not.toHaveBeenCalled();
   expect(option("agent-fix").textContent).not.toMatch(/change|Clean/);
-  await act(async () => button("Check status").click());
+  await act(async () => button("Check loaded").click());
   expect(opened).toEqual(["/app", "/app-agent-fix"]);
   expect(option("agent-fix").textContent).toContain("3 changes");
   expect(option("Main worktree").textContent).toContain("Clean");
   expect(option("gone").textContent).not.toMatch(/change|Clean/);
 });
 
-it("steps aside for an agent that cannot list worktrees", async () => {
+it("keeps a retryable error visible for an agent that cannot list worktrees", async () => {
   const { render } = setup(async () => {
     throw new Error("Update the server agent to use this Git feature.");
   });
   await render();
-  expect(button("Worktrees: Main worktree")).toBeUndefined();
+  await act(async () => button("Worktrees: Main worktree").click());
+  expect(document.body.textContent).toContain("Update the server agent");
+  expect(button("Refresh worktrees")).toBeTruthy();
+});
+
+it("loads only the first page while closed, preserves current metadata and deduplicates continuation retries", async () => {
+  let fail = true;
+  const current = wt("current-late", "/late", "late", { current: true });
+  const page = decodeGitWorktrees({
+    snapshot: "paged",
+    nextCursor: "next",
+    entries: [wt("first", "/first", "first")],
+    metadata: {
+      listToken: "token",
+      totalEntries: 1001,
+      matchingEntries: 1001,
+      current,
+      main: wt(null, "/app", "main"),
+    },
+  });
+  const { render, client, onOpen } = setup(async (_repo, cursor) => {
+    if (!cursor) return page;
+    if (fail) throw { code: "IO_ERROR", message: "Page unavailable" };
+    return {
+      ...page,
+      nextCursor: null,
+      entries: [
+        ...page.entries,
+        decodeGitWorktrees({
+          snapshot: "paged",
+          nextCursor: null,
+          metadata: { listToken: "token" },
+          entries: [wt("second", "/second", "second")],
+        }).entries[0],
+      ],
+    };
+  });
+  await render();
+  expect(client.worktrees).toHaveBeenCalledTimes(1);
+  expect(button("Worktrees: current-late")).toBeTruthy();
+  await act(async () => button("Worktrees: current-late").click());
+  expect(document.body.textContent).toContain("1 loaded · 1,001 total");
+  await act(async () => button("Load more worktrees").click());
+  expect(document.body.textContent).toContain("Page unavailable (IO_ERROR)");
+  expect(option("first")).toBeTruthy();
+  fail = false;
+  await act(async () => button("Retry: load more worktrees").click());
+  expect(document.querySelectorAll('[role="option"]')).toHaveLength(2);
+  expect(document.body.textContent).toContain("All worktrees loaded");
+  await act(async () => option("second").click());
+  expect(onOpen.mock.calls[0][0].path.display).toBe("/second");
+});
+
+it("searches on the server and stops offering stale filtered rows", async () => {
+  let resolve!: (value: unknown) => void;
+  const read = vi.fn(
+    async (_repo: string, _cursor?: string, options?: { filter?: string }) => {
+      if (options?.filter === "late")
+        return new Promise((done) => {
+          resolve = done;
+        });
+      return listing;
+    },
+  );
+  const { render, onOpen } = setup(read);
+  await render();
+  await act(async () => button("Worktrees: Main worktree").click());
+  const input = document.querySelector<HTMLInputElement>(
+    'input[aria-label="Filter worktrees"]',
+  )!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!.call(input, "late");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => option("agent-fix").click());
+  expect(onOpen).not.toHaveBeenCalled();
+  await act(async () => new Promise((done) => setTimeout(done, 220)));
+  expect(read).toHaveBeenLastCalledWith("repo:/app", undefined, {
+    filter: "late",
+    atSnapshot: "worktrees",
+  });
+  await act(async () =>
+    resolve(
+      decodeGitWorktrees({
+        snapshot: "filtered",
+        nextCursor: null,
+        metadata: {
+          listToken: "token",
+          totalEntries: 1001,
+          matchingEntries: 1,
+          current: listing.entries[0],
+        },
+        entries: [wt("late-result", "/late-result", "late")],
+      }),
+    ),
+  );
+  expect(option("agent-fix")).toBeUndefined();
+  expect(option("late-result")).toBeTruthy();
+  expect(document.body.textContent).toContain(
+    "1 loaded · 1 matching · 1,001 total",
+  );
+});
+
+it("refreshes an expired captured search before trying that filter again", async () => {
+  let refreshed = false;
+  const read = vi.fn(
+    async (
+      _repo: string,
+      _cursor?: string,
+      options?: { filter?: string; atSnapshot?: string },
+    ) => {
+      if (options?.filter && options.atSnapshot === "worktrees")
+        throw { code: "SNAPSHOT_EXPIRED", message: "Listing changed" };
+      return {
+        ...listing,
+        snapshot: refreshed ? "fresh-listing" : "worktrees",
+      };
+    },
+  );
+  const { render } = setup(read);
+  await render();
+  await act(async () => button("Worktrees: Main worktree").click());
+  const type = async () => {
+    const input = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Filter worktrees"]',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!.call(input, "late");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => new Promise((done) => setTimeout(done, 220)));
+  };
+  await type();
+  expect(document.body.textContent).toContain(
+    "Listing changed (SNAPSHOT_EXPIRED)",
+  );
+  refreshed = true;
+  await act(async () => button("Refresh worktrees").click());
+  expect(
+    document.querySelector<HTMLInputElement>(
+      'input[aria-label="Filter worktrees"]',
+    )!.value,
+  ).toBe("");
+  await type();
+  expect(read).toHaveBeenLastCalledWith("repo:/app", undefined, {
+    filter: "late",
+    atSnapshot: "fresh-listing",
+  });
+  expect(document.body.textContent).not.toContain("Listing changed");
+});
+
+it("aborts status reads already started by Check loaded", async () => {
+  const { client, render } = setup(async () => listing);
+  const checks: {
+    signal: AbortSignal;
+    resolve: (value: ReturnType<typeof statusOf>["metadata"]) => void;
+  }[] = [];
+  client.withSignal = vi.fn(
+    (signal) =>
+      ({
+        ...client,
+        statusSummary: () =>
+          new Promise((resolve) => {
+            checks.push({ signal, resolve });
+          }),
+      }) as unknown as GitRepositoryClient,
+  );
+  await render();
+  await act(async () => button("Worktrees: Main worktree").click());
+  await act(async () => button("Check loaded").click());
+  expect(checks).toHaveLength(2);
+  await act(async () => button("Worktrees: Main worktree").click());
+  expect(checks.every((check) => check.signal.aborted)).toBe(true);
+  await act(async () => {
+    for (const check of checks) check.resolve(statusOf(99).metadata);
+  });
+  await act(async () => button("Worktrees: Main worktree").click());
+  expect(document.body.textContent).not.toContain("99 changes");
 });

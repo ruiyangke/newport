@@ -319,6 +319,20 @@ mod tests {
             b"untracked data"
         );
         assert_eq!(repo.state(), RepositoryState::Clean);
+        // Revert's preview restores a path absent from both input indexes.
+        // Ignored files must receive the same protection as untracked files.
+        repo.add_ignore_rule("file").unwrap();
+        assert_eq!(
+            run(&repo, revert(deleted)).unwrap_err().code,
+            "CHECKOUT_CONFLICT"
+        );
+        assert_eq!(
+            fs::read(temp.path().join("file")).unwrap(),
+            b"untracked data"
+        );
+        assert_eq!(repo.head().unwrap().target(), Some(deleted));
+        assert_eq!(repo.state(), RepositoryState::Clean);
+        repo.clear_ignore_rules().unwrap();
         fs::remove_file(temp.path().join("file")).unwrap();
         repo.reference("refs/heads/main", ours, true, "fixture")
             .unwrap();

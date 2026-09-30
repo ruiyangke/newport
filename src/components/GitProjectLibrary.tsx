@@ -1,4 +1,19 @@
-import { Fragment, useId, useMemo, useState, type ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { gitQueries } from "../query/git";
+import type { ServerScope } from "../query/keys";
+import { gitProjectsFor } from "../git/registry";
+import { readIPC, readSharedQuery } from "../query/client";
+import { useGitPageLoader } from "../hooks/useGitPageLoader";
+import { GitLoadMore } from "./GitLoadMore";
+import { gitErrorMessage } from "../git/errors";
+import {
+  Fragment,
+  useEffect,
+  useId,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   Activity,
   ArrowUp,
@@ -347,7 +362,11 @@ export function GitProjectLibrary({
   worktreeStatus,
   onOpenWorktree,
   onCheckWorktree,
+  scope,
+  onVisibleWorktrees,
 }: {
+  scope?: ServerScope;
+  onVisibleWorktrees?: (projectId: string, rows: WorktreeRow[]) => void;
   projects: GitProject[];
   busy?: boolean;
   search: string;
@@ -625,7 +644,8 @@ export function GitProjectLibrary({
                 // Folded to start with when there are many: agents leave
                 // dozens, and the next project should not be pages away.
                 const folded =
-                  folding.get(project.id) ?? listed.length > FOLD_ABOVE;
+                  folding.get(project.id) ??
+                  (scope ? true : listed.length > FOLD_ABOVE);
                 const worktrees = folded ? [] : listed;
                 return (
                   <Fragment key={project.id}>
@@ -663,7 +683,7 @@ export function GitProjectLibrary({
                         >
                           {project.path.display}
                         </div>
-                        {listed.length > 0 && (
+                        {(scope || listed.length > 0) && (
                           // Agents leave many; the project's own row stays
                           // put when its worktrees are folded away.
                           <button
@@ -684,7 +704,9 @@ export function GitProjectLibrary({
                                 !folded && "rotate-90",
                               )}
                             />
-                            {plural(listed.length, "worktree")}
+                            {scope
+                              ? "Worktrees"
+                              : plural(listed.length, "worktree")}
                           </button>
                         )}
                       </div>
@@ -770,60 +792,28 @@ export function GitProjectLibrary({
                     </li>
                     {/* The project's other checkouts, under it: where agents
                       work, each on its own branch. */}
-                    {worktrees.map((row) => {
-                      const key = `worktree:${worktreeKey(row)}`;
-                      const label = worktreeLabel(row);
-                      const canOpen = openable(row) && !!onOpenWorktree;
-                      return (
-                        <li
-                          key={key}
-                          className="git-library-worktree group/row flex w-full items-center gap-[12px] border-b border-border py-[7px] pr-[12px] pl-[42px] last:border-b-0 hover:bg-[color-mix(in_srgb,var(--accent)_55%,transparent)]"
-                        >
-                          <span className="flex w-[16px] flex-none self-start pt-[1px] text-muted-foreground">
-                            <FolderTree
-                              size={14}
-                              strokeWidth={1.6}
-                              aria-hidden="true"
-                            />
-                          </span>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex min-w-0 items-center gap-[6px]">
-                              <Button
-                                variant="ghost"
-                                className="git-library-open-worktree block h-auto! min-h-[18px] max-w-full truncate rounded-[4px]! bg-transparent px-0! text-left text-[12px]! leading-[18px] font-medium! text-foreground hover:bg-transparent hover:underline dark:hover:bg-transparent"
-                                disabled={busy || !canOpen}
-                                aria-label={`Open worktree ${label} of ${project.name}`}
-                                onClick={() => onOpenWorktree?.(project, row)}
-                              >
-                                {label}
-                              </Button>
-                              {row.state !== "available" && (
-                                <span className="flex-none rounded-[4px] bg-[color-mix(in_srgb,var(--orange)_14%,transparent)] px-[5px] text-[10px] leading-[16px] font-semibold text-(--orange)">
-                                  {row.state}
-                                </span>
-                              )}
-                            </div>
-                            <div
-                              className="truncate text-[11px] leading-[15px] text-muted-foreground"
-                              title={row.path?.display}
-                            >
-                              {row.path?.display ?? "Path unavailable"}
-                            </div>
-                          </div>
-                          <WorktreeCells
-                            row={row}
-                            state={worktreeStatus?.[key]}
-                            checking={checking?.has(key)}
-                            onCheck={
-                              onCheckWorktree && openable(row)
-                                ? () => onCheckWorktree(project, row)
-                                : undefined
-                            }
-                          />
-                          <div className={ACTIONS_COLUMN} />
-                        </li>
-                      );
-                    })}
+                    {!folded && scope ? (
+                      <PagedLibraryWorktrees
+                        scope={scope}
+                        project={project}
+                        busy={busy}
+                        worktreeStatus={worktreeStatus}
+                        checking={checking}
+                        onOpenWorktree={onOpenWorktree}
+                        onCheckWorktree={onCheckWorktree}
+                        onVisible={onVisibleWorktrees}
+                      />
+                    ) : (
+                      <LibraryWorktreeRows
+                        rows={worktrees}
+                        project={project}
+                        busy={busy}
+                        worktreeStatus={worktreeStatus}
+                        checking={checking}
+                        onOpenWorktree={onOpenWorktree}
+                        onCheckWorktree={onCheckWorktree}
+                      />
+                    )}
                   </Fragment>
                 );
               })}
@@ -832,5 +822,173 @@ export function GitProjectLibrary({
         </div>
       )}
     </section>
+  );
+}
+
+type ChildProps = {
+  project: GitProject;
+  busy?: boolean;
+  worktreeStatus?: Record<string, GitProjectRowStatus>;
+  checking?: Set<string>;
+  onOpenWorktree?: (project: GitProject, row: WorktreeRow) => void;
+  onCheckWorktree?: (project: GitProject, row: WorktreeRow) => void;
+};
+function LibraryWorktreeRows({
+  rows,
+  project,
+  busy,
+  worktreeStatus,
+  checking,
+  onOpenWorktree,
+  onCheckWorktree,
+}: ChildProps & { rows: WorktreeRow[] }) {
+  return (
+    <>
+      {rows.map((row) => {
+        const key = `worktree:${worktreeKey(row)}`;
+        const label = worktreeLabel(row);
+        const canOpen = openable(row) && !!onOpenWorktree;
+        return (
+          <li
+            key={key}
+            className="git-library-worktree group/row flex w-full items-center gap-[12px] border-b border-border py-[7px] pr-[12px] pl-[42px] last:border-b-0 hover:bg-[color-mix(in_srgb,var(--accent)_55%,transparent)]"
+          >
+            <span className="flex w-[16px] flex-none self-start pt-[1px] text-muted-foreground">
+              <FolderTree size={14} strokeWidth={1.6} aria-hidden="true" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 items-center gap-[6px]">
+                <Button
+                  variant="ghost"
+                  className="git-library-open-worktree block h-auto! min-h-[18px] max-w-full truncate rounded-[4px]! bg-transparent px-0! text-left text-[12px]! leading-[18px] font-medium! text-foreground hover:bg-transparent hover:underline dark:hover:bg-transparent"
+                  disabled={busy || !canOpen}
+                  aria-label={`Open worktree ${label} of ${project.name}`}
+                  onClick={() => onOpenWorktree?.(project, row)}
+                >
+                  {label}
+                </Button>
+                {row.state !== "available" && (
+                  <span className="flex-none rounded-[4px] bg-[color-mix(in_srgb,var(--orange)_14%,transparent)] px-[5px] text-[10px] leading-[16px] font-semibold text-(--orange)">
+                    {row.state}
+                  </span>
+                )}
+              </div>
+              <div
+                className="truncate text-[11px] leading-[15px] text-muted-foreground"
+                title={row.path?.display}
+              >
+                {row.path?.display ?? "Path unavailable"}
+              </div>
+            </div>
+            <WorktreeCells
+              row={row}
+              state={worktreeStatus?.[key]}
+              checking={checking?.has(key)}
+              onCheck={
+                onCheckWorktree && openable(row)
+                  ? () => onCheckWorktree(project, row)
+                  : undefined
+              }
+            />
+            <div className={ACTIONS_COLUMN} />
+          </li>
+        );
+      })}
+    </>
+  );
+}
+
+function PagedLibraryWorktrees({
+  scope,
+  onVisible,
+  ...props
+}: ChildProps & {
+  scope: ServerScope;
+  onVisible?: (projectId: string, rows: WorktreeRow[]) => void;
+}) {
+  const client = useQueryClient();
+  const opened = useQuery({
+    queryKey: [
+      ...gitQueries.projects(scope).queryKey,
+      "worktree-repository",
+      props.project.id,
+      props.project.path.bytesB64,
+    ],
+    queryFn: ({ signal }) =>
+      readIPC(signal, () => gitProjectsFor(scope).open(props.project)),
+  });
+  const repoId = opened.data?.repoId ?? "";
+  const query = gitQueries.worktrees(scope, repoId);
+  const listing = useQuery({ ...query, enabled: !!repoId });
+  const pages = useGitPageLoader({
+    queryKey: query.queryKey,
+    page: listing.data ?? null,
+    enabled: !!repoId && !listing.isFetching && !listing.isError,
+    entryKey: worktreeKey,
+    read: (cursor, signal) =>
+      readSharedQuery(
+        client,
+        {
+          ...gitQueries.worktrees(scope, repoId, cursor),
+          staleTime: Infinity,
+        },
+        signal,
+      ),
+  });
+  const rows = useMemo(
+    () =>
+      listing.data?.entries.filter(
+        (row) => row.kind === "linked" && !row.current,
+      ) ?? [],
+    [listing.data],
+  );
+  useEffect(() => {
+    onVisible?.(props.project.id, rows);
+  }, [onVisible, props.project.id, rows]);
+  useEffect(
+    () => () => {
+      onVisible?.(props.project.id, []);
+    },
+    [onVisible, props.project.id],
+  );
+  const error = opened.error ?? listing.error;
+  return (
+    <>
+      <LibraryWorktreeRows {...props} rows={rows} />
+      <li className="px-10 py-2 text-xs text-muted-foreground">
+        {error ? (
+          <span role="alert">
+            {gitErrorMessage(error)}{" "}
+            <Button
+              onClick={() =>
+                void (opened.error ? opened.refetch() : listing.refetch())
+              }
+            >
+              Retry
+            </Button>
+          </span>
+        ) : opened.isPending || listing.isPending ? (
+          "Loading worktrees…"
+        ) : rows.length === 0 && !listing.data?.nextCursor ? (
+          "No other worktrees"
+        ) : null}
+        {listing.data && (
+          <GitLoadMore
+            cursor={listing.data.nextCursor}
+            disabled={
+              listing.isFetching ||
+              listing.isError ||
+              opened.isFetching ||
+              opened.isError
+            }
+            loading={pages.loading}
+            error={pages.error}
+            onLoad={pages.load}
+            label="Load more worktrees"
+            endLabel="All worktrees loaded"
+          />
+        )}
+      </li>
+    </>
   );
 }

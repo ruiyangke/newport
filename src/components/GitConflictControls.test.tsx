@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { notifyManager } from "@tanstack/react-query";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { GitConflictControls } from "./GitConflictControls";
 import { GitRepositoryClient } from "../api/gitRepository";
 import { gitPath } from "../domain/git";
@@ -15,6 +15,9 @@ import {
 // Query delivers results on a timer by default; act() only flushes microtasks.
 notifyManager.setScheduler(queueMicrotask);
 
+beforeAll(async () => {
+  await import("./GitBlobEditor");
+});
 let root: Root;
 let host: HTMLDivElement;
 beforeEach(() => {
@@ -62,10 +65,10 @@ function render(
   overrides: Partial<Parameters<typeof GitConflictControls>[0]> = {},
 ) {
   const request = vi.fn(async () => ({
-    oid: oid("c"),
-    size: 8,
-    truncated: false,
-    bytesB64: btoa("theirs\n\n"),
+    snapshot: "blob",
+    nextCursor: null,
+    metadata: { oid: oid("c"), size: 8 },
+    entries: [{ offset: 0, bytesB64: btoa("theirs\n\n") }],
   }));
   const client = new GitRepositoryClient({ request, forget: vi.fn() });
   seedGitClient(client);
@@ -128,9 +131,10 @@ it("reads a side's content on demand and binds it to the requested blob", async 
   await act(async () => button("View Theirs").click());
   expect(request).toHaveBeenCalledWith(
     expect.objectContaining({
-      method: "repo.blob",
-      params: { repoId: "repo", oid: "c".repeat(40) },
+      method: "repo.blob_page",
+      params: { repoId: "repo", oid: "c".repeat(40), maxBytes: 65536 },
     }),
+    expect.any(AbortSignal),
   );
   expect(host.textContent).toContain("theirs");
   await act(async () => button("Hide").click());

@@ -110,6 +110,12 @@ impl RepoRef {
     /// Re-opens the repository the token names, refusing a directory that is
     /// gone or has been replaced since the token was issued.
     pub fn open(&self) -> Result<Repository, Error> {
+        let path = self.checked_path()?;
+        Repository::open(path)
+            .map_err(|_| Error::new("REPO_NOT_FOUND", "The repository is no longer available."))
+    }
+    /// Validate identity without opening a Git engine. Shared by both adapters.
+    pub fn checked_path(&self) -> Result<std::path::PathBuf, Error> {
         let git_dir = self.git_dir()?;
         let path = Path::new(OsStr::from_bytes(&git_dir));
         let metadata = fs::metadata(path).map_err(|e| {
@@ -125,8 +131,7 @@ impl RepoRef {
                 "The repository directory was replaced.",
             ));
         }
-        Repository::open(path)
-            .map_err(|_| Error::new("REPO_NOT_FOUND", "The repository is no longer available."))
+        Ok(path.to_owned())
     }
 }
 
@@ -196,6 +201,8 @@ impl EntryRef {
 pub struct CursorRef {
     pub s: SnapshotRef,
     pub o: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub k: Option<String>,
 }
 impl CursorRef {
     pub fn encode(&self) -> String {
@@ -223,7 +230,11 @@ mod tests {
             p: None,
         };
         assert_eq!(SnapshotRef::decode(&s.encode()).unwrap(), s);
-        let c = CursorRef { s: s.clone(), o: 3 };
+        let c = CursorRef {
+            s: s.clone(),
+            o: 3,
+            k: None,
+        };
         assert_eq!(CursorRef::decode(&c.encode()).unwrap(), c);
         let e = EntryRef::new(&[b"src/a.rs".to_vec()]);
         assert_eq!(EntryRef::decode(&e.encode()).unwrap(), e);

@@ -25,11 +25,31 @@ beforeEach(() => {
   );
 });
 
-it("serializes reads and continues after a repository error without retrying it", async () => {
+it("requires advertised server-side branch filtering instead of silently searching a partial list", async () => {
+  invoke.mockResolvedValue({
+    serverId: "server",
+    info: { capabilities: { methods: ["repo.branches"], features: [] } },
+  });
+  const session = new GitSession("server");
+  await expect(
+    session.request({
+      method: "repo.branches",
+      params: { repoId: "repo", filter: "late-branch" },
+    }),
+  ).rejects.toThrow("Update the server agent");
+  expect(invoke.mock.calls.some(([name]) => name === "git_request")).toBe(
+    false,
+  );
+  await session.dispose();
+});
+
+it("overlaps reads and isolates a repository error without retrying it", async () => {
   const first = deferred<unknown>();
+  let requests = 0;
   invoke.mockImplementation((command: string) => {
     if (command === "git_connect") return Promise.resolve(connection);
-    if (command === "git_request") return first.promise;
+    if (command === "git_request")
+      return ++requests === 1 ? first.promise : Promise.resolve("second");
     return Promise.resolve();
   });
   const session = new GitSession("server");
@@ -39,12 +59,11 @@ it("serializes reads and continues after a repository error without retrying it"
   await vi.waitFor(() =>
     expect(
       invoke.mock.calls.filter(([name]) => name === "git_request"),
-    ).toHaveLength(1),
+    ).toHaveLength(2),
   );
-  invoke.mockImplementation(async () => "second");
+  await expect(b).resolves.toBe("second");
   first.reject({ code: "STALE_SNAPSHOT" });
   await rejected;
-  await expect(b).resolves.toBe("second");
   expect(
     invoke.mock.calls.filter(([name]) => name === "git_request"),
   ).toHaveLength(2);
@@ -103,8 +122,8 @@ it("a broken transport fails only its own request; the next goes out on a fresh 
   });
   const session = new GitSession("server");
   const first = session.request(request);
-  const second = session.request(request);
   await expect(first).rejects.toMatchObject({ code: "TRANSPORT_ERROR" });
+  const second = session.request(request);
   await expect(second).resolves.toBe("fresh");
   const names = invoke.mock.calls.map(([name]) => name);
   // Let go of the broken connection, handshook again, then sent the next one.
@@ -179,6 +198,176 @@ const writableConnection = {
     },
   },
 };
+
+it("does not dispatch an aborted read queued behind a write", async () => {
+  const writing = deferred<unknown>();
+  invoke.mockImplementation((command, args) => {
+    if (command === "git_connect") return Promise.resolve(writableConnection);
+    if (command === "git_request" && args.request.method === "operation.start")
+      return writing.promise;
+    return Promise.resolve();
+  });
+  const session = new GitSession("server");
+  const mutation = session.request(write);
+  await vi.waitFor(() =>
+    expect(invoke.mock.calls.some(([name]) => name === "git_request")).toBe(
+      true,
+    ),
+  );
+  const controller = new AbortController();
+  const pending = session.request(request, controller.signal);
+  const rejected = expect(pending).rejects.toMatchObject({
+    name: "AbortError",
+  });
+  controller.abort();
+  writing.resolve("saved");
+  await mutation;
+  await rejected;
+  expect(
+    invoke.mock.calls.filter(([name]) => name === "git_request"),
+  ).toHaveLength(1);
+  await session.dispose();
+});
+
+it("does not dispatch an aborted read after connection setup", async () => {
+  const opening = deferred<typeof connection>();
+  invoke.mockImplementation((command) =>
+    command === "git_connect" ? opening.promise : Promise.resolve(),
+  );
+  const session = new GitSession("server");
+  const controller = new AbortController();
+  const pending = session.request(request, controller.signal);
+  const rejected = expect(pending).rejects.toMatchObject({
+    name: "AbortError",
+  });
+  await vi.waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith("git_connect", { serverId: "server" }),
+  );
+  controller.abort();
+  opening.resolve(connection);
+  await rejected;
+  expect(invoke.mock.calls.some(([name]) => name === "git_request")).toBe(
+    false,
+  );
+  await session.dispose();
+});
+
+it("does not release the write barrier when an already dispatched read is aborted", async () => {
+  const reading = deferred<unknown>();
+  invoke.mockImplementation((command, args) => {
+    if (command === "git_connect") return Promise.resolve(writableConnection);
+    if (command === "git_request" && args.request.method === "repo.status")
+      return reading.promise;
+    return Promise.resolve("saved");
+  });
+  const session = new GitSession("server");
+  const controller = new AbortController();
+  const pending = session.request(request, controller.signal);
+  const rejected = expect(pending).rejects.toMatchObject({
+    name: "AbortError",
+  });
+  await vi.waitFor(() =>
+    expect(invoke.mock.calls.some(([name]) => name === "git_request")).toBe(
+      true,
+    ),
+  );
+  controller.abort();
+  const mutation = session.request(write);
+  await Promise.resolve();
+  expect(
+    invoke.mock.calls.filter(([name]) => name === "git_request"),
+  ).toHaveLength(1);
+  reading.resolve("obsolete");
+  await rejected;
+  await expect(mutation).resolves.toBe("saved");
+  expect(
+    invoke.mock.calls.filter(([name]) => name === "git_request"),
+  ).toHaveLength(2);
+  await session.dispose();
+});
+
+it("refuses read cancellation signals on writes before dispatch", async () => {
+  const session = new GitSession("server");
+  await expect(
+    session.request(write, new AbortController().signal),
+  ).rejects.toThrow("Write requests");
+  expect(invoke).not.toHaveBeenCalled();
+  await session.dispose();
+});
+
+it("waits for earlier reads before a write and gates later reads until it settles", async () => {
+  const read = deferred<unknown>();
+  const writing = deferred<unknown>();
+  let reads = 0;
+  invoke.mockImplementation((command, args) => {
+    if (command === "git_connect") return Promise.resolve(writableConnection);
+    if (command === "git_request") {
+      if (args.request.method === "operation.start") return writing.promise;
+      return ++reads === 1 ? read.promise : Promise.resolve("later");
+    }
+    return Promise.resolve();
+  });
+  const session = new GitSession("server");
+  const first = session.request(request);
+  const mutation = session.request(write);
+  const later = session.request(request);
+  await vi.waitFor(() => expect(reads).toBe(1));
+  expect(
+    invoke.mock.calls.filter(([name]) => name === "git_request"),
+  ).toHaveLength(1);
+  read.resolve("earlier");
+  await first;
+  await vi.waitFor(() =>
+    expect(
+      invoke.mock.calls.filter(([name]) => name === "git_request"),
+    ).toHaveLength(2),
+  );
+  expect(reads).toBe(1);
+  writing.resolve("saved");
+  await expect(mutation).resolves.toBe("saved");
+  await expect(later).resolves.toBe("later");
+  await session.dispose();
+});
+
+it("coalesces parallel transport failures and waits for disconnect before reconnecting", async () => {
+  const failure = deferred<unknown>();
+  const disconnect = deferred<void>();
+  let fresh = false;
+  invoke.mockImplementation((command) => {
+    if (command === "git_connect") return Promise.resolve(connection);
+    if (command === "git_disconnect") return disconnect.promise;
+    return fresh ? Promise.resolve("fresh") : failure.promise;
+  });
+  const session = new GitSession("server");
+  const a = expect(session.request(request)).rejects.toMatchObject({
+    code: "TRANSPORT_ERROR",
+  });
+  const b = expect(session.request(request)).rejects.toMatchObject({
+    code: "TRANSPORT_ERROR",
+  });
+  await vi.waitFor(() =>
+    expect(
+      invoke.mock.calls.filter(([name]) => name === "git_request"),
+    ).toHaveLength(2),
+  );
+  failure.reject({ code: "TRANSPORT_ERROR" });
+  await Promise.all([a, b]);
+  const c = session.request(request);
+  await Promise.resolve();
+  expect(
+    invoke.mock.calls.filter(([name]) => name === "git_disconnect"),
+  ).toHaveLength(1);
+  expect(
+    invoke.mock.calls.filter(([name]) => name === "git_connect"),
+  ).toHaveLength(1);
+  fresh = true;
+  disconnect.resolve();
+  await expect(c).resolves.toBe("fresh");
+  expect(
+    invoke.mock.calls.filter(([name]) => name === "git_connect"),
+  ).toHaveLength(2);
+  await session.dispose();
+});
 
 it("refuses unsupported write actions before dispatch", async () => {
   invoke.mockResolvedValue({
@@ -403,3 +592,357 @@ it.each([false, true])(
     await session.dispose();
   },
 );
+
+it.each([true, false])(
+  "requests short history messages only when advertised: %s",
+  async (supported) => {
+    invoke.mockImplementation(async (command: string) =>
+      command === "git_connect"
+        ? {
+            serverId: "server",
+            info: {
+              capabilities: {
+                methods: ["repo.history"],
+                features: supported ? ["history.summary"] : [],
+              },
+            },
+          }
+        : undefined,
+    );
+    const session = new GitSession("server");
+    const request = {
+      method: "repo.history" as const,
+      params: { repoId: "repo", cursor: "next", messageBytes: 512 },
+    };
+    await session.request(request);
+    expect(invoke).toHaveBeenCalledWith("git_request", {
+      serverId: "server",
+      request: {
+        method: "repo.history",
+        params: {
+          repoId: "repo",
+          cursor: "next",
+          ...(supported ? { messageBytes: 512 } : {}),
+        },
+      },
+    });
+    expect(request.params.messageBytes).toBe(512);
+    await session.dispose();
+  },
+);
+
+it.each([true, false])(
+  "requests short tag annotations only when advertised: %s",
+  async (supported) => {
+    invoke.mockImplementation(async (command: string) =>
+      command === "git_connect"
+        ? {
+            serverId: "server",
+            info: {
+              capabilities: {
+                methods: ["repo.tags"],
+                features: supported ? ["tags.summary"] : [],
+              },
+            },
+          }
+        : undefined,
+    );
+    const session = new GitSession("server");
+    await session.request({
+      method: "repo.tags",
+      params: { repoId: "repo", cursor: "next", messageBytes: 512 },
+    });
+    expect(invoke).toHaveBeenCalledWith("git_request", {
+      serverId: "server",
+      request: {
+        method: "repo.tags",
+        params: {
+          repoId: "repo",
+          cursor: "next",
+          ...(supported ? { messageBytes: 512 } : {}),
+        },
+      },
+    });
+    await session.dispose();
+  },
+);
+
+it("refuses worktree filters unless the agent advertises exact filtering", async () => {
+  invoke.mockResolvedValue({
+    serverId: "server",
+    info: { capabilities: { methods: ["repo.worktrees"], features: [] } },
+  });
+  const session = new GitSession("server");
+  for (const options of [
+    { filter: "late" },
+    { branch: "refs/heads/late" },
+    { name: "late" },
+  ]) {
+    await expect(
+      session.request({
+        method: "repo.worktrees",
+        params: { repoId: "repo", ...options },
+      }),
+    ).rejects.toThrow("Update the server agent");
+  }
+  expect(invoke.mock.calls.some(([name]) => name === "git_request")).toBe(
+    false,
+  );
+  await session.dispose();
+});
+
+it("does not silently ignore an unsupported worktree snapshot", async () => {
+  invoke.mockResolvedValue({
+    serverId: "server",
+    info: {
+      capabilities: {
+        methods: ["repo.worktrees"],
+        features: ["worktrees.filter"],
+      },
+    },
+  });
+  const session = new GitSession("server");
+  await expect(
+    session.request({
+      method: "repo.worktrees",
+      params: { repoId: "repo", filter: "late", atSnapshot: "capture" },
+    }),
+  ).rejects.toThrow(
+    "Update the server agent to search a captured worktree listing",
+  );
+  expect(invoke.mock.calls.some(([name]) => name === "git_request")).toBe(
+    false,
+  );
+  await session.dispose();
+});
+
+it("negotiates compact diff rows without changing requests for older agents", async () => {
+  for (const compact of [false, true]) {
+    invoke.mockReset();
+    invoke.mockImplementation(async (command: string) =>
+      command === "git_connect"
+        ? {
+            serverId: "server",
+            info: {
+              capabilities: {
+                methods: ["repo.diff_page"],
+                features: compact ? ["diff.tuple_v1"] : [],
+              },
+            },
+          }
+        : null,
+    );
+    const session = new GitSession("server");
+    const request = {
+      method: "repo.diff_page" as const,
+      params: {
+        repoId: "repo",
+        snapshot: "status",
+        entryId: "entry",
+        side: "index_to_worktree" as const,
+        lineEncoding: "tuple_v1" as const,
+      },
+    };
+    await session.request(request);
+    const sent = invoke.mock.calls.find(([name]) => name === "git_request")![1]
+      .request;
+    expect(sent.params.lineEncoding).toBe(compact ? "tuple_v1" : undefined);
+    expect(request.params.lineEncoding).toBe("tuple_v1");
+    await session.dispose();
+  }
+});
+
+it.each([false, true])(
+  "negotiates changed-file filters (supported=%s) without mutating the request",
+  async (supported) => {
+    invoke.mockImplementation(async (command: string) =>
+      command === "git_connect"
+        ? {
+            ...connection,
+            info: {
+              capabilities: {
+                methods: ["repo.status"],
+                features: supported ? ["status.filter"] : [],
+              },
+            },
+          }
+        : {},
+    );
+    const session = new GitSession("server");
+    const filtered = {
+      method: "repo.status" as const,
+      params: {
+        repoId: "repo",
+        cursor: "next",
+        filter: { text: "late-file", group: "untracked" as const },
+      },
+    };
+    await session.request(filtered);
+    const sent = invoke.mock.calls.find(([name]) => name === "git_request")![1]
+      .request;
+    expect(sent.params.filter).toEqual(
+      supported ? filtered.params.filter : undefined,
+    );
+    expect(filtered.params.filter.text).toBe("late-file");
+    expect(sent.params.cursor).toBe("next");
+    await session.dispose();
+  },
+);
+
+it("cancels a native read and releases the write barrier only after native cleanup", async () => {
+  const reading = deferred<unknown>();
+  invoke.mockImplementation((command, args) => {
+    if (command === "git_connect") return Promise.resolve(writableConnection);
+    if (command === "git_register_read") return Promise.resolve("read-token");
+    if (command === "git_request" && args.request.method === "repo.status")
+      return reading.promise;
+    return Promise.resolve("saved");
+  });
+  const session = new GitSession("server");
+  const controller = new AbortController();
+  const pending = session.request(request, controller.signal);
+  const rejected = expect(pending).rejects.toMatchObject({
+    name: "AbortError",
+  });
+  await vi.waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith("git_request", {
+      serverId: "server",
+      request,
+      readId: "read-token",
+    }),
+  );
+  controller.abort();
+  expect(invoke).toHaveBeenCalledWith("git_cancel_read", {
+    serverId: "server",
+    readId: "read-token",
+  });
+  const mutation = session.request(write);
+  await Promise.resolve();
+  expect(
+    invoke.mock.calls.filter(([name]) => name === "git_request"),
+  ).toHaveLength(1);
+  reading.reject({ code: "READ_CANCELLED" });
+  await rejected;
+  await expect(mutation).resolves.toBe("saved");
+  expect(invoke.mock.calls.some(([name]) => name === "git_disconnect")).toBe(
+    false,
+  );
+  await session.dispose();
+});
+it("cancels registration if abort wins before native dispatch", async () => {
+  const registering = deferred<string>();
+  invoke.mockImplementation((command) =>
+    command === "git_connect"
+      ? Promise.resolve(connection)
+      : command === "git_register_read"
+        ? registering.promise
+        : Promise.resolve(),
+  );
+  const session = new GitSession("server");
+  const controller = new AbortController();
+  const pending = session.request(request, controller.signal);
+  const rejected = expect(pending).rejects.toMatchObject({
+    name: "AbortError",
+  });
+  await vi.waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith("git_register_read", {
+      serverId: "server",
+    }),
+  );
+  controller.abort();
+  registering.resolve("early-token");
+  await rejected;
+  expect(invoke).toHaveBeenCalledWith("git_cancel_read", {
+    serverId: "server",
+    readId: "early-token",
+  });
+  expect(invoke.mock.calls.some(([name]) => name === "git_request")).toBe(
+    false,
+  );
+  await session.dispose();
+});
+
+it("does not disconnect parallel reads or replay a failed read channel", async () => {
+  const healthy = deferred<unknown>();
+  let sent = 0;
+  invoke.mockImplementation((command) => {
+    if (command === "git_connect") return Promise.resolve(connection);
+    if (command === "git_request") {
+      sent++;
+      if (sent === 1)
+        return Promise.reject({
+          code: "READ_CHANNEL_ERROR",
+          message: "Read interrupted",
+        });
+      return sent === 2 ? healthy.promise : Promise.resolve("fresh channel");
+    }
+    return Promise.resolve();
+  });
+  const session = new GitSession("server");
+  const failed = expect(session.request(request)).rejects.toMatchObject({
+    code: "READ_CHANNEL_ERROR",
+  });
+  const other = session.request(request);
+  await failed;
+  expect(invoke.mock.calls.some(([name]) => name === "git_disconnect")).toBe(
+    false,
+  );
+  healthy.resolve("uninterrupted");
+  await expect(other).resolves.toBe("uninterrupted");
+  await expect(session.request(request)).resolves.toBe("fresh channel");
+  expect(sent).toBe(3);
+  expect(
+    invoke.mock.calls.filter(([name]) => name === "git_connect"),
+  ).toHaveLength(1);
+  await session.dispose();
+});
+
+it("requires remote search support but preserves unfiltered older agents", async () => {
+  invoke.mockImplementation(async (command: string) =>
+    command === "git_connect"
+      ? {
+          serverId: "server",
+          info: {
+            capabilities: { methods: ["repo.remote_refs"], features: [] },
+          },
+        }
+      : undefined,
+  );
+  const session = new GitSession("server");
+  const params = { repoId: "repo", remote: "origin", expectedToken: "token" };
+  await expect(
+    session.request({
+      method: "repo.remote_refs",
+      params: { ...params, filter: "late" },
+    }),
+  ).rejects.toThrow("Update the server agent");
+  expect(invoke.mock.calls.some(([name]) => name === "git_request")).toBe(
+    false,
+  );
+  await session.request({
+    method: "repo.remote_refs",
+    params: { ...params, filter: "" },
+  });
+  expect(invoke).toHaveBeenCalledWith("git_request", {
+    serverId: "server",
+    request: { method: "repo.remote_refs", params },
+  });
+  await session.dispose();
+});
+
+it("requires path-summary capability before sending a path to an older agent", async () => {
+  invoke.mockResolvedValue({
+    serverId: "server",
+    info: { capabilities: { methods: ["repo.status_summary"], features: [] } },
+  });
+  const session = new GitSession("server");
+  await expect(
+    session.request({
+      method: "repo.status_summary",
+      params: { path: gitPath("/repo") },
+    }),
+  ).rejects.toThrow("Update the server agent");
+  expect(invoke.mock.calls.some(([command]) => command === "git_request")).toBe(
+    false,
+  );
+});

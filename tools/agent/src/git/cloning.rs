@@ -32,7 +32,7 @@ fn absent(path: &Path) -> Result<(), Error> {
         )),
     }
 }
-fn sync_tree(path: &Path, count: &mut usize) -> Result<(), Error> {
+pub(super) fn sync_tree(path: &Path, count: &mut usize) -> Result<(), Error> {
     *count += 1;
     if *count > 250_000 {
         return Err(Error::new(

@@ -31,6 +31,9 @@ export function seedGitClient(
   server: Server = testGitServer,
 ) {
   const scope = serverScope(server);
+  // Partial component doubles have no request queue to cancel. Session and
+  // repository boundary tests cover propagation of the actual signal.
+  client.withSignal ??= () => client as GitRepositoryClient;
   gitResources.set(scope.connection, {
     repositories: client as GitRepositoryClient,
   } as unknown as GitProjects);
