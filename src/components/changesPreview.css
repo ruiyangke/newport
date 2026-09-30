@@ -1,0 +1,23 @@
+/*
+ * The line-selection bar under the diff header. The header, the counts and
+ * the comparison are utilities on GitChangesPreview itself.
+ */
+.git-diff-selection {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--git-tint);
+  font-size: 12px;
+}
+.git-diff-selection-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.git-diff-selection-note {
+  color: var(--muted-foreground);
+}

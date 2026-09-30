@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
                 "--locked",
                 "--manifest-path",
                 "src-tauri/Cargo.toml",
-                "remote_tests::",
+                &std::env::var("NEWPORT_TEST_FILTER").unwrap_or_else(|_| "remote_tests::".into()),
                 "--",
                 "--ignored",
                 "--nocapture",

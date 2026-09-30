@@ -152,7 +152,13 @@ pub fn run() -> anyhow::Result<()> {
         ))
         .manage(crate::terminal::Sessions::default())
         .manage(crate::files::Operations::default())
+        .manage(crate::git::Sessions::default())
         .invoke_handler(tauri::generate_handler![
+            crate::git::git_connect,
+            crate::git::git_request,
+            crate::git::git_disconnect,
+            crate::git::pending::git_pending_operations,
+            crate::git::pending::git_acknowledge_operation,
             crate::updates::update_status,
             crate::updates::check_for_updates,
             crate::updates::install_update,
@@ -166,6 +172,9 @@ pub fn run() -> anyhow::Result<()> {
             crate::preferences::set_launch_at_login,
             crate::preferences::get_sidebar_width,
             crate::preferences::set_sidebar_width,
+            crate::preferences::projects::git_projects_list,
+            crate::preferences::projects::git_projects_save,
+            crate::preferences::projects::git_projects_remove,
             commands::ssh_agent_keys,
             commands::cockpit_collect,
             commands::cockpit_history,
@@ -207,6 +216,9 @@ pub fn run() -> anyhow::Result<()> {
             app.manage(sampling_db.clone());
             crate::platform::desktop::configure(app);
             crate::preferences::install(app, &profile_directory)?;
+            app.manage(crate::git::pending::PendingOperations::new(
+                profile_directory.join("git-operations.json"),
+            ));
             if let Err(error) = crate::migration::finish_startup(app, &profile_directory) {
                 log::warn!("Cannot migrate launch-at-login preference: {error}");
             }

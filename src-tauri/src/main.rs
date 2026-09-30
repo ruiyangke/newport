@@ -14,6 +14,7 @@ mod connectivity;
 mod credentials;
 mod desktop;
 mod files;
+mod git;
 mod known_hosts;
 mod manager;
 mod metrics_db;

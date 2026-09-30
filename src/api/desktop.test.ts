@@ -36,3 +36,26 @@ function invalidRequests() {
   return overview;
 }
 void invalidRequests;
+
+it("scopes project bookmarks to a server and preserves opaque path bytes", async () => {
+  const project = {
+    id: "project",
+    serverId: "server",
+    name: "Example",
+    path: { display: "/home/�", bytesB64: "L2hvbWUv/w==" },
+  };
+  await desktop("git_projects_save", { project });
+  expect(invoke).toHaveBeenLastCalledWith("git_projects_save", { project });
+  await desktop("git_projects_list", { serverId: "server" });
+  expect(invoke).toHaveBeenLastCalledWith("git_projects_list", {
+    serverId: "server",
+  });
+  await desktop("git_projects_remove", {
+    serverId: "server",
+    projectId: "project",
+  });
+  expect(invoke).toHaveBeenLastCalledWith("git_projects_remove", {
+    serverId: "server",
+    projectId: "project",
+  });
+});

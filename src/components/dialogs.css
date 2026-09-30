@@ -14,6 +14,15 @@
   box-shadow: 0 16px 56px rgb(0 0 0 / 18%);
   max-height: calc(100dvh - 32px);
 }
+/*
+ * A dark dialog needs an edge. The shadow that separates it from a light page
+ * is nearly invisible against a dark one: measured, the surface is rgb(30,31,33)
+ * on a scrimmed page around rgb(17,18,19), with no border at all. The design
+ * draws its dark dialog with a 1px rgb(54,63,76) edge for exactly this reason.
+ */
+.dark [data-slot="dialog-content"] {
+  border: 1px solid var(--border);
+}
 [data-slot="dialog-content"] [data-slot="dialog-title"] {
   line-height: 1.35;
   overflow-wrap: anywhere;

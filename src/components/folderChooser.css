@@ -1,0 +1,205 @@
+/*
+ * Server folder chooser. Scoped to `git-folder-` so it cannot reach any other
+ * dialog, and sized to the same density as the rest of the Git workspace:
+ * 28px rows, 12px labels, 11px metadata.
+ */
+.git-folder-dialog {
+  --folder-accent: #3767c8;
+  --folder-ink: #252932;
+  --folder-muted: #626b79;
+  --folder-line: #e1e4e9;
+  --folder-surface: #f8f9fb;
+  --folder-panel: #fff;
+  color: var(--folder-ink);
+}
+.dark .git-folder-dialog {
+  --folder-ink: var(--foreground);
+  --folder-muted: var(--muted-foreground);
+  --folder-line: var(--border);
+  --folder-surface: var(--muted);
+  --folder-panel: var(--card);
+}
+.git-folder-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 24px 8px;
+  min-width: 0;
+}
+.git-folder-toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.git-folder-form {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.git-folder-form input {
+  flex: 1;
+  min-width: 140px;
+  height: 28px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+.git-folder-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--folder-muted);
+  white-space: nowrap;
+}
+.git-folder-crumbs {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.git-folder-current {
+  font-size: 12px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--folder-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /*
+   * A long path is worth more at its tail, so the ellipsis goes at the front:
+   * that is what `rtl` buys here. It costs the character order — bidi moves a
+   * leading "/" to the far end — so the text itself must sit in a `bdi`, which
+   * keeps the run reading left to right while the box still clips the start.
+   */
+  direction: rtl;
+  text-align: left;
+}
+.git-folder-error {
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--destructive, #b3261e);
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--destructive, #b3261e);
+  overflow-wrap: anywhere;
+}
+.git-folder-list {
+  border: 1px solid var(--folder-line);
+  border-radius: 6px;
+  background: var(--folder-panel);
+  height: 260px;
+  overflow-y: auto;
+}
+.git-folder-list ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.git-folder-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 4px 0 6px;
+  border-bottom: 1px solid var(--folder-line);
+}
+.git-folder-row:last-child {
+  border-bottom: 0;
+}
+.git-folder-row:hover {
+  background: var(--folder-surface);
+}
+.git-folder-name {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px 2px;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--folder-ink);
+  text-align: left;
+  cursor: pointer;
+}
+.git-folder-name > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.git-folder-name > svg {
+  flex-shrink: 0;
+  color: var(--folder-accent);
+}
+.git-folder-name:focus-visible {
+  outline: 2px solid var(--folder-accent);
+  outline-offset: -2px;
+  border-radius: 5px;
+}
+.git-folder-row > button[aria-label^="Choose"] {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  border-radius: 5px;
+  opacity: 0;
+}
+.git-folder-row:hover > button[aria-label^="Choose"],
+.git-folder-row > button[aria-label^="Choose"]:focus-visible {
+  opacity: 1;
+}
+.git-folder-other {
+  color: var(--folder-muted);
+}
+.git-folder-other .git-folder-name {
+  color: var(--folder-muted);
+  cursor: default;
+}
+.git-folder-other .git-folder-name > svg {
+  color: var(--folder-muted);
+}
+.git-folder-other small {
+  font-size: 11px;
+  color: var(--folder-muted);
+  padding-right: 6px;
+}
+.git-folder-empty,
+.git-folder-note {
+  margin: 0;
+  padding: 10px 8px;
+  font-size: 12px;
+  color: var(--folder-muted);
+}
+.git-folder-note {
+  padding: 0 0 2px;
+  font-size: 11px;
+}
+.git-folder-resolve {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 24px;
+}
+.git-folder-resolve p {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--folder-line);
+  border-radius: 6px;
+  background: var(--folder-surface);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+.git-folder-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 24px 20px;
+}
+.git-folder-resolve .git-folder-actions {
+  padding: 0 0 20px;
+}

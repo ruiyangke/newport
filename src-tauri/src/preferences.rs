@@ -1,6 +1,13 @@
 //! Typed preference commands keep profile data out of the unencrypted Store plugin.
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
 use tauri::{Manager, State};
+
+pub(crate) mod projects;
+// Serialize edits and saves, including project rollback after a failed save.
+static ACCESS: Mutex<()> = Mutex::new(());
 
 pub struct Preferences(Arc<tauri_plugin_store::Store<tauri::Wry>>);
 
@@ -34,6 +41,9 @@ pub async fn set_sidebar_width(state: State<'_, Preferences>, width: f64) -> Res
     }
     let store = state.0.clone();
     tokio::task::spawn_blocking(move || {
+        let _guard = ACCESS
+            .lock()
+            .map_err(|_| "Preference storage is unavailable.")?;
         store.set("sidebarWidth", serde_json::json!(width));
         store.save().map_err(|e| e.to_string())
     })
@@ -73,4 +83,23 @@ pub fn set_launch_at_login(
     }
     .map_err(|e| e.to_string())?;
     get_startup_settings(app)
+}
+
+impl Preferences {
+    /// Caller serializes initial creation. Always save before exposing this identity.
+    pub(crate) fn git_client_id(&self) -> Result<String, String> {
+        let _guard = ACCESS
+            .lock()
+            .map_err(|_| "Preference storage is unavailable.")?;
+        let id = match self.0.get("gitClientId") {
+            Some(value) => value
+                .as_str()
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .ok_or("Stored Git client identity is invalid.")?,
+            None => uuid::Uuid::new_v4(),
+        };
+        self.0.set("gitClientId", serde_json::json!(id.to_string()));
+        self.0.save().map_err(|e| e.to_string())?;
+        Ok(id.to_string())
+    }
 }

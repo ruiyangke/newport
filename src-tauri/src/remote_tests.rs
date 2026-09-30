@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 mod arboard;
 mod boundaries;
+mod git;
 mod recovery;
 
 fn server() -> Server {

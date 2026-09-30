@@ -17,6 +17,17 @@ fn main() {
                 args.iter().any(|a| a == "--clipboard"),
                 args.iter().any(|a| a == "--browser"),
             ),
+            Some("git-rpc")
+                if args.get(2).map(String::as_str) == Some("--stdio") && args.len() == 3 =>
+            {
+                // This entry point has not spawned threads or used libgit2 yet.
+                unsafe {
+                    git2::opts::set_server_connect_timeout_in_milliseconds(15_000)
+                        .expect("Git timeout");
+                    git2::opts::set_server_timeout_in_milliseconds(30_000).expect("Git timeout");
+                }
+                newport_agent::git::serve()
+            }
             Some("clipboard") => newport_agent::clipboard::read(&args[2..]),
             Some("open") => newport_agent::browser::open(&args[2..], false),
             Some("env") => newport_agent::environment::print(&args[2..]),
@@ -30,7 +41,7 @@ fn main() {
                 Ok(())
             }
             Some("--help") | None => {
-                println!("Newport agent\n\nCommands: serve, install, clipboard, open URL, env, display --backend x11|wayland");
+                println!("Newport agent\n\nCommands: serve, git-rpc --stdio, install, clipboard, open URL, env, display --backend x11|wayland");
                 Ok(())
             }
             _ => Err(std::io::Error::other("Unknown command; use --help")),
