@@ -5,6 +5,7 @@ import { notifyManager, type QueryClient } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { GitCommitInspector } from "./GitCommitInspector";
 import { GitRepositoryClient } from "../api/gitRepository";
+import type { GitRequest } from "../domain/git";
 import { gitPath } from "../domain/git";
 import {
   GitTestProviders,
@@ -82,37 +83,36 @@ function page(char: string, path: string) {
 /** A historical diff of one added file, for the file the inspector opens on. */
 function diffOf(char: string, path: string) {
   return {
-    // A commit diff is fixed by its commit, so its snapshot is the commit id.
     snapshot: char.repeat(40),
-    diff: {
+    nextCursor: null,
+    metadata: {
       commitOid: oid(char),
       parents: [],
       parentIndex: null,
       parentOid: null,
-      truncated: false,
+      contextLines: 3,
+      selectedPath: gitPath(path),
       readOnly: true,
-      files: [
-        {
-          oldPath: null,
-          newPath: gitPath(path),
-          oldOid: null,
-          newOid: oid(char),
-          oldMode: 0,
-          newMode: 33188,
-          status: "Added",
-          binary: false,
-          additions: 1,
-          deletions: 0,
-          hunks: [],
-        },
-      ],
+      hasOmissions: false,
+      totalUnits: 1,
     },
+    entries: [
+      {
+        ...page(char, path).entries[0],
+        fileIndex: 0,
+        binary: false,
+        omissionReason: null,
+        additions: 1,
+        deletions: 0,
+        hunks: [],
+      },
+    ],
   };
 }
 /** Answers each read with what that method returns. */
 function answer(char: string, path: string) {
   return async (request: { method: string }) =>
-    request.method === "repo.commit_diff"
+    request.method === "repo.commit_diff_page"
       ? diffOf(char, path)
       : page(char, path);
 }
@@ -194,4 +194,233 @@ it("puts the commit's files and diff on a labelled resizable split", async () =>
   expect(
     host.querySelector('[aria-label="Historical file diff"]')?.textContent,
   ).toContain("file.txt");
+});
+
+it("loads the full message beside the file read and reuses the immutable commit", async () => {
+  let resolve!: (value: unknown) => void;
+  const full = {
+    ...commit("a"),
+    message: gitPath("Summary\n\nComplete body from the server"),
+  };
+  const session = {
+    request: vi.fn((request: { method: string }) =>
+      request.method === "repo.commit"
+        ? new Promise((yes) => {
+            resolve = yes;
+          })
+        : answer("a", "ready.txt")(request),
+    ),
+    forget: vi.fn(async () => {}),
+  };
+  const client = new GitRepositoryClient(session);
+  const preview = {
+    ...commit("a"),
+    message: gitPath("Summary"),
+    messageTruncated: true,
+  };
+  const actions = vi.fn((entry: { messageTruncated: boolean }) => (
+    <span>
+      {entry.messageTruncated ? "Incomplete message" : "Complete message"}
+    </span>
+  ));
+  const node = () =>
+    inGit(
+      client,
+      <GitCommitInspector repoId="repo" commit={preview} actions={actions} />,
+    );
+  await act(async () => root.render(node()));
+  expect(host.textContent).toContain("ready.txt");
+  expect(host.textContent).toContain("Loading full commit message");
+  expect(actions).toHaveBeenLastCalledWith(
+    expect.objectContaining({ messageTruncated: true }),
+  );
+  await act(async () => resolve(full));
+  expect(host.textContent).toContain("Complete body from the server");
+  expect(actions).toHaveBeenLastCalledWith(
+    expect.objectContaining({ messageTruncated: false }),
+  );
+  await act(async () => root.render(null));
+  await act(async () => root.render(node()));
+  expect(
+    session.request.mock.calls.filter(
+      ([request]) => request.method === "repo.commit",
+    ),
+  ).toHaveLength(1);
+  expect(host.textContent).toContain("Complete message");
+});
+
+it("keeps files and the incomplete preview on message failure, with retry", async () => {
+  let attempts = 0;
+  const session = {
+    request: vi.fn(async (request: { method: string }) => {
+      if (request.method !== "repo.commit")
+        return answer("a", "ready.txt")(request);
+      if (++attempts === 1)
+        throw { code: "IO_ERROR", message: "Commit read failed" };
+      return { ...commit("a"), message: gitPath("Complete recovered message") };
+    }),
+    forget: vi.fn(async () => {}),
+  };
+  await act(async () =>
+    root.render(
+      inGit(
+        new GitRepositoryClient(session),
+        <GitCommitInspector
+          repoId="repo"
+          commit={{ ...commit("a"), messageTruncated: true }}
+        />,
+      ),
+    ),
+  );
+  expect(host.textContent).toContain("ready.txt");
+  expect(host.textContent).toContain("Commit read failed (IO_ERROR)");
+  await act(async () =>
+    [...host.querySelectorAll("button")]
+      .find((button) => button.textContent === "Retry commit message")!
+      .click(),
+  );
+  expect(host.textContent).toContain("Complete recovered message");
+  expect(host.textContent).not.toContain("Commit read failed");
+});
+
+it("prefetches one file page and preserves the selected diff when files append", async () => {
+  let finishNext!: (value: unknown) => void;
+  const initial = {
+    ...page("a", "first.txt"),
+    nextCursor: "next",
+    metadata: { ...page("a", "first.txt").metadata, totalFiles: 2 },
+  };
+  const next = { ...page("a", "second.txt"), metadata: initial.metadata };
+  const request = vi.fn(
+    (request: import("../domain/git").GitRequest): Promise<unknown> => {
+      if (request.method === "repo.commit_diff_page")
+        return Promise.resolve(
+          diffOf("a", request.params.path?.display ?? "first.txt"),
+        );
+      if (request.method === "repo.commit_files" && request.params.cursor)
+        return new Promise((resolve) => {
+          finishNext = resolve;
+        });
+      return Promise.resolve(initial);
+    },
+  );
+  const client = new GitRepositoryClient({
+    request,
+    forget: vi.fn(async () => {}),
+  });
+  await act(async () =>
+    root.render(
+      inGit(client, <GitCommitInspector repoId="repo" commit={commit("a")} />),
+    ),
+  );
+  expect(
+    host.querySelector('[aria-label="Historical file diff"]')?.textContent,
+  ).toContain("first.txt");
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 180));
+  });
+  expect(
+    request.mock.calls.filter(([r]) => r.method === "repo.commit_files"),
+  ).toHaveLength(2);
+  await act(async () =>
+    [...host.querySelectorAll("button")]
+      .find((b) => b.textContent === "Load more files")!
+      .click(),
+  );
+  await act(async () => finishNext(next));
+  expect(
+    host.querySelector('[aria-label="Historical file diff"]')?.textContent,
+  ).toContain("first.txt");
+  expect(
+    request.mock.calls.filter(([r]) => r.method === "repo.commit_diff_page"),
+  ).toHaveLength(1);
+  expect(host.textContent).toContain("All commit files loaded");
+  expect(
+    [...host.querySelectorAll("button")].filter((b) =>
+      b.textContent?.includes("first.txt"),
+    ),
+  ).toHaveLength(1);
+  await act(async () =>
+    [...host.querySelectorAll("button")]
+      .find((b) => b.textContent?.includes("second.txt"))!
+      .click(),
+  );
+  expect(
+    host.querySelector('[aria-label="Historical file diff"]')?.textContent,
+  ).toContain("second.txt");
+  expect(
+    request.mock.calls.filter(([r]) => r.method === "repo.commit_diff_page"),
+  ).toHaveLength(2);
+});
+
+it("appends historical diff pages and reaches the end without restarting the selection", async () => {
+  const request = vi.fn(async (request: GitRequest) => {
+    if (request.method !== "repo.commit_diff_page")
+      return page("a", "file.txt");
+    const next = !!request.params.cursor;
+    const base = diffOf("a", "file.txt");
+    return {
+      ...base,
+      nextCursor: next ? null : "more-diff",
+      metadata: { ...base.metadata, totalUnits: 2 },
+      entries: [
+        {
+          ...base.entries[0],
+          hunks: [
+            {
+              index: 0,
+              oldStart: 0,
+              oldLines: 0,
+              newStart: 1,
+              newLines: 2,
+              lines: [
+                {
+                  lineIndex: next ? 1 : 0,
+                  byteOffset: 0,
+                  lineComplete: true,
+                  origin: "+",
+                  oldLine: null,
+                  newLine: next ? 2 : 1,
+                  contentBytesB64: btoa(
+                    next ? "second line\n" : "first line\n",
+                  ),
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+  });
+  const client = new GitRepositoryClient({
+    request,
+    forget: vi.fn(async () => {}),
+  });
+  await act(async () =>
+    root.render(
+      inGit(client, <GitCommitInspector repoId="repo" commit={commit("a")} />),
+    ),
+  );
+  const more = () =>
+    [...host.querySelectorAll("button")].find(
+      (button) => button.textContent === "Load more changes",
+    );
+  // The editor is a lazy import, and its scroll container owns the sentinel.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  });
+  expect(more()).toBeDefined();
+  await act(async () => more()!.click());
+  expect(host.textContent).toContain("All changes loaded");
+  expect(
+    request.mock.calls.filter(([r]) => r.method === "repo.commit_diff_page"),
+  ).toHaveLength(2);
+  expect(
+    request.mock.calls
+      .filter(([r]) => r.method === "repo.commit_diff_page")
+      .map(([r]) =>
+        r.method === "repo.commit_diff_page" ? r.params.maxBytes : null,
+      ),
+  ).toEqual([65536, 524288]);
+  expect(host.textContent).not.toContain("Retry");
 });

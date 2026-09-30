@@ -1,7 +1,6 @@
 //! Worktree administration; mutations use a worktree-list snapshot and the
 //! journal's common-repository lock, not a working-tree status snapshot.
 use super::{
-    journal,
     protocol::{Action, Error, Path as WirePath},
     repository,
 };
@@ -27,9 +26,26 @@ fn unknown() -> Error {
     )
 }
 pub fn token(repo: &Repository) -> Result<String, Error> {
-    serde_json::to_vec(&repository::worktree_rows(repo)?)
-        .map(|bytes| journal::hash(&bytes))
-        .map_err(|_| Error::invalid("Cannot encode worktree state."))
+    repository::worktree_listing::scan(repo, |_, _| Ok(()))
+}
+fn selected(repo: &Repository, name: &str, expected: &str) -> Result<Value, Error> {
+    let mut selected = None;
+    let selection = WirePath::new(name.as_bytes());
+    let fingerprint = repository::worktree_listing::scan(repo, |row, _| {
+        if row["kind"] == "linked" && row["name"]["bytesB64"] == selection.bytes_b64 {
+            selected = Some(row);
+        }
+        Ok(())
+    })?;
+    if fingerprint != expected {
+        return Err(stale());
+    }
+    selected.ok_or_else(|| {
+        Error::new(
+            "WORKTREE_NOT_FOUND",
+            "The linked worktree no longer exists.",
+        )
+    })
 }
 fn engine(_: git2::Error) -> Error {
     Error::new("GIT_ERROR", "Cannot prepare the linked worktree.")
@@ -295,20 +311,7 @@ fn repair(repo: &Repository, name: &str, path: &WirePath, expected: &str) -> Res
             "Select a linked worktree name from the listing.",
         ));
     }
-    let rows = repository::worktree_rows(repo)?;
-    if journal::hash(&serde_json::to_vec(&rows).map_err(|_| stale())?) != expected {
-        return Err(stale());
-    }
-    let selection = WirePath::new(name.as_bytes());
-    let row = rows
-        .iter()
-        .find(|row| row["kind"] == "linked" && row["name"]["bytesB64"] == selection.bytes_b64)
-        .ok_or_else(|| {
-            Error::new(
-                "WORKTREE_NOT_FOUND",
-                "The linked worktree no longer exists.",
-            )
-        })?;
+    let row = selected(repo, name, expected)?;
     if !matches!(row["state"].as_str(), Some("missing" | "available")) {
         return Err(Error::new(
             "INVALID_WORKTREE",
@@ -473,20 +476,7 @@ fn remove(
             "Select a linked worktree name from the listing.",
         ));
     }
-    let rows = repository::worktree_rows(repo)?;
-    if journal::hash(&serde_json::to_vec(&rows).map_err(|_| stale())?) != expected {
-        return Err(stale());
-    }
-    let selection = WirePath::new(name.as_bytes());
-    let row = rows
-        .iter()
-        .find(|row| row["kind"] == "linked" && row["name"]["bytesB64"] == selection.bytes_b64)
-        .ok_or_else(|| {
-            Error::new(
-                "WORKTREE_NOT_FOUND",
-                "The linked worktree no longer exists.",
-            )
-        })?;
+    let row = selected(repo, name, expected)?;
     if row["current"] == true {
         return Err(Error::new(
             "CURRENT_WORKTREE",
@@ -631,20 +621,7 @@ pub fn apply(repo: &Repository, action: &Action, expected: &str) -> Result<Value
             "A lock reason must be at most 4 KiB without NUL bytes.",
         ));
     }
-    let rows = repository::worktree_rows(repo)?;
-    if journal::hash(&serde_json::to_vec(&rows).map_err(|_| stale())?) != expected {
-        return Err(stale());
-    }
-    let selection = WirePath::new(name.as_bytes());
-    let row = rows
-        .iter()
-        .find(|row| row["kind"] == "linked" && row["name"]["bytesB64"] == selection.bytes_b64)
-        .ok_or_else(|| {
-            Error::new(
-                "WORKTREE_NOT_FOUND",
-                "The linked worktree no longer exists.",
-            )
-        })?;
+    let row = selected(repo, name, expected)?;
     if !matches!(row["state"].as_str(), Some("available" | "missing"))
         || !row["locked"].is_boolean()
     {

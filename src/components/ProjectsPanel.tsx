@@ -1,4 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { GitCommandLog } from "./GitCommandLog";
+import { useGitPageLoader } from "../hooks/useGitPageLoader";
+import { GitLoadMore } from "./GitLoadMore";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   isCancelledError,
   useIsMutating,
@@ -35,11 +38,7 @@ import type {
   GitProject,
   GitBootstrapRequest,
 } from "../domain/git";
-import {
-  appendGitPage,
-  type GitHistory,
-  type GitStatus,
-} from "../domain/gitResponses";
+import { type GitHistory, type GitStatus } from "../domain/gitResponses";
 import type { ReactNode } from "react";
 import type { Server } from "../types";
 import { useWorkspaceState } from "../state/workspace";
@@ -51,7 +50,12 @@ import {
 } from "../state/git";
 import { useServerScope } from "../query/keys";
 import { refreshQuery } from "../query/client";
-import { gitKeys, gitQueries, invalidateRepository } from "../query/git";
+import {
+  gitKeys,
+  gitQueries,
+  invalidateRepository,
+  normalizeStatusFilter,
+} from "../query/git";
 import {
   gitProjectsFor,
   gitResources,
@@ -86,7 +90,6 @@ import { GitWorktreePicker } from "./GitWorktreePicker";
 import { GitNewWorktree } from "./GitNewWorktree";
 import {
   openable,
-  worktreeByBranch,
   worktreeKey,
   worktreeLabel,
   type WorktreeRow,
@@ -99,11 +102,10 @@ import { GitHistoryActions } from "./GitHistoryActions";
 import { GitCommitInspector, relativeTime } from "./GitCommitInspector";
 import { GitChangeList, changeGroups, changeMark } from "./GitChangeList";
 import { GitNotice } from "./GitNotice";
+import { gitErrorMessage } from "../git/errors";
 
 function message(error: unknown) {
-  return error && typeof error === "object" && "message" in error
-    ? String(error.message)
-    : String(error);
+  return gitErrorMessage(error);
 }
 /**
  * How long ago a read returned. Describes Newport's own read only: nothing here
@@ -203,9 +205,27 @@ export function ProjectsPanel({ server }: { server: Server }) {
 
   const repoId = opened?.repository.repoId ?? "";
   const bare = opened?.repository.bare ?? false;
+  const [debouncedFileFilter, setDebouncedFileFilter] = useState(fileFilter);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedFileFilter(fileFilter), 200);
+    return () => clearTimeout(timer);
+  }, [fileFilter]);
+  const statusFilter = normalizeStatusFilter({
+    text: debouncedFileFilter,
+    group: groupFilter,
+  });
+  const filterPending =
+    fileFilter.trim().toLowerCase() !==
+    debouncedFileFilter.trim().toLowerCase();
   const statusQuery = useQuery({
-    ...gitQueries.status(scope, repoId),
+    ...gitQueries.status(scope, repoId, statusFilter),
     enabled: !!opened && !bare,
+    // Keep the filter input mounted while replacing its results. Never carry
+    // rows between repositories; pending rows cannot be selected or written.
+    placeholderData: (previous, query) =>
+      query?.queryKey[gitKeys.repo(scope, repoId).length - 1] === repoId
+        ? previous
+        : undefined,
     // Agents edit while you watch: the open checkout is read again every
     // fifteen seconds while the window is showing, and not while an action of
     // the page's own is running. A read is cheap -- status fingerprints files
@@ -216,25 +236,28 @@ export function ProjectsPanel({ server }: { server: Server }) {
         ? false
         : 15_000,
   });
-  const status = opened && !bare ? (statusQuery.data ?? null) : null;
+  const [lastStatus, setLastStatus] = useState<{
+    repoId: string;
+    data: GitStatus;
+  }>();
+  useEffect(() => {
+    if (statusQuery.data && !statusQuery.isPlaceholderData)
+      setLastStatus({ repoId, data: statusQuery.data });
+  }, [repoId, statusQuery.data, statusQuery.isPlaceholderData]);
+  const status =
+    opened && !bare
+      ? (statusQuery.data ??
+        (lastStatus?.repoId === repoId ? lastStatus.data : null))
+      : null;
   // A clean working tree shows the commit it matches, so history is read
   // for that view too.
-  const cleanTree = status?.entries.length === 0;
+  const cleanTree =
+    (status?.metadata.totalEntries ?? status?.entries.length) === 0;
   const historyQuery = useQuery({
     ...gitQueries.history(scope, repoId),
     enabled: !!opened && (tab === "history" || bare || cleanTree),
   });
   const history = opened ? (historyQuery.data ?? null) : null;
-  // The repository's worktrees: the picker lists them, and the branch picker
-  // needs to know which branches another worktree holds. One cached read.
-  const worktreeQuery = useQuery({
-    ...gitQueries.worktreeList(scope, repoId),
-    enabled: !!opened,
-  });
-  const worktreeHolders = useMemo(
-    () => worktreeByBranch(worktreeQuery.data?.entries ?? []),
-    [worktreeQuery.data],
-  );
   // When the repository was last read, taken from the read itself rather than
   // kept alongside it, so the footer cannot describe a read that did not
   // happen.
@@ -250,9 +273,11 @@ export function ProjectsPanel({ server }: { server: Server }) {
   const inspectedCommit = history?.entries.find(
     (commit) => commit.oid.hex === selectedCommit,
   );
-  const previewEntry = status?.entries.find(
-    (entry) => entry.entryId === selectedEntry,
-  );
+  const statusFiltering =
+    filterPending || statusQuery.isPlaceholderData || statusQuery.isError;
+  const previewEntry = !statusFiltering
+    ? status?.entries.find((entry) => entry.entryId === selectedEntry)
+    : undefined;
   // Only what the user asked to read: a library row is read when its "Check
   // status" is pressed, never on sight, because each read opens a repository.
   const { libraryStatus, libraryChecking } = useQueries({
@@ -278,12 +303,23 @@ export function ProjectsPanel({ server }: { server: Server }) {
     }),
   });
 
+  const checkRun = useRef(0);
+  const [visibleWorktrees, setVisibleWorktrees] = useState<
+    Record<string, WorktreeRow[]>
+  >({});
+  const onVisibleWorktrees = useCallback(
+    (projectId: string, rows: WorktreeRow[]) => {
+      checkRun.current++;
+      setVisibleWorktrees((current) => ({ ...current, [projectId]: rows }));
+    },
+    [],
+  );
   // The worktrees the library has listed under its projects, and what each
   // one's own read said -- again only when asked.
   const libraryWorktrees = useMemo(
     () =>
       projects.flatMap((project) =>
-        (libraryStatus[project.id]?.worktrees ?? []).flatMap((row) =>
+        (visibleWorktrees[project.id] ?? []).flatMap((row) =>
           row.path && openable(row)
             ? [
                 {
@@ -300,7 +336,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
             : [],
         ),
       ),
-    [projects, libraryStatus, server.id],
+    [projects, visibleWorktrees, server.id],
   );
   const { worktreeStatus, worktreeChecking } = useQueries({
     queries: libraryWorktrees.map(({ target }) => ({
@@ -406,7 +442,6 @@ export function ProjectsPanel({ server }: { server: Server }) {
    * generation, and a run that is no longer current stops before its next
    * read.
    */
-  const checkRun = useRef(0);
   const stopChecks = () => {
     checkRun.current += 1;
   };
@@ -425,10 +460,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
       await checkLibraryStatus(project);
     }
     for (const project of shown) {
-      const summary = queryClient.getQueryData(
-        gitQueries.summary(scope, project).queryKey,
-      );
-      for (const row of summary?.worktrees ?? []) {
+      for (const row of visibleWorktrees[project.id] ?? []) {
         if (run !== checkRun.current) return;
         if (row.path && openable(row)) await checkWorktreeStatus(project, row);
       }
@@ -485,7 +517,11 @@ export function ProjectsPanel({ server }: { server: Server }) {
     const id = selection.repository.repoId;
     if (selection.repository.bare)
       await refreshQuery(queryClient, gitQueries.history(scope, id));
-    else await refreshQuery(queryClient, gitQueries.status(scope, id));
+    else
+      await refreshQuery(
+        queryClient,
+        gitQueries.status(scope, id, statusFilter),
+      );
   }
   async function openProject(projects: GitProjects, project: GitProject) {
     // Before the open: it queues behind whatever the connection is doing.
@@ -579,7 +615,10 @@ export function ProjectsPanel({ server }: { server: Server }) {
            */
           const next = selection.repository.bare
             ? null
-            : await refreshQuery(queryClient, gitQueries.status(scope, id));
+            : await refreshQuery(
+                queryClient,
+                gitQueries.status(scope, id, statusFilter),
+              );
           if (!isCurrent(projects)) return;
           const retainSelection =
             ("hunks" in action && !!action.hunks) ||
@@ -602,7 +641,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
             await refreshQuery(queryClient, gitQueries.history(scope, id));
           if (!isCurrent(projects)) return;
           void invalidateRepository(queryClient, scope, id, [
-            "status",
+            gitKeys.status(scope, id, statusFilter),
             ...(rereadHistory ? ["history"] : []),
           ]);
           if (outcome.state !== "failed")
@@ -664,6 +703,10 @@ export function ProjectsPanel({ server }: { server: Server }) {
           if (outcome.state === "succeeded")
             toast.success(
               "The saved operation completed. Reopen the repository to see its changes.",
+            );
+          else if (outcome.state === "reviewed_unknown")
+            toast.info(
+              "This interruption was reviewed. Its original outcome remains unknown.",
             );
           else
             setError(
@@ -736,40 +779,42 @@ export function ProjectsPanel({ server }: { server: Server }) {
       if (!opened) await refreshQuery(queryClient, gitQueries.projects(scope));
       else if (tab === "history" || bare)
         await refreshQuery(queryClient, gitQueries.history(scope, repoId));
-      else await refreshQuery(queryClient, gitQueries.status(scope, repoId));
+      else
+        await refreshQuery(
+          queryClient,
+          gitQueries.status(scope, repoId, statusFilter),
+        );
     });
   }
-  /** Appends the next page of a paged read to the cached first page. */
-  function appendStatusPage(cursor: string) {
-    return run(async (projects) => {
-      const page = await projects.repositories.status(repoId, cursor);
-      queryClient.setQueryData(
-        gitQueries.status(scope, repoId).queryKey,
-        (current) => current && appendGitPage(current, page, cursor),
-        // Loading more is not re-reading: the freshness line keeps describing
-        // the first page's read.
-        { updatedAt: statusQuery.dataUpdatedAt },
-      );
-    });
-  }
-  function appendHistoryPage(cursor: string) {
-    return run(async (projects) => {
-      const page = await projects.repositories.history(repoId, "HEAD", cursor);
-      queryClient.setQueryData(
-        gitQueries.history(scope, repoId).queryKey,
-        (current) => current && appendGitPage(current, page, cursor),
-        { updatedAt: historyQuery.dataUpdatedAt },
-      );
-    });
-  }
-  const unresolvedOperation =
+  const statusPages = useGitPageLoader({
+    prefetch: true,
+    queryKey: gitQueries.status(scope, repoId, statusFilter).queryKey,
+    page: status,
+    enabled: !!opened && !busy && !statusFiltering && tab === "changes",
+    read: (cursor, signal) =>
+      gitProjectsFor(scope)
+        .repositories.withSignal(signal)
+        .status(repoId, cursor, statusFilter),
+    entryKey: (entry) => entry.entryId,
+  });
+  const historyPages = useGitPageLoader({
+    prefetch: true,
+    queryKey: gitQueries.history(scope, repoId).queryKey,
+    page: history,
+    enabled: !!opened && !busy && tab === "history",
+    read: (cursor, signal) =>
+      gitProjectsFor(scope)
+        .repositories.withSignal(signal)
+        .history(repoId, "HEAD", cursor),
+    entryKey: (entry) => `${entry.oid.algorithm}:${entry.oid.hex}`,
+  });
+  const hasSavedOutcome =
     receipts?.some(
       (receipt) =>
         receipt.state === "pending" || receipt.state === "outcome_unknown",
     ) ?? false;
-  const branchBlockedReason = unresolvedOperation
-    ? "Check the saved operation’s outcome before changing branches."
-    : receipts === null
+  const branchBlockedReason =
+    receipts === null
       ? "Saved outcomes are unavailable. Refresh them before making changes."
       : opened?.repository.capabilities.readOnly
         ? "This repository is read-only."
@@ -780,9 +825,8 @@ export function ProjectsPanel({ server }: { server: Server }) {
             : undefined;
 
   const readOnly = opened?.repository.capabilities.readOnly ?? false;
-  const worktreeBlockedReason = unresolvedOperation
-    ? "Check the saved operation’s outcome before changing worktrees."
-    : receipts === null
+  const worktreeBlockedReason =
+    receipts === null
       ? "Saved outcomes are unavailable. Refresh them before making changes."
       : readOnly
         ? "This repository is read-only."
@@ -790,12 +834,8 @@ export function ProjectsPanel({ server }: { server: Server }) {
   // Whether the index may be written right now: the file and group actions in
   // the list, and the file actions in the diff header, all follow this.
   const indexWritable =
-    !!opened &&
-    !readOnly &&
-    !opened.repository.bare &&
-    receipts !== null &&
-    !unresolvedOperation;
-  const clean = status?.entries.length === 0;
+    !!opened && !readOnly && !opened.repository.bare && receipts !== null;
+  const clean = cleanTree;
   const branchName = status ? headBranch(status) : null;
   const upstreamName =
     status?.metadata.upstreamRef?.display.replace(/^refs\/remotes\//, "") ??
@@ -883,9 +923,11 @@ export function ProjectsPanel({ server }: { server: Server }) {
             currentSummary={
               status
                 ? {
-                    changes: status.metadata.truncated
-                      ? null
-                      : status.entries.length,
+                    changes:
+                      status.metadata.totalEntries ??
+                      (status.nextCursor || status.metadata.truncated
+                        ? null
+                        : status.entries.length),
                     outgoing: status.metadata.ahead ?? null,
                   }
                 : undefined
@@ -903,25 +945,32 @@ export function ProjectsPanel({ server }: { server: Server }) {
                 !!status &&
                 !opened.repository.capabilities.readOnly &&
                 !opened.repository.bare &&
-                receipts !== null &&
-                !receipts.some(
-                  (receipt) =>
-                    receipt.state === "pending" ||
-                    receipt.state === "outcome_unknown",
-                )
+                receipts !== null
               }
               blockedReason={branchBlockedReason}
-              recoveryAvailable={unresolvedOperation || receipts === null}
+              recoveryAvailable={hasSavedOutcome || receipts === null}
               error={error}
               onAction={write}
               worktrees={{
-                holder: (branch) => {
-                  const row = worktreeHolders.get(branch);
-                  return row && !row.current ? worktreeLabel(row) : null;
-                },
-                open: (branch) => {
-                  const row = worktreeHolders.get(branch);
-                  if (row && openable(row)) openWorktree(row);
+                openIfHeld: async (branch, isCurrent) => {
+                  const page = await queryClient.fetchQuery({
+                    ...gitQueries.worktrees(scope, repoId, undefined, {
+                      branch,
+                      pageSize: 2,
+                    }),
+                    staleTime: 0,
+                  });
+                  if (!isCurrent()) return false;
+                  const row = page.entries.find(
+                    (row) => !row.current && row.head?.name?.display === branch,
+                  );
+                  if (!row) return false;
+                  if (!openable(row))
+                    throw new Error(
+                      `The worktree holding ${branch.replace(/^refs\/heads\//, "")} is ${row.state}. Open Worktrees to inspect or repair it.`,
+                    );
+                  openWorktree(row);
+                  return true;
                 },
               }}
             />
@@ -943,7 +992,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
               blockedReason={branchBlockedReason
                 ?.replace("changing branches", "making Git changes")
                 .replace("Branch changes", "Remote changes")}
-              recoveryAvailable={unresolvedOperation || receipts === null}
+              recoveryAvailable={hasSavedOutcome || receipts === null}
               error={error}
               onAction={write}
             />
@@ -1103,6 +1152,20 @@ export function ProjectsPanel({ server }: { server: Server }) {
         error={recoveryError}
         busy={busy}
         onCheck={(id) => void checkOutcome(id)}
+        onReview={(id) =>
+          void run(async (projects) => {
+            await projects.mutations.review(id);
+            await refreshReceipts();
+            if (opened && !bare)
+              await refreshQuery(
+                queryClient,
+                gitQueries.status(scope, repoId, statusFilter),
+              );
+            toast.info(
+              "Review recorded. The original outcome remains unknown.",
+            );
+          })
+        }
         onAcknowledge={(id) =>
           void run(async (projects) => {
             await projects.mutations.acknowledge(id);
@@ -1126,6 +1189,8 @@ export function ProjectsPanel({ server }: { server: Server }) {
       )}
       {!opened ? (
         <GitProjectLibrary
+          scope={scope}
+          onVisibleWorktrees={onVisibleWorktrees}
           projects={projects}
           busy={busy}
           search={search}
@@ -1261,14 +1326,18 @@ export function ProjectsPanel({ server }: { server: Server }) {
                         className="h-[26px]! flex-1 gap-[6px] rounded-[5px]! text-[12px] font-medium text-muted-foreground data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-[0_1px_2px_rgb(0_0_0/0.1)]"
                       >
                         Changes
-                        {!!status?.entries.length && (
+                        {!!(
+                          status?.metadata.totalEntries ??
+                          status?.entries.length
+                        ) && (
                           <span
                             aria-hidden="true"
                             className="min-w-[18px] rounded-full bg-[color-mix(in_srgb,var(--foreground)_9%,transparent)] px-[5px] text-[10px] leading-[16px] font-semibold tabular-nums"
                           >
-                            {status.nextCursor
-                              ? `${status.entries.length}+`
-                              : status.entries.length}
+                            {status.metadata.totalEntries?.toLocaleString() ??
+                              (status.nextCursor || status.metadata.truncated
+                                ? `${status.entries.length}+`
+                                : status.entries.length)}
                           </span>
                         )}
                       </TabsTrigger>
@@ -1289,7 +1358,10 @@ export function ProjectsPanel({ server }: { server: Server }) {
                       <p className="git-projects-empty" role="status">
                         Loading changes…
                       </p>
-                    ) : status && clean ? (
+                    ) : status &&
+                      clean &&
+                      !fileFilter &&
+                      groupFilter === "all" ? (
                       <p className="git-projects-empty text-[12px]">
                         No changed files
                       </p>
@@ -1315,11 +1387,18 @@ export function ProjectsPanel({ server }: { server: Server }) {
                           onUnstage={(entryIds) =>
                             void write({ kind: "unstage", entryIds })
                           }
-                          onLoadMore={
-                            status.nextCursor
-                              ? () => void appendStatusPage(status.nextCursor!)
-                              : undefined
+                          onLoadMore={statusPages.load}
+                          filterLoading={
+                            statusFiltering && !statusQuery.isError
                           }
+                          filterError={
+                            statusQuery.isError
+                              ? message(statusQuery.error)
+                              : ""
+                          }
+                          onRetryFilter={() => void statusQuery.refetch()}
+                          pageLoading={statusPages.loading}
+                          pageError={statusPages.error}
                         />
                         <GitCommitComposer
                           status={status}
@@ -1406,18 +1485,19 @@ export function ProjectsPanel({ server }: { server: Server }) {
                             partial history.
                           </GitNotice>
                         )}
-                        {history.nextCursor && (
-                          <div className="px-[16px] pb-[10px]">
-                            <Button
-                              disabled={busy}
-                              onClick={() =>
-                                void appendHistoryPage(history.nextCursor!)
-                              }
-                            >
-                              Load more commits
-                            </Button>
-                          </div>
-                        )}
+                        <GitLoadMore
+                          cursor={history.nextCursor}
+                          loading={historyPages.loading}
+                          error={historyPages.error}
+                          disabled={busy}
+                          onLoad={historyPages.load}
+                          label="Load more commits"
+                          endLabel={
+                            history.metadata.truncated
+                              ? "End of available history"
+                              : "End of history"
+                          }
+                        />
                       </div>
                     ) : null}
                   </TabsContent>
@@ -1452,17 +1532,13 @@ export function ProjectsPanel({ server }: { server: Server }) {
                       disabled={busy || !!branchBlockedReason}
                       blockedReason={
                         status.metadata.integration ||
-                        status.entries.some((entry) => entry.conflicted)
+                        (status.metadata.groupCounts?.conflicted ??
+                          status.entries.filter((entry) => entry.conflicted)
+                            .length) > 0
                           ? "Resolve conflicts and finish any integration before staging individual hunks."
-                          : unresolvedOperation
-                            ? "Check the saved operation’s outcome before editing hunks."
-                            : branchBlockedReason
-                      }
-                      conflictBlockedReason={
-                        unresolvedOperation
-                          ? "Check the saved operation’s outcome before resolving conflicts."
                           : branchBlockedReason
                       }
+                      conflictBlockedReason={branchBlockedReason}
                       actions={
                         <GitFileActions
                           entry={previewEntry}
@@ -1487,14 +1563,17 @@ export function ProjectsPanel({ server }: { server: Server }) {
                     key={inspectedCommit.oid.hex}
                     repoId={opened.repository.repoId}
                     commit={inspectedCommit}
-                    actions={
+                    actions={(fullCommit) => (
                       <GitHistoryActions
                         key={inspectedCommit.oid.hex}
-                        commit={inspectedCommit}
+                        commit={fullCommit}
                         snapshot={status?.snapshot}
-                        conflicted={status?.entries.some(
-                          (entry) => entry.conflicted,
-                        )}
+                        conflicted={
+                          (status?.metadata.groupCounts?.conflicted ??
+                            status?.entries.filter((entry) => entry.conflicted)
+                              .length ??
+                            0) > 0
+                        }
                         repository={{
                           ...opened.repository,
                           head: status?.metadata.head ?? opened.repository.head,
@@ -1508,7 +1587,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
                         error={error}
                         onAction={write}
                       />
-                    }
+                    )}
                   />
                 ) : (
                   <EmptyPane
@@ -1622,11 +1701,9 @@ export function ProjectsPanel({ server }: { server: Server }) {
           serverName={server.name}
           busy={busy}
           blockedReason={
-            unresolvedOperation
-              ? "Check the saved operation’s outcome before creating another repository."
-              : receipts === null
-                ? "Saved outcomes are unavailable. Close this dialog and refresh them before creating a repository."
-                : undefined
+            receipts === null
+              ? "Saved outcomes are unavailable. Close this dialog and refresh them before creating a repository."
+              : undefined
           }
           error={error}
           onClose={() => setCreating(null)}
@@ -1678,7 +1755,11 @@ export function ProjectsPanel({ server }: { server: Server }) {
       {opened && (
         /* What the page knows and how fresh it is. Never that the remote was
            contacted: the counts compare stored refs. */
-        <footer className="git-projects-footer flex h-[28px] flex-none items-center justify-between gap-[12px] border-t border-border px-[12px] text-[11px] text-muted-foreground">
+        <GitCommandLog
+          key={`${server.id}:${opened.repository.repoId}`}
+          serverId={server.id}
+          repoId={opened.repository.repoId}
+        >
           <span className="flex-none">
             {readAge(readAt, now)
               ? `Read ${readAge(readAt, now)}`
@@ -1696,7 +1777,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
                       : "In step with"
                   } ${upstreamName} · stored refs; the remote was not contacted`}
           </span>
-        </footer>
+        </GitCommandLog>
       )}
     </section>
   );

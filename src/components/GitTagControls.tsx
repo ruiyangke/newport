@@ -1,17 +1,17 @@
+import { GitRemotePicker } from "./GitRemotePicker";
+import { useGitRemoteSelection } from "../hooks/useGitRemoteSelection";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { gitPath, type GitWriteAction } from "../domain/git";
-import {
-  appendGitPage,
-  type GitRepository,
-  type GitTags,
-} from "../domain/gitResponses";
-import { refreshQuery } from "../query/client";
+import { type GitRepository, type GitTags } from "../domain/gitResponses";
+import { useGitPageLoader } from "../hooks/useGitPageLoader";
+import { gitErrorMessage } from "../git/errors";
+import { gitProjectsFor } from "../git/registry";
+import { GitLoadMore } from "./GitLoadMore";
 import { gitKeys, gitQueries } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
 import { Button, Input } from "./controls";
 import { Modal } from "./Editors";
-import { Pagination, PaginationContent, PaginationItem } from "./ui/pagination";
 import { Textarea } from "./ui/textarea";
 import {
   Select,
@@ -26,29 +26,6 @@ const note = "text-[12px] text-muted-foreground";
 
 type Tag = GitTags["entries"][number];
 type Editor = { kind: "create" } | { kind: "delete" | "push"; tag: Tag };
-/**
- * Where the reader is in the paged tag list. Each page is its own query, keyed
- * by its cursor; this only remembers which cursors were visited. It belongs to
- * one reading of the first page (`basis`, that read's time), so a fresh first
- * page -- the dialog reopening, the repository changing, a reload -- starts
- * the list over, as it always has.
- */
-type Trail = {
-  basis: number;
-  cursors: string[];
-  index: number;
-  pending: boolean;
-  error: string;
-  selected: string | null;
-};
-const startTrail = (basis: number): Trail => ({
-  basis,
-  cursors: [],
-  index: 0,
-  pending: false,
-  error: "",
-  selected: null,
-});
 function usable(tag: Tag) {
   try {
     return (
@@ -155,63 +132,40 @@ function TagsDialog({
       queryKey: gitKeys.tags(scope, repoId),
     });
   }, [queryClient, scope, repoId, snapshot]);
-  const [storedTrail, setTrail] = useState(() => startTrail(0));
-  const trail =
-    storedTrail.basis === first.dataUpdatedAt
-      ? storedTrail
-      : startTrail(first.dataUpdatedAt);
-  const cursor = trail.index === 0 ? undefined : trail.cursors[trail.index - 1];
-  // Later pages are only ever read by "Next tags", which checks that each one
-  // continues the listing; showing one must not re-read it on its own.
-  const later = useQuery({
-    ...gitQueries.tags(scope, repoId, cursor),
-    enabled: false,
+  const page = first.data;
+  const loading = first.isFetching;
+  const [selected, setSelected] = useState<string | null>(null);
+  const pages = useGitPageLoader({
+    queryKey: gitQueries.tags(scope, repoId).queryKey,
+    page: page ?? null,
+    enabled: !first.isFetching && !first.isError && !editor,
+    prefetch: true,
+    entryKey: (tag: Tag) => tag.reference.bytesB64,
+    read: (cursor, signal) =>
+      gitProjectsFor(scope)
+        .repositories.withSignal(signal)
+        .tags(repoId, cursor),
   });
-  // A listing being (re)read is not shown, as before: nothing is offered from
-  // it until the read that replaces it has landed.
-  const reading = first.isFetching || first.isError;
-  const page = reading
-    ? undefined
-    : trail.index === 0
-      ? first.data
-      : later.data;
-  const loading = first.isFetching || trail.pending;
   const pushing = editor?.kind === "push";
-  // Read afresh each time the push form opens, as before; never otherwise.
-  const remotesQuery = useQuery({
-    ...gitQueries.remotes(scope, repoId),
-    enabled: pushing,
-    staleTime: 0,
-  });
-  const remotes =
-    pushing && !remotesQuery.isFetching && !remotesQuery.isError
-      ? (remotesQuery.data ?? null)
-      : null;
+  const remoteSelection = useGitRemoteSelection(
+    repoId,
+    remoteName,
+    setRemoteName,
+    pushing,
+  );
+  const remote = remoteSelection.remote;
   const readError =
-    trail.error ||
-    (!first.isFetching && first.error ? String(first.error) : "") ||
-    (pushing && !remotesQuery.isFetching && remotesQuery.error
-      ? String(remotesQuery.error)
-      : "");
-  const selected = trail.selected;
-  const setSelected = (value: string | null) =>
-    setTrail({ ...trail, selected: value });
-  const selectedTag = page?.entries.find(
-    (tag) => tag.name.bytesB64 === selected,
-  );
-  // The remote the form offers: the one chosen, while it still exists, else
-  // origin, else the first -- what each fresh read used to select.
-  const chosenRemote = remotes?.entries.some(
-    (remote) => remote.name === remoteName,
-  )
-    ? remoteName
-    : (remotes?.entries.find((remote) => remote.name === "origin")?.name ??
-      remotes?.entries[0]?.name ??
-      "");
-  const remote = remotes?.entries.find(
-    (remote) => remote.name === chosenRemote,
-  );
-  const disabled = busy || loading || !!blockedReason || !snapshot;
+    (!first.isFetching && first.error ? gitErrorMessage(first.error) : "") ||
+    remoteSelection.error;
+  const preview = page?.entries.find((tag) => tag.name.bytesB64 === selected);
+  const detail = useQuery({
+    ...gitQueries.tag(scope, repoId, preview?.oid?.hex ?? ""),
+    enabled: !!preview?.oid && !!preview.messageTruncated,
+  });
+  const selectedTag =
+    preview && detail.data ? { ...preview, ...detail.data } : preview;
+  const disabled =
+    busy || loading || first.isError || !!blockedReason || !snapshot;
   async function submit(action: GitWriteAction) {
     if (disabled) return;
     if (await onAction(action)) {
@@ -220,45 +174,9 @@ function TagsDialog({
     }
   }
   function reload() {
-    setTrail(startTrail(first.dataUpdatedAt));
+    setSelected(null);
     void first.refetch();
-    if (pushing) void remotesQuery.refetch();
-  }
-  async function nextPage() {
-    if (!page?.nextCursor || loading || busy) return;
-    const visited = trail.cursors[trail.index];
-    if (
-      visited !== undefined &&
-      queryClient.getQueryData(gitKeys.tags(scope, repoId, visited))
-    ) {
-      setTrail({ ...trail, index: trail.index + 1, selected: null });
-      return;
-    }
-    const nextCursor = page.nextCursor;
-    const requested: Trail = { ...trail, pending: true, error: "" };
-    setTrail(requested);
-    let outcome: Partial<Trail>;
-    try {
-      const next = await refreshQuery(
-        queryClient,
-        gitQueries.tags(scope, repoId, nextCursor),
-      );
-      appendGitPage(page, next, nextCursor);
-      outcome = {
-        cursors: [...trail.cursors.slice(0, trail.index), nextCursor],
-        index: trail.index + 1,
-        selected: null,
-      };
-    } catch (reason) {
-      outcome = { error: String(reason) };
-    }
-    // A page that lands after the list started over belongs to a listing that
-    // is no longer shown. It stays cached under its own cursor, unused.
-    setTrail((current) =>
-      current === requested
-        ? { ...current, ...outcome, pending: false }
-        : current,
-    );
+    if (pushing) remoteSelection.refresh();
   }
   return (
     <Modal
@@ -411,35 +329,25 @@ function TagsDialog({
                       Push this exact tag to the selected remote. An existing
                       remote tag will not be overwritten.
                     </p>
-                    {!remotes && !readError && (
+                    {remoteSelection.loading && (
                       <p role="status" className={note}>
                         Loading remotes…
                       </p>
                     )}
-                    {remotes && remotes.entries.length === 0 && (
+                    {remoteSelection.empty && (
                       <p className={note}>
                         No remotes configured. Add one in Remotes first.
                       </p>
                     )}
-                    {!!remotes?.entries.length && (
+                    {!remoteSelection.empty && (
                       <label>
                         Remote
-                        <Select
-                          value={chosenRemote}
-                          onValueChange={setRemoteName}
+                        <GitRemotePicker
+                          repoId={repoId}
+                          value={remoteSelection.selected}
+                          onChange={setRemoteName}
                           disabled={busy}
-                        >
-                          <SelectTrigger aria-label="Remote">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {remotes.entries.map((item) => (
-                              <SelectItem key={item.name} value={item.name}>
-                                {item.name}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                        />
                       </label>
                     )}
                     {remote && (
@@ -524,6 +432,19 @@ function TagsDialog({
                   </Button>
                 </li>
               ))}
+              {page && (
+                <li className="list-none">
+                  <GitLoadMore
+                    cursor={page.nextCursor}
+                    loading={pages.loading}
+                    error={pages.error}
+                    disabled={loading || first.isError}
+                    onLoad={pages.load}
+                    label="Load more tags"
+                    endLabel="All tags loaded"
+                  />
+                </li>
+              )}
             </ul>
             {selectedTag && (
               <div className="git-tag-details pt-[16px]">
@@ -550,8 +471,18 @@ function TagsDialog({
                 )}
                 {selectedTag.messageTruncated && (
                   <p className={`mt-[6px]! ${note}`}>
-                    The annotation is truncated.
+                    {detail.isFetching
+                      ? "Loading full annotation…"
+                      : "The annotation is truncated."}
                   </p>
+                )}
+                {detail.isError && !detail.isFetching && (
+                  <div role="alert" className={`mt-[6px] ${note}`}>
+                    {gitErrorMessage(detail.error)}
+                    <Button onClick={() => void detail.refetch()}>
+                      Retry annotation
+                    </Button>
+                  </div>
                 )}
                 {selectedTag.detailsOmitted && (
                   <p className={`mt-[6px]! ${note}`}>
@@ -584,40 +515,6 @@ function TagsDialog({
                   </Button>
                 </div>
               </div>
-            )}
-            {page && (trail.index > 0 || page.nextCursor) && (
-              <Pagination
-                aria-label="Tag pages"
-                className="git-tag-pagination mx-0 my-[12px] flex items-center justify-between gap-[8px]"
-              >
-                <PaginationContent className="w-full justify-between gap-[8px]">
-                  <PaginationItem>
-                    <Button
-                      disabled={busy || loading || trail.index === 0}
-                      onClick={() =>
-                        setTrail({
-                          ...trail,
-                          index: trail.index - 1,
-                          selected: null,
-                        })
-                      }
-                    >
-                      Previous tags
-                    </Button>
-                  </PaginationItem>
-                  <PaginationItem>
-                    <span aria-current="page">Page {trail.index + 1}</span>
-                  </PaginationItem>
-                  <PaginationItem>
-                    <Button
-                      disabled={busy || loading || !page.nextCursor}
-                      onClick={() => void nextPage()}
-                    >
-                      Next tags
-                    </Button>
-                  </PaginationItem>
-                </PaginationContent>
-              </Pagination>
             )}
           </>
         )}

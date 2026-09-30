@@ -1,3 +1,4 @@
+import { GitLoadMore } from "./GitLoadMore";
 import { useId } from "react";
 import { ListFilter, Minus, Plus, Search } from "lucide-react";
 import { cn } from "cn";
@@ -197,6 +198,11 @@ export function GitChangeList({
   onStage,
   onUnstage,
   onLoadMore,
+  filterLoading = false,
+  filterError = "",
+  onRetryFilter,
+  pageLoading = false,
+  pageError = "",
 }: {
   status: GitStatus;
   filter: string;
@@ -212,11 +218,26 @@ export function GitChangeList({
   onStage: (entryIds: string[]) => void;
   onUnstage: (entryIds: string[]) => void;
   onLoadMore?: () => void;
+  filterLoading?: boolean;
+  filterError?: string;
+  onRetryFilter?: () => void;
+  pageLoading?: boolean;
+  pageError?: string;
 }) {
   const statusId = useId();
-  const groups = changeGroups(status.entries, filter, group);
+  const groups =
+    filterLoading || filterError
+      ? []
+      : changeGroups(status.entries, filter, group);
   const filtering = !!filter.trim() || group !== "all";
-  const shown = groups.reduce((total, each) => total + each.entries.length, 0);
+  const shown = new Set(
+    groups.flatMap((each) => each.entries.map((entry) => entry.entryId)),
+  ).size;
+  const partial = !!status.nextCursor || status.metadata.truncated;
+  const total =
+    status.metadata.totalEntries ?? (partial ? null : status.entries.length);
+  const matched = status.metadata.matchedEntries;
+  const bulkScope = partial ? "loaded" : filtering ? "shown" : "all";
   const integrating = !!status.metadata.integration;
   // Unstaging during a merge or rebase would lose the resolution bookkeeping,
   // so the file controls never offered it; the quick actions follow suit.
@@ -230,6 +251,9 @@ export function GitChangeList({
           </InputGroupAddon>
           <InputGroupInput
             aria-label="Filter changed files"
+            spellCheck={false}
+            autoCorrect="off"
+            autoCapitalize="none"
             placeholder="Filter files"
             value={filter}
             onChange={(event) => onFilter(event.target.value)}
@@ -287,14 +311,34 @@ export function GitChangeList({
           not ignored. Add it to .gitignore, then refresh.
         </GitNotice>
       )}
-      {/* Only while filtering: the total stays in view, so a filter cannot
-          quietly look like an empty working tree. Unfiltered, the count is on
-          the Changes tab. */}
-      {filtering && (
-        <p className="git-projects-summary flex-none px-[16px] pb-[4px] text-[11px] text-muted-foreground">
-          {shown} of {countLabel(status.entries.length, "changed file")}
-          {status.nextCursor ? " loaded" : ""}
+      {filterError ? (
+        <GitNotice tone="error">
+          {filterError} <Button onClick={onRetryFilter}>Retry search</Button>
+        </GitNotice>
+      ) : filterLoading ? (
+        <p
+          className="git-projects-summary flex-none px-[16px] pb-[4px] text-[11px] text-muted-foreground"
+          role="status"
+        >
+          Searching changed files…
         </p>
+      ) : (
+        (filtering || partial) && (
+          <p className="git-projects-summary flex-none px-[16px] pb-[4px] text-[11px] text-muted-foreground">
+            {filtering && matched !== undefined ? (
+              `${shown.toLocaleString()} of ${matched.toLocaleString()} matching files loaded.`
+            ) : (
+              <>
+                {partial
+                  ? `${status.entries.length.toLocaleString()} of ${total?.toLocaleString() ?? "more"} changed files loaded.`
+                  : countLabel(status.entries.length, "changed file")}
+                {filtering &&
+                  ` ${shown.toLocaleString()} matching loaded ${shown === 1 ? "file" : "files"}.`}
+                {filtering && partial && " Filters apply to loaded files only."}
+              </>
+            )}
+          </p>
+        )
       )}
       {/* The scrolling region. The filter above and the composer below stay
           put, so the commit button is never eighty files away. */}
@@ -304,14 +348,14 @@ export function GitChangeList({
           const bulk =
             each.key === "staged"
               ? canUnstage && {
-                  label: "Unstage all",
-                  name: `Unstage all ${each.entries.length} staged`,
+                  label: `Unstage ${bulkScope}`,
+                  name: `Unstage ${bulkScope} ${each.entries.length} staged`,
                   run: () => onUnstage(ids),
                 }
               : each.key === "unstaged" || each.key === "untracked"
                 ? writable && {
-                    label: "Stage all",
-                    name: `Stage all ${each.entries.length} ${each.key}`,
+                    label: `Stage ${bulkScope}`,
+                    name: `Stage ${bulkScope} ${each.entries.length} ${each.key}`,
                     run: () => onStage(ids),
                   }
                 : false;
@@ -324,7 +368,10 @@ export function GitChangeList({
               <h4 className="sticky top-0 z-[1] flex h-[28px] items-center gap-[6px] bg-background pr-[10px] pl-[16px] text-[11px]! font-semibold! text-muted-foreground">
                 <span>{each.label}</span>
                 <span className="font-normal tabular-nums">
-                  {each.entries.length}
+                  {status.metadata.groupCounts?.[each.key] !== undefined &&
+                  (partial || filtering)
+                    ? `${each.entries.length} ${filtering ? "shown" : "loaded"} of ${status.metadata.groupCounts[each.key].toLocaleString()}`
+                    : `${each.entries.length}${partial ? " loaded" : filtering ? " shown" : ""}`}
                 </span>
                 {bulk && (
                   <Button
@@ -424,7 +471,7 @@ export function GitChangeList({
             </section>
           );
         })}
-        {filtering && groups.length === 0 && (
+        {!filterLoading && !filterError && filtering && groups.length === 0 && (
           <div className="git-projects-empty git-filter-empty px-[16px] py-[28px] text-center">
             <h3 className="text-[12px]! font-semibold!">
               No files match your current filters
@@ -433,7 +480,9 @@ export function GitChangeList({
               {filter.trim()
                 ? `No changed file matches “${filter.trim()}”.`
                 : "This group has no files."}
-              {status.nextCursor ? " Only loaded files are filtered." : ""}
+              {status.nextCursor && matched === undefined
+                ? " Only loaded files are filtered."
+                : ""}
             </p>
             <Button
               className="mt-[12px]"
@@ -446,12 +495,23 @@ export function GitChangeList({
             </Button>
           </div>
         )}
-        {status.nextCursor && onLoadMore && (
-          <div className="px-[16px] pt-[6px]">
-            <Button disabled={busy} onClick={onLoadMore}>
-              Load more files
-            </Button>
-          </div>
+        {onLoadMore && !filterLoading && !filterError && (
+          <GitLoadMore
+            cursor={status.nextCursor}
+            loading={pageLoading}
+            error={pageError}
+            disabled={busy}
+            automatic={!filtering || matched !== undefined}
+            onLoad={onLoadMore}
+            label="Load more files"
+            endLabel={
+              status.metadata.truncated
+                ? "End of available changes"
+                : filtering && matched !== undefined
+                  ? "All matching files loaded"
+                  : "All changes loaded"
+            }
+          />
         )}
       </div>
     </>

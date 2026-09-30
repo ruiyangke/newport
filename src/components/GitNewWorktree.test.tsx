@@ -18,6 +18,7 @@ import {
 } from "../git/testing";
 
 notifyManager.setScheduler(queueMicrotask);
+Element.prototype.scrollIntoView ??= () => {};
 globalThis.ResizeObserver ??= class {
   observe() {}
   unobserve() {}
@@ -138,6 +139,8 @@ async function type(label: string, value: string) {
     )!.set!.call(input, value);
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
+  if (label !== "Find a branch")
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 220)));
   return input;
 }
 const field = (label: string) => {
@@ -194,4 +197,123 @@ it("refuses a new branch that already exists, and a worktree name in use", async
   expect(field("Worktree name").value).toBe("taken-2");
   expect(create().disabled).toBe(false);
   expect(onCreate).not.toHaveBeenCalled();
+});
+
+it("loads later branch pages from the prefetched cursor", async () => {
+  const read = vi.fn(async (_repo, cursor) =>
+    decodeGitBranches({
+      snapshot: "paged",
+      nextCursor: cursor ? null : "next",
+      metadata: {},
+      entries: cursor
+        ? [branch("later-branch", other)]
+        : [branch("main", main, true)],
+    }),
+  );
+  seedGitClient({
+    worktrees: vi.fn(async () => worktrees),
+    branches: read,
+  } as unknown as GitRepositoryClient);
+  await render();
+  expect(read).toHaveBeenCalledTimes(2);
+  const more = [...document.querySelectorAll("button")].find(
+    (button) => button.textContent === "Load more branches",
+  )!;
+  await act(async () => more.click());
+  expect(read).toHaveBeenCalledTimes(2);
+  expect(document.body.textContent).toContain("All matching branches loaded");
+  await act(async () => {
+    document
+      .querySelector('[aria-label="Start from"]')!
+      .dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+      );
+  });
+  expect(document.body.textContent).toContain("later-branch");
+});
+
+it("searches on the server while preserving the selected starting commit", async () => {
+  const read = vi.fn(async (_repo, _cursor, options) =>
+    decodeGitBranches({
+      snapshot: options?.filter || "all",
+      nextCursor: null,
+      metadata: {},
+      entries: options?.filter
+        ? [branch("unloaded-match", other)]
+        : [branch("main", main, true)],
+    }),
+  );
+  seedGitClient({
+    worktrees: vi.fn(async () => worktrees),
+    branches: read,
+  } as unknown as GitRepositoryClient);
+  const onCreate = await render();
+  await type("Branch name", "new-feature");
+  await type("Find a branch", "unloaded");
+  expect(create().disabled).toBe(true);
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 220));
+  });
+  expect(read).toHaveBeenLastCalledWith("repo", undefined, {
+    filter: "unloaded",
+  });
+  expect(create().disabled).toBe(false);
+  await act(async () => create().click());
+  expect(onCreate).toHaveBeenCalledWith(
+    expect.objectContaining({ expectedOid: main.hex }),
+    "worktrees-token",
+    true,
+  );
+});
+
+it("shows structured branch read failures instead of opaque object text", async () => {
+  seedGitClient({
+    worktrees: vi.fn(async () => worktrees),
+    branches: vi.fn(async () => {
+      throw {
+        code: "INVALID_REQUEST",
+        message: "This agent cannot read filtered branches.",
+      };
+    }),
+  } as unknown as GitRepositoryClient);
+  await render();
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+    "This agent cannot read filtered branches. (INVALID_REQUEST)",
+  );
+  expect(document.body.textContent).not.toContain("[object Object]");
+  expect(create().disabled).toBe(true);
+});
+
+it("uses main-worktree metadata and exact name lookup beyond the first page", async () => {
+  const lookup = vi.fn(
+    async (_repo: string, _cursor?: string, options?: { name?: string }) => ({
+      ...worktrees,
+      metadata: {
+        ...worktrees.metadata,
+        main: { ...worktrees.entries[0], path: gitPath("/srv/original") },
+      },
+      entries:
+        options?.name === "hidden"
+          ? [{ ...worktrees.entries[1], name: gitPath("hidden") }]
+          : [],
+      nextCursor: options?.name ? null : "more",
+    }),
+  );
+  seedGitClient({
+    worktrees: lookup,
+    branches: vi.fn(async () => branches),
+  } as unknown as GitRepositoryClient);
+  const onCreate = await render();
+  await type("Branch name", "hidden");
+  expect(field("Location on server").value).toBe("/srv/original-hidden");
+  expect(lookup).toHaveBeenCalledWith("repo", undefined, {
+    name: "hidden",
+    pageSize: 1,
+  });
+  expect(create().disabled).toBe(true);
+  expect(document.body.textContent).toContain(
+    "A worktree with that name exists.",
+  );
+  expect(onCreate).not.toHaveBeenCalled();
+  expect(lookup.mock.calls.some((call) => call[1] === "more")).toBe(false);
 });

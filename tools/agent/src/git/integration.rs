@@ -168,12 +168,19 @@ pub(super) fn prepare(
         checkout::supported_hook(repo, "pre-merge-commit")?;
         checkout::supported_hook(repo, "post-merge")?;
     }
-    checkout::supported_merge_files(repo, &theirs.tree().map_err(engine)?)?;
     if kind != Kind::Merge && theirs.parent_count() > 0 {
         let parent = theirs
             .parent(mainline.saturating_sub(1) as usize)
             .map_err(engine)?;
-        checkout::supported_merge_files(repo, &parent.tree().map_err(engine)?)?;
+        checkout::supported_merge_trees(
+            repo,
+            &[
+                theirs.tree().map_err(engine)?,
+                parent.tree().map_err(engine)?,
+            ],
+        )?;
+    } else {
+        checkout::supported_merge_files(repo, &theirs.tree().map_err(engine)?)?;
     }
     let mut lock = IndexLock::acquire(repo)?;
     let mut refs = repo.transaction().map_err(engine)?;
@@ -194,21 +201,22 @@ pub(super) fn prepare(
     incoming
         .read_tree(&theirs.tree().map_err(engine)?)
         .map_err(engine)?;
-    let tracked: std::collections::BTreeSet<Vec<u8>> = incoming
+    let mut tracked: BTreeSet<Vec<u8>> = incoming
         .iter()
         .chain(repo.index().map_err(engine)?.iter())
         .map(|entry| entry.path)
         .collect();
-    guard_paths(repo, &tracked, true)?;
     let preview = match kind {
         Kind::Merge => repo.merge_commits(&ours, &theirs, None),
         Kind::CherryPick => repo.cherrypick_commit(&theirs, &ours, mainline, None),
         Kind::Revert => repo.revert_commit(&theirs, &ours, mainline, None),
     }
     .map_err(engine)?;
-    // A revert may restore paths absent from the selected commit's tree.
-    let preview_paths = preview.iter().map(|entry| entry.path).collect();
-    guard_paths(repo, &preview_paths, true)?;
+    // Preview only creates an in-memory index. Check the union once, before
+    // writing recovery state or checking out files. Include paths restored by
+    // revert that are absent from both the current and selected commit trees.
+    tracked.extend(preview.iter().map(|entry| entry.path));
+    guard_paths(repo, &tracked, true)?;
     let mut changed = BTreeSet::new();
     let original_tree = ours.tree().map_err(engine)?;
     let diff = repo
@@ -475,15 +483,22 @@ pub(super) fn restore_paths(
     let mut index = super::operations::private_index(repo, &index_path)?;
     for bytes in paths {
         let path = Path::new(OsStr::from_bytes(bytes));
-        for result in [index.conflict_remove(path), index.remove_path(path)] {
-            if let Err(e) = result {
-                if e.code() != git2::ErrorCode::NotFound {
-                    return Err(engine(e));
-                }
+        if let Err(e) = index.conflict_remove(path) {
+            if e.code() != git2::ErrorCode::NotFound {
+                return Err(engine(e));
             }
         }
         if let Some(entry) = original_index.get_path(path, 0) {
+            // Keep the tree entry's empty stat cache: preserving cached metadata
+            // can hide equal-sized edits with restored mtimes when trustctime
+            // is disabled, even during a forced hard reset.
+            // add replaces an existing stage-zero entry. Avoid removing and
+            // reinserting it in the sorted index for every restored path.
             index.add(&entry).map_err(engine)?;
+        } else if let Err(e) = index.remove_path(path) {
+            if e.code() != git2::ErrorCode::NotFound {
+                return Err(engine(e));
+            }
         }
     }
     index.write().map_err(engine)?;
@@ -629,6 +644,7 @@ mod tests {
         );
         let repo_id = opened["repoId"].as_str().unwrap().to_owned();
         let status_request = Request::Status {
+            filter: None,
             repo_id: repo_id.clone(),
             page_size: 100,
             cursor: None,

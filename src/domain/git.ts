@@ -1,3 +1,8 @@
+export type GitStatusFilter = {
+  text: string;
+  group?: "all" | "staged" | "unstaged" | "untracked" | "conflicted";
+};
+
 /** Mirrors the agent's protocol.rs. Paths returned by Git must retain bytesB64. */
 export interface GitPath {
   bytesB64: string;
@@ -19,6 +24,7 @@ export interface GitOperationReceipt {
     | "failed"
     | "rejected"
     | "needs_resolution"
+    | "reviewed_unknown"
     | "outcome_unknown";
 }
 export interface GitConnection {
@@ -40,32 +46,85 @@ export interface GitConnection {
   };
 }
 type Page = { repoId: string; pageSize?: number; cursor?: string | null };
+export type GitBranchOptions = {
+  filter?: string;
+  branchKind?: "all" | "local" | "remote";
+  pageSize?: number;
+};
+export type GitWorktreeOptions = {
+  /** Search a captured listing; a changed, evicted snapshot is refused. */
+  atSnapshot?: string;
+  filter?: string;
+  branch?: string;
+  name?: string;
+  pageSize?: number;
+};
 /** Read operations never mutate repository state. */
 export type GitReadRequest =
   | { method: "repo.open"; params: { path: GitPath } }
+  | {
+      method: "repo.remote_names";
+      params: {
+        repoId: string;
+        filter?: string;
+        pageSize?: number;
+        cursor?: string;
+      };
+    }
+  | { method: "repo.remote"; params: { repoId: string; name: string } }
   | { method: "repo.close" | "repo.remotes"; params: { repoId: string } }
   | {
-      method:
-        | "repo.status"
-        | "repo.branches"
-        | "repo.worktrees"
-        | "repo.stashes"
-        | "repo.tags";
+      method: "repo.stashes";
       params: Page;
     }
-  | { method: "repo.history"; params: Page & { revision?: string } }
+  | {
+      method: "repo.status_summary";
+      params:
+        { repoId: string; path?: never } | { path: GitPath; repoId?: never };
+    }
+  | { method: "repo.status"; params: Page & { filter?: GitStatusFilter } }
+  | { method: "repo.worktrees"; params: Page & GitWorktreeOptions }
+  | { method: "repo.tags"; params: Page & { messageBytes?: number } }
+  | { method: "repo.tag"; params: { repoId: string; oid: string } }
+  | { method: "repo.branches"; params: Page & GitBranchOptions }
+  | {
+      method: "repo.history";
+      params: Page & { revision?: string; messageBytes?: number };
+    }
   | {
       method: "repo.remote_refs";
       params: Page & {
         remote: string;
         expectedToken: string;
         forPush?: boolean;
+        filter?: string;
       };
     }
+  | { method: "repo.commit"; params: { repoId: string; commitOid: string } }
   | { method: "repo.blob"; params: { repoId: string; oid: string } }
+  | {
+      method: "repo.blob_page";
+      params: {
+        repoId: string;
+        oid: string;
+        maxBytes?: number;
+        cursor?: string | null;
+      };
+    }
   | {
       method: "repo.commit_files";
       params: Page & { commitOid: string; parentIndex?: number };
+    }
+  | {
+      method: "repo.commit_diff_page";
+      params: Page & {
+        commitOid: string;
+        parentIndex?: number;
+        path: GitPath;
+        contextLines?: number;
+        maxBytes?: number;
+        lineEncoding?: "tuple_v1";
+      };
     }
   | {
       method: "repo.commit_diff";
@@ -75,6 +134,17 @@ export type GitReadRequest =
         parentIndex?: number;
         path?: GitPath;
         contextLines?: number;
+      };
+    }
+  | {
+      method: "repo.diff_page";
+      params: Page & {
+        snapshot: string;
+        entryId: string;
+        side: "head_to_index" | "index_to_worktree" | "head_to_worktree";
+        contextLines?: number;
+        maxBytes?: number;
+        lineEncoding?: "tuple_v1";
       };
     }
   | {

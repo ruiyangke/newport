@@ -1,4 +1,7 @@
 import type {
+  GitBranchOptions,
+  GitStatusFilter,
+  GitWorktreeOptions,
   GitBootstrapRequest,
   GitPath,
   GitReadRequest,
@@ -8,17 +11,27 @@ import type {
 import {
   decodeGitRepository,
   decodeGitStatus,
+  decodeGitStatusMetadata,
   decodeGitHistory,
+  decodeGitCommit,
   decodeGitDiff,
+  decodeGitCommitDiffPage,
+  decodeGitWorkingDiffPage,
+  validateInitialGitDiffPage,
   decodeGitBranches,
   decodeGitCommitFiles,
   decodeGitOperation,
   decodeGitRemotes,
+  decodeGitRemote,
   decodeGitRemoteRefs,
+  decodeGitRemoteNames,
   decodeGitStashes,
   decodeGitTags,
+  decodeGitTag,
   decodeGitWorktrees,
   decodeGitBlob,
+  decodeGitBlobPage,
+  validateInitialGitBlobPage,
   GitResponseError,
 } from "../domain/gitResponses";
 import { isGitMutation } from "../domain/git";
@@ -28,13 +41,21 @@ import { GitOperationError, type GitSession } from "./gitSession";
 export class GitRepositoryClient {
   constructor(
     private readonly session: Pick<GitSession, "request" | "forget">,
+    private readonly signal?: AbortSignal,
   ) {}
+
+  /** A per-read view; cancellation never changes the shared session or writes. */
+  withSignal(signal: AbortSignal) {
+    return new GitRepositoryClient(this.session, signal);
+  }
 
   private async read<T>(
     request: GitRequest,
     decode: (value: unknown) => T,
   ): Promise<T> {
-    const response = await this.session.request(request);
+    const response = await (this.signal
+      ? this.session.request(request, this.signal)
+      : this.session.request(request));
     try {
       return decode(response);
     } catch (error) {
@@ -73,25 +94,86 @@ export class GitRepositoryClient {
       (value) => decodeGitOperation(value, operationId),
     );
   }
-  status(repoId: string, cursor?: string) {
+  statusSummary(target: string | GitPath) {
     return this.read(
-      { method: "repo.status", params: { repoId, cursor } },
+      {
+        method: "repo.status_summary",
+        params:
+          typeof target === "string" ? { repoId: target } : { path: target },
+      },
+      (value) => {
+        const result = decodeGitStatusMetadata(value);
+        if (result.totalEntries === null || result.truncated)
+          throw new GitResponseError("complete status summary");
+        return result;
+      },
+    );
+  }
+  status(repoId: string, cursor?: string, filter?: GitStatusFilter) {
+    return this.read(
+      {
+        method: "repo.status",
+        params: { repoId, cursor, ...(filter ? { filter } : {}) },
+      },
       decodeGitStatus,
     );
   }
   history(repoId: string, revision = "HEAD", cursor?: string) {
     return this.read(
-      { method: "repo.history", params: { repoId, revision, cursor } },
+      {
+        method: "repo.history",
+        params: { repoId, revision, cursor, messageBytes: 512 },
+      },
       decodeGitHistory,
+    );
+  }
+  commit(repoId: string, commitOid: string) {
+    return this.read(
+      { method: "repo.commit", params: { repoId, commitOid } },
+      (value) => {
+        const commit = decodeGitCommit(value);
+        if (commit.oid.hex !== commitOid.toLowerCase())
+          throw new GitResponseError("requested commit");
+        return commit;
+      },
     );
   }
   async close(repoId: string): Promise<void> {
     await this.session.request({ method: "repo.close", params: { repoId } });
   }
-  branches(repoId: string, cursor?: string) {
+  branches(repoId: string, cursor?: string, options?: GitBranchOptions) {
     return this.read(
-      { method: "repo.branches", params: { repoId, cursor } },
+      { method: "repo.branches", params: { ...options, repoId, cursor } },
       decodeGitBranches,
+    );
+  }
+  remoteNames(
+    params: Extract<GitReadRequest, { method: "repo.remote_names" }>["params"],
+  ) {
+    const expected = structuredClone(params);
+    return this.read(
+      { method: "repo.remote_names", params: expected },
+      (value) => {
+        const result = decodeGitRemoteNames(value);
+        if (
+          result.entries.length > (expected.pageSize ?? 100) ||
+          (!expected.cursor &&
+            result.nextCursor === null &&
+            result.entries.length !== result.metadata.totalEntries)
+        )
+          throw new GitResponseError("remote names completeness");
+        return result;
+      },
+    );
+  }
+  remote(repoId: string, name: string) {
+    return this.read(
+      { method: "repo.remote", params: { repoId, name } },
+      (value) => {
+        const remote = decodeGitRemote(value);
+        if (remote.name !== name) throw new GitResponseError("remote identity");
+        return remote;
+      },
     );
   }
   remotes(repoId: string) {
@@ -126,14 +208,48 @@ export class GitRepositoryClient {
   }
   tags(repoId: string, cursor?: string) {
     return this.read(
-      { method: "repo.tags", params: { repoId, cursor } },
+      { method: "repo.tags", params: { repoId, cursor, messageBytes: 512 } },
       decodeGitTags,
     );
   }
-  worktrees(repoId: string, cursor?: string) {
+  tag(repoId: string, oid: string) {
     return this.read(
-      { method: "repo.worktrees", params: { repoId, cursor } },
+      { method: "repo.tag", params: { repoId, oid } },
+      (value) => {
+        const result = decodeGitTag(value);
+        if (result.oid.hex !== oid.toLowerCase())
+          throw new GitResponseError("requested tag");
+        return result;
+      },
+    );
+  }
+  worktrees(repoId: string, cursor?: string, options?: GitWorktreeOptions) {
+    const { atSnapshot, ...filters } = options ?? {};
+    return this.read(
+      {
+        method: "repo.worktrees",
+        params: {
+          repoId,
+          cursor,
+          ...filters,
+          ...(!cursor && atSnapshot !== undefined ? { atSnapshot } : {}),
+        },
+      },
       decodeGitWorktrees,
+    );
+  }
+  blobPage(
+    params: Extract<GitReadRequest, { method: "repo.blob_page" }>["params"],
+  ) {
+    const expected = structuredClone(params);
+    return this.read(
+      { method: "repo.blob_page", params: expected },
+      (value) => {
+        const result = decodeGitBlobPage(value);
+        if (result.metadata.oid.hex !== expected.oid.toLowerCase())
+          throw new GitResponseError("requested blob page");
+        return expected.cursor ? result : validateInitialGitBlobPage(result);
+      },
     );
   }
   blob(repoId: string, oid: string) {
@@ -168,6 +284,57 @@ export class GitRepositoryClient {
         throw new GitResponseError("working diff snapshot");
       return result;
     });
+  }
+  diffPage(
+    params: Extract<GitReadRequest, { method: "repo.diff_page" }>["params"],
+  ) {
+    const expected = {
+      ...structuredClone(params),
+      lineEncoding: "tuple_v1" as const,
+    };
+    return this.read(
+      { method: "repo.diff_page", params: expected },
+      (value) => {
+        const result = decodeGitWorkingDiffPage(value);
+        if (
+          result.metadata.sourceSnapshot !== expected.snapshot ||
+          result.metadata.entryId !== expected.entryId ||
+          result.metadata.side !== expected.side ||
+          result.metadata.contextLines !== (expected.contextLines ?? 3)
+        )
+          throw new GitResponseError("working diff selection");
+        return expected.cursor ? result : validateInitialGitDiffPage(result);
+      },
+    );
+  }
+  commitDiffPage(
+    params: Extract<
+      GitReadRequest,
+      { method: "repo.commit_diff_page" }
+    >["params"],
+  ) {
+    const expected = {
+      ...structuredClone(params),
+      lineEncoding: "tuple_v1" as const,
+    };
+    return this.read(
+      { method: "repo.commit_diff_page", params: expected },
+      (value) => {
+        const result = decodeGitCommitDiffPage(value);
+        checkComparison(result.metadata, expected);
+        if (
+          result.metadata.selectedPath.bytesB64 !== expected.path.bytesB64 ||
+          result.metadata.contextLines !== (expected.contextLines ?? 3) ||
+          result.entries.some(
+            (file) =>
+              file.oldPath?.bytesB64 !== expected.path.bytesB64 &&
+              file.newPath?.bytesB64 !== expected.path.bytesB64,
+          )
+        )
+          throw new GitResponseError("selected paged diff");
+        return expected.cursor ? result : validateInitialGitDiffPage(result);
+      },
+    );
   }
   commitDiff(
     params: Extract<GitReadRequest, { method: "repo.commit_diff" }>["params"],

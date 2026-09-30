@@ -4,29 +4,48 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{self, Read, Write};
 
+/// Engine-neutral response consumed by the common RPC framing/streaming layer.
+pub enum Output {
+    Json(Value),
+    Diff { snapshot: String, bytes: Vec<u8> },
+}
+
 pub const VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const MAX_DIFF: usize = 20 * 1024 * 1024;
 pub const CHUNK_SIZE: usize = 64 * 1024;
+/// At most 512 KiB of decoded diff data may await acknowledgement. The eight
+/// small ACK frames also fit a 1 KiB reverse-direction buffer, so existing
+/// clients can keep acknowledging while the agent fills the window.
+pub const STREAM_WINDOW: u32 = 8;
 pub const METHODS: &[&str] = &[
     "repo.open",
     "repo.init",
     "repo.clone",
     "repo.close",
     "repo.status",
+    "repo.status_summary",
     "repo.branches",
     "repo.worktrees",
     "repo.remotes",
+    "repo.remote",
+    "repo.remote_names",
     "repo.remote_refs",
     "repo.blob",
+    "repo.blob_page",
     "repo.stashes",
     "repo.tags",
+    "repo.tag",
     "repo.history",
+    "repo.commit",
     "repo.diff",
+    "repo.diff_page",
     "repo.commit_diff",
+    "repo.commit_diff_page",
     "repo.commit_files",
     "operation.start",
     "operation.get",
+    "operation.review",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +100,15 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusFilter {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub group: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -484,6 +512,13 @@ pub enum Action {
     },
 }
 
+/// Opt-in wire format; omitted requests keep the original object rows.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum DiffLineEncoding {
+    #[serde(rename = "tuple_v1")]
+    TupleV1,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", deny_unknown_fields)]
 pub enum Request {
@@ -506,6 +541,12 @@ pub enum Request {
         #[serde(rename = "initialBranch")]
         initial_branch: String,
     },
+    #[serde(rename = "repo.tag")]
+    Tag {
+        #[serde(rename = "repoId")]
+        repo_id: String,
+        oid: String,
+    },
     #[serde(rename = "repo.tags")]
     Tags {
         #[serde(rename = "repoId")]
@@ -514,6 +555,12 @@ pub enum Request {
         page_size: usize,
         #[serde(default)]
         cursor: Option<String>,
+        #[serde(
+            default,
+            rename = "messageBytes",
+            skip_serializing_if = "Option::is_none"
+        )]
+        message_bytes: Option<usize>,
     },
     #[serde(rename = "repo.stashes")]
     Stashes {
@@ -521,6 +568,16 @@ pub enum Request {
         repo_id: String,
         #[serde(rename = "pageSize", default = "page_size")]
         page_size: usize,
+        #[serde(default)]
+        cursor: Option<String>,
+    },
+    #[serde(rename = "repo.blob_page")]
+    BlobPage {
+        #[serde(rename = "repoId")]
+        repo_id: String,
+        oid: String,
+        #[serde(default, rename = "maxBytes")]
+        max_bytes: Option<usize>,
         #[serde(default)]
         cursor: Option<String>,
     },
@@ -539,10 +596,29 @@ pub enum Request {
         expected_token: String,
         #[serde(default, rename = "forPush")]
         for_push: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        filter: String,
         #[serde(default = "page_size", rename = "pageSize")]
         page_size: usize,
         #[serde(default)]
         cursor: Option<String>,
+    },
+    #[serde(rename = "repo.remote_names")]
+    RemoteNames {
+        #[serde(rename = "repoId")]
+        repo_id: String,
+        #[serde(default)]
+        filter: String,
+        #[serde(default = "page_size", rename = "pageSize")]
+        page_size: usize,
+        #[serde(default)]
+        cursor: Option<String>,
+    },
+    #[serde(rename = "repo.remote")]
+    Remote {
+        #[serde(rename = "repoId")]
+        repo_id: String,
+        name: String,
     },
     #[serde(rename = "repo.remotes")]
     Remotes {
@@ -564,6 +640,11 @@ pub enum Request {
         #[serde(rename = "operationId")]
         operation_id: String,
     },
+    #[serde(rename = "operation.review")]
+    Review {
+        #[serde(rename = "operationId")]
+        operation_id: String,
+    },
     #[serde(rename = "repo.open")]
     Open { path: Path },
     #[serde(rename = "repo.close")]
@@ -571,10 +652,19 @@ pub enum Request {
         #[serde(rename = "repoId")]
         repo_id: String,
     },
+    #[serde(rename = "repo.status_summary")]
+    StatusSummary {
+        #[serde(default, rename = "repoId", skip_serializing_if = "Option::is_none")]
+        repo_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<Path>,
+    },
     #[serde(rename = "repo.status")]
     Status {
         #[serde(rename = "repoId")]
         repo_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<StatusFilter>,
         #[serde(default = "page_size", rename = "pageSize")]
         page_size: usize,
         #[serde(default)]
@@ -588,6 +678,18 @@ pub enum Request {
         page_size: usize,
         #[serde(default)]
         cursor: Option<String>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        filter: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(
+            default,
+            rename = "atSnapshot",
+            skip_serializing_if = "Option::is_none"
+        )]
+        at_snapshot: Option<String>,
     },
     #[serde(rename = "repo.branches")]
     Branches {
@@ -597,6 +699,14 @@ pub enum Request {
         page_size: usize,
         #[serde(default)]
         cursor: Option<String>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        filter: String,
+        #[serde(
+            default,
+            rename = "branchKind",
+            skip_serializing_if = "Option::is_none"
+        )]
+        branch_kind: Option<String>,
     },
     #[serde(rename = "repo.history")]
     History {
@@ -608,6 +718,19 @@ pub enum Request {
         cursor: Option<String>,
         #[serde(default = "revision")]
         revision: String,
+        #[serde(
+            default,
+            rename = "messageBytes",
+            skip_serializing_if = "Option::is_none"
+        )]
+        message_bytes: Option<usize>,
+    },
+    #[serde(rename = "repo.commit")]
+    Commit {
+        #[serde(rename = "repoId")]
+        repo_id: String,
+        #[serde(rename = "commitOid")]
+        commit_oid: String,
     },
     #[serde(rename = "repo.commit_files")]
     CommitFiles {
@@ -635,6 +758,53 @@ pub enum Request {
         #[serde(default = "context", rename = "contextLines")]
         context_lines: u32,
     },
+    #[serde(rename = "repo.commit_diff_page")]
+    CommitDiffPage {
+        #[serde(rename = "repoId")]
+        repo_id: String,
+        #[serde(rename = "commitOid")]
+        commit_oid: String,
+        path: Path,
+        #[serde(default, rename = "parentIndex")]
+        parent_index: usize,
+        #[serde(default = "context", rename = "contextLines")]
+        context_lines: u32,
+        #[serde(default = "page_size", rename = "pageSize")]
+        page_size: usize,
+        #[serde(default, rename = "maxBytes")]
+        max_bytes: Option<usize>,
+        #[serde(default)]
+        cursor: Option<String>,
+        #[serde(
+            default,
+            rename = "lineEncoding",
+            skip_serializing_if = "Option::is_none"
+        )]
+        line_encoding: Option<DiffLineEncoding>,
+    },
+    #[serde(rename = "repo.diff_page")]
+    DiffPage {
+        #[serde(rename = "repoId")]
+        repo_id: String,
+        snapshot: String,
+        #[serde(rename = "entryId")]
+        entry_id: String,
+        side: Side,
+        #[serde(default = "context", rename = "contextLines")]
+        context_lines: u32,
+        #[serde(default = "page_size", rename = "pageSize")]
+        page_size: usize,
+        #[serde(default, rename = "maxBytes")]
+        max_bytes: Option<usize>,
+        #[serde(default)]
+        cursor: Option<String>,
+        #[serde(
+            default,
+            rename = "lineEncoding",
+            skip_serializing_if = "Option::is_none"
+        )]
+        line_encoding: Option<DiffLineEncoding>,
+    },
     #[serde(rename = "repo.diff")]
     Diff {
         #[serde(rename = "repoId")]
@@ -646,6 +816,16 @@ pub enum Request {
         #[serde(default = "context", rename = "contextLines")]
         context_lines: u32,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommandLog {
+    pub command: String,
+    pub duration_ms: u64,
+    pub exit_code: Option<i32>,
+    pub output: String,
+    pub interrupted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -665,6 +845,12 @@ pub enum Message {
         client_id: String,
         #[serde(rename = "clientVersion")]
         client_version: String,
+        #[serde(
+            default,
+            rename = "commandLogs",
+            skip_serializing_if = "std::ops::Not::not"
+        )]
+        command_logs: bool,
     },
     Ready {
         id: String,
@@ -675,6 +861,11 @@ pub enum Message {
         id: String,
         method: String,
         params: Value,
+    },
+    #[serde(rename = "command.log")]
+    CommandLog {
+        id: String,
+        entry: CommandLog,
     },
     Response {
         id: String,
@@ -860,5 +1051,22 @@ mod tests {
         );
         assert_eq!(Path::new(b"a\n\xff").decode().unwrap(), b"a\n\xff");
         assert!(Path::new(b"a\0b").decode().is_err());
+    }
+    #[test]
+    fn default_branch_requests_preserve_legacy_wire_fields() {
+        let request = Request::Branches {
+            repo_id: "repo".into(),
+            page_size: 100,
+            cursor: None,
+            filter: String::new(),
+            branch_kind: None,
+        };
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert!(encoded["params"].get("filter").is_none());
+        assert!(encoded["params"].get("branchKind").is_none());
+        let decoded: Request = serde_json::from_value(encoded).unwrap();
+        assert!(
+            matches!(decoded, Request::Branches{filter,branch_kind:None,..} if filter.is_empty())
+        );
     }
 }

@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { GitWriteAction } from "../domain/git";
-import { appendGitPage, type GitStashes } from "../domain/gitResponses";
+import { type GitStashes } from "../domain/gitResponses";
 import { gitKeys, gitQueries } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
 import { Button, Input } from "./controls";
 import { Checkbox } from "./ui/checkbox";
 import { Modal } from "./Editors";
 import { GitCommitInspector } from "./GitCommitInspector";
+import { useGitPageLoader } from "../hooks/useGitPageLoader";
+import { GitLoadMore } from "./GitLoadMore";
+import { gitProjectsFor } from "../git/registry";
+import { gitErrorMessage } from "../git/errors";
 
 /**
  * A segmented choice on its rail: the pressed chip is raised, the other sits
@@ -72,9 +76,6 @@ function StashDialog({
 }) {
   const scope = useCurrentServerScope();
   const queryClient = useQueryClient();
-  // Each page of the list is its own read, keyed by its cursor; these are the
-  // cursors of the pages loaded after the first.
-  const [cursors, setCursors] = useState<string[]>([]);
   const [selected, setSelected] = useState<Stash | null>(null);
   const [message, setMessage] = useState("");
   const [includeUntracked, setIncludeUntracked] = useState(false);
@@ -83,41 +84,30 @@ function StashDialog({
   const [confirm, setConfirm] = useState<"apply" | "pop" | "drop" | null>(null);
   const [saving, setSaving] = useState(false);
   const [showUntracked, setShowUntracked] = useState(false);
-  const reads = useQueries({
-    queries: [undefined, ...cursors].map((cursor) => ({
-      ...gitQueries.stashes(scope, repoId, cursor),
-      refetchOnMount: "always" as const,
-    })),
+  const first = useQuery({
+    ...gitQueries.stashes(scope, repoId),
+    refetchOnMount: "always",
   });
-  // The list as far as it has been read. A page counts once it has been read
-  // for this opening and continues the page before it.
-  let stashes: GitStashes | null = null;
-  let loaded = 0;
-  let listError = "";
-  for (const [index, read] of reads.entries()) {
-    if (read.isError && !read.isFetching) {
-      listError = String(read.error);
-      break;
-    }
-    if (!read.data || !read.isFetchedAfterMount) break;
-    try {
-      stashes =
-        index === 0
-          ? read.data
-          : appendGitPage(stashes!, read.data, cursors[index - 1]);
-    } catch (reason) {
-      listError = String(reason);
-      break;
-    }
-    loaded = index + 1;
-  }
-  const loading = reads.some((read) => read.isFetching);
+  const stashes = first.isFetchedAfterMount ? first.data : null;
+  const loading = first.isFetching;
+  const listError =
+    first.isError && !loading ? gitErrorMessage(first.error) : "";
+  const pages = useGitPageLoader({
+    queryKey: gitQueries.stashes(scope, repoId).queryKey,
+    page: stashes ?? null,
+    enabled: !loading && !first.isError && !selected && !saving,
+    prefetch: true,
+    entryKey: (stash: Stash) => `${stash.index}:${stash.oid}`,
+    read: (cursor, signal) =>
+      gitProjectsFor(scope)
+        .repositories.withSignal(signal)
+        .stashes(repoId, cursor),
+  });
   // A new snapshot means the stash list may have changed under the dialog.
   const seen = useRef(snapshot);
   useEffect(() => {
     if (seen.current === snapshot) return;
     seen.current = snapshot;
-    setCursors([]);
     setSelected(null);
     setConfirm(null);
     void queryClient.invalidateQueries(
@@ -128,46 +118,46 @@ function StashDialog({
   // A stash is a commit whose second parent is the saved index and whose
   // third, when present, holds the untracked files.
   const tracked = useQuery({
-    ...gitQueries.history(scope, repoId, selected?.oid ?? ""),
+    ...gitQueries.commit(scope, repoId, selected?.oid ?? ""),
     enabled: !!selected,
   });
-  const trackedCommit = tracked.data?.entries[0];
+  const trackedCommit = tracked.data;
   const trackedMatches = !!selected && trackedCommit?.oid.hex === selected.oid;
   const untrackedOid = trackedMatches
     ? trackedCommit!.parents[2]?.hex
     : undefined;
   const untracked = useQuery({
-    ...gitQueries.history(scope, repoId, untrackedOid ?? ""),
-    enabled: !!untrackedOid,
+    ...gitQueries.commit(scope, repoId, untrackedOid ?? ""),
+    enabled: !!untrackedOid && showUntracked,
   });
-  const untrackedCommit = untracked.data?.entries[0];
+  const untrackedCommit = untracked.data;
   const untrackedMatches =
     !!untrackedOid && untrackedCommit?.oid.hex === untrackedOid;
   const previewLoading =
     !!selected &&
-    (tracked.isFetching || (!!untrackedOid && untracked.isFetching));
+    (tracked.isFetching ||
+      (showUntracked && !!untrackedOid && untracked.isFetching));
   const previewError = !selected
     ? ""
     : tracked.isError && !tracked.isFetching
-      ? String(tracked.error)
+      ? gitErrorMessage(tracked.error)
       : tracked.data && !trackedMatches
         ? String(new Error("The selected stash could not be inspected."))
-        : untracked.isError && !untracked.isFetching
-          ? String(untracked.error)
-          : untracked.data && !untrackedMatches
+        : showUntracked && untracked.isError && !untracked.isFetching
+          ? gitErrorMessage(untracked.error)
+          : showUntracked && untracked.data && !untrackedMatches
             ? String(
                 new Error(
                   "The stash’s untracked files could not be inspected.",
                 ),
               )
             : "";
-  const preview =
-    trackedMatches && (!untrackedOid || untrackedMatches)
-      ? {
-          tracked: trackedCommit!,
-          untracked: untrackedOid ? untrackedCommit! : null,
-        }
-      : null;
+  const preview = trackedMatches
+    ? {
+        tracked: trackedCommit!,
+        untracked: untrackedOid ? untrackedCommit! : null,
+      }
+    : null;
   const readError = selected ? previewError : listError;
   const disabled = busy || loading || previewLoading || !!blockedReason;
   async function submit(action: GitWriteAction) {
@@ -216,8 +206,7 @@ function StashDialog({
               onClick={() => {
                 setSelected(null);
                 setConfirm(null);
-                setCursors([]);
-                void reads[0].refetch();
+                void first.refetch();
               }}
             >
               Retry stashes
@@ -350,7 +339,7 @@ function StashDialog({
                   >
                     Tracked changes
                   </Button>
-                  {preview.untracked && (
+                  {untrackedOid && (
                     <Button
                       className={segment}
                       aria-pressed={showUntracked}
@@ -365,15 +354,19 @@ function StashDialog({
                     ? "Files saved as untracked content."
                     : "Parent 1 is the original base; parent 2 is the saved index."}
                 </p>
-                <GitCommitInspector
-                  key={
-                    showUntracked
-                      ? preview.untracked!.oid.hex
-                      : preview.tracked.oid.hex
-                  }
-                  repoId={repoId}
-                  commit={showUntracked ? preview.untracked! : preview.tracked}
-                />
+                {(!showUntracked || preview.untracked) && (
+                  <GitCommitInspector
+                    key={
+                      showUntracked
+                        ? preview.untracked!.oid.hex
+                        : preview.tracked.oid.hex
+                    }
+                    repoId={repoId}
+                    commit={
+                      showUntracked ? preview.untracked! : preview.tracked
+                    }
+                  />
+                )}
               </>
             )}
             {/*
@@ -423,6 +416,16 @@ function StashDialog({
               Save current changes…
             </Button>
             {stashes?.entries.length === 0 && <p>No saved stashes.</p>}
+            {stashes && stashes.entries.length > 0 && (
+              <p role="status">
+                {stashes.entries.length}{" "}
+                {stashes.metadata.totalEntries === undefined
+                  ? stashes.nextCursor
+                    ? "stashes loaded"
+                    : "stashes"
+                  : `of ${stashes.metadata.totalEntries} stashes loaded`}
+              </p>
+            )}
             <ul className="git-stash-list max-h-[300px] overflow-auto [&_button]:[align-items:start]">
               {stashes?.entries.map((stash) => (
                 <li key={`${stash.oid}:${stash.index}`}>
@@ -446,22 +449,20 @@ function StashDialog({
                   </Button>
                 </li>
               ))}
+              {stashes && (
+                <li className="list-none">
+                  <GitLoadMore
+                    cursor={stashes.nextCursor}
+                    loading={pages.loading}
+                    error={pages.error}
+                    disabled={busy || loading || first.isError}
+                    onLoad={pages.load}
+                    label="Load more stashes"
+                    endLabel="All stashes loaded"
+                  />
+                </li>
+              )}
             </ul>
-            {stashes?.nextCursor && (
-              <Button
-                disabled={busy || loading}
-                onClick={() => {
-                  const cursor = stashes!.nextCursor!;
-                  // A page that failed is asked for again; otherwise the
-                  // next one joins the list.
-                  if (cursors[loaded - 1] === cursor)
-                    void reads[loaded]?.refetch();
-                  else setCursors([...cursors.slice(0, loaded - 1), cursor]);
-                }}
-              >
-                Load more stashes
-              </Button>
-            )}
           </>
         )}
       </div>

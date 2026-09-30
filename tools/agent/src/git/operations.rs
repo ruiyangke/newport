@@ -390,12 +390,16 @@ pub fn apply(
         ));
     }
     let mut head_index = Index::new().map_err(engine)?;
-    match repo.head() {
-        Ok(head) => head_index
-            .read_tree(&head.peel_to_tree().map_err(engine)?)
-            .map_err(engine)?,
-        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {}
-        Err(e) => return Err(engine(e)),
+    // Only whole-file unstaging reads entries from HEAD. Staging and hunk
+    // edits must not expand every HEAD tree into an otherwise unused index.
+    if matches!(action, Action::Unstage { hunks: None, .. }) {
+        match repo.head() {
+            Ok(head) => head_index
+                .read_tree(&head.peel_to_tree().map_err(engine)?)
+                .map_err(engine)?,
+            Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {}
+            Err(e) => return Err(engine(e)),
+        }
     }
     // Status collapses an untracked directory into one row, the way `git status`
     // does. Expand such a selection into the files `git add <dir>` would stage so
@@ -957,6 +961,7 @@ mod tests {
         let status = read(
             &mut service,
             Request::Status {
+                filter: None,
                 repo_id: handle.clone(),
                 page_size: 100,
                 cursor: None,
@@ -991,6 +996,7 @@ mod tests {
         let history = read(
             &mut reconnected,
             Request::History {
+                message_bytes: None,
                 repo_id: opened["repoId"].as_str().unwrap().into(),
                 revision: "HEAD".into(),
                 page_size: 100,
@@ -1033,6 +1039,12 @@ mod tests {
         assert_eq!(fs::read(temp.path().join("file")).unwrap(), b"unstaged");
         assert!(repo.find_commit(original).is_ok());
         let replacement = commit.id();
+        let head_log = repo.reflog("HEAD").unwrap();
+        assert_eq!(head_log.get(0).unwrap().id_old(), original);
+        assert_eq!(head_log.get(0).unwrap().id_new(), replacement);
+        let branch_log = repo.reflog(repo.head().unwrap().name().unwrap()).unwrap();
+        assert_eq!(branch_log.get(0).unwrap().id_old(), original);
+        assert_eq!(branch_log.get(0).unwrap().id_new(), replacement);
         drop(commit);
         // Message-only amendment is meaningful even when the tree is unchanged.
         let mut action = amend_action(replacement);
@@ -1090,6 +1102,9 @@ mod tests {
         assert_eq!(commit.author().name().unwrap(), "Replacement Author");
         assert_eq!(commit.committer().name().unwrap(), "Committer");
         assert_eq!(commit.tree_id(), tree.id());
+        let head_log = fresh.reflog("HEAD").unwrap();
+        assert_eq!(head_log.get(0).unwrap().id_old(), merged);
+        assert_eq!(head_log.get(0).unwrap().id_new(), commit.id());
     }
     #[test]
     fn amendment_refuses_stale_targets_rewrite_hooks_and_signed_metadata() {
@@ -1194,6 +1209,7 @@ mod tests {
         )
         .unwrap();
         let oid = git2::Oid::from_str(result["commitOid"].as_str().unwrap()).unwrap();
+        assert_eq!(repo.reflog("HEAD").unwrap().get(0).unwrap().id_new(), oid);
         let committed = repo.find_commit(oid).unwrap();
         assert_eq!(committed.parent_count(), 0);
         assert_eq!(committed.author().email().unwrap(), "author@example.test");
@@ -1237,6 +1253,9 @@ mod tests {
         let normal_oid = repo.head().unwrap().target().unwrap();
         assert_eq!(normal["commitOid"], normal_oid.to_string());
         assert_eq!(normal["parentOid"], oid.to_string());
+        let head_log = repo.reflog("HEAD").unwrap();
+        assert_eq!(head_log.get(0).unwrap().id_old(), oid);
+        assert_eq!(head_log.get(0).unwrap().id_new(), normal_oid);
         assert_eq!(
             repo.find_commit(normal_oid)
                 .unwrap()
@@ -1260,6 +1279,9 @@ mod tests {
         assert!(repo.head_detached().unwrap());
         let next = repo.head().unwrap().peel_to_commit().unwrap();
         assert_eq!(next.parent_id(0).unwrap(), oid);
+        let head_log = repo.reflog("HEAD").unwrap();
+        assert_eq!(head_log.get(0).unwrap().id_old(), oid);
+        assert_eq!(head_log.get(0).unwrap().id_new(), next.id());
     }
     #[test]
     fn commit_rejects_stale_state_locks_hooks_signing_and_invalid_authors() {

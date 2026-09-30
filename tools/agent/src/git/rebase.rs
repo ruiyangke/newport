@@ -268,8 +268,9 @@ pub fn start(
         )
         .map_err(engine)?;
     let target = repo.find_commit(onto.id()).map_err(engine)?;
-    checkout::supported_merge_files(repo, &original.tree().map_err(engine)?)?;
-    checkout::supported_merge_files(repo, &target.tree().map_err(engine)?)?;
+    let mut attributes = checkout::MergeChecks::new(repo);
+    attributes.check(&original.tree().map_err(engine)?)?;
+    attributes.check(&target.tree().map_err(engine)?)?;
     // libgit2 omits merge commits from its replay list; do not silently flatten them.
     let mut walk = repo.revwalk().map_err(engine)?;
     walk.push(original.id()).map_err(engine)?;
@@ -334,13 +335,14 @@ pub fn start(
         }
         let tree = commit.tree().map_err(engine)?;
         let parent = commit.parent(0).map_err(engine)?.tree().map_err(engine)?;
-        checkout::supported_merge_files(repo, &tree)?;
-        checkout::supported_merge_files(repo, &parent)?;
+        attributes.check(&tree)?;
+        attributes.check(&parent)?;
         operations::validate_commit(repo, commit.message().map_err(engine)?)?;
         affected.extend(diff_paths(repo, &parent, &tree)?);
         commits.push(id.to_string());
     }
     drop(preview);
+    drop(attributes);
     integration::guard_paths(repo, &affected, true)?;
     let mut lock = operations::IndexLock::acquire(repo)?;
     check(repo, expected)?;
@@ -653,6 +655,38 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn preparation_checks_attributes_removed_by_later_commits() {
+        for (rule, code) in [
+            ("file filter=custom\n", "UNSUPPORTED_FILTER"),
+            ("file merge=custom\n", "UNSUPPORTED_MERGE_DRIVER"),
+        ] {
+            let (temp, repo, original, onto) = fixture(false);
+            let with_rule = commit(&repo, Some(original), ".gitattributes", rule);
+            let tip = commit(&repo, Some(with_rule), ".gitattributes", "");
+            repo.reference("refs/heads/topic", tip, true, "fixture")
+                .unwrap();
+            repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+                .unwrap();
+            let index = fs::read(repo.path().join("index")).unwrap();
+            let error = run(
+                &repo,
+                Action::Rebase {
+                    upstream_oid: onto.to_string(),
+                    onto_oid: None,
+                    committer: Some(author()),
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.code, code);
+            assert_eq!(repo.head().unwrap().target(), Some(tip));
+            assert_eq!(repo.state(), RepositoryState::Clean);
+            assert_eq!(fs::read(repo.path().join("index")).unwrap(), index);
+            assert_eq!(fs::read(temp.path().join("file")).unwrap(), b"topic\n");
+            assert!(!repo.path().join(MARKER).exists());
+        }
+    }
+
     #[test]
     fn detached_and_batched_rebases_resume() {
         let (temp, repo, mut original, onto) = fixture(false);

@@ -6,6 +6,8 @@ use super::{
 };
 use git2::{BranchType, Oid, Repository};
 use serde_json::{json, Value};
+#[path = "branch_edit.rs"]
+mod edit;
 
 fn engine(error: git2::Error) -> Error {
     match error.code() {
@@ -51,37 +53,66 @@ fn checked_out(repo: &Repository, reference: &str) -> Result<bool, Error> {
     let head = repo.find_reference("HEAD").map_err(engine)?;
     Ok(head.symbolic_target_bytes() == Some(reference.as_bytes()))
 }
-/// Include the main worktree even when called from a linked worktree.
+fn worktree_metadata_error() -> Error {
+    Error::new(
+        "WORKTREE_METADATA_UNAVAILABLE",
+        "Cannot inspect registered worktree HEAD metadata. Repair or prune the affected worktree registration before changing branches.",
+    )
+}
+/// Inspect the administrative HEAD, not the checkout directory. A missing or
+/// moved checkout still reserves its branch until its registration is pruned.
+fn admin_checked_out(admin: &std::path::Path, reference: &str) -> Result<bool, Error> {
+    let bytes = repository::worktree_metadata(&admin.join("HEAD"))
+        .map_err(|_| worktree_metadata_error())?;
+    if bytes.len() > 8192 {
+        return Err(worktree_metadata_error());
+    }
+    let head = std::str::from_utf8(&bytes)
+        .map_err(|_| worktree_metadata_error())?
+        .trim_end_matches(['\r', '\n']);
+    if let Some(target) = head.strip_prefix("ref: ") {
+        if !git2::Reference::is_valid_name(target) {
+            return Err(worktree_metadata_error());
+        }
+        return Ok(target == reference);
+    }
+    if !matches!(head.len(), 40 | 64) || !head.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(worktree_metadata_error());
+    }
+    Ok(false)
+}
+/// Include the main worktree even when called from a linked worktree, and
+/// inspect every registered linked HEAD without opening its working directory.
 pub(super) fn other_worktree(repo: &Repository, reference: &str) -> Result<bool, Error> {
     let current = repo
         .path()
         .canonicalize()
-        .map_err(|_| Error::new("IO_ERROR", "Cannot resolve the worktree."))?;
-    let main = Repository::open(repo.commondir()).map_err(engine)?;
-    if main.path().canonicalize().ok().as_ref() != Some(&current) && checked_out(&main, reference)?
-    {
+        .map_err(|_| worktree_metadata_error())?;
+    let common = repo
+        .commondir()
+        .canonicalize()
+        .map_err(|_| worktree_metadata_error())?;
+    if common != current && admin_checked_out(&common, reference)? {
         return Ok(true);
     }
-    let names = repo.worktrees().map_err(engine)?;
-    for name in names.iter() {
-        let name = name.map_err(|_| {
-            Error::new(
-                "UNSUPPORTED_CAPABILITY",
-                "A linked worktree name is not valid UTF-8.",
-            )
-        })?;
-        let name =
-            name.ok_or_else(|| Error::new("GIT_ERROR", "A linked worktree name is missing."))?;
-        let worktree = repo.find_worktree(name).map_err(engine)?;
-        let linked = Repository::open_from_worktree(&worktree).map_err(engine)?;
-        if linked.path().canonicalize().ok().as_ref() != Some(&current)
-            && checked_out(&linked, reference)?
-        {
+    let entries = match std::fs::read_dir(common.join("worktrees")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(worktree_metadata_error()),
+    };
+    for entry in entries {
+        let admin = entry
+            .map_err(|_| worktree_metadata_error())?
+            .path()
+            .canonicalize()
+            .map_err(|_| worktree_metadata_error())?;
+        if admin != current && admin_checked_out(&admin, reference)? {
             return Ok(true);
         }
     }
     Ok(false)
 }
+
 fn uncertain() -> Error {
     Error::new("OUTCOME_UNKNOWN", "The branch update could not be confirmed; its reference or configuration may have changed. Inspect the operation before retrying.")
 }
@@ -145,6 +176,20 @@ pub(super) fn upstream_in<'r>(
     remotes: &mut std::collections::HashMap<String, Option<git2::Remote<'r>>>,
     branch: &str,
 ) -> Option<Vec<u8>> {
+    let target = upstream_target_in(repo, config, remotes, branch)?;
+    repo.find_reference(std::str::from_utf8(&target).ok()?)
+        .ok()?;
+    Some(target)
+}
+
+/// Resolve only the configured mapping; callers may validate existence against
+/// a captured reference snapshot instead of the current live repository.
+pub(super) fn upstream_target_in<'r>(
+    repo: &'r Repository,
+    config: &git2::Config,
+    remotes: &mut std::collections::HashMap<String, Option<git2::Remote<'r>>>,
+    branch: &str,
+) -> Option<Vec<u8>> {
     let remote = config.get_str(&format!("branch.{branch}.remote")).ok()?;
     let merge = config.get_str(&format!("branch.{branch}.merge")).ok()?;
     let target = if remote == "." {
@@ -161,7 +206,6 @@ pub(super) fn upstream_in<'r>(
         })?;
         spec.transform(merge).ok()?.as_str().ok()?.to_owned()
     };
-    repo.find_reference(&target).ok()?;
     Some(target.into_bytes())
 }
 
@@ -314,73 +358,8 @@ pub fn apply(repo: &Repository, action: &Action, expected: &str) -> Result<Value
                 })?;
             Ok(json!({"name":branch_name,"oid":commit.id().to_string(),"refreshRequired":true}))
         }
-        Action::BranchRename {
-            name: branch_name,
-            expected_oid,
-            ..
-        }
-        | Action::BranchDelete {
-            name: branch_name,
-            expected_oid,
-            ..
-        } => {
-            name(branch_name)?;
-            let mut branch = repo
-                .find_branch(branch_name, BranchType::Local)
-                .map_err(engine)?;
-            let expected_oid = oid(expected_oid)?;
-            if branch.get().target() != Some(expected_oid) {
-                return Err(Error::new(
-                    "STALE_REFERENCE",
-                    "The branch moved. Refresh branches before changing it.",
-                ));
-            }
-            let reference = format!("refs/heads/{branch_name}");
-            if other_worktree(repo, &reference)? {
-                return Err(Error::new(
-                    "BRANCH_IN_USE",
-                    "This branch is checked out in another worktree.",
-                ));
-            }
-            match action {
-                Action::BranchRename { new_name, .. } => {
-                    unused(repo, new_name)?;
-                    branch.rename(new_name, false).map_err(|_| uncertain())?;
-                    Ok(
-                        json!({"oldName":branch_name,"name":new_name,"oid":expected_oid.to_string(),"refreshRequired":true}),
-                    )
-                }
-                Action::BranchDelete { force, .. } => {
-                    if checked_out(repo, &reference)? {
-                        return Err(Error::new(
-                            "BRANCH_IN_USE",
-                            "Switch to another branch before deleting this branch.",
-                        ));
-                    }
-                    if !force {
-                        let head = repo
-                            .head()
-                            .map_err(engine)?
-                            .peel_to_commit()
-                            .map_err(engine)?
-                            .id();
-                        if head != expected_oid
-                            && !repo
-                                .graph_descendant_of(head, expected_oid)
-                                .map_err(engine)?
-                        {
-                            return Err(Error::new("BRANCH_NOT_MERGED", "This branch contains commits not reachable from HEAD. Explicit force is required to delete it."));
-                        }
-                    }
-                    // libgit2 deletes using the reference's expected old OID and
-                    // removes its branch config. Config may change before a ref failure.
-                    branch.delete().map_err(|_| uncertain())?;
-                    Ok(
-                        json!({"deleted":branch_name,"previousOid":expected_oid.to_string(),"refreshRequired":true}),
-                    )
-                }
-                _ => unreachable!(),
-            }
+        Action::BranchRename { .. } | Action::BranchDelete { .. } => {
+            edit::apply(repo, action, expected)
         }
         _ => Err(Error::invalid("Not a branch operation.")),
     }
@@ -418,6 +397,112 @@ mod tests {
                 .into(),
             upstream: upstream.map(str::to_owned),
         }
+    }
+    /// Dependency probe: run explicitly when reviewing native ref semantics.
+    /// This reports behavior, rather than treating native success as proof that
+    /// the caller's previously inspected object ID was still current.
+    #[test]
+    #[ignore = "manual native reference race audit"]
+    fn audit_native_branch_races() {
+        for rename in [false, true] {
+            let (_temp, repo, old) = fixture();
+            repo.branch("topic", &repo.find_commit(old).unwrap(), false)
+                .unwrap();
+            repo.config()
+                .unwrap()
+                .set_str("branch.topic.description", "preserve me")
+                .unwrap();
+            let mut stale = repo.find_branch("topic", BranchType::Local).unwrap();
+            let parent = repo.find_commit(old).unwrap();
+            let sig = git2::Signature::now("Fixture", "test@example.test").unwrap();
+            let newer = repo
+                .commit(
+                    None,
+                    &sig,
+                    &sig,
+                    "external update",
+                    &parent.tree().unwrap(),
+                    &[&parent],
+                )
+                .unwrap();
+            let external = Repository::open(repo.path()).unwrap();
+            external
+                .reference("refs/heads/topic", newer, true, "external update")
+                .unwrap();
+            let outcome = if rename {
+                stale.rename("renamed", false).map(|_| ())
+            } else {
+                stale.delete()
+            };
+            let fresh = Repository::open(repo.path()).unwrap();
+            let target = |name| {
+                fresh
+                    .find_reference(name)
+                    .ok()
+                    .and_then(|r| r.target())
+                    .map(|id| id.to_string())
+            };
+            println!(
+                "REF_RACE {}",
+                json!({
+                    "operation": if rename { "rename" } else { "delete" },
+                    "expectedOid": old.to_string(), "externalOid": newer.to_string(),
+                    "succeeded": outcome.is_ok(), "error": outcome.err().map(|e| format!("{:?}", e.code())),
+                    "sourceAfter": target("refs/heads/topic"), "destinationAfter": target("refs/heads/renamed"),
+                    "sourceDescriptionAfter": fresh.config().unwrap().get_string("branch.topic.description").ok(),
+                    "destinationDescriptionAfter": fresh.config().unwrap().get_string("branch.renamed.description").ok()
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn occupancy_reads_missing_checkout_head_including_detached_and_unborn() {
+        let (_temp, repo, oid) = fixture();
+        let parent = tempfile::tempdir().unwrap();
+        let linked_path = parent.path().join("linked");
+        repo.worktree("linked", &linked_path, None).unwrap();
+        std::fs::remove_dir_all(linked_path).unwrap();
+        let head = repo.commondir().join("worktrees/linked/HEAD");
+        assert!(other_worktree(&repo, "refs/heads/linked").unwrap());
+        assert!(!other_worktree(&repo, "refs/heads/other").unwrap());
+        std::fs::write(&head, format!("{oid}\n")).unwrap();
+        assert!(!other_worktree(&repo, "refs/heads/linked").unwrap());
+        std::fs::write(&head, "ref: refs/heads/unborn\n").unwrap();
+        assert!(other_worktree(&repo, "refs/heads/unborn").unwrap());
+    }
+    #[test]
+    fn occupancy_refuses_symlink_special_and_oversized_heads() {
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
+        let temp = tempfile::tempdir().unwrap();
+        let head = temp.path().join("HEAD");
+        let target = temp.path().join("target");
+        std::fs::write(&target, "ref: refs/heads/topic\n").unwrap();
+        symlink(&target, &head).unwrap();
+        assert_eq!(
+            admin_checked_out(temp.path(), "refs/heads/topic")
+                .unwrap_err()
+                .code,
+            "WORKTREE_METADATA_UNAVAILABLE"
+        );
+        std::fs::remove_file(&head).unwrap();
+        let fifo = std::ffi::CString::new(head.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert_eq!(
+            admin_checked_out(temp.path(), "refs/heads/topic")
+                .unwrap_err()
+                .code,
+            "WORKTREE_METADATA_UNAVAILABLE"
+        );
+        std::fs::remove_file(&head).unwrap();
+        // Valid ref syntax, but over this reader's stricter 8 KiB bound.
+        std::fs::write(&head, format!("ref: refs/heads/{}\n", "a".repeat(8192))).unwrap();
+        assert_eq!(
+            admin_checked_out(temp.path(), "refs/heads/topic")
+                .unwrap_err()
+                .code,
+            "WORKTREE_METADATA_UNAVAILABLE"
+        );
     }
     #[test]
     fn upstream_selects_remote_or_local_and_clears_pruned_configuration() {

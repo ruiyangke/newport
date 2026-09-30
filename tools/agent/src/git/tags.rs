@@ -8,7 +8,6 @@ use git2::{ObjectType, Oid, Repository};
 use serde_json::{json, Value};
 
 const MAX_OBJECT: usize = 1024 * 1024;
-const MAX_LIST: usize = 16 * 1024 * 1024;
 fn engine(error: git2::Error) -> Error {
     match error.code() {
         git2::ErrorCode::Locked => Error::new(
@@ -40,69 +39,79 @@ pub(super) fn reference(name: &str) -> Result<String, Error> {
     Ok(format!("refs/tags/{name}"))
 }
 
-pub fn list(repo: &Repository) -> Result<Vec<Value>, Error> {
-    let odb = repo.odb().map_err(engine)?;
-    let mut rows = Vec::new();
-    let mut bytes = 0;
-    for reference in repo.references_glob("refs/tags/*").map_err(engine)? {
-        if rows.len() == 10_000 {
-            return Err(Error::new("LIMIT_EXCEEDED", "Too many tags."));
-        }
-        let reference = reference.map_err(engine)?;
-        let name = reference
-            .name_bytes()
-            .strip_prefix(b"refs/tags/")
-            .ok_or_else(|| Error::invalid("Invalid tag reference."))?;
-        let mut row = json!({"name":WirePath::new(name),"reference":WirePath::new(reference.name_bytes()),"oid":reference.target().map(wire_oid),"symbolicTarget":reference.symbolic_target_bytes().map(WirePath::new),"annotated":false,"detailsOmitted":false});
-        if let Some(mut current) = reference.target() {
-            // Bound both nested tags and object reads. A large external tag can
-            // still be displayed/deleted without loading its entire annotation.
-            let mut object_bytes = 0;
-            for depth in 0..16 {
-                let (size, kind) = odb.read_header(current).map_err(engine)?;
-                if depth == 0 {
-                    row["objectType"] = json!(kind.str());
-                    row["annotated"] = json!(kind == ObjectType::Tag);
-                    if kind != ObjectType::Tag {
-                        row["targetOid"] = wire_oid(current);
-                    }
-                }
+pub(super) fn details(
+    repo: &Repository,
+    odb: &git2::Odb<'_>,
+    object: Option<Oid>,
+    message_bytes: usize,
+) -> Result<Value, Error> {
+    let mut row = json!({"oid":object.map(wire_oid),"annotated":false,"detailsOmitted":false});
+    if let Some(mut current) = object {
+        // Bound both nested tags and object reads. A large external tag can
+        // still be displayed/deleted without loading its entire annotation.
+        let mut object_bytes: usize = 0;
+        for depth in 0..16 {
+            let (size, kind) = odb.read_header(current).map_err(engine)?;
+            if depth == 0 {
+                row["objectType"] = json!(kind.str());
+                row["annotated"] = json!(kind == ObjectType::Tag);
                 if kind != ObjectType::Tag {
-                    row["peeledOid"] = wire_oid(current);
-                    row["peeledType"] = json!(kind.str());
-                    break;
-                }
-                object_bytes += size;
-                if object_bytes > MAX_OBJECT {
-                    row["detailsOmitted"] = true.into();
-                    break;
-                }
-                let tag = repo.find_tag(current).map_err(engine)?;
-                if depth == 0 {
-                    let message = tag.message_bytes().unwrap_or_default();
-                    row["targetOid"] = wire_oid(tag.target_id());
-                    row["message"] = json!(WirePath::new(&message[..message.len().min(16384)]));
-                    row["messageTruncated"] = json!(message.len() > 16384);
-                    row["tagger"] = tag.tagger().map(|s| json!({"name":String::from_utf8_lossy(s.name_bytes()),"email":String::from_utf8_lossy(s.email_bytes()),"time":s.when().seconds(),"offsetMinutes":s.when().offset_minutes()})).unwrap_or(Value::Null);
-                }
-                current = tag.target_id();
-                if depth == 15 {
-                    row["detailsOmitted"] = true.into();
+                    row["targetOid"] = wire_oid(current);
                 }
             }
+            if kind != ObjectType::Tag {
+                row["peeledOid"] = wire_oid(current);
+                row["peeledType"] = json!(kind.str());
+                break;
+            }
+            object_bytes = object_bytes.saturating_add(size);
+            if object_bytes > MAX_OBJECT {
+                row["detailsOmitted"] = true.into();
+                break;
+            }
+            let tag = repo.find_tag(current).map_err(engine)?;
+            if depth == 0 {
+                let message = tag.message_bytes().unwrap_or_default();
+                row["targetOid"] = wire_oid(tag.target_id());
+                row["message"] = json!(WirePath::new(&message[..message.len().min(message_bytes)]));
+                row["messageTruncated"] = json!(message.len() > message_bytes);
+                row["tagger"] = tag.tagger().map(|s| json!({"name":String::from_utf8_lossy(s.name_bytes()),"email":String::from_utf8_lossy(s.email_bytes()),"time":s.when().seconds(),"offsetMinutes":s.when().offset_minutes()})).unwrap_or(Value::Null);
+            }
+            current = tag.target_id();
+            if depth == 15 {
+                row["detailsOmitted"] = true.into();
+            }
         }
-        bytes += serde_json::to_vec(&row)
-            .map_err(|_| Error::invalid("Invalid tag metadata."))?
-            .len();
-        if bytes > MAX_LIST {
-            return Err(Error::new(
-                "LIMIT_EXCEEDED",
-                "Tag metadata exceeds the listing limit.",
-            ));
-        }
+    }
+    Ok(row)
+}
+
+pub(super) fn detail(repo: &Repository, value: &str) -> Result<Value, Error> {
+    let format = repo.object_format();
+    let length = if format == git2::ObjectFormat::Sha1 {
+        40
+    } else {
+        64
+    };
+    if value.len() != length {
+        return Err(Error::invalid("A complete object ID is required."));
+    }
+    let oid = Oid::from_str_ext(value, format).map_err(|_| Error::invalid("Invalid object ID."))?;
+    details(repo, &repo.odb().map_err(engine)?, Some(oid), 16384)
+}
+
+#[cfg(test)]
+fn list(repo: &Repository) -> Result<Vec<Value>, Error> {
+    let odb = repo.odb().map_err(engine)?;
+    let mut rows = Vec::new();
+    for reference in repo.references_glob("refs/tags/*").map_err(engine)? {
+        let reference = reference.map_err(engine)?;
+        let mut row = details(repo, &odb, reference.target(), 16384)?;
+        row["name"] = json!(WirePath::new(&reference.name_bytes()[10..]));
+        row["reference"] = json!(WirePath::new(reference.name_bytes()));
+        row["symbolicTarget"] = json!(reference.symbolic_target_bytes().map(WirePath::new));
         rows.push(row);
     }
-    // References may come from packed and loose storage in different orders.
     rows.sort_by(|a, b| {
         a["name"]["display"]
             .as_str()
@@ -163,13 +172,12 @@ pub fn apply(repo: &Repository, action: &Action, expected: &str) -> Result<Value
                 .map_err(engine)?
                 .read_header(target)
                 .map_err(engine)?;
-            if size > MAX_OBJECT {
+            if annotation.is_some() && size > MAX_OBJECT {
                 return Err(Error::new(
                     "LIMIT_EXCEEDED",
                     "The tag target object exceeds the supported size.",
                 ));
             }
-            let target = repo.find_object(target, None).map_err(engine)?;
             let tagger = annotation
                 .as_ref()
                 .map(|a| operations::signature(repo, a.author.as_ref()))
@@ -185,17 +193,17 @@ pub fn apply(repo: &Repository, action: &Action, expected: &str) -> Result<Value
                 }
                 repo.tag_annotation_create(
                     name,
-                    &target,
+                    &repo.find_object(target, None).map_err(engine)?,
                     tagger.as_ref().expect("annotation identity"),
                     &annotation.message,
                 )
                 .map_err(engine)?
             } else {
-                target.id()
+                target
             };
             tx.set_target(&reference_name, new_oid, tagger.as_ref(), "tag: Newport")
                 .map_err(engine)?;
-            json!({"name":name,"oid":new_oid.to_string(),"targetOid":target.id().to_string(),"annotated":annotation.is_some(),"refreshRequired":true})
+            json!({"name":name,"oid":new_oid.to_string(),"targetOid":target.to_string(),"annotated":annotation.is_some(),"refreshRequired":true})
         }
         Action::TagDelete { expected_oid, .. } => {
             let old = repo.find_reference(&reference_name).map_err(engine)?;
@@ -265,6 +273,30 @@ mod tests {
     fn run(repo: &Repository, action: &Action) -> Result<Value, Error> {
         operations::apply(repo, action, &[], &repository::fingerprint(repo).unwrap())
     }
+    #[test]
+    fn lightweight_tags_accept_large_blobs_without_loading_the_target() {
+        let (_temp, repo, _) = fixture();
+        let blob = repo.blob(&vec![b'x'; MAX_OBJECT + 1]).unwrap();
+        let created = run(&repo, &create("large-blob", blob, None)).unwrap();
+        assert_eq!(created["oid"], blob.to_string());
+        assert_eq!(
+            repo.find_reference("refs/tags/large-blob")
+                .unwrap()
+                .target(),
+            Some(blob)
+        );
+        // Annotated tags still require a bounded native object allocation.
+        assert_eq!(
+            run(&repo, &create("large-annotation", blob, Some("note")))
+                .unwrap_err()
+                .code,
+            "LIMIT_EXCEEDED"
+        );
+        assert!(repo.find_reference("refs/tags/large-annotation").is_err());
+        assert!(run(&repo, &create("missing", Oid::ZERO_SHA1, None)).is_err());
+        assert!(repo.find_reference("refs/tags/missing").is_err());
+    }
+
     #[test]
     fn lightweight_annotated_and_nested_tags_preserve_index_and_files() {
         let (temp, repo, commit) = fixture();
@@ -416,7 +448,7 @@ mod tests {
         assert!(rows[1]["message"].is_null());
         let large_blob = repo.blob(&vec![0; MAX_OBJECT + 1]).unwrap();
         assert_eq!(
-            run(&repo, &create("too-large", large_blob, None))
+            run(&repo, &create("too-large", large_blob, Some("annotation")))
                 .unwrap_err()
                 .code,
             "LIMIT_EXCEEDED"
@@ -453,6 +485,7 @@ mod tests {
         let status = request(
             &mut service,
             Request::Status {
+                filter: None,
                 repo_id: handle.clone(),
                 page_size: 100,
                 cursor: None,
@@ -470,6 +503,7 @@ mod tests {
         let first = request(
             &mut service,
             Request::Tags {
+                message_bytes: None,
                 repo_id: handle.clone(),
                 page_size: 1,
                 cursor: None,
@@ -486,6 +520,7 @@ mod tests {
         let second = request(
             &mut service,
             Request::Tags {
+                message_bytes: None,
                 repo_id: handle,
                 page_size: 1,
                 cursor: Some(first["nextCursor"].as_str().unwrap().into()),

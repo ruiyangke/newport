@@ -1,3 +1,4 @@
+import { gitErrorMessage } from "../git/errors";
 import {
   useEffect,
   useId,
@@ -21,7 +22,7 @@ import {
   type GitRepository,
   type decodeGitBranches,
 } from "../domain/gitResponses";
-import { refreshQuery } from "../query/client";
+import { GitLoadMore } from "./GitLoadMore";
 import { gitKeys, gitQueries } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
 import { Button, Input } from "./controls";
@@ -69,12 +70,12 @@ type Editing =
  * over, as it always has.
  */
 type Trail = {
-  basis: number;
+  basis: string;
   cursors: string[];
   pending: boolean;
   error: string;
 };
-const startTrail = (basis: number): Trail => ({
+const startTrail = (basis: string): Trail => ({
   basis,
   cursors: [],
   pending: false,
@@ -129,7 +130,7 @@ async function copyBranchName(name: string) {
     await navigator.clipboard.writeText(name);
     toast.success(`Copied branch name ${name}`);
   } catch (reason) {
-    toast.error(`Could not copy branch name: ${String(reason)}`);
+    toast.error(`Could not copy branch name: ${gitErrorMessage(reason)}`);
   }
 }
 
@@ -224,8 +225,12 @@ export function GitBranchControls({
  * worktree holds goes there instead of failing to switch.
  */
 export type WorktreeHolders = {
-  holder: (branch: string) => string | null;
-  open: (branch: string) => void;
+  holder?: (branch: string) => string | null;
+  open?: (branch: string) => void;
+  openIfHeld?: (
+    reference: string,
+    isCurrent: () => boolean,
+  ) => Promise<boolean>;
 };
 
 function BranchPanel({
@@ -261,6 +266,19 @@ function BranchPanel({
   const queryClient = useQueryClient();
   const repoId = repository.repoId;
   const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setFilter(search.trim()), 200);
+    return () => clearTimeout(timer);
+  }, [search]);
+  const [branchKind, setBranchKind] = useState<"all" | "local" | "remote">(
+    "all",
+  );
+  const options = useMemo(
+    () => (filter || branchKind !== "all" ? { filter, branchKind } : undefined),
+    [filter, branchKind],
+  );
+  const filtering = search.trim() !== filter;
   const actionsHint = useId();
   const [name, setName] = useState("");
   const [upstream, setUpstream] = useState("none");
@@ -268,7 +286,7 @@ function BranchPanel({
   const [force, setForce] = useState(false);
   const [editingSnapshot, setEditingSnapshot] = useState<string>();
   const first = useQuery({
-    ...gitQueries.branches(scope, repoId),
+    ...gitQueries.branches(scope, repoId, undefined, options),
     refetchOnMount: "always",
   });
   // A new status snapshot re-reads the branches, starting the list over.
@@ -277,19 +295,17 @@ function BranchPanel({
     if (seenSnapshot.current === snapshot) return;
     seenSnapshot.current = snapshot;
     void queryClient.invalidateQueries({
-      queryKey: gitKeys.branches(scope, repoId),
+      queryKey: gitKeys.branchRoot(scope, repoId),
     });
   }, [queryClient, scope, repoId, snapshot]);
-  const [storedTrail, setTrail] = useState(() => startTrail(0));
-  const trail =
-    storedTrail.basis === first.dataUpdatedAt
-      ? storedTrail
-      : startTrail(first.dataUpdatedAt);
+  const basis = `${branchKind}:${filter}:${first.dataUpdatedAt}`;
+  const [storedTrail, setTrail] = useState(() => startTrail(""));
+  const trail = storedTrail.basis === basis ? storedTrail : startTrail(basis);
   // Later pages are only ever read by "Load more", which checks that each one
   // continues the list; showing them must not re-read them on their own.
   const laterData = useQueries({
     queries: trail.cursors.map((cursor) => ({
-      ...gitQueries.branches(scope, repoId, cursor),
+      ...gitQueries.branches(scope, repoId, cursor, options),
       enabled: false,
     })),
     combine: pageData,
@@ -306,24 +322,57 @@ function BranchPanel({
         break;
       }
     }
-    return merged;
+    const seen = new Set<string>();
+    return {
+      ...merged,
+      entries: merged.entries.filter((branch) => {
+        if (seen.has(branch.reference.bytesB64)) return false;
+        seen.add(branch.reference.bytesB64);
+        return true;
+      }),
+    };
   }, [first.data, laterData, trail.cursors]);
   // The list read last time is shown at once while the picker re-reads it --
   // opening on "Loading branches…" every time made the picker feel slow on a
   // repository with thousands of branches. Nothing that changes a branch is
   // offered from it until the fresh read lands (`loading` disables writes);
   // browsing, filtering and going to a worktree need no fresh list.
-  const branches = first.isSuccess ? loaded : null;
+  const branches = loaded;
+  const [highlighted, setHighlighted] = useState("");
+  useEffect(() => {
+    setHighlighted((current) =>
+      branches?.entries.some((branch) => branch.reference.bytesB64 === current)
+        ? current
+        : (branches?.entries[0]?.reference.bytesB64 ?? ""),
+    );
+  }, [branches]);
   const refreshing = first.isFetching && !!branches;
-  const loading = first.isFetching || trail.pending;
+  const loading = first.isFetching || filtering;
+  // Warm only the next cursor. It stays outside the visible list until needed;
+  // consuming it warms one more page, never the whole repository.
+  useEffect(() => {
+    if (!branches?.nextCursor || loading || first.isError || editing) return;
+    void queryClient.prefetchQuery({
+      ...gitQueries.branches(scope, repoId, branches.nextCursor, options),
+      staleTime: Infinity,
+    });
+  }, [
+    branches?.nextCursor,
+    loading,
+    first.isError,
+    editing,
+    queryClient,
+    scope,
+    repoId,
+    options,
+  ]);
   const readError =
-    trail.error ||
-    (!first.isFetching && first.error ? String(first.error) : "");
+    !first.isFetching && first.error ? gitErrorMessage(first.error) : "";
   async function submit(action: GitWriteAction) {
-    if (!writable || busy || loading || staleUpstream) return;
+    if (!writable || busy || loading || first.isError || staleUpstream) return;
     if (await onAction(action)) onClose();
   }
-  const disabled = busy || loading || !writable;
+  const disabled = busy || loading || first.isError || !writable;
   const staleUpstream =
     editing?.kind === "upstream" && (!snapshot || editingSnapshot !== snapshot);
   const upstreamChoices =
@@ -344,20 +393,30 @@ function BranchPanel({
     upstream !== "none" &&
     !upstreamChoices.some((branch) => branch.reference.display === upstream);
   async function loadMore() {
-    if (!branches?.nextCursor || loading || busy) return;
+    if (!branches?.nextCursor || loading || trail.pending) return;
     const cursor = branches.nextCursor;
     const requested: Trail = { ...trail, pending: true, error: "" };
     setTrail(requested);
     let outcome: Partial<Trail>;
     try {
-      const next = await refreshQuery(
-        queryClient,
-        gitQueries.branches(scope, repoId, cursor),
-      );
+      const next = await queryClient.fetchQuery({
+        ...gitQueries.branches(scope, repoId, cursor, options),
+        staleTime: Infinity,
+      });
       appendGitPage(branches, next, cursor);
+      const existing = new Set(
+        branches.entries.map((branch) => branch.reference.bytesB64),
+      );
+      if (
+        next.nextCursor &&
+        !next.entries.some((branch) => !existing.has(branch.reference.bytesB64))
+      )
+        throw new Error(
+          "The next page did not add any branches. Refresh the list.",
+        );
       outcome = { cursors: [...trail.cursors, cursor] };
     } catch (reason) {
-      outcome = { error: String(reason) };
+      outcome = { error: gitErrorMessage(reason) };
     }
     // A page that lands after the list started over belongs to a list that is
     // no longer shown. It stays cached under its own cursor, unused.
@@ -368,23 +427,60 @@ function BranchPanel({
     );
   }
   function retry() {
-    setTrail(startTrail(-1));
+    setTrail(startTrail("retry"));
     void first.refetch();
   }
-  function switchTo(branch: Branch) {
-    if (disabled || branch.current || !usable(branch) || !branch.oid) return;
-    void submit({
-      kind: "checkout",
-      target: {
-        kind: "branch",
-        name: branch.name.display,
-        expectedOid: branch.oid.hex,
-      },
-    });
+  const [holderError, setHolderError] = useState("");
+  const [checkingHolder, setCheckingHolder] = useState(false);
+  const holderRequest = useRef(0);
+  useEffect(
+    () => () => {
+      holderRequest.current++;
+    },
+    [repoId],
+  );
+  async function switchTo(branch: Branch) {
+    if (branch.current || !usable(branch) || !branch.oid || checkingHolder)
+      return;
+    if (worktrees?.holder?.(branch.name.display)) {
+      worktrees.open?.(branch.name.display);
+      onClose();
+      return;
+    }
+    const generation = ++holderRequest.current;
+    setHolderError("");
+    setCheckingHolder(true);
+    try {
+      if (
+        branch.reference.display.startsWith("refs/heads/") &&
+        worktrees?.openIfHeld &&
+        (await worktrees.openIfHeld(
+          branch.reference.display,
+          () => holderRequest.current === generation,
+        ))
+      ) {
+        if (holderRequest.current === generation) onClose();
+        return;
+      }
+      if (holderRequest.current !== generation || disabled) return;
+      await submit({
+        kind: "checkout",
+        target: {
+          kind: "branch",
+          name: branch.name.display,
+          expectedOid: branch.oid.hex,
+        },
+      });
+    } catch (reason) {
+      if (holderRequest.current === generation)
+        setHolderError(gitErrorMessage(reason));
+    } finally {
+      if (holderRequest.current === generation) setCheckingHolder(false);
+    }
   }
-  const failure = error && (
+  const failure = (holderError || error) && (
     <p role="alert" className={failureTone}>
-      {error}
+      {holderError || error}
     </p>
   );
   const notice = !writable && blockedReason && (
@@ -419,16 +515,9 @@ function BranchPanel({
         )}
         <Command
           label="Filter branches"
-          // Substring, as the filter has always been, over the name alone; the
-          // row's value is its reference so two rows never share one.
-          filter={(_value, query, keywords) =>
-            (keywords ?? [])
-              .join(" ")
-              .toLocaleLowerCase()
-              .includes(query.toLocaleLowerCase())
-              ? 1
-              : 0
-          }
+          shouldFilter={false}
+          value={highlighted}
+          onValueChange={setHighlighted}
           className="size-auto min-h-0 flex-1 rounded-none! bg-transparent p-0"
         >
           <span id={actionsHint} className="sr-only">
@@ -456,6 +545,7 @@ function BranchPanel({
             />
             <Button
               disabled={disabled || !repository.head.oid}
+              onKeyDown={(event) => event.stopPropagation()}
               onClick={() => {
                 setName("");
                 setEditing({ kind: "create" });
@@ -463,6 +553,28 @@ function BranchPanel({
             >
               New branch
             </Button>
+          </div>
+          <div
+            className="px-[12px] pb-[8px]"
+            // Select content is portalled, but keyboard events still bubble
+            // through React to cmdk. Filtering must never select a branch.
+            onKeyDown={(event) => event.stopPropagation()}
+          >
+            <Select
+              value={branchKind}
+              onValueChange={(value) =>
+                setBranchKind(value as typeof branchKind)
+              }
+            >
+              <SelectTrigger aria-label="Branch type" size="sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All branches</SelectItem>
+                <SelectItem value="local">Local branches</SelectItem>
+                <SelectItem value="remote">Remote branches</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
           {repository.head.unborn && (
             <p className={`px-[12px] pb-[8px] ${hint}`}>
@@ -472,7 +584,11 @@ function BranchPanel({
           {readError && (
             <p role="alert" className={`mx-[12px] mb-[8px] ${failureTone}`}>
               {readError}{" "}
-              <Button disabled={busy || loading} onClick={retry}>
+              <Button
+                disabled={busy || loading}
+                onClick={retry}
+                onKeyDown={(event) => event.stopPropagation()}
+              >
                 Retry branches
               </Button>
             </p>
@@ -487,11 +603,9 @@ function BranchPanel({
             className="git-branch-list px-[4px] pb-[4px]"
           >
             {/* A list being (re)read offers nothing, so it has no empty state. */}
-            {branches && (
+            {branches && !loading && (
               <CommandEmpty className={`py-[16px] ${hint}`}>
-                {search
-                  ? "No matching branches in the loaded results."
-                  : "No branches yet."}
+                {search ? "No matching branches." : "No branches yet."}
               </CommandEmpty>
             )}
             {(
@@ -512,7 +626,7 @@ function BranchPanel({
                     const writes = disabled || !usable(branch);
                     const holder =
                       !branch.remote && !branch.current
-                        ? (worktrees?.holder(branch.name.display) ?? null)
+                        ? (worktrees?.holder?.(branch.name.display) ?? null)
                         : null;
                     return (
                       <ContextMenu key={branch.reference.bytesB64}>
@@ -525,11 +639,9 @@ function BranchPanel({
                             keywords={[branch.name.display]}
                             // Choosing a row switches to it, under the conditions
                             // `switchTo` keeps.
+                            disabled={checkingHolder}
                             onSelect={() => {
-                              if (holder && worktrees) {
-                                onClose();
-                                worktrees.open(branch.name.display);
-                              } else switchTo(branch);
+                              void switchTo(branch);
                             }}
                             data-checked={branch.current}
                             aria-current={branch.current || undefined}
@@ -589,6 +701,9 @@ function BranchPanel({
                               writes || !snapshot || !branch.tracking?.editable
                             }
                             onSelect={() => {
+                              setSearch("");
+                              setFilter("");
+                              setBranchKind("all");
                               setUpstream(branch.upstream?.display ?? "none");
                               setEditingSnapshot(snapshot);
                               setEditing({ kind: "upstream", branch });
@@ -614,21 +729,19 @@ function BranchPanel({
                 </CommandGroup>
               ),
             )}
+            {branches && (
+              <GitLoadMore
+                cursor={branches.nextCursor}
+                loading={trail.pending}
+                error={trail.error}
+                disabled={loading || first.isError}
+                automatic={!editing}
+                onLoad={() => void loadMore()}
+                label="Load more branches"
+                endLabel="All matching branches loaded"
+              />
+            )}
           </CommandList>
-          {branches?.nextCursor && (
-            <footer className="flex flex-col items-start gap-[8px] border-t border-border p-[12px]">
-              <p className={hint}>
-                Showing {branches.entries.length} loaded branches. Load more to
-                search the remaining branches.
-              </p>
-              <Button
-                disabled={busy || loading}
-                onClick={() => void loadMore()}
-              >
-                Load more branches
-              </Button>
-            </footer>
-          )}
         </Command>
       </PopoverContent>
       {editing && (

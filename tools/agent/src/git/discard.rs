@@ -285,8 +285,8 @@ pub fn apply(
         match repo.head() {
             Ok(head) => {
                 let tree = head.peel_to_tree().map_err(engine)?;
-                checkout::supported_files(repo, &tree)?;
                 baseline.read_tree(&tree).map_err(engine)?;
+                checkout::supported_index_paths(repo, &mut baseline, paths)?;
             }
             Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {}
             Err(e) => return Err(engine(e)),
@@ -400,6 +400,62 @@ mod tests {
             &repository::fingerprint(repo).unwrap(),
         )
     }
+    #[test]
+    fn head_discard_checks_selected_destination_attributes_without_blocking_unrelated_files() {
+        for (rule, allowed) in [
+            ("keep filter=custom\n", true),
+            ("file filter=custom\n", false),
+            ("file working-tree-encoding=UTF-16\n", false),
+        ] {
+            let (tmp, repo) = fixture();
+            let parent = repo.head().unwrap().peel_to_commit().unwrap();
+            let mut tree = repo.treebuilder(Some(&parent.tree().unwrap())).unwrap();
+            tree.insert(
+                ".gitattributes",
+                repo.blob(rule.as_bytes()).unwrap(),
+                0o100644,
+            )
+            .unwrap();
+            let target = repo.find_tree(tree.write().unwrap()).unwrap();
+            let signature = git2::Signature::now("Test", "test@example.test").unwrap();
+            repo.commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "attributes",
+                &target,
+                &[&parent],
+            )
+            .unwrap();
+            let mut index = repo.index().unwrap();
+            index.read_tree(&target).unwrap();
+            index.write().unwrap();
+            // Current working rules allow restoration; destination rules must
+            // still be checked independently before writing selected files.
+            fs::write(
+                tmp.path().join(".gitattributes"),
+                "* -filter -working-tree-encoding\n",
+            )
+            .unwrap();
+            fs::write(tmp.path().join("file"), "local edit").unwrap();
+            fs::write(tmp.path().join("keep"), "unrelated edit").unwrap();
+            let before = fs::read(repo.path().join("index")).unwrap();
+            let result = run(&repo, &[b"file"], DiscardSource::Head);
+            if allowed {
+                result.unwrap();
+                assert_eq!(fs::read(tmp.path().join("file")).unwrap(), b"head");
+            } else {
+                assert_eq!(result.unwrap_err().code, "UNSUPPORTED_FILTER");
+                assert_eq!(fs::read(tmp.path().join("file")).unwrap(), b"local edit");
+                assert_eq!(fs::read(repo.path().join("index")).unwrap(), before);
+            }
+            assert_eq!(
+                fs::read(tmp.path().join("keep")).unwrap(),
+                b"unrelated edit"
+            );
+        }
+    }
+
     #[test]
     fn index_discard_preserves_staging_and_unselected_edits() {
         let (tmp, repo) = fixture();

@@ -162,6 +162,10 @@ impl ExecSession {
         .map_err(|e| session_error(e.into()))
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.0.handle.is_closed()
+    }
+
     pub fn callbacks(&self) -> super::callback::Callbacks {
         super::callback::Callbacks::new(self.0.clone())
     }

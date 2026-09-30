@@ -36,9 +36,25 @@ export function GitCommitComposer({
   onDescription: (value: string) => void;
   onAction: (action: GitWriteAction) => Promise<boolean>;
 }) {
-  const staged = status.entries.filter((entry) => entry.staged).length;
+  const staged =
+    status.metadata.groupCounts?.staged ??
+    status.entries.filter((entry) => entry.staged && !entry.conflicted).length;
+  const exactStaged = status.metadata.groupCounts !== undefined;
+  const conflicts =
+    status.metadata.groupCounts?.conflicted ??
+    status.entries.filter((entry) => entry.conflicted).length;
+  const partial =
+    !!status.nextCursor ||
+    status.metadata.truncated ||
+    (status.metadata.totalEntries !== null &&
+      status.entries.length < status.metadata.totalEntries);
   const integrating = !!status.metadata.integration;
-  const canCommit = !disabled && !!summary.trim() && staged > 0 && !integrating;
+  const canCommit =
+    !disabled &&
+    !!summary.trim() &&
+    (staged > 0 || (partial && !exactStaged)) &&
+    conflicts === 0 &&
+    !integrating;
   if (integrating) return null;
   return (
     <form
@@ -86,6 +102,11 @@ export function GitCommitComposer({
         rows={3}
         onChange={(event) => onDescription(event.target.value)}
       />
+      {partial && (
+        <p className="text-[11px] leading-[15px] text-muted-foreground">
+          Commits all staged changes, including files not loaded here.
+        </p>
+      )}
       {/* A disabled primary button at half opacity read as broken, and in dark
           it put navy text on navy. Disabled is stated as a neutral instead. */}
       <Button
@@ -94,9 +115,13 @@ export function GitCommitComposer({
         className="git-composer-commit mt-[2px] h-[30px]! w-full rounded-[5px]! text-[12px]! font-medium! disabled:border-border disabled:bg-background disabled:text-muted-foreground disabled:opacity-100"
         disabled={!canCommit}
       >
-        {staged === 0
-          ? "No staged changes to commit"
-          : `Commit ${staged} ${staged === 1 ? "file" : "files"}${branch ? ` to ${branch}` : ""}`}
+        {conflicts > 0
+          ? "Resolve conflicts before committing"
+          : partial && !exactStaged
+            ? `Commit staged changes${branch ? ` to ${branch}` : ""}`
+            : staged === 0
+              ? "No staged changes to commit"
+              : `Commit ${staged} ${staged === 1 ? "file" : "files"}${branch ? ` to ${branch}` : ""}`}
       </Button>
     </form>
   );

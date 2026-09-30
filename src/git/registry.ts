@@ -5,8 +5,8 @@ import type { ServerScope } from "../query/keys";
  * One Git workspace per server connection, outside React.
  *
  * The page and each panel that reads its own branches, stashes or tags share
- * one `GitProjects`, so their requests queue together on the server's one
- * connection (the native side keeps a single connection per server). Keyed by
+ * one `GitProjects`, so writes share a barrier while the native side routes
+ * reads through four agent channels on the server's SSH connection. Keyed by
  * connection here, as terminals are, it is found by anyone holding the server
  * scope, and it outlives navigation the way the rest of the workspace does.
  * Repository ids are stateless tokens, so none of this is needed for them to
@@ -47,5 +47,12 @@ export function retainGitProjects(valid: Set<string>) {
     }
   }
 }
-if (import.meta.hot)
-  import.meta.hot.dispose(() => retainGitProjects(new Set()));
+/** Replace JS adapters after hot edits without interrupting native requests.
+ * Keeping old instances also keeps their old methods and protocol decoders.
+ * Native connections are reused by new adapters; pending writes retain their
+ * receipt and native serialization until the original request finishes.
+ */
+export function releaseGitHotAdapters() {
+  gitResources.clear();
+}
+if (import.meta.hot) import.meta.hot.dispose(releaseGitHotAdapters);
