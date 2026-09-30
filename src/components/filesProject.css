@@ -1,0 +1,42 @@
+/* "Open as project" hands a browsed folder to Projects. Files only ever claims
+   what it did — saved a bookmark — never what the folder turned out to contain.
+   Own prefix: every selector here starts with .files-project- so nothing in
+   files.css can be shadowed by accident. */
+
+/* The actions column is sized for one icon in files.css; a directory row now
+   carries two, so widen it from here instead of editing that file. */
+.files-workspace .file-list th.files-project-column,
+.files-workspace .file-list td.files-project-cell {
+  width: 72px;
+  padding-inline: 3px;
+}
+.files-project-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+}
+.files-project-actions [aria-busy="true"] {
+  color: var(--primary, #3767c8);
+}
+
+/* A failed save stays on Files and shows what the save actually said. */
+.files-project-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border, #e1e4e9);
+  background: var(--muted, #f8f9fb);
+  color: var(--red, #252932);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.files-project-error > span {
+  flex: 1;
+  min-width: 0;
+}
+.files-project-error small {
+  display: block;
+  color: var(--muted-foreground, #626b79);
+}

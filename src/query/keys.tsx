@@ -43,6 +43,16 @@ export function useServerScope(id: string) {
     throw new Error("Server data requires its workspace scope");
   return scope;
 }
+/**
+ * The enclosing server's scope, for components that sit inside one server's
+ * page but are not told which server it is -- the Git panels, which read the
+ * repository the page opened. The nearest provider is that page's own.
+ */
+export function useCurrentServerScope() {
+  const scope = useContext(Context);
+  if (!scope) throw new Error("Server data requires its workspace scope");
+  return scope;
+}
 export const keys = {
   snapshot: ["snapshot"] as const,
   startup: ["preferences", "startup"] as const,

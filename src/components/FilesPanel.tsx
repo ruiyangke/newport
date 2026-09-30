@@ -5,17 +5,20 @@ import { fileListingOptions } from "../query/files";
 import { FilePreviewDialog } from "./FilePreviewDialog";
 import { FileIcon } from "./FileIcon";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router";
 import {
   ArrowUp,
   ChevronDown,
   ChevronRight,
   Download,
+  FolderGit2,
   Home,
   RefreshCw,
   Upload,
 } from "lucide-react";
 import { toast } from "sonner";
 import { desktop } from "../api/desktop";
+import { GitProjects } from "../api/gitProjects";
 import {
   type FileEntry,
   type FileListing,
@@ -35,8 +38,21 @@ import {
   TableRow,
 } from "./ui/table";
 import "./files.css";
+import "./filesProject.css";
 const PAGE_SIZE = 100;
 type Load = (path: string) => Promise<FileListing>;
+
+/** The message the failed command actually returned, never a paraphrase. */
+function errorText(reason: unknown) {
+  return reason && typeof reason === "object" && "message" in reason
+    ? String(reason.message)
+    : String(reason);
+}
+/** A bookmark needs a name; the folder's own name is the one the user just read. */
+function projectLabel(path: string) {
+  const trimmed = path.replace(/\/+$/, "");
+  return trimmed.split("/").pop() || trimmed || path;
+}
 
 function FolderBranch({
   path,
@@ -183,6 +199,14 @@ export const FilesPanel = memo(function FilesPanel({
     direction: string;
     progress: FileProgress | null;
   } | null>(null);
+  const [savingProject, setSavingProject] = useState<string | null>(null);
+  const [projectError, setProjectError] = useState<{
+    path: string;
+    message: string;
+  } | null>(null);
+  const routerNavigate = useNavigate();
+  const projectWorkspace = useRef<GitProjects | null>(null);
+  const projectSequence = useRef(0);
   const operations = useRef(new Set<string>());
   const navigation = useRef(0);
   const latestPath = useRef(listingPath);
@@ -219,6 +243,19 @@ export const FilesPanel = memo(function FilesPanel({
     },
     [cache, scope],
   );
+  // A bookmark save that outlives this connection scope belongs to a workspace
+  // the user has left: drop its session and let its sequence go stale so it
+  // cannot navigate or write state afterwards.
+  useEffect(() => {
+    const sequence = projectSequence;
+    const workspace = projectWorkspace;
+    return () => {
+      sequence.current++;
+      const open = workspace.current;
+      workspace.current = null;
+      void open?.dispose().catch(() => undefined);
+    };
+  }, [scope.connection]);
   const navigate = useCallback(
     async (path: string) => {
       const sequence = ++navigation.current;
@@ -318,6 +355,35 @@ export const FilesPanel = memo(function FilesPanel({
     } catch (reason) {
       if (mounted.current && sequence === previewSequence.current)
         setPreview({ entry, error: String(reason) });
+    }
+  }
+  /**
+   * Save a project bookmark for a browsed folder, then hand over to Projects.
+   * Files says nothing about what the folder holds: the save reports what the
+   * server found, and Projects describes the repository once it opens it.
+   */
+  async function openAsProject(path: string) {
+    if (projectWorkspace.current) return;
+    const sequence = ++projectSequence.current;
+    const workspace = new GitProjects(server.id);
+    projectWorkspace.current = workspace;
+    setSavingProject(path);
+    setProjectError(null);
+    try {
+      await workspace.add(path, projectLabel(path));
+      if (!mounted.current || sequence !== projectSequence.current) return;
+      void routerNavigate(`/servers/${encodeURIComponent(server.id)}/projects`);
+    } catch (reason) {
+      // Nothing was bookmarked. Stay here and show what the save returned.
+      if (mounted.current && sequence === projectSequence.current)
+        setProjectError({ path, message: errorText(reason) });
+    } finally {
+      if (projectWorkspace.current === workspace)
+        projectWorkspace.current = null;
+      // Projects opens its own session; this one has no reader left.
+      void workspace.dispose().catch(() => undefined);
+      if (mounted.current && sequence === projectSequence.current)
+        setSavingProject(null);
     }
   }
   async function transferFile(direction: "upload" | "download", path: string) {
@@ -424,6 +490,17 @@ export const FilesPanel = memo(function FilesPanel({
           <Upload size={14} />
           Upload
         </Button>
+        <Button
+          size="icon"
+          aria-label="Open this folder as project"
+          loading={!!listing && savingProject === listing.path}
+          disabled={busy || !listing || !!savingProject}
+          onClick={() => void openAsProject(listing!.path)}
+        >
+          {listing && savingProject === listing.path ? null : (
+            <FolderGit2 size={14} />
+          )}
+        </Button>
       </div>
       <div className="files-filters">
         <Button
@@ -457,6 +534,18 @@ export const FilesPanel = memo(function FilesPanel({
         <div className="file-error" role="alert">
           Cannot open {attemptedPath}: {error}{" "}
           <Button onClick={() => go(attemptedPath)}>Retry</Button>
+        </div>
+      )}
+      {projectError && (
+        <div className="files-project-error" role="alert">
+          <span>
+            Cannot save a project for {projectError.path}:{" "}
+            {projectError.message}
+            <small>
+              No project was saved. Nothing has changed on the server.
+            </small>
+          </span>
+          <Button onClick={() => setProjectError(null)}>Dismiss</Button>
         </div>
       )}
       <div className={`files-layout${tree ? "" : " files-no-tree"}`}>
@@ -498,7 +587,7 @@ export const FilesPanel = memo(function FilesPanel({
                 <TableHead>Name</TableHead>
                 <TableHead className="file-size">Size</TableHead>
                 <TableHead className="file-modified">Modified</TableHead>
-                <TableHead>
+                <TableHead className="files-project-column">
                   <span className="sr-only">Actions</span>
                 </TableHead>
               </TableRow>
@@ -530,20 +619,36 @@ export const FilesPanel = memo(function FilesPanel({
                       ? new Date(entry.modified * 1000).toLocaleDateString()
                       : "—"}
                   </TableCell>
-                  <TableCell>
-                    {entry.kind !== "directory" && entry.kind !== "other" && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-label={`Download ${entry.name}`}
-                        disabled={!!transfer || busy}
-                        onClick={() =>
-                          void transferFile("download", entry.path)
-                        }
-                      >
-                        <Download size={14} />
-                      </Button>
-                    )}
+                  <TableCell className="files-project-cell">
+                    <div className="files-project-actions">
+                      {entry.kind === "directory" && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Open ${entry.name} as project`}
+                          loading={savingProject === entry.path}
+                          disabled={busy || !!savingProject}
+                          onClick={() => void openAsProject(entry.path)}
+                        >
+                          {savingProject === entry.path ? null : (
+                            <FolderGit2 size={14} />
+                          )}
+                        </Button>
+                      )}
+                      {entry.kind !== "directory" && entry.kind !== "other" && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Download ${entry.name}`}
+                          disabled={!!transfer || busy}
+                          onClick={() =>
+                            void transferFile("download", entry.path)
+                          }
+                        >
+                          <Download size={14} />
+                        </Button>
+                      )}
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}

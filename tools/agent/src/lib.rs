@@ -5,6 +5,7 @@ pub mod clipboard;
 mod diagnostics;
 pub mod display;
 pub mod environment;
+pub mod git;
 pub mod install;
 mod local_socket;
 pub mod migration;

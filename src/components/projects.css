@@ -1,0 +1,263 @@
+/*
+ * What is left of the Projects stylesheet after the redesign moved the
+ * workspace, the lists and the library onto Tailwind utilities in the
+ * components themselves. What stays here is either shared by several
+ * components (dialog frames, forms, notices) or not reachable by a utility
+ * (the pane chain the app shell builds, and portalled dialogs).
+ *
+ * Every rule here is UNLAYERED and so beats any utility on the same element.
+ * Nothing below targets an element a component also styles with utilities for
+ * the same property; keep it that way, or the utility will silently lose.
+ */
+.git-projects,
+.editor-dialog {
+  /*
+   * The tint that marks a persistent selection, stated per theme because the
+   * same percentage carries far less colour over a dark base.
+   */
+  --git-tint: color-mix(in srgb, var(--primary) 10%, var(--background));
+}
+.dark .git-projects,
+.dark .editor-dialog {
+  --git-tint: color-mix(in srgb, var(--primary) 22%, var(--background));
+}
+/*
+ * Every Git surface marks its failures with `role="alert"`, the same way, so a
+ * failure reads as one wherever it appears. The dialogs are listed because they
+ * render in a portal, outside the panel.
+ */
+.git-projects [role="alert"],
+.git-project-form [role="alert"],
+.git-branch-dialog [role="alert"],
+.git-remote-dialog [role="alert"],
+.git-stash-dialog [role="alert"],
+.git-tag-dialog [role="alert"],
+.git-worktree-dialog [role="alert"] {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--destructive);
+  border-radius: 6px;
+  color: var(--destructive);
+  overflow-wrap: anywhere;
+}
+/*
+ * The panel's own failure sits above whatever surface is showing and lines up
+ * with it: the toolbar's first control in a repository, the heading in the
+ * library.
+ */
+.git-projects > [role="alert"] {
+  margin: 8px 12px;
+}
+.git-projects > [role="alert"]:has(+ .git-library) {
+  margin: 18px 22px 0;
+}
+.git-projects > button {
+  margin: 12px 16px;
+}
+.git-projects-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--muted-foreground);
+}
+.git-projects-empty h3 {
+  color: var(--foreground);
+}
+.git-filter-empty {
+  padding: 28px 16px;
+}
+.git-projects-notice {
+  padding: 10px 16px;
+  color: var(--foreground);
+  background: var(--native-toolbar);
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+/* Forms inside the Git dialogs. */
+.git-project-form {
+  display: grid;
+  gap: 16px;
+  padding-top: 16px;
+}
+.editor-dialog > .git-project-form {
+  padding: 16px 20px 20px;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+.git-project-form label {
+  display: grid;
+  gap: 6px;
+}
+.git-project-form small {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.git-project-form footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.git-path-field {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.git-path-field input {
+  flex: 1;
+  min-width: 0;
+}
+/*
+ * Stated at a specificity that beats `.git-project-form label`, which lays its
+ * labels out as a grid: the box and the sentence it governs are one control.
+ */
+.git-project-form label.git-branch-force,
+.git-branch-force {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.git-checkbox-row {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.git-integration-confirm {
+  padding: 0 24px 24px;
+  display: grid;
+  gap: 14px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.git-integration-confirm label {
+  display: grid;
+  gap: 6px;
+}
+.git-integration-confirm footer {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* The branch and remote-ref lists inside their popovers and dialogs. */
+.git-branch-list {
+  max-height: 320px;
+  overflow: auto;
+}
+.git-branch-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.git-branch-list li > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+.git-branch-list strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  font-weight: 500;
+}
+.git-branch-list small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+/*
+ * The diff's code box: it takes whatever height its pane leaves below the
+ * diff's header and scrolls in both directions itself, as an editor does. A
+ * fixed `max-height: 60vh` here cut a long diff off partway down the pane with
+ * an inner scrollbar nobody could see, and left the rest of the pane empty.
+ */
+.git-diff-code {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  font:
+    12px/22px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+}
+.git-diff-code pre {
+  margin: 0;
+  font: inherit;
+  white-space: pre;
+  tab-size: 4;
+}
+.git-conflict-sides .git-diff-code {
+  margin-top: 8px;
+  max-height: 260px;
+}
+
+/*
+ * Every Git dialog is a flex column whose body scrolls. Without this the body
+ * grows past the dialog's own max-height and is clipped -- its `overflow-y`
+ * never engages, because nothing gives it a height to overflow.
+ */
+.editor-dialog.git-stash-dialog,
+.editor-dialog.git-remote-dialog,
+.editor-dialog.git-worktree-dialog,
+.editor-dialog.git-tag-dialog,
+.editor-dialog.git-branch-dialog {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.git-stash-dialog .dialog-header,
+.git-remote-dialog .dialog-header,
+.git-worktree-dialog .dialog-header,
+.git-tag-dialog .dialog-header,
+.git-branch-dialog .dialog-header {
+  flex: none;
+}
+.git-stash-body,
+.git-remote-body,
+.git-worktree-body,
+.git-tag-body,
+.git-branch-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/*
+ * The full-height, edge-to-edge Projects pane, as Files has it: the app shell's
+ * `.detail` pads and caps every panel, and a workspace of split panes wants
+ * neither. Each link in the chain needs `min-height: 0`, or a flex item refuses
+ * to shrink below its content and the panes never get a height to scroll in.
+ */
+.projects-pane,
+.projects-pane > .detail,
+.projects-pane .workspace-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+.mac-shell .projects-pane > .detail {
+  padding: 0;
+  margin: 0;
+  max-width: none;
+  width: 100%;
+}
+.projects-pane .git-changes-files {
+  min-height: 0;
+  overflow: hidden;
+}
+.projects-pane .git-changes-detail {
+  min-height: 0;
+  overflow-y: auto;
+}

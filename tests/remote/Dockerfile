@@ -6,7 +6,7 @@ COPY arboard-probe/src ./src
 RUN cargo build --release --locked
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-server python3 bash zsh fish ca-certificates procps iproute2 xclip wl-clipboard \
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server git python3 bash zsh fish ca-certificates procps iproute2 xclip wl-clipboard \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -s /bin/bash fixture \
     && echo 'fixture:unused-container-only-password' | chpasswd \

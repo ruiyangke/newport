@@ -1,4 +1,6 @@
 import { retainWorkspaces } from "./state/workspace";
+import { retainGitState } from "./state/git";
+import { retainGitProjects } from "./git/registry";
 import { retainTerminals } from "./terminal/registry";
 import { serverScope } from "./query/keys";
 import { WindowControls } from "./components/WindowControls";
@@ -14,6 +16,7 @@ import {
 } from "./hooks/useWorkspaceNavigation";
 import { IntegrationPanel } from "./components/IntegrationPanel";
 import { ConnectionsPanel } from "./components/ConnectionsPanel";
+import { ProjectsPanel } from "./components/ProjectsPanel";
 import { useSnapshot } from "./hooks/useSnapshot";
 import { desktop } from "./api/desktop";
 import { useSidebar } from "./useSidebar";
@@ -53,6 +56,7 @@ import {
 } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import {
+  FolderGit2,
   FolderOpen,
   Plug,
   PanelLeft,
@@ -165,6 +169,10 @@ export default function App() {
     );
     retainWorkspaces(valid);
     retainTerminals(valid);
+    // A Git session and the page state that names its repository handles go
+    // together: an id kept past its session would only be refused.
+    retainGitProjects(valid);
+    retainGitState(valid);
   }, [
     loaded,
     snapshotError,
@@ -304,6 +312,7 @@ export default function App() {
             { value: "containers", label: "Containers", icon: Boxes },
             { value: "commands", label: "Commands", icon: Terminal },
             { value: "files", label: "Files", icon: FolderOpen },
+            { value: "projects", label: "Projects", icon: FolderGit2 },
             { value: "integration", label: "Integration", icon: Plug },
           ].map(({ value, label, icon: Icon }) => (
             <TabsTrigger
@@ -512,7 +521,7 @@ export default function App() {
           <WindowControls />
         </header>
         <div
-          className={`workspace-scroll${!settings && view === "commands" ? " terminal-workspace" : !settings && view === "files" ? " files-pane" : ""}`}
+          className={`workspace-scroll${!settings && view === "commands" ? " terminal-workspace" : !settings && view === "files" ? " files-pane" : !settings && view === "projects" ? " projects-pane" : ""}`}
           key={selected}
         >
           {!live && (
@@ -592,7 +601,19 @@ export default function App() {
                     }
                   >
                     <TabsContent value={view} className="workspace-content">
-                      {view === "files" ? (
+                      {view === "projects" ? (
+                        <ProjectsPanel
+                          key={
+                            serverScope(
+                              server,
+                              data.runtime.connectionRevisions?.[server.id] ??
+                                0,
+                              data.instanceId,
+                            ).connection
+                          }
+                          server={server}
+                        />
+                      ) : view === "files" ? (
                         <FilesPanel
                           key={
                             serverScope(

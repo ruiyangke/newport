@@ -56,6 +56,13 @@ objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSImage", "NSBit
 opt-level = 3
 
 [dev-dependencies]
+libc = "0.2"
+git2 = { version = "0.21", default-features = false, features = [
+    "ssh",
+    "https",
+    "vendored-openssl",
+    "unstable-sha256",
+] }
 tokio = { version = "1", features = ["test-util"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 tauri = { version = "2", features = ["test"] }

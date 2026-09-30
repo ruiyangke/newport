@@ -8,12 +8,12 @@ if [[ "$(basename "$binary")" == newport ]]; then
   : "${NEWPORT_PROVISIONING_PROFILE:?Set the Mac development provisioning profile path}"
   : "${NEWPORT_SIGNING_ENTITLEMENTS:?Set the matching Keychain entitlements path}"
   binary_dir="$(cd "$(dirname "$binary")" && pwd)"
-  python3 scripts/check-signing.py "$NEWPORT_SIGNING_ENTITLEMENTS" "$NEWPORT_PROVISIONING_PROFILE"
+  script_dir="$(cd "$(dirname "$0")" && pwd)"
+  python3 "$script_dir/check-signing.py" "$NEWPORT_SIGNING_ENTITLEMENTS" "$NEWPORT_PROVISIONING_PROFILE"
   bundle="$binary_dir/Newport.app"
   mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
   cp "$binary" "$bundle/Contents/MacOS/newport"
   cp "$NEWPORT_PROVISIONING_PROFILE" "$bundle/Contents/embedded.provisionprofile"
-  script_dir="$(cd "$(dirname "$0")" && pwd)"
   cp "$script_dir/../src-tauri/icons/icon.icns" "$bundle/Contents/Resources/icon.icns"
   cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
