@@ -44,9 +44,15 @@ export function validate(entitlements, profile, identifier) {
     );
 }
 export function profileEntitlements(xml) {
+  // Older plutil versions cannot convert a profile containing dates/data to JSON.
+  const entitlements = capture(
+    "plutil",
+    ["-extract", "Entitlements", "xml1", "-o", "-", "-"],
+    { input: xml },
+  );
   return JSON.parse(
-    capture("plutil", ["-extract", "Entitlements", "json", "-o", "-", "-"], {
-      input: xml,
+    capture("plutil", ["-convert", "json", "-o", "-", "-"], {
+      input: entitlements,
     }),
   );
 }

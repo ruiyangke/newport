@@ -849,6 +849,7 @@ mod tests {
     /// known. The agent journals before it executes, so a missing record is a
     /// definitive negative rather than a permanent dead end.
     #[test]
+    #[cfg(unix)]
     fn a_never_journaled_operation_resolves_instead_of_blocking_writes() {
         use crate::git::{cli::Service, journal::Journal};
 

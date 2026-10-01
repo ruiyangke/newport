@@ -22,17 +22,18 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Client<S> {
         stream: S,
         identity: String,
     ) -> Result<(Self, serde_json::Value), crate::git::protocol::Error> {
-        use std::os::unix::fs::OpenOptionsExt;
         let stream = metrics::Stream::new(stream);
         let counters = stream.counters.clone();
         let (inner, info) = TransportClient::start_with_identity(stream, identity).await?;
         let trace = std::env::var_os("NEWPORT_GIT_TRACE_PATH").map(|path| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .mode(0o600)
-                .open(path)
-                .expect("open explicit Git test trace")
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            options.open(path).expect("open explicit Git test trace")
         });
         Ok((
             Self {
