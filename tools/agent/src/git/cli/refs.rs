@@ -137,7 +137,10 @@ fn describe(config: &Config, name: &str) -> Result<Value, Error> {
     let urls = config.values(&format!("remote.{name}.url"));
     let push = config.values(&format!("remote.{name}.pushurl"));
     if urls.is_empty() {
-        return Err(Error::new("NOT_FOUND", "The remote no longer exists."));
+        return Err(Error::new(
+            "REMOTE_NOT_FOUND",
+            "The remote no longer exists.",
+        ));
     }
     let token = pages::hash(
         &json!({"url":urls,"pushUrl":push,"fetch":config.values(&format!("remote.{name}.fetch")),"push":config.values(&format!("remote.{name}.push"))}),

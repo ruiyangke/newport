@@ -1,3 +1,4 @@
+import { Tag as TagIcon, Plus, Search } from "lucide-react";
 import { GitRemotePicker } from "./GitRemotePicker";
 import { useGitRemoteSelection } from "../hooks/useGitRemoteSelection";
 import { useEffect, useRef, useState } from "react";
@@ -11,7 +12,7 @@ import { GitLoadMore } from "./GitLoadMore";
 import { gitKeys, gitQueries } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
 import { Button, Input } from "./controls";
-import { Modal } from "./Editors";
+import { GitInspectorSection } from "./GitInspectorSection";
 import { Textarea } from "./ui/textarea";
 import {
   Select,
@@ -114,6 +115,7 @@ function TagsDialog({
   const repoId = repository.repoId;
   const [editor, setEditor] = useState<Editor | null>(null);
   const [name, setName] = useState("");
+  const [filter, setFilter] = useState("");
   const [target, setTarget] = useState("");
   const [annotation, setAnnotation] = useState("");
   const [annotated, setAnnotated] = useState(false);
@@ -139,7 +141,7 @@ function TagsDialog({
     queryKey: gitQueries.tags(scope, repoId).queryKey,
     page: page ?? null,
     enabled: !first.isFetching && !first.isError && !editor,
-    prefetch: true,
+    prefetch: false,
     entryKey: (tag: Tag) => tag.reference.bytesB64,
     read: (cursor, signal) =>
       gitProjectsFor(scope)
@@ -179,7 +181,7 @@ function TagsDialog({
     if (pushing) remoteSelection.refresh();
   }
   return (
-    <Modal
+    <GitInspectorSection
       title={
         editor?.kind === "create"
           ? "Create tag"
@@ -191,9 +193,8 @@ function TagsDialog({
       }
       busy={busy}
       onClose={onClose}
-      className="git-tag-dialog w-[min(640px,calc(100vw-32px))]!"
     >
-      <div className="git-tag-body min-h-0 overflow-y-auto px-[24px] pt-[16px] pb-[24px] [overflow-wrap:anywhere]">
+      <div className="git-tag-body min-h-0 px-[16px] pb-[16px] [overflow-wrap:anywhere]">
         {blockedReason && (
           <p role="status" className={note}>
             {blockedReason}
@@ -388,12 +389,11 @@ function TagsDialog({
           </form>
         ) : (
           <>
-            <div className="git-tag-toolbar mx-0 my-[12px] flex items-center gap-[8px]">
-              <p className={`flex-1 ${note}`}>
-                {repository.head.unborn
-                  ? "No commits yet. Create a commit before tagging it."
-                  : "Tags mark specific points in your repository."}
-              </p>
+            <div className="git-inspector-toolbar">
+              <span className="git-inspector-count">
+                {page?.entries.length ?? 0} tags
+                {page?.nextCursor ? " loaded" : ""}
+              </span>
               <Button
                 disabled={disabled}
                 onClick={() => {
@@ -404,8 +404,17 @@ function TagsDialog({
                   setEditor({ kind: "create" });
                 }}
               >
-                New tag
+                <Plus size={13} aria-hidden="true" /> New tag
               </Button>
+            </div>
+            <div className="git-inspector-search">
+              <Search size={13} aria-hidden="true" />
+              <Input
+                aria-label="Filter loaded tags"
+                placeholder="Filter loaded tags"
+                value={filter}
+                onChange={(event) => setFilter(event.target.value)}
+              />
             </div>
             {loading && (
               <p role="status" className={note}>
@@ -415,26 +424,122 @@ function TagsDialog({
             {page?.entries.length === 0 && (
               <p className={note}>No tags in this repository.</p>
             )}
-            <ul className="git-tag-list max-h-[240px] overflow-y-auto">
-              {page?.entries.map((tag) => (
-                <li key={tag.name.bytesB64} className="border-b border-border">
-                  <Button
-                    variant="ghost"
-                    className="h-auto! w-full flex-col items-start px-[8px]! py-[10px] text-left whitespace-normal aria-pressed:bg-accent aria-pressed:text-accent-foreground dark:aria-pressed:bg-[color-mix(in_srgb,var(--foreground)_10%,var(--accent))]"
-                    aria-pressed={selected === tag.name.bytesB64}
-                    onClick={() => setSelected(tag.name.bytesB64)}
+            {filter &&
+              page &&
+              !page.entries.some((tag) =>
+                tag.name.display.toLowerCase().includes(filter.toLowerCase()),
+              ) && <p className={note}>No matching loaded tags.</p>}
+            <ul className="git-tag-list git-inspector-list">
+              {page?.entries
+                .filter((tag) =>
+                  tag.name.display.toLowerCase().includes(filter.toLowerCase()),
+                )
+                .map((tag) => (
+                  <li
+                    key={tag.name.bytesB64}
+                    className="git-inspector-list-item"
                   >
-                    <strong>{tag.name.display}</strong>
-                    <small className="text-[11px]! text-muted-foreground!">
-                      {tag.annotated ? "Annotated" : "Lightweight"} ·{" "}
-                      {tag.oid?.hex.slice(0, 8) ?? "Object unavailable"}
-                    </small>
-                  </Button>
-                </li>
-              ))}
+                    <Button
+                      variant="ghost"
+                      className="git-inspector-row"
+                      title={tag.name.display}
+                      aria-pressed={selected === tag.name.bytesB64}
+                      onClick={() => setSelected(tag.name.bytesB64)}
+                    >
+                      <TagIcon
+                        size={14}
+                        className="git-inspector-row-icon"
+                        aria-hidden="true"
+                      />
+                      <span className="git-inspector-row-copy">
+                        <strong className="git-inspector-row-title">
+                          {tag.name.display}
+                        </strong>
+                        <span className="git-inspector-row-meta">
+                          {tag.annotated ? "Annotated tag" : "Lightweight tag"}
+                        </span>
+                      </span>
+                      <code className="git-inspector-row-meta">
+                        {tag.oid?.hex.slice(0, 7) ?? "—"}
+                      </code>
+                    </Button>
+                    {selectedTag && selected === tag.name.bytesB64 && (
+                      <div className="git-tag-details git-inspector-details">
+                        <strong>{selectedTag.name.display}</strong>
+                        <p className={`mt-[6px]! ${note}`}>
+                          Object: {selectedTag.oid?.hex ?? "Unavailable"}
+                        </p>
+                        {selectedTag.peeledOid && (
+                          <p className={`mt-[6px]! ${note}`}>
+                            Target: {selectedTag.peeledOid.hex} (
+                            {selectedTag.peeledType})
+                          </p>
+                        )}
+                        {selectedTag.tagger && (
+                          <p className={`mt-[6px]! ${note}`}>
+                            {selectedTag.tagger.name} &lt;
+                            {selectedTag.tagger.email}
+                            &gt;
+                          </p>
+                        )}
+                        {selectedTag.message && (
+                          <pre className="mt-[12px] max-h-[160px] overflow-y-auto [font:inherit] whitespace-pre-wrap">
+                            {selectedTag.message.display}
+                          </pre>
+                        )}
+                        {selectedTag.messageTruncated && (
+                          <p className={`mt-[6px]! ${note}`}>
+                            {detail.isFetching
+                              ? "Loading full annotation…"
+                              : "The annotation is truncated."}
+                          </p>
+                        )}
+                        {detail.isError && !detail.isFetching && (
+                          <div role="alert" className={`mt-[6px] ${note}`}>
+                            {gitErrorMessage(detail.error)}
+                            <Button onClick={() => void detail.refetch()}>
+                              Retry annotation
+                            </Button>
+                          </div>
+                        )}
+                        {selectedTag.detailsOmitted && (
+                          <p className={`mt-[6px]! ${note}`}>
+                            Some tag details could not be loaded.
+                          </p>
+                        )}
+                        {!usable(selectedTag) && (
+                          <p className={`mt-[6px]! ${note}`}>
+                            This tag cannot be changed because its name or
+                            direct object ID is unavailable.
+                          </p>
+                        )}
+                        <div className="git-tag-actions mx-0 my-[12px] flex items-center gap-[8px]">
+                          <Button
+                            disabled={disabled || !usable(selectedTag)}
+                            onClick={() => {
+                              setRemoteName("");
+                              setEditor({ kind: "push", tag: selectedTag });
+                            }}
+                          >
+                            Push…
+                          </Button>
+                          <Button
+                            disabled={disabled || !usable(selectedTag)}
+                            onClick={() =>
+                              setEditor({ kind: "delete", tag: selectedTag })
+                            }
+                          >
+                            Delete local tag…
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </li>
+                ))}
               {page && (
                 <li className="list-none">
                   <GitLoadMore
+                    scrollOnly
                     cursor={page.nextCursor}
                     loading={pages.loading}
                     error={pages.error}
@@ -446,79 +551,9 @@ function TagsDialog({
                 </li>
               )}
             </ul>
-            {selectedTag && (
-              <div className="git-tag-details pt-[16px]">
-                <strong>{selectedTag.name.display}</strong>
-                <p className={`mt-[6px]! ${note}`}>
-                  Object: {selectedTag.oid?.hex ?? "Unavailable"}
-                </p>
-                {selectedTag.peeledOid && (
-                  <p className={`mt-[6px]! ${note}`}>
-                    Target: {selectedTag.peeledOid.hex} (
-                    {selectedTag.peeledType})
-                  </p>
-                )}
-                {selectedTag.tagger && (
-                  <p className={`mt-[6px]! ${note}`}>
-                    {selectedTag.tagger.name} &lt;{selectedTag.tagger.email}
-                    &gt;
-                  </p>
-                )}
-                {selectedTag.message && (
-                  <pre className="mt-[12px] max-h-[160px] overflow-y-auto [font:inherit] whitespace-pre-wrap">
-                    {selectedTag.message.display}
-                  </pre>
-                )}
-                {selectedTag.messageTruncated && (
-                  <p className={`mt-[6px]! ${note}`}>
-                    {detail.isFetching
-                      ? "Loading full annotation…"
-                      : "The annotation is truncated."}
-                  </p>
-                )}
-                {detail.isError && !detail.isFetching && (
-                  <div role="alert" className={`mt-[6px] ${note}`}>
-                    {gitErrorMessage(detail.error)}
-                    <Button onClick={() => void detail.refetch()}>
-                      Retry annotation
-                    </Button>
-                  </div>
-                )}
-                {selectedTag.detailsOmitted && (
-                  <p className={`mt-[6px]! ${note}`}>
-                    Some tag details could not be loaded.
-                  </p>
-                )}
-                {!usable(selectedTag) && (
-                  <p className={`mt-[6px]! ${note}`}>
-                    This tag cannot be changed because its name or direct object
-                    ID is unavailable.
-                  </p>
-                )}
-                <div className="git-tag-actions mx-0 my-[12px] flex items-center gap-[8px]">
-                  <Button
-                    disabled={disabled || !usable(selectedTag)}
-                    onClick={() => {
-                      setRemoteName("");
-                      setEditor({ kind: "push", tag: selectedTag });
-                    }}
-                  >
-                    Push…
-                  </Button>
-                  <Button
-                    disabled={disabled || !usable(selectedTag)}
-                    onClick={() =>
-                      setEditor({ kind: "delete", tag: selectedTag })
-                    }
-                  >
-                    Delete local tag…
-                  </Button>
-                </div>
-              </div>
-            )}
           </>
         )}
       </div>
-    </Modal>
+    </GitInspectorSection>
   );
 }

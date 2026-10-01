@@ -16,7 +16,7 @@ import type { GitStashes } from "../domain/gitResponses";
 // Query delivers results on a timer by default; act() only flushes microtasks.
 notifyManager.setScheduler(queueMicrotask);
 
-it("ignores a late stash page after the dialog has been reopened", async () => {
+it("ignores a late stash page after the inspector has been reopened", async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   const page = (
     message: string,
@@ -81,7 +81,7 @@ it("ignores a late stash page after the dialog has been reopened", async () => {
     );
     await click("Stashes");
     await click("Load more stashes");
-    await click("Close dialog");
+    await click("Close inspector");
     await click("Stashes");
     expect(document.body.textContent).toContain("Fresh stash");
     await act(async () => resolvePage(page("Late stale stash", "old", null)));
@@ -93,7 +93,8 @@ it("ignores a late stash page after the dialog has been reopened", async () => {
   }
 });
 
-vi.mock("./GitCommitInspector", () => ({
+vi.mock("./GitCommitInspector", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./GitCommitInspector")>()),
   GitCommitInspector: ({ commit }: { commit: { oid: { hex: string } } }) => (
     <div data-testid="preview">{commit.oid.hex}</div>
   ),
@@ -158,6 +159,8 @@ it("reads only selected stash commits and loads untracked details on demand", as
     await click("Stashes");
     await click("Saved edits");
     expect(commit.mock.calls).toEqual([["repo", tracked]]);
+    expect(document.querySelector(".git-stash-sidebar")).not.toBeNull();
+    expect(document.querySelector(".git-stash-sidebar [aria-pressed=true]")).not.toBeNull();
     expect(document.querySelector('[data-testid="preview"]')?.textContent).toBe(
       tracked,
     );

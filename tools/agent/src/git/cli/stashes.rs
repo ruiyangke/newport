@@ -1,5 +1,15 @@
 use super::*;
 pub(super) fn rows(repo: &Repo) -> Result<(Vec<Value>, String), Error> {
+    // An absent stash ref is normal. A failed log command is not: reporting it
+    // as an empty list hides corrupt objects and produces a false list token.
+    let reference = command::run(
+        &repo.root,
+        &["for-each-ref", "--format=%(objectname)", "refs/stash"],
+    )?
+    .ok_or_else(failure)?;
+    if reference.is_empty() {
+        return Ok((Vec::new(), hex(&Sha256::digest([]))));
+    }
     let bytes = command::run(
         &repo.root,
         &[
@@ -11,7 +21,7 @@ pub(super) fn rows(repo: &Repo) -> Result<(Vec<Value>, String), Error> {
             "--",
         ],
     )?;
-    let bytes = bytes.unwrap_or_default();
+    let bytes = bytes.ok_or_else(failure)?;
     let fields = bytes.split(|b| *b == 0).collect::<Vec<_>>();
     let mut rows = Vec::new();
     for chunk in fields.chunks(3) {

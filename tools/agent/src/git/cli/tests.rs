@@ -40,6 +40,14 @@ fn request(service: &mut impl Adapter, method: &str, params: Value) -> Result<Va
                 (value.clone(), json!({"snapshot":snapshot,"diff":value}))
             }
         };
+    // Every operation fixture preserves its contract through the wire codec.
+    for value in [&wire, &trace_response] {
+        let bytes = super::super::protocol::encode_value(value).unwrap();
+        assert_eq!(
+            super::super::protocol::decode_value(&bytes).unwrap(),
+            *value
+        );
+    }
     if service.cli() {
         if let Some(path) = std::env::var_os("NEWPORT_CLI_TRACE_PATH") {
             use std::io::Write;
@@ -72,27 +80,27 @@ impl Adapter for Service {
         self.request(r)
     }
 }
-impl Adapter for super::super::repository::Service {
-    fn call(&mut self, r: Request) -> Result<Output, Error> {
-        self.request(r)
-    }
-}
 fn compare(root: &Path) {
     let mut cli = Service::default();
-    let mut native = super::super::repository::Service::default();
     let path = WirePath::new(root.as_os_str().as_bytes());
-    let a = request(&mut cli, "repo.open", json!({"path":path})).unwrap();
-    let b = request(&mut native, "repo.open", json!({"path":path})).unwrap();
+    let opened = request(&mut cli, "repo.open", json!({"path":path})).unwrap();
+    assert_eq!(opened["bare"], false);
+    let a = request(&mut cli, "repo.status_summary", json!({"path":path})).unwrap();
+    let b = request(
+        &mut cli,
+        "repo.status_summary",
+        json!({"repoId":opened["repoId"]}),
+    )
+    .unwrap();
     assert_eq!(a, b);
-    for params in [json!({"path":path}), json!({"repoId":a["repoId"]})] {
-        assert_eq!(
-            request(&mut cli, "repo.status_summary", params.clone()).unwrap(),
-            request(&mut native, "repo.status_summary", params).unwrap()
-        );
-    }
+    let status = request(&mut cli, "repo.status", json!({"repoId":opened["repoId"]})).unwrap();
+    assert_eq!(
+        a["totalEntries"],
+        status["entries"].as_array().unwrap().len()
+    );
 }
 #[test]
-fn both_engines_share_open_and_summary_contract() {
+fn open_and_summary_contract_cover_repository_states() {
     let dir = setup();
     compare(dir.path());
     fs::write(dir.path().join("tracked"), "before\n").unwrap();
@@ -147,15 +155,9 @@ fn linked_worktree_and_bare_open_match() {
         ],
     );
     let params = json!({"path":WirePath::new(bare.as_os_str().as_bytes())});
-    assert_eq!(
-        request(&mut Service::default(), "repo.open", params.clone()).unwrap(),
-        request(
-            &mut super::super::repository::Service::default(),
-            "repo.open",
-            params
-        )
-        .unwrap()
-    );
+    let opened = request(&mut Service::default(), "repo.open", params).unwrap();
+    assert_eq!(opened["bare"], true);
+    assert_eq!(opened["capabilities"]["workingTree"], false);
 }
 #[test]
 fn paginated_history_and_commit_rows_match_and_anchor_the_original_tip() {
@@ -174,8 +176,9 @@ fn paginated_history_and_commit_rows_match_and_anchor_the_original_tip() {
     let repo = Repo::discover(WirePath::new(dir.path().as_os_str().as_bytes())).unwrap();
     let id = repo.id.encode();
     let mut cli = Service::default();
-    let mut native = super::super::repository::Service::default();
-    let (mut ca, mut cb) = (Value::Null, Value::Null);
+    let mut ca = Value::Null;
+    let expected = String::from_utf8(git(dir.path(), &["rev-list", "HEAD"])).unwrap();
+    let expected: Vec<_> = expected.lines().collect();
     let mut total = 0;
     loop {
         let a = request(
@@ -184,28 +187,34 @@ fn paginated_history_and_commit_rows_match_and_anchor_the_original_tip() {
             json!({"repoId":id,"pageSize":2,"cursor":ca,"messageBytes":9}),
         )
         .unwrap();
-        let b = request(
-            &mut native,
-            "repo.history",
-            json!({"repoId":id,"pageSize":2,"cursor":cb,"messageBytes":9}),
-        )
-        .unwrap();
-        assert_eq!(a["entries"], b["entries"]);
+        let entries = a["entries"].as_array().unwrap();
+        for (offset, row) in entries.iter().enumerate() {
+            assert_eq!(row["oid"]["hex"], expected[total + offset]);
+            assert_eq!(row["messageTruncated"], true);
+        }
         if total == 0 {
             git(dir.path(), &["commit", "--allow-empty", "-qm", "new tip"]);
         }
         for row in a["entries"].as_array().unwrap() {
             let params = json!({"repoId":id,"commitOid":row["oid"]["hex"]});
+            let commit = request(&mut cli, "repo.commit", params).unwrap();
+            let expected_message = git(
+                dir.path(),
+                &[
+                    "show",
+                    "-s",
+                    "--format=%B",
+                    row["oid"]["hex"].as_str().unwrap(),
+                ],
+            );
             assert_eq!(
-                request(&mut cli, "repo.commit", params.clone()).unwrap(),
-                request(&mut native, "repo.commit", params).unwrap()
+                commit["message"]["display"].as_str().unwrap().trim_end(),
+                String::from_utf8_lossy(&expected_message).trim_end()
             );
         }
         total += a["entries"].as_array().unwrap().len();
         ca = a["nextCursor"].clone();
-        cb = b["nextCursor"].clone();
         if ca.is_null() {
-            assert!(cb.is_null());
             break;
         }
     }
@@ -241,7 +250,7 @@ fn refuses_bad_selectors_foreign_cursors_and_unimplemented_mutations() {
 }
 
 #[test]
-fn cursors_reject_other_engine_and_changed_shallow_boundaries() {
+fn cursors_reject_changed_shallow_boundaries() {
     let dir = setup();
     for _ in 0..3 {
         git(dir.path(), &["commit", "--allow-empty", "-qm", "commit"]);
@@ -249,20 +258,6 @@ fn cursors_reject_other_engine_and_changed_shallow_boundaries() {
     let repo = Repo::discover(WirePath::new(dir.path().as_os_str().as_bytes())).unwrap();
     let params = json!({"repoId":repo.id.encode(),"pageSize":1});
     let page = request(&mut Service::default(), "repo.history", params.clone()).unwrap();
-    let native = request(
-        &mut super::super::repository::Service::default(),
-        "repo.history",
-        params.clone(),
-    )
-    .unwrap();
-    let mut next = params.clone();
-    next["cursor"] = native["nextCursor"].clone();
-    assert_eq!(
-        request(&mut Service::default(), "repo.history", next)
-            .unwrap_err()
-            .code,
-        "INVALID_REQUEST"
-    );
     fs::write(
         repo.common.join("shallow"),
         git(dir.path(), &["rev-parse", "HEAD"]),
@@ -513,7 +508,7 @@ fn cli_branch_tag_checkout_and_remote_controls() {
     assert!(git(dir.path(), &["remote"]).is_empty());
 }
 #[test]
-fn cli_status_and_branches_match_git2_and_expire_pages() {
+fn cli_status_and_branches_report_fixture_and_expire_pages() {
     let dir = setup();
     git(dir.path(), &["commit", "--allow-empty", "-qm", "initial"]);
     git(dir.path(), &["branch", "topic"]);
@@ -524,12 +519,12 @@ fn cli_status_and_branches_match_git2_and_expire_pages() {
     fs::write(dir.path().join("a"), "changed").unwrap();
     let id = opened(&mut Service::default(), dir.path());
     let mut cli = Service::default();
-    let mut native = super::super::repository::Service::default();
-    for method in ["repo.status", "repo.branches"] {
-        let a = request(&mut cli, method, json!({"repoId":id})).unwrap();
-        let b = request(&mut native, method, json!({"repoId":id})).unwrap();
-        assert_eq!(a["entries"], b["entries"], "{method}");
-    }
+    let status = request(&mut cli, "repo.status", json!({"repoId":id})).unwrap();
+    assert_eq!(status["entries"].as_array().unwrap().len(), 3);
+    assert_eq!(status["entries"][0]["staged"], true);
+    assert_eq!(status["entries"][0]["unstaged"], true);
+    let branches = request(&mut cli, "repo.branches", json!({"repoId":id})).unwrap();
+    assert_eq!(branches["entries"].as_array().unwrap().len(), 2);
     let first = request(&mut cli, "repo.status", json!({"repoId":id,"pageSize":1})).unwrap();
     fs::write(dir.path().join("d"), "data").unwrap();
     assert_eq!(
@@ -859,6 +854,17 @@ fn cli_remote_fetch_pull_push_leases_and_tracking() {
         &id,
         json!({"kind":"push.with_lease","remote":"origin","expectedToken":token,"branch":"main","expectedOid":head,"destinationBranch":"main","expectedRemoteOid":old}),
     );
+    let status = request(&mut service, "repo.status", json!({"repoId":id})).unwrap();
+    let stale_push = request(&mut service, "operation.start", json!({
+        "repoId":id,"operationId":uuid::Uuid::new_v4().to_string(),
+        "expectedSnapshot":status["snapshot"],
+        "action":{"kind":"push.with_lease","remote":"origin","expectedToken":token,
+            "branch":"main","expectedOid":head,"destinationBranch":"main","expectedRemoteOid":old}
+    })).unwrap();
+    assert_eq!(
+        stale_push["error"]["code"], "STALE_REMOTE_REFERENCE",
+        "{stale_push}"
+    );
     operation(
         &mut service,
         &id,
@@ -1134,4 +1140,121 @@ fn cli_status_large_untracked_files_are_bounded_and_detect_edits() {
     file.sync_all().unwrap();
     let changed = request(&mut service, "repo.status", json!({"repoId":id})).unwrap();
     assert_ne!(first["snapshot"], changed["snapshot"]);
+}
+
+#[test]
+fn cli_stashes_distinguish_absent_ref_from_unreadable_history() {
+    let dir = setup();
+    let home = tempfile::tempdir().unwrap();
+    let mut service = writable(home.path());
+    let id = opened(&mut service, dir.path());
+    let empty = request(&mut service, "repo.stashes", json!({"repoId":id})).unwrap();
+    assert!(empty["entries"].as_array().unwrap().is_empty());
+
+    fs::write(dir.path().join("file"), "base").unwrap();
+    git(dir.path(), &["add", "file"]);
+    git(dir.path(), &["commit", "-qm", "initial"]);
+    fs::write(dir.path().join("file"), "changed").unwrap();
+    git(dir.path(), &["stash", "push", "-qm", "saved"]);
+    let stash = String::from_utf8(git(dir.path(), &["rev-parse", "refs/stash"])).unwrap();
+    let stash = stash.trim();
+    fs::remove_file(
+        dir.path()
+            .join(".git/objects")
+            .join(&stash[..2])
+            .join(&stash[2..]),
+    )
+    .unwrap();
+    assert!(request(&mut service, "repo.stashes", json!({"repoId":id})).is_err());
+}
+
+#[test]
+fn cli_missing_remote_preserves_selection_recovery_contract() {
+    let dir = setup();
+    let mut service = Service::default();
+    let id = opened(&mut service, dir.path());
+    let error = request(
+        &mut service,
+        "repo.remote",
+        json!({"repoId":id,"name":"origin"}),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "REMOTE_NOT_FOUND");
+}
+
+#[test]
+fn cli_signal_after_commit_is_an_unknown_outcome() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = setup();
+    let home = tempfile::tempdir().unwrap();
+    let mut service = writable(home.path());
+    fs::write(dir.path().join("file"), "base").unwrap();
+    git(dir.path(), &["add", "file"]);
+    let hook = dir.path().join(".git/hooks/post-commit");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    fs::write(&hook, "#!/bin/sh\nkill -KILL \"$PPID\"\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
+    let id = opened(&mut service, dir.path());
+    let status = request(&mut service, "repo.status", json!({"repoId":id})).unwrap();
+    let result = request(
+        &mut service,
+        "operation.start",
+        json!({
+            "operationId":uuid::Uuid::new_v4().to_string(),
+            "repoId":id,
+            "expectedSnapshot":status["snapshot"],
+            "action":{"kind":"commit","message":"completed before signal"}
+        }),
+    )
+    .unwrap();
+    assert_eq!(result["state"], "outcome_unknown");
+    assert_eq!(result["error"]["code"], "OUTCOME_UNKNOWN");
+    assert!(!git(dir.path(), &["rev-parse", "--verify", "HEAD"]).is_empty());
+}
+
+#[test]
+fn cli_discard_untracked_is_literal_and_preserves_other_files_and_index() {
+    let dir = setup();
+    fs::write(dir.path().join("tracked"), "base\n").unwrap();
+    git(dir.path(), &["add", "tracked"]);
+    git(dir.path(), &["commit", "-qm", "base"]);
+    fs::write(dir.path().join("tracked"), "staged\n").unwrap();
+    git(dir.path(), &["add", "tracked"]);
+    fs::write(dir.path().join("new[1].txt"), "remove").unwrap();
+    fs::write(dir.path().join("new1.txt"), "keep").unwrap();
+    fs::create_dir(dir.path().join("directory")).unwrap();
+    fs::write(dir.path().join("directory/keep"), "keep").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut service = writable(home.path());
+    let id = opened(&mut service, dir.path());
+    let status = request(&mut service, "repo.status", json!({"repoId":id})).unwrap();
+    let entry = status["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["path"]["display"] == "new[1].txt")
+        .unwrap()["entryId"]
+        .clone();
+    operation(
+        &mut service,
+        &id,
+        json!({"kind":"discard","entryIds":[entry],"source":"index"}),
+    );
+    assert!(!dir.path().join("new[1].txt").exists());
+    assert_eq!(fs::read(dir.path().join("new1.txt")).unwrap(), b"keep");
+    assert_eq!(git(dir.path(), &["show", ":tracked"]), b"staged\n");
+    let status = request(&mut service, "repo.status", json!({"repoId":id})).unwrap();
+    let entry = status["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["path"]["display"] == "directory/")
+        .unwrap()["entryId"]
+        .clone();
+    let rejected = request(&mut service,"operation.start",json!({"repoId":id,"operationId":uuid::Uuid::new_v4().to_string(),"expectedSnapshot":status["snapshot"],"action":{"kind":"discard","entryIds":[entry],"source":"index"}})).unwrap();
+    assert_eq!(rejected["error"]["code"], "UNSUPPORTED_CAPABILITY");
+    assert_eq!(
+        fs::read(dir.path().join("directory/keep")).unwrap(),
+        b"keep"
+    );
 }

@@ -1,4 +1,5 @@
 //! Real OpenSSH/Linux checks. Run with `npm run test:remote`.
+use crate::agent::wire;
 use crate::{
     model::{Server, Tunnel},
     ssh::{self, sftp::Sftp, ExecSession, Forwarding},
@@ -24,7 +25,7 @@ fn server() -> Server {
 }
 
 #[tokio::test]
-#[ignore = "Requires scripts/test-remote.py and real OpenSSH"]
+#[ignore = "Requires npm run test:remote and real OpenSSH"]
 async fn authentication_exec_sftp_and_metrics() {
     let mut server = server();
     let session = ExecSession::connect(&server).await.unwrap();
@@ -88,7 +89,7 @@ async fn authentication_exec_sftp_and_metrics() {
 }
 
 #[tokio::test]
-#[ignore = "Requires scripts/test-remote.py and real OpenSSH"]
+#[ignore = "Requires npm run test:remote and real OpenSSH"]
 async fn forwarding_roundtrip_and_shutdown() {
     let server = server();
     let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -121,7 +122,7 @@ async fn forwarding_roundtrip_and_shutdown() {
 }
 
 #[tokio::test]
-#[ignore = "Requires scripts/test-remote.py and real OpenSSH"]
+#[ignore = "Requires npm run test:remote and real OpenSSH"]
 async fn deploy_reinstall_and_agent_protocol() {
     let server = server();
     let session = ExecSession::connect(&server).await.unwrap();
@@ -150,17 +151,24 @@ async fn deploy_reinstall_and_agent_protocol() {
         timeout(Duration::from_secs(10), async {
             let mut header = [0; 5];
             stream.read_exact(&mut header).await.unwrap();
-            assert_eq!(header[0], kind);
-            let size = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
+            assert_eq!(header[0], b'M');
+            let size = wire::payload_length(&header, 1024 * 1024).unwrap();
             assert!(size < 1024 * 1024);
             let mut data = vec![0; size];
             stream.read_exact(&mut data).await.unwrap();
+            let (actual, data) = wire::decode(&data, 1024 * 1024).unwrap();
+            assert_eq!(
+                actual,
+                kind,
+                "Unexpected agent payload: {}",
+                String::from_utf8_lossy(&data)
+            );
             data
         })
         .await
         .unwrap()
     }
-    assert_eq!(event(&mut stream, b'R').await, b"newport-agent/5");
+    assert_eq!(event(&mut stream, b'R').await, b"newport-agent/6");
     let mut archive = tar::Builder::new(Vec::new());
     for (name, data) in [
         ("text/plain", "container clipboard 世界\n"),
@@ -175,12 +183,7 @@ async fn deploy_reinstall_and_agent_protocol() {
             .unwrap();
     }
     let bytes = archive.into_inner().unwrap();
-    stream.write_all(b"S").await.unwrap();
-    stream
-        .write_all(&(bytes.len() as u32).to_be_bytes())
-        .await
-        .unwrap();
-    stream.write_all(&bytes).await.unwrap();
+    frame(&mut stream, b'S', &bytes).await;
     event(&mut stream, b'A').await;
     assert_eq!(
         session
@@ -195,20 +198,18 @@ async fn deploy_reinstall_and_agent_protocol() {
             None
         ),
         async {
-            let request = String::from_utf8(event(&mut stream, b'O').await).unwrap();
-            let (id, url) = request.split_once('\n').unwrap();
+            let (id, url) = wire::parse_browser_request(&event(&mut stream, b'O').await).unwrap();
             assert_eq!(url, "https://example.com/login?code=fixture");
-            let ack = format!("{id}\nok");
-            stream.write_all(b"B").await.unwrap();
-            stream
-                .write_all(&(ack.len() as u32).to_be_bytes())
-                .await
-                .unwrap();
-            stream.write_all(ack.as_bytes()).await.unwrap();
+            frame(
+                &mut stream,
+                b'B',
+                &wire::browser_reply(id, true, None).unwrap(),
+            )
+            .await;
         }
     );
     opened.unwrap();
-    stream.write_all(&[b'Q', 0, 0, 0, 0]).await.unwrap();
+    frame(&mut stream, b'Q', &[]).await;
     timeout(Duration::from_secs(10), stream.read_to_end(&mut Vec::new()))
         .await
         .unwrap()
@@ -221,7 +222,7 @@ async fn deploy_reinstall_and_agent_protocol() {
 }
 
 #[tokio::test]
-#[ignore = "Requires scripts/test-remote.py and real OpenSSH"]
+#[ignore = "Requires npm run test:remote and real OpenSSH"]
 async fn interactive_shell_resize_and_exit() {
     use crate::terminal::{Event, Input};
     let (input, receiver) = tokio::sync::mpsc::channel(8);
@@ -262,7 +263,7 @@ async fn interactive_shell_resize_and_exit() {
 }
 
 #[tokio::test]
-#[ignore = "Requires scripts/test-remote.py and real OpenSSH"]
+#[ignore = "Requires npm run test:remote and real OpenSSH"]
 async fn changed_host_key_is_rejected_and_restoration_recovers() {
     struct Restore(std::path::PathBuf, Vec<u8>);
     impl Drop for Restore {
@@ -298,7 +299,7 @@ async fn shell_setup_is_idempotent_and_respects_protected_files() {
     let session = ExecSession::connect(&server()).await.unwrap();
     crate::agent::install(&session).await.unwrap();
     let output = session
-        .execute("python3 /srv/fixture/shell_setup.py", None)
+        .execute("newport-test-fixture shell-setup", None)
         .await
         .unwrap();
     for shell in ["bash", "zsh", "fish"] {
@@ -311,22 +312,22 @@ async fn shell_setup_is_idempotent_and_respects_protected_files() {
 }
 
 async fn frame(stream: &mut (impl tokio::io::AsyncWrite + Unpin), kind: u8, data: &[u8]) {
-    stream.write_all(&[kind]).await.unwrap();
     stream
-        .write_all(&(data.len() as u32).to_be_bytes())
+        .write_all(&wire::encode(kind, data).unwrap())
         .await
         .unwrap();
-    stream.write_all(data).await.unwrap();
 }
 async fn receive(stream: &mut (impl tokio::io::AsyncRead + Unpin), kind: u8) -> Vec<u8> {
     timeout(Duration::from_secs(15), async {
         let mut header = [0; 5];
         stream.read_exact(&mut header).await.unwrap();
-        assert_eq!(header[0], kind);
-        let size = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
+        assert_eq!(header[0], b'M');
+        let size = wire::payload_length(&header, 1024 * 1024).unwrap();
         assert!(size < 1024 * 1024);
         let mut bytes = vec![0; size];
         stream.read_exact(&mut bytes).await.unwrap();
+        let (actual, bytes) = wire::decode(&bytes, 1024 * 1024).unwrap();
+        assert_eq!(actual, kind);
         bytes
     })
     .await
@@ -346,14 +347,14 @@ async fn demand_clipboard_compression_freshness_and_failed_transfer_recovery() {
         ))
         .await
         .unwrap();
-    assert_eq!(receive(&mut stream, b'R').await, b"newport-agent/5");
+    assert_eq!(receive(&mut stream, b'R').await, b"newport-agent/6");
     // A new offer invalidates the old cache. A failed transfer of that revision
     // must be retryable without another clipboard change.
     for (revision, corrupt) in [(100i64, false), (101, true), (101, false)] {
         frame(
             &mut stream,
             b'M',
-            format!("{revision}\ntext/plain").as_bytes(),
+            &rmp_serde::to_vec(&(revision, vec!["text/plain"])).unwrap(),
         )
         .await;
         receive(&mut stream, b'A').await;
@@ -361,11 +362,10 @@ async fn demand_clipboard_compression_freshness_and_failed_transfer_recovery() {
         let (read, ()) = tokio::join!(
             session.execute("~/.local/bin/xclip -selection clipboard -o", None),
             async {
-                let request = String::from_utf8(receive(&mut stream, b'C').await).unwrap();
-                let fields: Vec<_> = request.split('\n').collect();
-                assert_eq!(fields[1], revision.to_string());
-                assert_eq!(fields[2], "text/plain");
-                let id: u64 = fields[0].parse().unwrap();
+                let (id, received_revision, format): (u64, i64, String) =
+                    rmp_serde::from_slice(&receive(&mut stream, b'C').await).unwrap();
+                assert_eq!(received_revision, revision);
+                assert_eq!(format, "text/plain");
                 let chunks: Vec<_> = content.as_bytes().chunks(64 * 1024).collect();
                 for (index, chunk) in chunks.iter().enumerate() {
                     let mut encoder =
@@ -376,11 +376,14 @@ async fn demand_clipboard_compression_freshness_and_failed_transfer_recovery() {
                     } else {
                         encoder.finish().unwrap()
                     };
-                    let mut response = Vec::new();
-                    response.extend(id.to_be_bytes());
-                    response.extend(revision.to_be_bytes());
-                    response.extend([2, u8::from(corrupt || index + 1 == chunks.len())]);
-                    response.extend(bytes);
+                    let response = rmp_serde::to_vec(&(
+                        id,
+                        revision,
+                        2u8,
+                        (corrupt || index + 1 == chunks.len()),
+                        serde_bytes::Bytes::new(&bytes),
+                    ))
+                    .unwrap();
                     frame(&mut stream, b'D', &response).await;
                     if corrupt {
                         break;
@@ -474,25 +477,7 @@ async fn browser_callback_http_roundtrip_conflict_and_cleanup() {
     drop(reservation);
     // A real remote HTTP receiver stands in for the CLI's login callback.
     let mut receiver = session
-        .stream(&format!(
-            r#"python3 -u -c '
-import socket
-s = socket.socket()
-s.bind(("127.0.0.1", {port}))
-s.listen()
-print("ready", flush=True)
-c, _ = s.accept()
-data = b""
-while b"\r\n\r\n" not in data:
-    chunk = c.recv(4096)
-    if not chunk: raise RuntimeError("early EOF")
-    data += chunk
-assert b"GET /callback?code=fixture&state=nonce HTTP/1.1" in data
-c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nlogged-in")
-c.close()
-s.close()
-'"#
-        ))
+        .stream(&format!("newport-test-fixture callback {port}"))
         .await
         .unwrap();
     let mut ready = [0; 6];
@@ -573,22 +558,19 @@ async fn native_x11_and_wayland_clients_fetch_png_on_demand() {
         frame(
             &mut stream,
             b'M',
-            format!("{revision}\nimage/png").as_bytes(),
+            &rmp_serde::to_vec(&(revision, vec!["image/png"])).unwrap(),
         )
         .await;
         receive(&mut stream, b'A').await;
         let command = format!("eval \"$(~/.local/bin/newport-agent env)\"; {client} | sha256sum");
         let (output, ()) = tokio::join!(session.execute(&command, None), async {
-            let request = String::from_utf8(receive(&mut stream, b'C').await).unwrap();
-            let fields: Vec<_> = request.split('\n').collect();
-            assert_eq!(fields[1], revision.to_string());
-            assert_eq!(fields[2], "image/png");
-            let id: u64 = fields[0].parse().unwrap();
-            let mut response = Vec::new();
-            response.extend(id.to_be_bytes());
-            response.extend(revision.to_be_bytes());
-            response.extend([0, 1]);
-            response.extend(&png);
+            let (id, received_revision, format): (u64, i64, String) =
+                rmp_serde::from_slice(&receive(&mut stream, b'C').await).unwrap();
+            assert_eq!(received_revision, revision);
+            assert_eq!(format, "image/png");
+            let response =
+                rmp_serde::to_vec(&(id, revision, 0u8, true, serde_bytes::Bytes::new(&png)))
+                    .unwrap();
             frame(&mut stream, b'D', &response).await;
         });
         assert_eq!(

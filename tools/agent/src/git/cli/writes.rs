@@ -1,10 +1,11 @@
-//! CLI mutations share the existing durable journal, never the git2 executor.
+//! Journaled Git CLI mutations with repository-scoped exclusion.
 use super::super::{
     journal::Journal,
     protocol::{Action, Author, CheckoutTarget, DiscardSource, ResetMode},
     tokens::{EntryRef, SnapshotRef},
 };
 use super::*;
+use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 pub(super) fn journal(service: &Service) -> Result<&Journal, Error> {
     service.journal.as_ref().ok_or_else(|| {
         Error::new(
@@ -67,6 +68,29 @@ fn remote(repo: &Repo, name: &str, token: &str) -> Result<(), Error> {
             "STALE_REMOTE",
             "Remote configuration changed. Refresh before continuing.",
         ));
+    }
+    Ok(())
+}
+fn remote_lease(repo: &Repo, remote: &str, reference: &str, expected: &str) -> Result<(), Error> {
+    // Git skips lease validation for an already up-to-date push. Validate the
+    // advertised value too, while retaining --force-with-lease for atomicity.
+    let urls = repo.run(&["remote", "get-url", "--push", "--all", remote])?;
+    for url in urls.split(|b| *b == b'\n').filter(|url| !url.is_empty()) {
+        let url = std::str::from_utf8(url).map_err(|_| failure())?;
+        let refs = repo.run(&["ls-remote", "--refs", "--", url, reference])?;
+        let found = refs.split(|b| *b == b'\n').find_map(|line| {
+            let at = line.iter().position(|b| *b == b'\t')?;
+            (line[at + 1..] == *reference.as_bytes()).then_some(&line[..at])
+        });
+        if !match found {
+            Some(value) => value == expected.as_bytes(),
+            None => expected.bytes().all(|b| b == b'0'),
+        } {
+            return Err(Error::new(
+                "STALE_REMOTE_REFERENCE",
+                "The remote reference changed. Refresh before continuing.",
+            ));
+        }
     }
     Ok(())
 }
@@ -138,7 +162,7 @@ pub(super) fn start(
     let journal = journal(service)?;
     let repo = Repo::from_id(repo_id)?;
     let metadata = fs::metadata(&repo.common).map_err(io_error)?;
-    // Same lock identity as git2: both engines must serialize against each other.
+    // Preserve the common-directory lock identity across agent versions.
     let identity = super::super::journal::hash(
         &[
             repo.common.as_os_str().as_bytes(),
@@ -295,11 +319,15 @@ fn apply(
             message(msg)?;
             let mut command = Vec::new();
             identity(&mut command, author.as_ref())?;
+            let merging = repo.state()? == "Merge";
             command.extend(args(&["commit", "--file=-"]));
             run(repo, command, msg.as_bytes().to_vec())?;
             let head = repo.head()?;
+            if merging {
+                let _ = fs::remove_file(repo.git_dir.join("newport-cli-integration"));
+            }
             Ok(
-                json!({"commitOid":head["oid"]["hex"],"parentOid":capture.metadata["head"]["oid"]["hex"],"refreshRequired":true}),
+                json!({"mergeCompleted":merging,"commitOid":head["oid"]["hex"],"parentOid":capture.metadata["head"]["oid"]["hex"],"refreshRequired":true}),
             )
         }
         Action::Amend {
@@ -382,7 +410,9 @@ fn apply(
                 args(&["branch", "--unset-upstream", n])
             };
             run(repo, command, vec![])?;
-            Ok(refresh)
+            Ok(
+                json!({"tracking":refs::tracking(repo,n)?,"upstream":upstream,"refreshRequired":true}),
+            )
         }
         Action::Checkout { target: checkout } => {
             match checkout {
@@ -399,7 +429,9 @@ fn apply(
                     run(repo, args(&["switch", "--detach", oid]), vec![])?;
                 }
             }
-            Ok(refresh)
+            Ok(
+                json!({"detached":repo.head()?["detached"],"oid":repo.head()?["oid"]["hex"],"refreshRequired":true}),
+            )
         }
         Action::RemoteAdd { name: n, url } => {
             name(repo, n, "remotes")?;
@@ -414,8 +446,19 @@ fn apply(
         } => {
             remote(repo, n, expected_token)?;
             name(repo, new_name, "remotes")?;
+            let renamed = repo
+                .run(&[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    &format!("refs/remotes/{n}/"),
+                ])?
+                .split(|b| *b == b'\n')
+                .filter(|r| !r.is_empty())
+                .count();
             run(repo, args(&["remote", "rename", "--", n, new_name]), vec![])?;
-            Ok(refresh)
+            Ok(
+                json!({"renamedReferences":renamed,"token":refs::remote(repo,new_name)?["token"],"refreshRequired":true}),
+            )
         }
         Action::RemoteSetUrl {
             name: n,
@@ -475,7 +518,9 @@ fn apply(
                 args(&["merge", "--ff-only", "--no-edit", target_oid]),
                 vec![],
             )?;
-            Ok(refresh)
+            Ok(
+                json!({"fastForwarded":capture.metadata["head"]["oid"] != repo.head()?["oid"],"oid":repo.head()?["oid"]["hex"],"refreshRequired":true}),
+            )
         }
         Action::Push {
             remote: n,
@@ -514,6 +559,7 @@ fn apply(
             expected(repo, &reference, expected_oid)?;
             oid(expected_remote_oid.as_bytes())?;
             let destination = name(repo, destination_branch, "heads")?;
+            remote_lease(repo, n, &destination, expected_remote_oid)?;
             run(
                 repo,
                 args(&[
@@ -526,7 +572,7 @@ fn apply(
                 ]),
                 vec![],
             )?;
-            Ok(refresh)
+            Ok(json!({"leaseMatched":true,"refreshRequired":true}))
         }
         Action::BranchDeleteRemote {
             remote: n,
@@ -542,6 +588,11 @@ fn apply(
         } => {
             remote(repo, n, expected_token)?;
             oid(expected_oid.as_bytes())?;
+            if expected_oid.bytes().all(|b| b == b'0') {
+                return Err(Error::invalid(
+                    "Deleting a remote reference requires its existing object ID.",
+                ));
+            }
             let reference = name(
                 repo,
                 branch,
@@ -551,6 +602,7 @@ fn apply(
                     "heads"
                 },
             )?;
+            remote_lease(repo, n, &reference, expected_oid)?;
             run(
                 repo,
                 args(&[
@@ -563,7 +615,9 @@ fn apply(
                 ]),
                 vec![],
             )?;
-            Ok(refresh)
+            Ok(
+                json!({"deleted":true,"leaseMatched":true,"oid":null,"destinationTag":if matches!(action,Action::TagDeleteRemote{..}){Some(branch)}else{None},"refreshRequired":true}),
+            )
         }
         Action::TagCreate {
             name: n,
@@ -581,7 +635,9 @@ fn apply(
             } else {
                 run(repo, args(&["tag", n, target_oid]), vec![])?;
             }
-            Ok(refresh)
+            Ok(
+                json!({"oid":String::from_utf8_lossy(trim_line(&repo.run(&["rev-parse","--verify", &format!("refs/tags/{n}")])?)),"targetOid":target_oid,"refreshRequired":true}),
+            )
         }
         Action::TagDelete {
             name: n,
@@ -638,7 +694,7 @@ fn apply(
                 ]),
                 vec![],
             )?;
-            Ok(refresh)
+            Ok(json!({"previousOid":expected_oid,"oid":target_oid,"refreshRequired":true}))
         }
         Action::Discard {
             entry_ids,
@@ -666,31 +722,68 @@ fn apply(
                     args(&["apply", "--recount", "--whitespace=nowarn", "-"]),
                     patch,
                 )?;
-                return Ok(refresh);
+                return Ok(json!({"indexChanged":false,"refreshRequired":true}));
             }
-            if entry_ids.iter().any(|id| {
-                capture.rows.iter().any(|r| {
-                    r["entryId"] == *id && (r["untracked"] == true || r["conflicted"] == true)
-                })
-            }) {
-                return Err(Error::new(
-                    "UNSUPPORTED_CAPABILITY",
-                    "Discard requires tracked, resolved files.",
-                ));
+            // Validate every selection before any mutation; untracked directories
+            // are intentionally excluded so a collapsed row cannot erase a tree.
+            let _ = paths(capture, entry_ids)?;
+            let mut tracked = Vec::new();
+            let mut untracked = Vec::new();
+            for id in entry_ids {
+                let row = capture
+                    .rows
+                    .iter()
+                    .find(|row| row["entryId"] == *id)
+                    .ok_or_else(stale)?;
+                if row["conflicted"] == true {
+                    return Err(Error::new(
+                        "UNSUPPORTED_CAPABILITY",
+                        "Resolve conflicts before discarding files.",
+                    ));
+                }
+                if row["untracked"] == true {
+                    let path: WirePath =
+                        serde_json::from_value(row["path"].clone()).map_err(|_| failure())?;
+                    let bytes = path.decode()?;
+                    if bytes.ends_with(b"/") {
+                        return Err(Error::new(
+                            "UNSUPPORTED_CAPABILITY",
+                            "Discard individual untracked files, not collapsed directories.",
+                        ));
+                    }
+                    untracked.push(OsString::from_vec(bytes));
+                } else {
+                    tracked.push(id.clone());
+                }
             }
-            let input = paths(capture, entry_ids)?;
-            let mut command = args(&[
-                "--literal-pathspecs",
-                "restore",
-                "--worktree",
-                "--pathspec-from-file=-",
-                "--pathspec-file-nul",
-            ]);
-            if *source == DiscardSource::Head {
-                command.push("--source=HEAD".into());
+            if !tracked.is_empty() {
+                let input = paths(capture, &tracked)?;
+                let mut command = args(&[
+                    "--literal-pathspecs",
+                    "restore",
+                    "--worktree",
+                    "--pathspec-from-file=-",
+                    "--pathspec-file-nul",
+                ]);
+                if *source == DiscardSource::Head {
+                    command.extend(args(&["--source=HEAD", "--staged"]));
+                }
+                run(repo, command, input)?;
             }
-            run(repo, command, input)?;
-            Ok(refresh)
+            for path in untracked {
+                command::write(
+                    &repo.root,
+                    &[
+                        "--literal-pathspecs".into(),
+                        "clean".into(),
+                        "-f".into(),
+                        "--".into(),
+                        path,
+                    ],
+                    vec![],
+                )?;
+            }
+            Ok(json!({"indexChanged":*source == DiscardSource::Head,"refreshRequired":true}))
         }
         Action::StashSave {
             message: msg,
@@ -764,7 +857,12 @@ fn apply(
         }
         Action::Merge { target_oid } => {
             target(repo, target_oid)?;
-            integrate(repo, args(&["merge", "--no-edit", target_oid]), vec![])
+            integrate(
+                repo,
+                args(&["merge", "--no-edit", target_oid]),
+                vec![],
+                "merge",
+            )
         }
         Action::CherryPick {
             target_oid,
@@ -792,7 +890,16 @@ fn apply(
                 command.extend(["-m".into(), mainline.to_string()]);
             }
             command.push(target_oid.clone());
-            integrate(repo, command, vec![])
+            integrate(
+                repo,
+                command,
+                vec![],
+                if matches!(action, Action::Revert { .. }) {
+                    "revert"
+                } else {
+                    "cherry_pick"
+                },
+            )
         }
         Action::Rebase {
             upstream_oid,
@@ -808,7 +915,7 @@ fn apply(
                 command.extend(args(&["--onto", onto]));
             }
             command.push(upstream_oid.clone());
-            integrate(repo, command, vec![])
+            integrate(repo, command, vec![], "rebase")
         }
         Action::MergeAbort {}
         | Action::IntegrationAbort {}
@@ -862,7 +969,12 @@ fn apply(
                 }
                 _ => command.extend(args(&[kind, "--abort"])),
             }
-            finish_integration(repo, run(repo, command, input))
+            finish_integration(
+                repo,
+                run(repo, command, input),
+                info["kind"].as_str().unwrap(),
+                matches!(action, Action::MergeAbort {} | Action::IntegrationAbort {}),
+            )
         }
         Action::ConflictResolve {
             entry_ids,
@@ -956,7 +1068,12 @@ fn stash_selection(
     }
     Ok(format!("stash@{{{}}}", matches[0]))
 }
-fn integrate(repo: &Repo, command: Vec<String>, input: Vec<u8>) -> Result<Value, Error> {
+fn integrate(
+    repo: &Repo,
+    command: Vec<String>,
+    input: Vec<u8>,
+    kind: &str,
+) -> Result<Value, Error> {
     if repo.state()? != "Clean" {
         return Err(Error::new(
             "INTEGRATION_IN_PROGRESS",
@@ -964,9 +1081,14 @@ fn integrate(repo: &Repo, command: Vec<String>, input: Vec<u8>) -> Result<Value,
         ));
     }
     fs::write(repo.git_dir.join("newport-cli-integration"), b"1\n").map_err(io_error)?;
-    finish_integration(repo, run(repo, command, input))
+    finish_integration(repo, run(repo, command, input), kind, false)
 }
-fn finish_integration(repo: &Repo, result: Result<(), Error>) -> Result<Value, Error> {
+fn finish_integration(
+    repo: &Repo,
+    result: Result<(), Error>,
+    kind: &str,
+    aborted: bool,
+) -> Result<Value, Error> {
     if repo.state()? != "Clean" {
         if repo.integration()?["managed"] == true {
             return Ok(json!({"needsResolution":true,"refreshRequired":true}));
@@ -975,5 +1097,7 @@ fn finish_integration(repo: &Repo, result: Result<(), Error>) -> Result<Value, E
     }
     let _ = fs::remove_file(repo.git_dir.join("newport-cli-integration"));
     result?;
-    Ok(json!({"needsResolution":false,"refreshRequired":true}))
+    Ok(
+        json!({"needsResolution":false,"aborted":aborted,"mergeCompleted":!aborted && kind=="merge","integrationCompleted":if aborted{None}else{Some(kind)},"commitOid":repo.head()?["oid"]["hex"],"oid":repo.head()?["oid"]["hex"],"refreshRequired":true}),
+    )
 }

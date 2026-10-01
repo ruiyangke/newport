@@ -124,12 +124,12 @@ fn session_error(error: anyhow::Error) -> String {
 }
 
 /// Reuse an authenticated transport for setup commands and streaming channels.
-pub struct ExecSession(std::sync::Arc<Connection>);
+pub struct ExecSession(std::sync::Arc<Connection>, uuid::Uuid);
 impl ExecSession {
     pub async fn connect(server: &Server) -> Result<Self, String> {
         Connection::connect(server)
             .await
-            .map(|connection| Self(std::sync::Arc::new(connection)))
+            .map(|connection| Self(std::sync::Arc::new(connection), server.id))
             .map_err(session_error)
     }
     /// Long-lived sync waits for agent approval without a request deadline.
@@ -137,8 +137,11 @@ impl ExecSession {
     pub async fn connect_integration(server: &Server) -> Result<Self, String> {
         Connection::connect_with_policy(server, super::ConnectionPolicy::Integration)
             .await
-            .map(|connection| Self(std::sync::Arc::new(connection)))
+            .map(|connection| Self(std::sync::Arc::new(connection), server.id))
             .map_err(session_error)
+    }
+    pub(crate) fn server_id(&self) -> uuid::Uuid {
+        self.1
     }
     pub async fn execute(&self, command: &str, input: Option<&[u8]>) -> Result<String, String> {
         let result = tokio::time::timeout(COMMAND_TIMEOUT, self.0.command(command, input))

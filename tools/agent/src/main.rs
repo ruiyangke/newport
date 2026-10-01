@@ -20,12 +20,6 @@ fn main() {
             Some("git-rpc")
                 if args.get(2).map(String::as_str) == Some("--stdio") && args.len() == 3 =>
             {
-                // This entry point has not spawned threads or used libgit2 yet.
-                unsafe {
-                    git2::opts::set_server_connect_timeout_in_milliseconds(15_000)
-                        .expect("Git timeout");
-                    git2::opts::set_server_timeout_in_milliseconds(30_000).expect("Git timeout");
-                }
                 newport_agent::git::serve()
             }
             Some("clipboard") => newport_agent::clipboard::read(&args[2..]),

@@ -147,16 +147,8 @@ impl Service {
                         let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
                         // Local requests are tiny: never allocate a full wire frame from a client.
                         let result = (|| -> io::Result<(u8, Vec<u8>)> {
-                            use std::io::Read;
-                            let mut header = [0; 5];
-                            stream.read_exact(&mut header)?;
-                            let len = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
-                            if len > 512 {
-                                return Err(io::Error::other("invalid clipboard request"));
-                            }
-                            let mut bytes = vec![0; len];
-                            stream.read_exact(&mut bytes)?;
-                            match header[0] {
+                            let (kind, bytes) = wire::read_limited(&mut stream, 512)?;
+                            match kind {
                                 b'M' if bytes.is_empty() => Ok((b'M', data.offer().encode())),
                                 b'C' => {
                                     let request = Request::decode(&bytes)?;

@@ -13,6 +13,18 @@ pub(super) fn create(
     if let Some((url, _)) = &clone {
         super::super::remotes::validate_url(url)?;
     }
+    if clone.is_none() {
+        let branch = branch.as_deref().ok_or_else(failure)?;
+        if branch.starts_with('-')
+            || command::run(
+                Path::new("/"),
+                &["check-ref-format", &format!("refs/heads/{branch}")],
+            )?
+            .is_none()
+        {
+            return Err(Error::invalid("Invalid initial branch."));
+        }
+    }
     let payload = pages::hash(&json!({"engine":"cli","path":path,"branch":branch,"clone":clone}))?;
     if journal.existing(id, &payload)?.is_some() {
         return serde_json::to_value(journal.get(id)?).map_err(|_| failure());
@@ -56,7 +68,11 @@ pub(super) fn create(
     }
     if fs::symlink_metadata(root.join(leaf)).is_ok() {
         return Err(Error::new(
-            "PATH_EXISTS",
+            if clone.is_some() {
+                "PATH_EXISTS"
+            } else {
+                "ALREADY_REPOSITORY"
+            },
             "The destination already exists and will not be replaced.",
         ));
     }
@@ -91,15 +107,6 @@ pub(super) fn create(
             args.push(prepared.as_os_str().into());
         } else {
             let branch = branch.as_deref().ok_or_else(failure)?;
-            if branch.starts_with('-')
-                || command::run(
-                    &root,
-                    &["check-ref-format", &format!("refs/heads/{branch}")],
-                )?
-                .is_none()
-            {
-                return Err(Error::invalid("Invalid initial branch."));
-            }
             args.extend([
                 "init".into(),
                 "--template=".into(),
@@ -114,6 +121,12 @@ pub(super) fn create(
                 "Git could not prepare the repository. The destination was not published.",
             ));
         }
+        let cloned_oid = if clone.is_some() {
+            command::run(&prepared, &["rev-parse", "--verify", "HEAD"])?
+                .map(|b| String::from_utf8_lossy(trim_line(&b)).into_owned())
+        } else {
+            None
+        };
         let source = if clone.is_some() {
             prepared.clone()
         } else {
@@ -131,7 +144,7 @@ pub(super) fn create(
         let source = source.strip_prefix(&root).map_err(|_| failure())?;
         bootstrap::publish_to(&directory, source, Path::new(leaf))?;
         if let Some((_, bare)) = &clone {
-            Ok(json!({"cloned":true,"path":path,"bare":bare,"openRequired":true}))
+            Ok(json!({"cloned":true,"path":path,"bare":bare,"oid":cloned_oid,"openRequired":true}))
         } else {
             Ok(
                 json!({"initialized":true,"path":path,"initialBranch":branch,"bare":false,"openRequired":true}),

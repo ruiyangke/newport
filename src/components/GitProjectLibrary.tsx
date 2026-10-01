@@ -1,28 +1,11 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { gitQueries } from "../query/git";
-import type { ServerScope } from "../query/keys";
-import { gitProjectsFor } from "../git/registry";
-import { readIPC, readSharedQuery } from "../query/client";
-import { useGitPageLoader } from "../hooks/useGitPageLoader";
-import { GitLoadMore } from "./GitLoadMore";
-import { gitErrorMessage } from "../git/errors";
-import {
-  Fragment,
-  useEffect,
-  useId,
-  useMemo,
-  useState,
-  type ReactNode,
-} from "react";
+import { Fragment, useId, useMemo, type ReactNode } from "react";
 import {
   Activity,
   ArrowUp,
   ArrowUpDown,
   ChevronDown,
-  ChevronRight,
   Download,
   FolderGit2,
-  FolderTree,
   FolderPlus,
   GitBranch,
   MoreHorizontal,
@@ -44,13 +27,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { GitProject } from "../domain/git";
-import {
-  openable,
-  worktreeBranch,
-  worktreeKey,
-  worktreeLabel,
-  type WorktreeRow,
-} from "../git/worktrees";
 
 export type GitProjectFilter = "all" | "favorites" | "archived";
 export type GitProjectSort = "name" | "path";
@@ -66,8 +42,6 @@ export interface GitProjectRowStatus {
   clean?: boolean;
   running?: number | null;
   outgoing?: number | null;
-  /** The repository's other worktrees, when they were listed. */
-  worktrees?: WorktreeRow[];
 }
 
 const FILTERS: { value: GitProjectFilter; label: string }[] = [
@@ -102,9 +76,6 @@ const ACTIONS_COLUMN =
 const ROW_ICON_BUTTON =
   "h-[26px]! w-[26px] rounded-[5px]! px-0! text-muted-foreground hover:text-foreground";
 const MENU_CONTENT = "git-library-menu-list min-w-[190px]";
-/** More worktrees than this start folded under their project. */
-const FOLD_ABOVE = 6;
-
 /** A dot and a word: the state a column reports, or that nothing was read. */
 function Fact({
   tone,
@@ -252,89 +223,6 @@ function StateCells({
   );
 }
 
-/**
- * A worktree's branch and working-tree cells. The branch is known from the
- * listing; the working tree only once it has been read, as for a project.
- */
-function WorktreeCells({
-  row,
-  state,
-  checking,
-  onCheck,
-}: {
-  row: WorktreeRow;
-  state?: GitProjectRowStatus;
-  checking?: boolean;
-  onCheck?: () => void;
-}) {
-  const branch = worktreeBranch(row);
-  const changes = typeof state?.changes === "number" ? state.changes : null;
-  const label = worktreeLabel(row);
-  return (
-    <>
-      <div className={cn(BRANCH_COLUMN, "text-[12px]")}>
-        <span className="sr-only">Branch: </span>
-        {branch ? (
-          <span className="flex min-w-0 items-center gap-[5px]">
-            <GitBranch
-              size={13}
-              strokeWidth={1.6}
-              aria-hidden="true"
-              className="flex-none text-muted-foreground"
-            />
-            <span className="truncate">{branch}</span>
-          </span>
-        ) : (
-          <span className="text-muted-foreground">Not on a branch</span>
-        )}
-      </div>
-      <div
-        className={cn(
-          TREE_COLUMN,
-          "flex items-center gap-[6px] text-[12px] text-muted-foreground",
-        )}
-      >
-        <span className="sr-only">Working tree: </span>
-        {changes !== null ? (
-          changes > 0 ? (
-            <Fact tone="changed">{plural(changes, "change")}</Fact>
-          ) : (
-            <Fact tone="clean">Clean</Fact>
-          )
-        ) : checking ? (
-          <button type="button" className="git-library-check" disabled>
-            Reading…
-          </button>
-        ) : (
-          <span className="git-library-unknown flex min-w-0 items-center gap-[6px] text-muted-foreground/80">
-            <span className="truncate">Not checked</span>
-            {onCheck && (
-              <button
-                type="button"
-                className="git-library-check flex-none text-primary opacity-0 group-hover/row:opacity-100 hover:underline focus-visible:opacity-100"
-                aria-label={`Check status of ${label}`}
-                onClick={onCheck}
-              >
-                Check
-              </button>
-            )}
-          </span>
-        )}
-        {typeof state?.outgoing === "number" && state.outgoing > 0 && (
-          <span
-            className="flex flex-none items-center gap-[1px] tabular-nums"
-            title={`${plural(state.outgoing, "commit")} ahead of the upstream, from stored refs`}
-            aria-label={`${state.outgoing} ahead`}
-          >
-            · <ArrowUp size={11} aria-hidden="true" className="ml-[3px]" />
-            {state.outgoing}
-          </span>
-        )}
-      </div>
-    </>
-  );
-}
-
 export function GitProjectLibrary({
   projects,
   busy = false,
@@ -359,14 +247,7 @@ export function GitProjectLibrary({
   onCheckAll,
   checking,
   description,
-  worktreeStatus,
-  onOpenWorktree,
-  onCheckWorktree,
-  scope,
-  onVisibleWorktrees,
 }: {
-  scope?: ServerScope;
-  onVisibleWorktrees?: (projectId: string, rows: WorktreeRow[]) => void;
   projects: GitProject[];
   busy?: boolean;
   search: string;
@@ -401,18 +282,8 @@ export function GitProjectLibrary({
   checking?: Set<string>;
   /** Optional per-project blurb; rows omit the line when there is none. */
   description?: (project: GitProject) => string | undefined;
-  /** What each worktree's read said, keyed `worktree:<git dir>`. */
-  worktreeStatus?: Record<string, GitProjectRowStatus>;
-  /** Opens a project at one of its worktrees. */
-  onOpenWorktree?: (project: GitProject, row: WorktreeRow) => void;
-  /** Reads one worktree's working tree on request. */
-  onCheckWorktree?: (project: GitProject, row: WorktreeRow) => void;
 }) {
   const searchId = useId();
-  // Only the choices someone made; the rest follow FOLD_ABOVE.
-  const [folding, setFolding] = useState<ReadonlyMap<string, boolean>>(
-    () => new Map(),
-  );
   const rows = useMemo(() => {
     const needle = search.trim().toLowerCase();
     const isArchived = (project: GitProject) =>
@@ -640,13 +511,6 @@ export function GitProjectLibrary({
               {rows.map((project) => {
                 const favourite = favourites.has(project.id);
                 const blurb = description?.(project);
-                const listed = status?.[project.id]?.worktrees ?? [];
-                // Folded to start with when there are many: agents leave
-                // dozens, and the next project should not be pages away.
-                const folded =
-                  folding.get(project.id) ??
-                  (scope ? true : listed.length > FOLD_ABOVE);
-                const worktrees = folded ? [] : listed;
                 return (
                   <Fragment key={project.id}>
                     <li
@@ -683,32 +547,6 @@ export function GitProjectLibrary({
                         >
                           {project.path.display}
                         </div>
-                        {(scope || listed.length > 0) && (
-                          // Agents leave many; the project's own row stays
-                          // put when its worktrees are folded away.
-                          <button
-                            type="button"
-                            aria-expanded={!folded}
-                            onClick={() =>
-                              setFolding((current) =>
-                                new Map(current).set(project.id, !folded),
-                              )
-                            }
-                            className="git-library-worktrees-toggle mt-[2px] flex items-center gap-[3px] rounded-[4px] text-[11px] font-medium text-muted-foreground hover:text-foreground"
-                          >
-                            <ChevronRight
-                              size={12}
-                              aria-hidden="true"
-                              className={cn(
-                                "transition-transform",
-                                !folded && "rotate-90",
-                              )}
-                            />
-                            {scope
-                              ? "Worktrees"
-                              : plural(listed.length, "worktree")}
-                          </button>
-                        )}
                       </div>
                       <StateCells
                         state={status?.[project.id]}
@@ -790,30 +628,6 @@ export function GitProjectLibrary({
                         </DropdownMenu>
                       </div>
                     </li>
-                    {/* The project's other checkouts, under it: where agents
-                      work, each on its own branch. */}
-                    {!folded && scope ? (
-                      <PagedLibraryWorktrees
-                        scope={scope}
-                        project={project}
-                        busy={busy}
-                        worktreeStatus={worktreeStatus}
-                        checking={checking}
-                        onOpenWorktree={onOpenWorktree}
-                        onCheckWorktree={onCheckWorktree}
-                        onVisible={onVisibleWorktrees}
-                      />
-                    ) : (
-                      <LibraryWorktreeRows
-                        rows={worktrees}
-                        project={project}
-                        busy={busy}
-                        worktreeStatus={worktreeStatus}
-                        checking={checking}
-                        onOpenWorktree={onOpenWorktree}
-                        onCheckWorktree={onCheckWorktree}
-                      />
-                    )}
                   </Fragment>
                 );
               })}
@@ -822,173 +636,5 @@ export function GitProjectLibrary({
         </div>
       )}
     </section>
-  );
-}
-
-type ChildProps = {
-  project: GitProject;
-  busy?: boolean;
-  worktreeStatus?: Record<string, GitProjectRowStatus>;
-  checking?: Set<string>;
-  onOpenWorktree?: (project: GitProject, row: WorktreeRow) => void;
-  onCheckWorktree?: (project: GitProject, row: WorktreeRow) => void;
-};
-function LibraryWorktreeRows({
-  rows,
-  project,
-  busy,
-  worktreeStatus,
-  checking,
-  onOpenWorktree,
-  onCheckWorktree,
-}: ChildProps & { rows: WorktreeRow[] }) {
-  return (
-    <>
-      {rows.map((row) => {
-        const key = `worktree:${worktreeKey(row)}`;
-        const label = worktreeLabel(row);
-        const canOpen = openable(row) && !!onOpenWorktree;
-        return (
-          <li
-            key={key}
-            className="git-library-worktree group/row flex w-full items-center gap-[12px] border-b border-border py-[7px] pr-[12px] pl-[42px] last:border-b-0 hover:bg-[color-mix(in_srgb,var(--accent)_55%,transparent)]"
-          >
-            <span className="flex w-[16px] flex-none self-start pt-[1px] text-muted-foreground">
-              <FolderTree size={14} strokeWidth={1.6} aria-hidden="true" />
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="flex min-w-0 items-center gap-[6px]">
-                <Button
-                  variant="ghost"
-                  className="git-library-open-worktree block h-auto! min-h-[18px] max-w-full truncate rounded-[4px]! bg-transparent px-0! text-left text-[12px]! leading-[18px] font-medium! text-foreground hover:bg-transparent hover:underline dark:hover:bg-transparent"
-                  disabled={busy || !canOpen}
-                  aria-label={`Open worktree ${label} of ${project.name}`}
-                  onClick={() => onOpenWorktree?.(project, row)}
-                >
-                  {label}
-                </Button>
-                {row.state !== "available" && (
-                  <span className="flex-none rounded-[4px] bg-[color-mix(in_srgb,var(--orange)_14%,transparent)] px-[5px] text-[10px] leading-[16px] font-semibold text-(--orange)">
-                    {row.state}
-                  </span>
-                )}
-              </div>
-              <div
-                className="truncate text-[11px] leading-[15px] text-muted-foreground"
-                title={row.path?.display}
-              >
-                {row.path?.display ?? "Path unavailable"}
-              </div>
-            </div>
-            <WorktreeCells
-              row={row}
-              state={worktreeStatus?.[key]}
-              checking={checking?.has(key)}
-              onCheck={
-                onCheckWorktree && openable(row)
-                  ? () => onCheckWorktree(project, row)
-                  : undefined
-              }
-            />
-            <div className={ACTIONS_COLUMN} />
-          </li>
-        );
-      })}
-    </>
-  );
-}
-
-function PagedLibraryWorktrees({
-  scope,
-  onVisible,
-  ...props
-}: ChildProps & {
-  scope: ServerScope;
-  onVisible?: (projectId: string, rows: WorktreeRow[]) => void;
-}) {
-  const client = useQueryClient();
-  const opened = useQuery({
-    queryKey: [
-      ...gitQueries.projects(scope).queryKey,
-      "worktree-repository",
-      props.project.id,
-      props.project.path.bytesB64,
-    ],
-    queryFn: ({ signal }) =>
-      readIPC(signal, () => gitProjectsFor(scope).open(props.project)),
-  });
-  const repoId = opened.data?.repoId ?? "";
-  const query = gitQueries.worktrees(scope, repoId);
-  const listing = useQuery({ ...query, enabled: !!repoId });
-  const pages = useGitPageLoader({
-    queryKey: query.queryKey,
-    page: listing.data ?? null,
-    enabled: !!repoId && !listing.isFetching && !listing.isError,
-    entryKey: worktreeKey,
-    read: (cursor, signal) =>
-      readSharedQuery(
-        client,
-        {
-          ...gitQueries.worktrees(scope, repoId, cursor),
-          staleTime: Infinity,
-        },
-        signal,
-      ),
-  });
-  const rows = useMemo(
-    () =>
-      listing.data?.entries.filter(
-        (row) => row.kind === "linked" && !row.current,
-      ) ?? [],
-    [listing.data],
-  );
-  useEffect(() => {
-    onVisible?.(props.project.id, rows);
-  }, [onVisible, props.project.id, rows]);
-  useEffect(
-    () => () => {
-      onVisible?.(props.project.id, []);
-    },
-    [onVisible, props.project.id],
-  );
-  const error = opened.error ?? listing.error;
-  return (
-    <>
-      <LibraryWorktreeRows {...props} rows={rows} />
-      <li className="px-10 py-2 text-xs text-muted-foreground">
-        {error ? (
-          <span role="alert">
-            {gitErrorMessage(error)}{" "}
-            <Button
-              onClick={() =>
-                void (opened.error ? opened.refetch() : listing.refetch())
-              }
-            >
-              Retry
-            </Button>
-          </span>
-        ) : opened.isPending || listing.isPending ? (
-          "Loading worktrees…"
-        ) : rows.length === 0 && !listing.data?.nextCursor ? (
-          "No other worktrees"
-        ) : null}
-        {listing.data && (
-          <GitLoadMore
-            cursor={listing.data.nextCursor}
-            disabled={
-              listing.isFetching ||
-              listing.isError ||
-              opened.isFetching ||
-              opened.isError
-            }
-            loading={pages.loading}
-            error={pages.error}
-            onLoad={pages.load}
-            label="Load more worktrees"
-            endLabel="All worktrees loaded"
-          />
-        )}
-      </li>
-    </>
   );
 }

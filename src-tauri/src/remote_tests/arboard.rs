@@ -68,7 +68,7 @@ async fn agent(session: &ExecSession) -> Stream {
         ))
         .await
         .unwrap();
-    assert_eq!(receive(&mut agent, b'R').await, b"newport-agent/5");
+    assert_eq!(receive(&mut agent, b'R').await, b"newport-agent/6");
     agent
 }
 async fn stop(agent: &mut Stream) {
@@ -79,24 +79,40 @@ async fn stop(agent: &mut Stream) {
         .unwrap();
 }
 async fn offer(agent: &mut Stream, revision: i64, format: &str) {
-    frame(agent, b'M', format!("{revision}\n{format}").as_bytes()).await;
+    frame(
+        agent,
+        b'M',
+        &rmp_serde::to_vec(&(
+            revision,
+            if format.is_empty() {
+                vec![]
+            } else {
+                vec![format]
+            },
+        ))
+        .unwrap(),
+    )
+    .await;
     receive(agent, b'A').await;
 }
 fn request_fields(request: &[u8], revision: i64, format: &str) -> u64 {
-    let text = std::str::from_utf8(request).unwrap();
-    let fields: Vec<_> = text.split('\n').collect();
-    assert_eq!(fields[1], revision.to_string());
-    assert_eq!(fields[2], format);
-    fields[0].parse().unwrap()
+    let (id, received_revision, received_format): (u64, i64, String) =
+        rmp_serde::from_slice(request).unwrap();
+    assert_eq!(received_revision, revision);
+    assert_eq!(received_format, format);
+    id
 }
 async fn chunk(agent: &mut Stream, id: u64, revision: i64, data: &[u8], done: bool) {
     let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
     encoder.write_all(data).unwrap();
-    let mut bytes = Vec::new();
-    bytes.extend(id.to_be_bytes());
-    bytes.extend(revision.to_be_bytes());
-    bytes.extend([2, u8::from(done)]);
-    bytes.extend(encoder.finish().unwrap());
+    let bytes = rmp_serde::to_vec(&(
+        id,
+        revision,
+        2u8,
+        done,
+        serde_bytes::Bytes::new(&encoder.finish().unwrap()),
+    ))
+    .unwrap();
     frame(agent, b'D', &bytes).await;
 }
 async fn fetch(

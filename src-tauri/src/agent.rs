@@ -10,7 +10,38 @@ use tokio::{
 
 #[allow(dead_code)]
 #[path = "../../tools/agent/src/wire.rs"]
-mod wire;
+pub(crate) mod wire;
+
+/// All agent-backed features enter here before opening a protocol channel.
+/// Recheck every new channel so removal or an external replacement is repaired.
+pub enum Service {
+    Git,
+    Integration {
+        client: uuid::Uuid,
+        clipboard: bool,
+        browser: bool,
+    },
+}
+impl Service {
+    fn command(&self) -> String {
+        match self {
+            Self::Git => "exec env NEWPORT_GIT_BACKEND=cli \"$HOME/.local/bin/newport-agent\" git-rpc --stdio".into(),
+            Self::Integration { client, clipboard, browser } => format!(
+                "exec \"$HOME/.local/bin/newport-agent\" serve {client} {} {}",
+                if *clipboard { "--clipboard" } else { "" },
+                if *browser { "--browser" } else { "" },
+            ),
+        }
+    }
+}
+pub async fn launch(
+    session: &ExecSession,
+    service: Service,
+) -> Result<(russh::ChannelStream<russh::client::Msg>, String), String> {
+    let installed = install(session).await?;
+    let stream = session.stream(&service.command()).await?;
+    Ok((stream, installed))
+}
 
 pub async fn install(session: &ExecSession) -> Result<String, String> {
     deploy(session, false).await
@@ -18,7 +49,25 @@ pub async fn install(session: &ExecSession) -> Result<String, String> {
 pub async fn reinstall(session: &ExecSession) -> Result<String, String> {
     deploy(session, true).await
 }
+// Installation and explicit reinstalls share the same per-profile lock. Weak
+// entries avoid retaining every server ever visited; failures are never cached.
+fn installation_lock(server: uuid::Uuid) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    use std::sync::{Arc, LazyLock, Mutex, Weak};
+    static LOCKS: LazyLock<
+        Mutex<std::collections::HashMap<uuid::Uuid, Weak<tokio::sync::Mutex<()>>>>,
+    > = LazyLock::new(Mutex::default);
+    let mut locks = LOCKS.lock().expect("agent installation locks");
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&server).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(server, Arc::downgrade(&lock));
+    lock
+}
 async fn deploy(session: &ExecSession, force: bool) -> Result<String, String> {
+    let lock = installation_lock(session.server_id());
+    let _installing = lock.lock().await;
     let platform = session.execute("uname -s; uname -m", None).await?;
     let mut lines = platform.lines();
     if lines.next() != Some("Linux") {
@@ -36,7 +85,7 @@ async fn deploy(session: &ExecSession, force: bool) -> Result<String, String> {
     if !force {
         let installed = session
             .execute(
-                "sha256sum \"$HOME/.local/bin/newport-agent\" 2>/dev/null || true",
+                "test -x \"$HOME/.local/bin/newport-agent\" && sha256sum \"$HOME/.local/bin/newport-agent\" 2>/dev/null || true",
                 None,
             )
             .await?;
@@ -70,13 +119,10 @@ impl<W> Drop for Agent<W> {
 async fn read_event(input: &mut (impl AsyncRead + Unpin)) -> Result<(u8, Vec<u8>), String> {
     let mut header = [0; 5];
     input.read_exact(&mut header).await.map_err(transport)?;
-    let len = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
-    if len > 8224 {
-        return Err("Invalid agent event length.".into());
-    }
+    let len = wire::payload_length(&header, 8224).map_err(|e| e.to_string())?;
     let mut data = vec![0; len];
     input.read_exact(&mut data).await.map_err(transport)?;
-    Ok((header[0], data))
+    wire::decode(&data, 8224).map_err(|e| e.to_string())
 }
 fn transport(error: impl std::fmt::Display) -> String {
     format!("SSH transport interrupted: {error}")
@@ -146,19 +192,15 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
         checked_event(kind, data)
     }
     pub async fn open(&mut self, data: &[u8]) -> Result<(), String> {
-        let (id, request) = std::str::from_utf8(data)
-            .ok()
-            .and_then(|v| v.split_once('\n'))
-            .filter(|(id, _)| id.parse::<u64>().is_ok())
-            .ok_or("Invalid browser request.")?;
-        let result = self.open_request(request).await;
-        let reply = match result {
-            Ok(Some(warning)) => format!("ok\n{warning}"),
-            Ok(None) => "ok".to_owned(),
-            Err(error) => error,
+        let (id, request) = wire::parse_browser_request(data).map_err(|e| e.to_string())?;
+        let result = self.open_request(&request).await;
+        let (success, message) = match result {
+            Ok(warning) => (true, warning),
+            Err(error) => (false, Some(error)),
         };
-        let frame =
-            wire::encode(b'B', format!("{id}\n{reply}").as_bytes()).map_err(|e| e.to_string())?;
+        let reply =
+            wire::browser_reply(id, success, message.as_deref()).map_err(|e| e.to_string())?;
+        let frame = wire::encode(b'B', &reply).map_err(|e| e.to_string())?;
         tokio::time::timeout(Duration::from_secs(5), async {
             self.writer.write_all(&frame).await.map_err(transport)?;
             self.writer.flush().await.map_err(transport)
@@ -250,6 +292,32 @@ mod tests {
         assert_eq!(checked_event(b'A', vec![]).unwrap(), (b'A', vec![]));
     }
     #[tokio::test]
+    async fn installations_share_a_server_lock_without_blocking_other_servers() {
+        let server = uuid::Uuid::new_v4();
+        let first = installation_lock(server);
+        let second = installation_lock(server);
+        let other = installation_lock(uuid::Uuid::new_v4());
+        let held = first.lock().await;
+        assert!(second.try_lock().is_err());
+        assert!(other.try_lock().is_ok());
+        drop(held);
+        assert!(second.try_lock().is_ok());
+    }
+    #[test]
+    fn agent_services_keep_browser_and_clipboard_preferences_independent() {
+        for (clipboard, browser) in [(true, false), (false, true), (true, true), (false, false)] {
+            let command = Service::Integration {
+                client: uuid::Uuid::nil(),
+                clipboard,
+                browser,
+            }
+            .command();
+            assert_eq!(command.contains("--clipboard"), clipboard);
+            assert_eq!(command.contains("--browser"), browser);
+        }
+        assert!(Service::Git.command().ends_with("git-rpc --stdio"));
+    }
+    #[tokio::test]
     async fn agent_events_handle_fragmentation_and_reject_oversized_frames() {
         let (mut source, mut destination) = tokio::io::duplex(16);
         let frame = wire::encode(b'O', b"https://example.com").unwrap();
@@ -265,10 +333,10 @@ mod tests {
             .await
             .unwrap_err()
             .starts_with("SSH transport interrupted:"));
-        let oversized = [b'O', 0, 0, 33, 0];
+        let oversized = [b'M', 0, 0, 34, 0];
         assert!(read_event(&mut oversized.as_slice())
             .await
             .unwrap_err()
-            .contains("length"));
+            .contains("limit"));
     }
 }

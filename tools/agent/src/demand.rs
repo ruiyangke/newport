@@ -159,7 +159,7 @@ impl Store {
             return Ok(());
         }
         // Bad compressed data fails this read, without terminating the agent.
-        let decoded = clipboard_wire::decompress_chunk(status, bytes);
+        let decoded = clipboard_wire::decompress_chunk(status, &bytes);
         let failed = decoded.is_err();
         let bytes = decoded.unwrap_or_default();
         let mut used: usize = inner

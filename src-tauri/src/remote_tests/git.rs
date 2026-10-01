@@ -78,32 +78,53 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Client<S> {
 #[ignore = "Requires the disposable OpenSSH fixture"]
 async fn git_rpc_roundtrip() {
     let temporary = tempfile::tempdir().unwrap();
-    let repo = git2::Repository::init(temporary.path()).unwrap();
-    repo.config()
-        .unwrap()
-        .set_bool("commit.gpgsign", false)
-        .unwrap();
+    let git = |root: &std::path::Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(
+        temporary.path(),
+        &["init", "--template=", "--initial-branch=main"],
+    );
+    git(temporary.path(), &["config", "user.name", "Fixture"]);
+    git(
+        temporary.path(),
+        &["config", "user.email", "fixture@example.test"],
+    );
     std::fs::write(temporary.path().join("sample.txt"), "before\n").unwrap();
-    let mut index = repo.index().unwrap();
-    index.add_path(std::path::Path::new("sample.txt")).unwrap();
-    index.write().unwrap();
-    let tree_id = index.write_tree().unwrap();
-    let tree = repo.find_tree(tree_id).unwrap();
-    let author = git2::Signature::now("Fixture", "fixture@example.test").unwrap();
-    repo.commit(Some("HEAD"), &author, &author, "Fixture commit", &tree, &[])
-        .unwrap();
+    git(temporary.path(), &["add", "sample.txt"]);
+    git(temporary.path(), &["commit", "-m", "Fixture commit"]);
     let changed = (0..5000)
         .map(|i| format!("line {i}: content for streaming\n"))
         .collect::<String>();
     std::fs::write(temporary.path().join("sample.txt"), changed).unwrap();
     let blob_content = "pageable blob content\n".repeat(30_000);
-    let pageable_blob = repo.blob(blob_content.as_bytes()).unwrap();
+    let blob_file = temporary.path().join(".git/blob-fixture");
+    std::fs::write(&blob_file, &blob_content).unwrap();
+    let pageable_blob = git(
+        temporary.path(),
+        &["hash-object", "-w", blob_file.to_str().unwrap()],
+    );
+    std::fs::remove_file(blob_file).unwrap();
     let mut archive = tar::Builder::new(Vec::new());
     archive.append_dir_all(".", temporary.path()).unwrap();
     let bytes = archive.into_inner().unwrap();
     let bare_temp = tempfile::tempdir().unwrap();
-    let bare = git2::Repository::init_bare(bare_temp.path()).unwrap();
-    bare.set_head("refs/heads/main").unwrap();
+    git(
+        bare_temp.path(),
+        &["init", "--bare", "--initial-branch=main", "--template="],
+    );
     let mut bare_archive = tar::Builder::new(Vec::new());
     bare_archive.append_dir_all(".", bare_temp.path()).unwrap();
     let bare_bytes = bare_archive.into_inner().unwrap();
@@ -280,7 +301,7 @@ async fn git_rpc_roundtrip() {
         .unwrap();
     assert_eq!(
         history["entries"][0]["message"]["display"],
-        "Fixture commit"
+        "Fixture commit\n"
     );
     let summary = client
         .request(Request::History {
@@ -379,15 +400,11 @@ async fn git_rpc_roundtrip() {
         })
         .await
         .unwrap();
-    let script = "import json,os,pathlib,sys; data=json.load(sys.stdin); p=pathlib.Path.home()/'.local/state/newport/git/records'/data['file']; r=json.loads(p.read_text()); assert r['state']=='succeeded'; r['state']='running'; p.write_text(json.dumps(r))";
     let payload =
         serde_json::to_vec(&serde_json::json!({"file":format!("{client_id}-{operation_id}.json")}))
             .unwrap();
     session
-        .execute(
-            &format!("python3 -c '{}'", script.replace('\'', "'\\''")),
-            Some(&payload),
-        )
+        .execute("newport-test-fixture interrupt-journal", Some(&payload))
         .await
         .unwrap();
     assert_eq!(
@@ -712,7 +729,7 @@ async fn git_rpc_roundtrip() {
         .iter()
         .any(|entry| entry["remote"] == true));
     // Outbound Git SSH uses an agent entirely inside the disposable server.
-    // These commands create test credentials; production transfers use libgit2.
+    // These commands create test credentials; production transfers use the Git CLI.
     let agent_dir = format!("{root}-agent");
     session.execute(&format!("mkdir -m 700 {agent_dir} && ssh-keygen -q -t ed25519 -N '' -f {agent_dir}/key && cat {agent_dir}/key.pub >> ~/.ssh/authorized_keys && ssh-agent -a {agent_dir}/socket > {agent_dir}/env && SSH_AUTH_SOCK={agent_dir}/socket ssh-add {agent_dir}/key"), None).await.unwrap();
     let ssh_stream = session.stream(&format!("SSH_AUTH_SOCK={agent_dir}/socket exec \"$HOME/.local/bin/newport-agent\" git-rpc --stdio")).await.unwrap();
@@ -816,7 +833,7 @@ async fn git_rpc_roundtrip() {
             .unwrap();
         assert_eq!(result["state"], "succeeded", "{result}");
     }
-    let initial_oid = repo.head().unwrap().target().unwrap().to_string();
+    let initial_oid = git(temporary.path(), &["rev-parse", "HEAD"]);
     let remotes = ssh_client
         .request(Request::Remotes {
             repo_id: ssh_repo.clone(),
@@ -1235,7 +1252,7 @@ async fn git_rpc_roundtrip() {
         .unwrap();
     assert_eq!(
         tags["entries"][0]["message"]["display"],
-        "Remote release notes"
+        "Remote release notes\n"
     );
     let summary = ssh_client
         .request(Request::Tags {
@@ -1346,7 +1363,7 @@ async fn git_rpc_roundtrip() {
     );
     assert_eq!(
         remote_tags["entries"][0]["message"]["display"],
-        "Remote release notes"
+        "Remote release notes\n"
     );
     let replay_author = || {
         Some(Author {
@@ -1481,7 +1498,7 @@ async fn git_rpc_roundtrip() {
         .unwrap();
     assert_eq!(
         history["entries"][0]["message"]["display"],
-        "Amended remote replay"
+        "Amended remote replay\n"
     );
     assert_eq!(
         history["entries"][0]["parents"].as_array().unwrap().len(),
@@ -1835,7 +1852,7 @@ async fn git_rpc_roundtrip() {
         .request(Request::CommitDiff {
             path: None,
             repo_id: ssh_repo.clone(),
-            commit_oid: repo.head().unwrap().target().unwrap().to_string(),
+            commit_oid: git(temporary.path(), &["rev-parse", "HEAD"]),
             parent_index: 0,
             context_lines: 3,
         })
@@ -2071,11 +2088,11 @@ async fn git_rpc_roundtrip() {
     );
     // Fixture-only receive hook changes the ref after advertisement and before
     // receive-pack's transaction, exercising the server-side old-OID guard.
-    let raced_oid = repo.head().unwrap().target().unwrap().to_string();
+    let raced_oid = git(temporary.path(), &["rev-parse", "HEAD"]);
     let hook=format!("#!/bin/sh\nif [ \"$1\" = refs/heads/lease-remote ]; then\n  git update-ref refs/heads/lease-remote {raced_oid}\nfi\nexit 0\n");
     session
         .execute(
-            &format!("cat > {remote_root}/hooks/update && chmod 700 {remote_root}/hooks/update"),
+            &format!("mkdir -p {remote_root}/hooks && cat > {remote_root}/hooks/update && chmod 700 {remote_root}/hooks/update"),
             Some(hook.as_bytes()),
         )
         .await
@@ -2140,7 +2157,7 @@ async fn git_rpc_roundtrip() {
     let hook=format!("#!/bin/sh\nif [ \"$1\" = refs/heads/lease-new ]; then\n  git update-ref refs/heads/lease-new {raced_oid}\nfi\nexit 0\n");
     session
         .execute(
-            &format!("cat > {remote_root}/hooks/update && chmod 700 {remote_root}/hooks/update"),
+            &format!("mkdir -p {remote_root}/hooks && cat > {remote_root}/hooks/update && chmod 700 {remote_root}/hooks/update"),
             Some(hook.as_bytes()),
         )
         .await
@@ -2266,7 +2283,7 @@ async fn git_rpc_roundtrip() {
     let hook = format!("#!/bin/sh\nif [ \"$1\" = refs/tags/fixture/release ]; then\n  git update-ref refs/tags/fixture/release {raced_oid}\nfi\nexit 0\n");
     session
         .execute(
-            &format!("cat > {remote_root}/hooks/update && chmod 700 {remote_root}/hooks/update"),
+            &format!("mkdir -p {remote_root}/hooks && cat > {remote_root}/hooks/update && chmod 700 {remote_root}/hooks/update"),
             Some(hook.as_bytes()),
         )
         .await
@@ -2869,7 +2886,7 @@ async fn git_rpc_roundtrip() {
     })
     .await;
     assert_eq!(preserved["state"], "succeeded", "{preserved}");
-    let base_oid = repo.head().unwrap().target().unwrap().to_string();
+    let base_oid = git(temporary.path(), &["rev-parse", "HEAD"]);
     let created = run_operation(&mut ssh_client, &ssh_repo, |_| Action::BranchCreate {
         name: "ssh-fast-forward".into(),
         start_oid: base_oid.clone(),

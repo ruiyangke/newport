@@ -1,7 +1,7 @@
 import { GitCommandLog } from "./GitCommandLog";
 import { useGitPageLoader } from "../hooks/useGitPageLoader";
 import { GitLoadMore } from "./GitLoadMore";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   isCancelledError,
   useIsMutating,
@@ -13,12 +13,12 @@ import {
 import { useNavigate } from "react-router";
 import {
   Archive,
+  ArrowLeft,
   CircleCheck,
   Ellipsis,
   FileDiff,
   FolderGit2,
   FolderOpen,
-  FolderTree,
   GitCommitHorizontal,
   Globe,
   LayoutList,
@@ -88,12 +88,7 @@ import {
 } from "./GitWorktreeControls";
 import { GitWorktreePicker } from "./GitWorktreePicker";
 import { GitNewWorktree } from "./GitNewWorktree";
-import {
-  openable,
-  worktreeKey,
-  worktreeLabel,
-  type WorktreeRow,
-} from "../git/worktrees";
+import { openable, type WorktreeRow } from "../git/worktrees";
 import { GitRemoteControls } from "./GitRemoteControls";
 import { GitBranchControls } from "./GitBranchControls";
 import { GitIntegrationControls } from "./GitIntegrationControls";
@@ -304,61 +299,6 @@ export function ProjectsPanel({ server }: { server: Server }) {
   });
 
   const checkRun = useRef(0);
-  const [visibleWorktrees, setVisibleWorktrees] = useState<
-    Record<string, WorktreeRow[]>
-  >({});
-  const onVisibleWorktrees = useCallback(
-    (projectId: string, rows: WorktreeRow[]) => {
-      checkRun.current++;
-      setVisibleWorktrees((current) => ({ ...current, [projectId]: rows }));
-    },
-    [],
-  );
-  // The worktrees the library has listed under its projects, and what each
-  // one's own read said -- again only when asked.
-  const libraryWorktrees = useMemo(
-    () =>
-      projects.flatMap((project) =>
-        (visibleWorktrees[project.id] ?? []).flatMap((row) =>
-          row.path && openable(row)
-            ? [
-                {
-                  project,
-                  row,
-                  target: {
-                    id: `worktree:${worktreeKey(row)}`,
-                    serverId: server.id,
-                    name: worktreeLabel(row),
-                    path: row.path,
-                  } satisfies GitProject,
-                },
-              ]
-            : [],
-        ),
-      ),
-    [projects, visibleWorktrees, server.id],
-  );
-  const { worktreeStatus, worktreeChecking } = useQueries({
-    queries: libraryWorktrees.map(({ target }) => ({
-      ...gitQueries.checkout(scope, target),
-      enabled: false,
-    })),
-    combine: (results) => ({
-      worktreeStatus: Object.fromEntries(
-        results.flatMap((result, index) =>
-          result.data && libraryWorktrees[index]
-            ? [[libraryWorktrees[index].target.id, result.data]]
-            : [],
-        ),
-      ) as Record<string, GitProjectRowStatus>,
-      worktreeChecking: results.flatMap((result, index) =>
-        result.fetchStatus === "fetching" && libraryWorktrees[index]
-          ? [libraryWorktrees[index].target.id]
-          : [],
-      ),
-    }),
-  });
-
   const navigate = useNavigate();
   // Files keeps its location in workspace state, so seeding it and navigating
   // opens the browser exactly where the repository lives.
@@ -453,37 +393,9 @@ export function ProjectsPanel({ server }: { server: Server }) {
    */
   async function checkAllLibraryStatus(shown: GitProject[]) {
     const run = ++checkRun.current;
-    // Every project first, so the rows people scan fill in quickly; then the
-    // worktrees each project's read listed.
     for (const project of shown) {
       if (run !== checkRun.current) return;
       await checkLibraryStatus(project);
-    }
-    for (const project of shown) {
-      for (const row of visibleWorktrees[project.id] ?? []) {
-        if (run !== checkRun.current) return;
-        if (row.path && openable(row)) await checkWorktreeStatus(project, row);
-      }
-    }
-  }
-  /** Reads one worktree's working tree because the user asked for it. */
-  async function checkWorktreeStatus(project: GitProject, row: WorktreeRow) {
-    if (!row.path) return;
-    try {
-      await queryClient.fetchQuery({
-        ...gitQueries.checkout(scope, {
-          id: `worktree:${worktreeKey(row)}`,
-          serverId: server.id,
-          name: worktreeLabel(row),
-          path: row.path,
-        }),
-        staleTime: 0,
-      });
-    } catch (reason) {
-      if (isCancelledError(reason)) return;
-      setError(
-        `Cannot read ${worktreeLabel(row)} of ${project.name}: ${message(reason)}`,
-      );
     }
   }
   /**
@@ -496,12 +408,15 @@ export function ProjectsPanel({ server }: { server: Server }) {
    */
   async function show(selection: Opened) {
     stopChecks();
+    setNewWorktree(false);
+    setWorktreeEdit(undefined);
     // Selections belong to one checkout: a project's worktrees share its
     // bookmark but not its files, so the key is the checkout's root as well.
     const checkout = `${selection.project.id}:${selection.repository.root.bytesB64}`;
     const returning = readGitState(connection).selectionProject === checkout;
     patchGitState(connection, {
       opened: selection,
+      actionsPanel: null,
       tab: selection.repository.bare ? "history" : "changes",
       commitSummary: "",
       commitDescription: "",
@@ -602,9 +517,12 @@ export function ProjectsPanel({ server }: { server: Server }) {
           throw new Error(
             "The operation’s outcome is not confirmed. Check its saved outcome before repeating it.",
           );
-        if (action.kind === "commit" && outcome.state === "succeeded")
-          setCommitSummary("");
-        setCommitDescription("");
+        if (action.kind === "commit" && outcome.state === "succeeded") {
+          patchGitState(connection, {
+            commitSummary: "",
+            commitDescription: "",
+          });
+        }
         try {
           /*
            * The order here is the safety property, not a detail. The saved
@@ -837,9 +755,6 @@ export function ProjectsPanel({ server }: { server: Server }) {
     !!opened && !readOnly && !opened.repository.bare && receipts !== null;
   const clean = cleanTree;
   const branchName = status ? headBranch(status) : null;
-  const upstreamName =
-    status?.metadata.upstreamRef?.display.replace(/^refs\/remotes\//, "") ??
-    null;
   const selectedGroup =
     previewEntry &&
     changeGroups(status?.entries ?? [], "", selectedSide).some((group) =>
@@ -849,6 +764,12 @@ export function ProjectsPanel({ server }: { server: Server }) {
       : previewEntry
         ? (changeGroups([previewEntry], "")[0]?.key ?? selectedSide)
         : selectedSide;
+
+  const fullPageTool =
+    !newWorktree &&
+    (actionsPanel === "tags" ||
+      actionsPanel === "stashes" ||
+      actionsPanel === "remotes");
 
   return (
     <section
@@ -895,14 +816,6 @@ export function ProjectsPanel({ server }: { server: Server }) {
                   {project.name}
                 </DropdownMenuItem>
               ))}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                disabled={busy || !!worktreeBlockedReason}
-                onSelect={() => setNewWorktree(true)}
-              >
-                <FolderTree size={14} aria-hidden="true" />
-                New worktree…
-              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
           <span
@@ -914,7 +827,10 @@ export function ProjectsPanel({ server }: { server: Server }) {
             repository={opened.repository}
             busy={busy}
             onOpen={openWorktree}
-            onNew={() => setNewWorktree(true)}
+            onNew={() => {
+              setActionsPanel(null);
+              setNewWorktree(true);
+            }}
             onManage={(edit) => {
               setWorktreeEdit(edit);
               setActionsPanel("worktrees");
@@ -976,81 +892,6 @@ export function ProjectsPanel({ server }: { server: Server }) {
             />
           </div>
           <div className="git-projects-actions ml-auto flex flex-none items-center gap-[6px] pl-[8px]">
-            {/* The four dialogs the Git actions menu opens; no triggers of
-                their own. */}
-            <GitRemoteControls
-              open={actionsPanel === "remotes"}
-              onOpenChange={(next) => setActionsPanel(next ? "remotes" : null)}
-              hideTrigger
-              repository={{
-                ...opened.repository,
-                head: status?.metadata.head ?? opened.repository.head,
-              }}
-              projectName={opened.project.name}
-              snapshot={status?.snapshot}
-              busy={busy}
-              blockedReason={branchBlockedReason
-                ?.replace("changing branches", "making Git changes")
-                .replace("Branch changes", "Remote changes")}
-              recoveryAvailable={hasSavedOutcome || receipts === null}
-              error={error}
-              onAction={write}
-            />
-            <GitStashControls
-              open={actionsPanel === "stashes"}
-              onOpenChange={(next) => setActionsPanel(next ? "stashes" : null)}
-              hideTrigger
-              repoId={opened.repository.repoId}
-              projectName={opened.project.name}
-              snapshot={status?.snapshot}
-              busy={busy}
-              blockedReason={
-                status?.metadata.integration
-                  ? "Finish the current Git operation before using stashes."
-                  : branchBlockedReason
-                      ?.replace("changing branches", "changing stashes")
-                      .replace("Branch changes", "Stash changes")
-              }
-              error={error}
-              onAction={write}
-            />
-            <GitTagControls
-              open={actionsPanel === "tags"}
-              onOpenChange={(next) => setActionsPanel(next ? "tags" : null)}
-              hideTrigger
-              repository={{
-                ...opened.repository,
-                head: status?.metadata.head ?? opened.repository.head,
-              }}
-              snapshot={status?.snapshot}
-              busy={busy}
-              blockedReason={branchBlockedReason
-                ?.replace("changing branches", "changing tags")
-                .replace("Branch changes", "Tag changes")}
-              error={error}
-              onAction={write}
-            />
-            <GitWorktreeControls
-              open={actionsPanel === "worktrees"}
-              onOpenChange={(next) => {
-                if (!next) setWorktreeEdit(undefined);
-                setActionsPanel(next ? "worktrees" : null);
-              }}
-              hideTrigger
-              initial={worktreeEdit}
-              repository={opened.repository}
-              busy={busy}
-              blockedReason={worktreeBlockedReason}
-              error={error}
-              onAction={async (action, snapshot) => {
-                const done = await write(action, snapshot);
-                if (done)
-                  void queryClient.invalidateQueries({
-                    queryKey: gitKeys.repo(scope, opened.repository.repoId),
-                  });
-                return done;
-              }}
-            />
             <GitSyncControl
               repository={{
                 ...opened.repository,
@@ -1083,11 +924,8 @@ export function ProjectsPanel({ server }: { server: Server }) {
                   <Ellipsis size={15} aria-hidden="true" />
                 </Button>
               </DropdownMenuTrigger>
-              {/* Branch work lives in the branch picker and transfers in the
-                  sync control, so this holds what neither covers: what is set
-                  aside (stashes), what is marked (tags), where else the
-                  repository is checked out (worktrees), where it syncs to
-                  (remotes), and the folder itself. */}
+              {/* Repository tools open in the inspector; worktree management
+                  stays in the worktree picker. */}
               <DropdownMenuContent
                 align="end"
                 className="git-actions-menu min-w-[200px]"
@@ -1097,28 +935,21 @@ export function ProjectsPanel({ server }: { server: Server }) {
                   onSelect={() => setActionsPanel("stashes")}
                 >
                   <Archive size={14} aria-hidden="true" />
-                  Stashes…
+                  Stashes
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={busy}
                   onSelect={() => setActionsPanel("tags")}
                 >
                   <Tag size={14} aria-hidden="true" />
-                  Tags…
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  disabled={busy}
-                  onSelect={() => setActionsPanel("worktrees")}
-                >
-                  <FolderTree size={14} aria-hidden="true" />
-                  Worktrees…
+                  Tags
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={busy}
                   onSelect={() => setActionsPanel("remotes")}
                 >
                   <Globe size={14} aria-hidden="true" />
-                  Remotes…
+                  Remotes
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
@@ -1189,8 +1020,6 @@ export function ProjectsPanel({ server }: { server: Server }) {
       )}
       {!opened ? (
         <GitProjectLibrary
-          scope={scope}
-          onVisibleWorktrees={onVisibleWorktrees}
           projects={projects}
           busy={busy}
           search={search}
@@ -1244,28 +1073,9 @@ export function ProjectsPanel({ server }: { server: Server }) {
             setCreating("init");
           }}
           status={libraryStatus}
-          checking={
-            worktreeChecking.length
-              ? new Set([...libraryChecking, ...worktreeChecking])
-              : libraryChecking
-          }
+          checking={libraryChecking}
           onCheck={(project) => void checkLibraryStatus(project)}
           onCheckAll={(shown) => void checkAllLibraryStatus(shown)}
-          worktreeStatus={worktreeStatus}
-          onCheckWorktree={(project, row) =>
-            void checkWorktreeStatus(project, row)
-          }
-          onOpenWorktree={(project, row) => {
-            if (!row.path) return;
-            stopChecks();
-            const path = row.path;
-            void run(async (projects) =>
-              show({
-                project,
-                repository: await projects.open({ ...project, path }),
-              }),
-            );
-          }}
         />
       ) : (
         <>
@@ -1278,326 +1088,484 @@ export function ProjectsPanel({ server }: { server: Server }) {
               onAction={write}
             />
           )}
-          <Tabs
-            className="git-repository-tabs flex min-h-0 flex-1 flex-col"
-            value={tab}
-            // Choosing a tab is all this does: the tab's read is enabled by it,
-            // and runs only if nothing fresh is cached.
-            onValueChange={setTab}
+          <div
+            className="git-repository-workspace flex min-h-0 flex-1"
+            data-inspector={!!actionsPanel || newWorktree}
+            data-full-page={fullPageTool}
           >
-            {/* One split for both views, so History gets the same resizable
+            <Tabs
+              className="git-repository-tabs min-w-0 flex min-h-0 flex-1 flex-col"
+              value={tab}
+              // Choosing a tab is all this does: the tab's read is enabled by it,
+              // and runs only if nothing fresh is cached.
+              onValueChange={setTab}
+            >
+              {/* One split for both views, so History gets the same resizable
                 list, the same narrow single-pane flow, and the same header
                 line as Changes. The tabs head the list column -- they choose
                 what the list shows -- and stay mounted across the switch, so
                 a keyboard user's focus is never on something that unmounts. */}
-            <GitChangesSplit
-              className="min-h-0 flex-1 overflow-hidden"
-              listClassName="git-changes-files flex flex-col"
-              detailClassName="git-changes-detail h-full overflow-y-auto"
-              detailTitle={
-                tab === "changes"
-                  ? previewEntry
-                    ? (previewEntry.path?.display ??
-                      previewEntry.oldPath?.display ??
-                      "Selected file")
-                    : undefined
-                  : inspectedCommit
-                    ? inspectedCommit.message.display.split("\n")[0]
-                    : undefined
-              }
-              detailKey={
-                tab === "changes"
-                  ? previewEntry?.entryId
-                  : (inspectedCommit?.oid.hex ?? undefined)
-              }
-              list={
-                <>
-                  <div className="flex h-[46px] flex-none items-center border-b border-border px-[8px]">
-                    {/* `flex-row!`: shadcn keys `flex-col` off
+              <GitChangesSplit
+                className="min-h-0 flex-1 overflow-hidden"
+                listClassName="git-changes-files flex flex-col"
+                detailClassName="git-changes-detail h-full overflow-y-auto"
+                detailTitle={
+                  tab === "changes"
+                    ? previewEntry
+                      ? (previewEntry.path?.display ??
+                        previewEntry.oldPath?.display ??
+                        "Selected file")
+                      : undefined
+                    : inspectedCommit
+                      ? inspectedCommit.message.display.split("\n")[0]
+                      : undefined
+                }
+                detailKey={
+                  tab === "changes"
+                    ? previewEntry?.entryId
+                    : (inspectedCommit?.oid.hex ?? undefined)
+                }
+                list={
+                  <>
+                    <div className="flex h-[46px] flex-none items-center border-b border-border px-[8px]">
+                      {/* `flex-row!`: shadcn keys `flex-col` off
                         `group-data-vertical/tabs`, a global group marker,
                         and this app's sidebar is itself a vertical Tabs. */}
-                    <TabsList
-                      aria-label="Repository view"
-                      className="h-[30px]! w-full flex-row! gap-[2px] rounded-[7px] bg-(--native-toolbar) p-[2px]"
-                    >
-                      <TabsTrigger
-                        value="changes"
-                        disabled={busy || opened.repository.bare}
-                        className="h-[26px]! flex-1 gap-[6px] rounded-[5px]! text-[12px] font-medium text-muted-foreground data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-[0_1px_2px_rgb(0_0_0/0.1)]"
+                      <TabsList
+                        aria-label="Repository view"
+                        className="h-[30px]! w-full flex-row! gap-[2px] rounded-[7px] bg-(--native-toolbar) p-[2px]"
                       >
-                        Changes
-                        {!!(
-                          status?.metadata.totalEntries ??
-                          status?.entries.length
-                        ) && (
-                          <span
-                            aria-hidden="true"
-                            className="min-w-[18px] rounded-full bg-[color-mix(in_srgb,var(--foreground)_9%,transparent)] px-[5px] text-[10px] leading-[16px] font-semibold tabular-nums"
-                          >
-                            {status.metadata.totalEntries?.toLocaleString() ??
-                              (status.nextCursor || status.metadata.truncated
-                                ? `${status.entries.length}+`
-                                : status.entries.length)}
-                          </span>
-                        )}
-                      </TabsTrigger>
-                      <TabsTrigger
-                        value="history"
-                        disabled={busy}
-                        className="h-[26px]! flex-1 rounded-[5px]! text-[12px] font-medium text-muted-foreground data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-[0_1px_2px_rgb(0_0_0/0.1)]"
-                      >
-                        History
-                      </TabsTrigger>
-                    </TabsList>
-                  </div>
-                  <TabsContent
-                    value="changes"
-                    className="flex min-h-0 flex-1 flex-col"
-                  >
-                    {statusQuery.isFetching && !status ? (
-                      <p className="git-projects-empty" role="status">
-                        Loading changes…
-                      </p>
-                    ) : status &&
-                      clean &&
-                      !fileFilter &&
-                      groupFilter === "all" ? (
-                      <p className="git-projects-empty text-[12px]">
-                        No changed files
-                      </p>
-                    ) : status ? (
-                      <>
-                        <GitChangeList
-                          status={status}
-                          filter={fileFilter}
-                          onFilter={setFileFilter}
-                          group={groupFilter}
-                          onGroup={setGroupFilter}
-                          selectedEntry={selectedEntry}
-                          selectedSide={selectedSide}
-                          onSelect={(entryId, group) => {
-                            setSelectedEntry(entryId);
-                            setSelectedSide(group);
-                          }}
-                          writable={indexWritable}
-                          busy={busy}
-                          onStage={(entryIds) =>
-                            void write({ kind: "stage", entryIds })
-                          }
-                          onUnstage={(entryIds) =>
-                            void write({ kind: "unstage", entryIds })
-                          }
-                          onLoadMore={statusPages.load}
-                          filterLoading={
-                            statusFiltering && !statusQuery.isError
-                          }
-                          filterError={
-                            statusQuery.isError
-                              ? message(statusQuery.error)
-                              : ""
-                          }
-                          onRetryFilter={() => void statusQuery.refetch()}
-                          pageLoading={statusPages.loading}
-                          pageError={statusPages.error}
-                        />
-                        <GitCommitComposer
-                          status={status}
-                          branch={
-                            (
-                              status.metadata.head ?? opened.repository.head
-                            ).name?.display.replace(/^refs\/heads\//, "") ??
-                            null
-                          }
-                          summary={commitSummary}
-                          description={commitDescription}
-                          disabled={busy || !indexWritable}
-                          onSummary={setCommitSummary}
-                          onDescription={setCommitDescription}
-                          onAction={write}
-                        />
-                      </>
-                    ) : null}
-                  </TabsContent>
-                  <TabsContent
-                    value="history"
-                    className="flex min-h-0 flex-1 flex-col"
-                  >
-                    {historyQuery.isFetching && !history ? (
-                      <p className="git-projects-empty" role="status">
-                        Loading history…
-                      </p>
-                    ) : history ? (
-                      <div className="git-history-list flex min-h-0 flex-1 flex-col overflow-y-auto">
-                        {history.entries.length === 0 ? (
-                          <p className="git-projects-empty">No commits yet.</p>
-                        ) : (
-                          <ul className="git-history-commits m-0 list-none px-[6px] py-[6px]">
-                            {history.entries.map((commit) => {
-                              const chosen = selectedCommit === commit.oid.hex;
-                              const when = new Date(commit.time * 1000);
-                              return (
-                                <li key={commit.oid.hex}>
-                                  <Button
-                                    variant="ghost"
-                                    aria-pressed={chosen}
-                                    onClick={() =>
-                                      setSelectedCommit(commit.oid.hex)
-                                    }
-                                    className={cn(
-                                      "h-auto! w-full flex-col items-stretch gap-[2px] rounded-[5px]! border-0 px-[10px]! py-[6px] text-left font-normal text-foreground",
-                                      chosen
-                                        ? "bg-(--git-tint) hover:bg-(--git-tint)"
-                                        : "hover:bg-accent",
-                                    )}
-                                  >
-                                    <span className="truncate text-[12px] leading-[17px] font-medium">
-                                      {commit.message.display.split("\n")[0] ||
-                                        "Empty commit message"}
-                                    </span>
-                                    <span className="flex min-w-0 items-center gap-[5px] text-[11px] leading-[15px] text-muted-foreground">
-                                      <span className="truncate">
-                                        {commit.author.name}
-                                      </span>
-                                      <span aria-hidden="true">·</span>
-                                      <time
-                                        className="flex-none"
-                                        title={
-                                          Number.isNaN(when.getTime())
-                                            ? undefined
-                                            : when.toLocaleString()
-                                        }
-                                      >
-                                        {relativeTime(commit.time, now)}
-                                      </time>
-                                      <code className="ml-auto flex-none pl-[6px] text-[10.5px]!">
-                                        {commit.oid.hex.slice(0, 7)}
-                                      </code>
-                                    </span>
-                                  </Button>
-                                </li>
-                              );
-                            })}
-                          </ul>
-                        )}
-                        {history.metadata.truncated && (
-                          <GitNotice tone="info">
-                            History exceeds the agent’s listing limit. This is a
-                            partial history.
-                          </GitNotice>
-                        )}
-                        <GitLoadMore
-                          cursor={history.nextCursor}
-                          loading={historyPages.loading}
-                          error={historyPages.error}
+                        <TabsTrigger
+                          value="changes"
+                          disabled={busy || opened.repository.bare}
+                          className="h-[26px]! flex-1 gap-[6px] rounded-[5px]! text-[12px] font-medium text-muted-foreground data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-[0_1px_2px_rgb(0_0_0/0.1)]"
+                        >
+                          Changes
+                          {!!(
+                            status?.metadata.totalEntries ??
+                            status?.entries.length
+                          ) && (
+                            <span
+                              aria-hidden="true"
+                              className="min-w-[18px] rounded-full bg-[color-mix(in_srgb,var(--foreground)_9%,transparent)] px-[5px] text-[10px] leading-[16px] font-semibold tabular-nums"
+                            >
+                              {status.metadata.totalEntries?.toLocaleString() ??
+                                (status.nextCursor || status.metadata.truncated
+                                  ? `${status.entries.length}+`
+                                  : status.entries.length)}
+                            </span>
+                          )}
+                        </TabsTrigger>
+                        <TabsTrigger
+                          value="history"
                           disabled={busy}
-                          onLoad={historyPages.load}
-                          label="Load more commits"
-                          endLabel={
-                            history.metadata.truncated
-                              ? "End of available history"
-                              : "End of history"
-                          }
-                        />
-                      </div>
-                    ) : null}
-                  </TabsContent>
-                </>
-              }
-              detail={
-                tab === "changes" ? (
-                  !status ? null : clean ? (
-                    <CleanWorkingTree
-                      branch={branchName}
-                      head={status.metadata.head.oid?.hex ?? null}
-                      latest={history?.entries[0] ?? null}
-                      now={now}
-                      busy={busy}
-                      onHistory={() => setTab("history")}
-                      onFiles={() =>
-                        openInFiles(opened.repository.root.display)
-                      }
-                    />
-                  ) : previewEntry ? (
-                    <GitChangesPreview
-                      key={`${status.snapshot}:${previewEntry.entryId}`}
+                          className="h-[26px]! flex-1 rounded-[5px]! text-[12px] font-medium text-muted-foreground data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-[0_1px_2px_rgb(0_0_0/0.1)]"
+                        >
+                          History
+                        </TabsTrigger>
+                      </TabsList>
+                    </div>
+                    <TabsContent
+                      value="changes"
+                      className="flex min-h-0 flex-1 flex-col"
+                    >
+                      {statusQuery.isFetching && !status ? (
+                        <p className="git-projects-empty" role="status">
+                          Loading changes…
+                        </p>
+                      ) : status &&
+                        clean &&
+                        !fileFilter &&
+                        groupFilter === "all" ? (
+                        <p className="git-projects-empty text-[12px]">
+                          No changed files
+                        </p>
+                      ) : status ? (
+                        <>
+                          <GitChangeList
+                            status={status}
+                            filter={fileFilter}
+                            onFilter={setFileFilter}
+                            group={groupFilter}
+                            onGroup={setGroupFilter}
+                            selectedEntry={selectedEntry}
+                            selectedSide={selectedSide}
+                            onSelect={(entryId, group) => {
+                              setSelectedEntry(entryId);
+                              setSelectedSide(group);
+                            }}
+                            writable={indexWritable}
+                            busy={busy}
+                            onStage={(entryIds) =>
+                              void write({ kind: "stage", entryIds })
+                            }
+                            onUnstage={(entryIds) =>
+                              void write({ kind: "unstage", entryIds })
+                            }
+                            onLoadMore={statusPages.load}
+                            filterLoading={
+                              statusFiltering && !statusQuery.isError
+                            }
+                            filterError={
+                              statusQuery.isError
+                                ? message(statusQuery.error)
+                                : ""
+                            }
+                            onRetryFilter={() => void statusQuery.refetch()}
+                            pageLoading={statusPages.loading}
+                            pageError={statusPages.error}
+                          />
+                          <GitCommitComposer
+                            status={status}
+                            branch={
+                              (
+                                status.metadata.head ?? opened.repository.head
+                              ).name?.display.replace(/^refs\/heads\//, "") ??
+                              null
+                            }
+                            summary={commitSummary}
+                            description={commitDescription}
+                            disabled={busy || !indexWritable}
+                            onSummary={setCommitSummary}
+                            onDescription={setCommitDescription}
+                            onAction={write}
+                          />
+                        </>
+                      ) : null}
+                    </TabsContent>
+                    <TabsContent
+                      value="history"
+                      className="flex min-h-0 flex-1 flex-col"
+                    >
+                      {historyQuery.isFetching && !history ? (
+                        <p className="git-projects-empty" role="status">
+                          Loading history…
+                        </p>
+                      ) : history ? (
+                        <div className="git-history-list flex min-h-0 flex-1 flex-col overflow-y-auto">
+                          {history.entries.length === 0 ? (
+                            <p className="git-projects-empty">
+                              No commits yet.
+                            </p>
+                          ) : (
+                            <ul className="git-history-commits m-0 list-none px-[6px] py-[6px]">
+                              {history.entries.map((commit) => {
+                                const chosen =
+                                  selectedCommit === commit.oid.hex;
+                                const when = new Date(commit.time * 1000);
+                                return (
+                                  <li key={commit.oid.hex}>
+                                    <Button
+                                      variant="ghost"
+                                      aria-pressed={chosen}
+                                      onClick={() =>
+                                        setSelectedCommit(commit.oid.hex)
+                                      }
+                                      className={cn(
+                                        "h-auto! w-full flex-col items-stretch gap-[2px] rounded-[5px]! border-0 px-[10px]! py-[6px] text-left font-normal text-foreground",
+                                        chosen
+                                          ? "bg-(--git-tint) hover:bg-(--git-tint)"
+                                          : "hover:bg-accent",
+                                      )}
+                                    >
+                                      <span className="truncate text-[12px] leading-[17px] font-medium">
+                                        {commit.message.display.split(
+                                          "\n",
+                                        )[0] || "Empty commit message"}
+                                      </span>
+                                      <span className="flex min-w-0 items-center gap-[5px] text-[11px] leading-[15px] text-muted-foreground">
+                                        <span className="truncate">
+                                          {commit.author.name}
+                                        </span>
+                                        <span aria-hidden="true">·</span>
+                                        <time
+                                          className="flex-none"
+                                          title={
+                                            Number.isNaN(when.getTime())
+                                              ? undefined
+                                              : when.toLocaleString()
+                                          }
+                                        >
+                                          {relativeTime(commit.time, now)}
+                                        </time>
+                                        <code className="ml-auto flex-none pl-[6px] text-[10.5px]!">
+                                          {commit.oid.hex.slice(0, 7)}
+                                        </code>
+                                      </span>
+                                    </Button>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          )}
+                          {history.metadata.truncated && (
+                            <GitNotice tone="info">
+                              History exceeds the agent’s listing limit. This is
+                              a partial history.
+                            </GitNotice>
+                          )}
+                          <GitLoadMore
+                            cursor={history.nextCursor}
+                            loading={historyPages.loading}
+                            error={historyPages.error}
+                            disabled={busy}
+                            onLoad={historyPages.load}
+                            label="Load more commits"
+                            endLabel={
+                              history.metadata.truncated
+                                ? "End of available history"
+                                : "End of history"
+                            }
+                          />
+                        </div>
+                      ) : null}
+                    </TabsContent>
+                  </>
+                }
+                detail={
+                  tab === "changes" ? (
+                    !status ? null : clean ? (
+                      <CleanWorkingTree
+                        branch={branchName}
+                        head={status.metadata.head.oid?.hex ?? null}
+                        latest={history?.entries[0] ?? null}
+                        now={now}
+                        busy={busy}
+                        onHistory={() => setTab("history")}
+                        onFiles={() =>
+                          openInFiles(opened.repository.root.display)
+                        }
+                      />
+                    ) : previewEntry ? (
+                      <GitChangesPreview
+                        key={`${status.snapshot}:${previewEntry.entryId}`}
+                        repoId={opened.repository.repoId}
+                        snapshot={status.snapshot}
+                        entry={previewEntry}
+                        mark={changeMark(previewEntry, selectedGroup)}
+                        preferredSide={
+                          selectedSide === "staged"
+                            ? "head_to_index"
+                            : "index_to_worktree"
+                        }
+                        disabled={busy || !!branchBlockedReason}
+                        blockedReason={
+                          status.metadata.integration ||
+                          (status.metadata.groupCounts?.conflicted ??
+                            status.entries.filter((entry) => entry.conflicted)
+                              .length) > 0
+                            ? "Resolve conflicts and finish any integration before staging individual hunks."
+                            : branchBlockedReason
+                        }
+                        conflictBlockedReason={branchBlockedReason}
+                        actions={
+                          <GitFileActions
+                            entry={previewEntry}
+                            status={status}
+                            busy={busy}
+                            error={error}
+                            compact
+                            disabled={busy || !indexWritable}
+                            onAction={write}
+                          />
+                        }
+                        onAction={write}
+                      />
+                    ) : (
+                      <EmptyPane
+                        icon={<FileDiff size={26} strokeWidth={1.4} />}
+                        text="Select a file to review its changes."
+                      />
+                    )
+                  ) : inspectedCommit ? (
+                    <GitCommitInspector
+                      key={inspectedCommit.oid.hex}
                       repoId={opened.repository.repoId}
-                      snapshot={status.snapshot}
-                      entry={previewEntry}
-                      mark={changeMark(previewEntry, selectedGroup)}
-                      preferredSide={
-                        selectedSide === "staged"
-                          ? "head_to_index"
-                          : "index_to_worktree"
-                      }
-                      disabled={busy || !!branchBlockedReason}
-                      blockedReason={
-                        status.metadata.integration ||
-                        (status.metadata.groupCounts?.conflicted ??
-                          status.entries.filter((entry) => entry.conflicted)
-                            .length) > 0
-                          ? "Resolve conflicts and finish any integration before staging individual hunks."
-                          : branchBlockedReason
-                      }
-                      conflictBlockedReason={branchBlockedReason}
-                      actions={
-                        <GitFileActions
-                          entry={previewEntry}
-                          status={status}
+                      commit={inspectedCommit}
+                      actions={(fullCommit) => (
+                        <GitHistoryActions
+                          key={inspectedCommit.oid.hex}
+                          commit={fullCommit}
+                          snapshot={status?.snapshot}
+                          conflicted={
+                            (status?.metadata.groupCounts?.conflicted ??
+                              status?.entries.filter(
+                                (entry) => entry.conflicted,
+                              ).length ??
+                              0) > 0
+                          }
+                          repository={{
+                            ...opened.repository,
+                            head:
+                              status?.metadata.head ?? opened.repository.head,
+                          }}
+                          disabled={
+                            busy ||
+                            !!branchBlockedReason ||
+                            !!status?.metadata.integration
+                          }
                           busy={busy}
                           error={error}
-                          compact
-                          disabled={busy || !indexWritable}
                           onAction={write}
                         />
-                      }
-                      onAction={write}
+                      )}
                     />
                   ) : (
                     <EmptyPane
-                      icon={<FileDiff size={26} strokeWidth={1.4} />}
-                      text="Select a file to review its changes."
+                      icon={<GitCommitHorizontal size={26} strokeWidth={1.4} />}
+                      text="Select a commit to inspect its changes."
                     />
                   )
-                ) : inspectedCommit ? (
-                  <GitCommitInspector
-                    key={inspectedCommit.oid.hex}
-                    repoId={opened.repository.repoId}
-                    commit={inspectedCommit}
-                    actions={(fullCommit) => (
-                      <GitHistoryActions
-                        key={inspectedCommit.oid.hex}
-                        commit={fullCommit}
-                        snapshot={status?.snapshot}
-                        conflicted={
-                          (status?.metadata.groupCounts?.conflicted ??
-                            status?.entries.filter((entry) => entry.conflicted)
-                              .length ??
-                            0) > 0
-                        }
-                        repository={{
-                          ...opened.repository,
-                          head: status?.metadata.head ?? opened.repository.head,
-                        }}
-                        disabled={
-                          busy ||
-                          !!branchBlockedReason ||
-                          !!status?.metadata.integration
-                        }
-                        busy={busy}
-                        error={error}
-                        onAction={write}
-                      />
+                }
+              />
+            </Tabs>
+            {(actionsPanel || newWorktree) && (
+              <aside
+                key={`${connection}:${opened.repository.repoId}`}
+                className="git-repository-inspector relative flex min-h-0 flex-col border-l border-border bg-(--native-surface)"
+                role={fullPageTool ? "region" : undefined}
+                aria-label={
+                  fullPageTool ? "Repository tools" : "Repository inspector"
+                }
+              >
+                {!newWorktree && (
+                  <div className="flex flex-none items-center gap-3 border-b border-border py-2 pr-12 pl-4">
+                    {fullPageTool && (
+                      <Button
+                        variant="ghost"
+                        disabled={busy}
+                        onClick={() => setActionsPanel(null)}
+                      >
+                        <ArrowLeft size={14} aria-hidden="true" />
+                        Back to {tab === "history" ? "History" : "Changes"}
+                      </Button>
                     )}
+                    <h2 className="text-sm font-medium">
+                      {actionsPanel === "stashes"
+                        ? "Stashes"
+                        : actionsPanel === "tags"
+                          ? "Tags"
+                          : actionsPanel === "remotes"
+                            ? "Remotes"
+                            : "Worktrees"}
+                    </h2>
+                  </div>
+                )}
+                {!newWorktree && (
+                  <>
+                    <GitRemoteControls
+                      open={actionsPanel === "remotes"}
+                      onOpenChange={(next) =>
+                        setActionsPanel(next ? "remotes" : null)
+                      }
+                      hideTrigger
+                      repository={{
+                        ...opened.repository,
+                        head: status?.metadata.head ?? opened.repository.head,
+                      }}
+                      projectName={opened.project.name}
+                      snapshot={status?.snapshot}
+                      busy={busy}
+                      blockedReason={branchBlockedReason
+                        ?.replace("changing branches", "making Git changes")
+                        .replace("Branch changes", "Remote changes")}
+                      recoveryAvailable={hasSavedOutcome || receipts === null}
+                      error={error}
+                      onAction={write}
+                    />
+                    <GitStashControls
+                      open={actionsPanel === "stashes"}
+                      onOpenChange={(next) =>
+                        setActionsPanel(next ? "stashes" : null)
+                      }
+                      hideTrigger
+                      repoId={opened.repository.repoId}
+                      projectName={opened.project.name}
+                      snapshot={status?.snapshot}
+                      busy={busy}
+                      blockedReason={
+                        status?.metadata.integration
+                          ? "Finish the current Git operation before using stashes."
+                          : branchBlockedReason
+                              ?.replace("changing branches", "changing stashes")
+                              .replace("Branch changes", "Stash changes")
+                      }
+                      error={error}
+                      onAction={write}
+                    />
+                    <GitTagControls
+                      open={actionsPanel === "tags"}
+                      onOpenChange={(next) =>
+                        setActionsPanel(next ? "tags" : null)
+                      }
+                      hideTrigger
+                      repository={{
+                        ...opened.repository,
+                        head: status?.metadata.head ?? opened.repository.head,
+                      }}
+                      snapshot={status?.snapshot}
+                      busy={busy}
+                      blockedReason={branchBlockedReason
+                        ?.replace("changing branches", "changing tags")
+                        .replace("Branch changes", "Tag changes")}
+                      error={error}
+                      onAction={write}
+                    />
+                    <GitWorktreeControls
+                      open={actionsPanel === "worktrees"}
+                      onOpenChange={(next) => {
+                        if (!next) setWorktreeEdit(undefined);
+                        setActionsPanel(next ? "worktrees" : null);
+                      }}
+                      hideTrigger
+                      initial={worktreeEdit}
+                      repository={opened.repository}
+                      busy={busy}
+                      blockedReason={worktreeBlockedReason}
+                      error={error}
+                      onAction={async (action, snapshot) => {
+                        const done = await write(action, snapshot);
+                        if (done)
+                          void queryClient.invalidateQueries({
+                            queryKey: gitKeys.repo(
+                              scope,
+                              opened.repository.repoId,
+                            ),
+                          });
+                        return done;
+                      }}
+                    />
+                  </>
+                )}
+                {newWorktree && opened && (
+                  <GitNewWorktree
+                    repository={{
+                      ...opened.repository,
+                      head: status?.metadata.head ?? opened.repository.head,
+                    }}
+                    serverId={server.id}
+                    busy={busy}
+                    blockedReason={worktreeBlockedReason}
+                    error={error}
+                    onClose={() => setNewWorktree(false)}
+                    onCreate={async (action, snapshot, openAfter) => {
+                      const done = await write(action, snapshot);
+                      if (!done) return false;
+                      setNewWorktree(false);
+                      void queryClient.invalidateQueries({
+                        queryKey: gitKeys.repo(scope, opened.repository.repoId),
+                      });
+                      if (openAfter)
+                        await run((projects) =>
+                          openCheckout(projects, action.path),
+                        );
+                      return true;
+                    }}
                   />
-                ) : (
-                  <EmptyPane
-                    icon={<GitCommitHorizontal size={26} strokeWidth={1.4} />}
-                    text="Select a commit to inspect its changes."
-                  />
-                )
-              }
-            />
-          </Tabs>
+                )}
+              </aside>
+            )}
+          </div>
         </>
       )}
       {editor && (
@@ -1669,30 +1637,6 @@ export function ProjectsPanel({ server }: { server: Server }) {
           </form>
         </Modal>
       )}
-      {newWorktree && opened && (
-        <GitNewWorktree
-          repository={{
-            ...opened.repository,
-            head: status?.metadata.head ?? opened.repository.head,
-          }}
-          serverId={server.id}
-          busy={busy}
-          blockedReason={worktreeBlockedReason}
-          error={error}
-          onClose={() => setNewWorktree(false)}
-          onCreate={async (action, snapshot, openAfter) => {
-            const done = await write(action, snapshot);
-            if (!done) return false;
-            setNewWorktree(false);
-            void queryClient.invalidateQueries({
-              queryKey: gitKeys.repo(scope, opened.repository.repoId),
-            });
-            if (openAfter)
-              await run((projects) => openCheckout(projects, action.path));
-            return true;
-          }}
-        />
-      )}
       {creating && (
         <GitCreateProject
           key={creating}
@@ -1707,6 +1651,13 @@ export function ProjectsPanel({ server }: { server: Server }) {
           }
           error={error}
           onClose={() => setCreating(null)}
+          pendingOperationIds={receipts
+            ?.filter(
+              (receipt) =>
+                receipt.state === "pending" ||
+                receipt.state === "outcome_unknown",
+            )
+            .map((receipt) => receipt.operationId)}
           onCreate={createProject}
         />
       )}
@@ -1753,8 +1704,6 @@ export function ProjectsPanel({ server }: { server: Server }) {
         </Modal>
       )}
       {opened && (
-        /* What the page knows and how fresh it is. Never that the remote was
-           contacted: the counts compare stored refs. */
         <GitCommandLog
           key={`${server.id}:${opened.repository.repoId}`}
           serverId={server.id}
@@ -1764,18 +1713,6 @@ export function ProjectsPanel({ server }: { server: Server }) {
             {readAge(readAt, now)
               ? `Read ${readAge(readAt, now)}`
               : "Not read yet"}
-          </span>
-          <span className="git-projects-footer-note min-w-0 truncate">
-            {!status
-              ? ""
-              : !upstreamName
-                ? "No upstream branch"
-                : `${
-                    (status.metadata.ahead ?? 0) ||
-                    (status.metadata.behind ?? 0)
-                      ? `${status.metadata.ahead ?? 0} ahead, ${status.metadata.behind ?? 0} behind`
-                      : "In step with"
-                  } ${upstreamName} · stored refs; the remote was not contacted`}
           </span>
         </GitCommandLog>
       )}

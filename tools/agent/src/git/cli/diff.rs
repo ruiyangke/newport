@@ -501,7 +501,9 @@ pub(super) fn page(
                 "A diff line exceeds the requested page budget.",
             ));
         }
-        end -= 1;
+        // Shrink geometrically: removing one line rebuilt and encoded the
+        // entire page thousands of times for large diffs with small budgets.
+        end = start + (end - start) / 2;
     }
 }
 

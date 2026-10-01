@@ -1063,6 +1063,9 @@ test("leaving during terminal setup preserves the session", async ({
   await page.getByRole("button", { name: "Connect terminal" }).click();
   await expect(page.locator(".terminal-status")).toHaveText("Connecting…");
   await page.getByRole("tab", { name: "Overview", exact: true }).click();
+  await page.waitForFunction(
+    () => typeof (window as any).__finishTerminalOpen === "function",
+  );
   await page.evaluate(() => (window as any).__finishTerminalOpen());
   await page.getByRole("tab", { name: "Commands", exact: true }).click();
   await expect(page.locator(".terminal-status")).toHaveText("Connected");

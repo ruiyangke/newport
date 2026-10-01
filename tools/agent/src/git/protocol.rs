@@ -10,7 +10,19 @@ pub enum Output {
     Diff { snapshot: String, bytes: Vec<u8> },
 }
 
-pub const VERSION: u32 = 1;
+#[path = "codec_fields.rs"]
+mod codec_fields;
+#[path = "msgpack.rs"]
+mod msgpack;
+/// Version 4 uses MessagePack for every frame, including the handshake.
+pub const VERSION: u32 = 4;
+pub fn encode_value(value: &Value) -> io::Result<Vec<u8>> {
+    msgpack::encode_value(value)
+}
+pub fn decode_value(bytes: &[u8]) -> io::Result<Value> {
+    msgpack::decode_value(bytes)
+}
+
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const MAX_DIFF: usize = 20 * 1024 * 1024;
 pub const CHUNK_SIZE: usize = 64 * 1024;
@@ -924,17 +936,17 @@ fn invalid(error: impl ToString) -> io::Error {
 }
 pub fn payload_length(header: [u8; 5]) -> io::Result<usize> {
     let length = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
-    if header[0] != b'J' || length == 0 || length > MAX_FRAME {
-        return Err(invalid("Invalid Git frame header"));
+    if header[0] != b'M' || length == 0 || length > MAX_FRAME {
+        return Err(invalid("Invalid MessagePack frame header"));
     }
     Ok(length)
 }
 pub fn encode(message: &Message) -> io::Result<Vec<u8>> {
-    let bytes = serde_json::to_vec(message).map_err(invalid)?;
+    let bytes = msgpack::encode(message)?;
     if bytes.len() > MAX_FRAME {
         return Err(invalid("Git frame too large"));
     }
-    let mut frame = vec![b'J'];
+    let mut frame = vec![b'M'];
     frame.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
     frame.extend(bytes);
     Ok(frame)
@@ -943,17 +955,7 @@ pub fn decode(bytes: &[u8]) -> io::Result<Message> {
     if bytes.len() > MAX_FRAME {
         return Err(invalid("Git frame too large"));
     }
-    let unique: Unique = serde_json::from_slice(bytes).map_err(invalid)?;
-    if depth(&unique.0) > 32 {
-        return Err(invalid("JSON nesting limit exceeded"));
-    }
-    let message = serde_json::from_value(unique.0).map_err(invalid)?;
-    if let Message::Response { result, error, .. } = &message {
-        if result.is_some() == error.is_some() {
-            return Err(invalid("Expected exactly one result or error"));
-        }
-    }
-    Ok(message)
+    msgpack::decode(bytes)
 }
 pub fn read(input: &mut impl Read) -> io::Result<Message> {
     let mut header = [0; 5];
@@ -966,75 +968,19 @@ pub fn write(output: &mut impl Write, message: &Message) -> io::Result<()> {
     output.write_all(&encode(message)?)?;
     output.flush()
 }
-fn depth(value: &Value) -> usize {
-    match value {
-        Value::Array(a) => 1 + a.iter().map(depth).max().unwrap_or(0),
-        Value::Object(o) => 1 + o.values().map(depth).max().unwrap_or(0),
-        _ => 0,
-    }
-}
-// Preserve strictness inside untyped parameter maps as well as typed envelopes.
-struct Unique(Value);
-impl<'de> Deserialize<'de> for Unique {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Visitor;
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = Unique;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("JSON with unique keys")
-            }
-            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Unique, E> {
-                Ok(Unique(v.into()))
-            }
-            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Unique, E> {
-                Ok(Unique(v.into()))
-            }
-            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Unique, E> {
-                Ok(Unique(v.into()))
-            }
-            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Unique, E> {
-                Ok(Unique(v.into()))
-            }
-            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Unique, E> {
-                Ok(Unique(v.into()))
-            }
-            fn visit_unit<E: serde::de::Error>(self) -> Result<Unique, E> {
-                Ok(Unique(Value::Null))
-            }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut a: A) -> Result<Unique, A::Error> {
-                let mut values = Vec::new();
-                while let Some(Unique(v)) = a.next_element()? {
-                    values.push(v);
-                }
-                Ok(Unique(Value::Array(values)))
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut a: A) -> Result<Unique, A::Error> {
-                let mut values = serde_json::Map::new();
-                while let Some(k) = a.next_key::<String>()? {
-                    if values.contains_key(&k) {
-                        return Err(serde::de::Error::custom("Duplicate JSON key"));
-                    }
-                    let Unique(v) = a.next_value()?;
-                    values.insert(k, v);
-                }
-                Ok(Unique(Value::Object(values)))
-            }
-        }
-        d.deserialize_any(Visitor)
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn rejects_bad_frames_and_ambiguous_json() {
-        assert!(payload_length([b'J', 255, 255, 255, 255]).is_err());
-        assert!(payload_length([b'X', 0, 0, 0, 4]).is_err());
-        assert!(read(&mut &b"J\0\0\0\x08{}"[..]).is_err());
-        assert!(decode(br#"{"type":"ping","nonce":"a","nonce":"b"}"#).is_err());
-        assert!(decode(br#"{"type":"response","id":"a"}"#).is_err());
-        assert!(decode(format!("{}0{}", "[".repeat(33), "]".repeat(33)).as_bytes()).is_err());
+    fn rejects_legacy_frames_truncation_and_oversize() {
+        for marker in *b"JCX" {
+            assert!(payload_length([marker, 0, 0, 0, 1]).is_err());
+        }
+        assert!(payload_length([b'M', 255, 255, 255, 255]).is_err());
+        assert!(payload_length([b'M', 0, 0, 0, 0]).is_err());
+        assert!(read(&mut &b"M\0\0\0\x08\x92"[..]).is_err());
+        assert!(decode(&vec![0; MAX_FRAME + 1]).is_err());
     }
     #[test]
     fn fragmented_frames_and_lossless_paths() {

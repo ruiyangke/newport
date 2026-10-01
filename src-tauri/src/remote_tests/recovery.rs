@@ -4,29 +4,32 @@ use std::sync::Arc;
 type Stream = russh::ChannelStream<russh::client::Msg>;
 
 async fn agent(session: &ExecSession) -> Stream {
-    crate::agent::install(session).await.unwrap();
-    let mut stream = session
-        .stream(&format!(
-            "exec ~/.local/bin/newport-agent serve {} --clipboard --browser",
-            Uuid::new_v4()
-        ))
-        .await
-        .unwrap();
-    assert_eq!(receive(&mut stream, b'R').await, b"newport-agent/5");
+    let (mut stream, _) = crate::agent::launch(
+        session,
+        crate::agent::Service::Integration {
+            client: Uuid::new_v4(),
+            clipboard: true,
+            browser: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(receive(&mut stream, b'R').await, b"newport-agent/6");
     stream
 }
 async fn offer(stream: &mut Stream, revision: i64, formats: &str) {
-    frame(stream, b'M', format!("{revision}\n{formats}").as_bytes()).await;
+    frame(
+        stream,
+        b'M',
+        &rmp_serde::to_vec(&(revision, formats.lines().collect::<Vec<_>>())).unwrap(),
+    )
+    .await;
     receive(stream, b'A').await;
 }
 async fn reply(stream: &mut Stream, request: &[u8], done: bool, data: &[u8]) {
-    let text = std::str::from_utf8(request).unwrap();
-    let fields: Vec<_> = text.split('\n').collect();
-    let mut bytes = Vec::new();
-    bytes.extend(fields[0].parse::<u64>().unwrap().to_be_bytes());
-    bytes.extend(fields[1].parse::<i64>().unwrap().to_be_bytes());
-    bytes.extend([0, u8::from(done)]);
-    bytes.extend(data);
+    let (id, revision, _): (u64, i64, String) = rmp_serde::from_slice(request).unwrap();
+    let bytes =
+        rmp_serde::to_vec(&(id, revision, 0u8, done, serde_bytes::Bytes::new(data))).unwrap();
     frame(stream, b'D', &bytes).await;
 }
 async fn stop(stream: &mut Stream) {
@@ -37,6 +40,72 @@ async fn stop(stream: &mut Stream) {
         .unwrap();
 }
 const READ: &str = "~/.local/bin/xclip -selection clipboard -o";
+
+#[tokio::test]
+#[ignore = "Requires npm run test:remote; replaces the disposable server agent"]
+async fn every_service_automatically_installs_and_repairs_the_agent() {
+    let session = ExecSession::connect(&server()).await.unwrap();
+    for service in [
+        crate::agent::Service::Git,
+        crate::agent::Service::Integration {
+            client: Uuid::new_v4(),
+            clipboard: true,
+            browser: false,
+        },
+        crate::agent::Service::Integration {
+            client: Uuid::new_v4(),
+            clipboard: false,
+            browser: true,
+        },
+    ] {
+        session
+            .execute("rm -f ~/.local/bin/newport-agent", None)
+            .await
+            .unwrap();
+        let git = matches!(service, crate::agent::Service::Git);
+        let (mut stream, _) = crate::agent::launch(&session, service).await.unwrap();
+        if git {
+            let (client, _) =
+                crate::git::client::Client::start_with_identity(stream, Uuid::new_v4().to_string())
+                    .await
+                    .unwrap();
+            drop(client);
+        } else {
+            assert_eq!(receive(&mut stream, b'R').await, b"newport-agent/6");
+            stop(&mut stream).await;
+        }
+    }
+    session
+        .execute("chmod 600 ~/.local/bin/newport-agent", None)
+        .await
+        .unwrap();
+    let mut stream = agent(&session).await;
+    stop(&mut stream).await;
+    let inode = session
+        .execute("stat -c %i ~/.local/bin/newport-agent", None)
+        .await
+        .unwrap();
+    let mut stream = agent(&session).await;
+    stop(&mut stream).await;
+    assert_eq!(
+        session
+            .execute("stat -c %i ~/.local/bin/newport-agent", None)
+            .await
+            .unwrap(),
+        inode,
+        "a matching executable must not be uploaded again"
+    );
+    session
+        .execute(
+            "printf '#!/bin/sh\\necho newport-agent/4\\n' > ~/.local/bin/newport-agent",
+            None,
+        )
+        .await
+        .unwrap();
+    let mut stream = agent(&session).await;
+    stop(&mut stream).await;
+    session.close().await;
+}
 
 #[tokio::test]
 #[ignore = "Requires npm run test:remote"]
@@ -57,8 +126,10 @@ async fn clipboard_copy_during_transfer_rejects_late_old_response() {
     let (current, ()) = tokio::join!(session.execute(READ, None), async {
         let request = receive(&mut stream, b'C').await;
         assert_eq!(
-            std::str::from_utf8(&request).unwrap().split('\n').nth(1),
-            Some("2")
+            rmp_serde::from_slice::<(u64, i64, String)>(&request)
+                .unwrap()
+                .1,
+            2
         );
         reply(&mut stream, &request, true, b"latest clipboard").await;
     });
@@ -310,20 +381,7 @@ async fn disk_full_reports_retryable_error_and_recovers_after_space_is_freed() {
     let mut stream = session.stream(&command).await.unwrap();
     receive(&mut stream, b'R').await;
     let output = session
-        .execute(
-            &format!(
-                r#"python3 -c '
-import errno
-with open("{filler}", "wb", buffering=0) as f:
-    try:
-        while True: f.write(b"x" * 65536)
-    except OSError as e:
-        assert e.errno == errno.ENOSPC
-        print("ENOSPC")
-'"#
-            ),
-            None,
-        )
+        .execute(&format!("newport-test-fixture fill-disk {filler}"), None)
         .await
         .unwrap();
     assert_eq!(output.trim(), "ENOSPC");
@@ -447,7 +505,7 @@ async fn persistent_tunnel_reconnects_after_real_ssh_disconnect_and_stop_cancels
     wait_status(&manager, tunnel.id, Status::Connected).await;
     http(port).await;
     // Only this disposable account's SSH worker processes; the root listener lives.
-    let disconnect = "pkill -KILL -u $(id -u) -x sshd";
+    let disconnect = "pkill -KILL -u $(id -u) -x 'sshd(-session)?'";
     let _ = tokio::join!(
         ssh::execute(&server, disconnect, None),
         wait_status(&manager, tunnel.id, Status::Reconnecting)

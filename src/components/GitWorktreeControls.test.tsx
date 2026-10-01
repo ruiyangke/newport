@@ -28,7 +28,7 @@ globalThis.ResizeObserver ??= class {
   disconnect() {}
 } as unknown as typeof ResizeObserver;
 
-it("ignores a late worktree page after the dialog has been reopened", async () => {
+it("ignores a late worktree page after the inspector has been reopened", async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   const page = (
     message: string,
@@ -117,7 +117,7 @@ it("ignores a late worktree page after the dialog has been reopened", async () =
     );
     await click("Worktrees");
     await click("Load more worktrees");
-    await click("Close dialog");
+    await click("Close inspector");
     await click("Worktrees");
     expect(document.body.textContent).toContain("Fresh worktree");
     await act(async () =>

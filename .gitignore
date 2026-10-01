@@ -29,3 +29,5 @@ __pycache__/
 *.provisionprofile
 
 tests/remote/arboard-probe/target/
+tools/test-harness/target/
+tests/remote/fixture/target/

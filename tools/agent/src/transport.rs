@@ -71,7 +71,7 @@ mod tests {
     fn partial_frame_progress_refreshes_inactivity_without_accepting_invalid_data() {
         let activity = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(60)));
         let mut reader = TrackedReader {
-            input: &[b'S', 0, 0, 0, 5, 1, 2][..],
+            input: &[b'M', 0, 0, 0, 5, 1, 2][..],
             activity: activity.clone(),
         };
         assert_eq!(

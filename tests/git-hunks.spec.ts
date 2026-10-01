@@ -105,7 +105,7 @@ const fixture = (options: {
                     "repo.open",
                     "repo.status",
                     "repo.branches",
-                    "repo.diff",
+                    "repo.diff_page",
                     "repo.close",
                     "operation.start",
                     "operation.get",
@@ -227,14 +227,14 @@ const fixture = (options: {
                   : {}),
               },
             };
-          if (method === "repo.diff") {
+          if (method === "repo.diff_page") {
             state.contexts.push(params.contextLines);
             const ids = ["a".repeat(64), "b".repeat(64)].filter((id) =>
               params.side === "head_to_index"
                 ? state.staged.includes(id)
                 : !state.staged.includes(id),
             );
-            return {
+            const response = {
               snapshot: params.snapshot,
               diff: {
                 truncated: false,
@@ -302,6 +302,47 @@ const fixture = (options: {
                     }),
                   },
                 ],
+              },
+            };
+            const entries = response.diff.files.map((file, fileIndex) => ({
+              ...file,
+              fileIndex,
+              omissionReason: null,
+              hunks: file.hunks.map((hunk, index) => ({
+                ...hunk,
+                index,
+                totalLines: hunk.lines.length,
+                lines: hunk.lines.map((line, lineIndex) => ({
+                  ...line,
+                  lineIndex,
+                  byteOffset: 0,
+                  lineComplete: true,
+                  contentBytesB64: line.content.bytesB64,
+                  id:
+                    line.origin === "+" || line.origin === "-"
+                      ? (line.id ??
+                        (line.origin === "+" ? "e" : "c").repeat(64))
+                      : null,
+                })),
+              })),
+            }));
+            return {
+              snapshot: params.snapshot,
+              entries,
+              nextCursor: null,
+              metadata: {
+                sourceSnapshot: params.snapshot,
+                entryId: params.entryId,
+                side: params.side,
+                contextLines: params.contextLines,
+                readOnly: false,
+                hasOmissions: false,
+                totalFiles: entries.length,
+                totalUnits: entries.reduce(
+                  (sum, f) =>
+                    sum + f.hunks.reduce((n, h) => n + h.lines.length, 0),
+                  0,
+                ),
               },
             };
           }
@@ -421,7 +462,7 @@ test("stages and unstages a selected hunk while preserving the selected file", a
     .getByRole("textbox", { name: "Filter changed files" })
     .fill("zzzznomatch");
   await expect(page.locator(".git-projects-summary")).toHaveText(
-    /^0 of 1 changed file/,
+    /^1 changed file 0 matching loaded files\./,
   );
   await expect(
     page.getByText("No files match your current filters", { exact: true }),
@@ -628,7 +669,7 @@ test("stages and unstages a selected hunk while preserving the selected file", a
     .click();
   await expect(
     page.getByRole("button", { name: "Stage hunk at line 32", exact: true }),
-  ).toBeDisabled();
+  ).toBeEnabled();
   await expect(
     page.getByRole("region", { name: "Git operation recovery", exact: true }),
   ).toBeVisible();
@@ -1413,7 +1454,7 @@ test("the change filter reads as one joined control", async ({ page }) => {
     .getByRole("menuitemradio", { name: "Staged only", exact: true })
     .click();
   await expect(page.locator(".git-projects-summary")).toHaveText(
-    /^0 of 1 changed file/,
+    /^1 changed file 0 matching loaded files\./,
   );
   await expect(page.getByRole("heading", { name: /Unstaged/ })).toHaveCount(0);
 

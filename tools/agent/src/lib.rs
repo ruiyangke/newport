@@ -11,6 +11,7 @@ mod local_socket;
 pub mod migration;
 mod native;
 mod paths;
+mod serialization;
 mod session;
 mod snapshot;
 mod transport;

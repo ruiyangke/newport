@@ -26,6 +26,8 @@ mod platform;
 mod plugins;
 mod ports;
 mod preferences;
+#[path = "../../tools/agent/src/serialization.rs"]
+mod serialization;
 mod ssh;
 mod system_events;
 mod terminal;

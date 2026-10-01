@@ -1,6 +1,4 @@
-//! Independent Git CLI adapter. No fallback into the libgit2 adapter.
-//! Engine-neutral RPC envelopes, bounded pages, and the shared operation
-//! journal surround Git processes. The desktop defaults to git2.
+//! Git CLI executor behind the bounded RPC contract and durable operation journal.
 mod command;
 mod create;
 mod diff;

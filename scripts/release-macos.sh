@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 : "${APPLE_ID:?Set the notarization Apple ID}"
 : "${APPLE_PASSWORD:?Set the notarization app-specific password}"
 : "${APPLE_TEAM_ID:?Set the Apple team ID}"
-python3 scripts/check-signing.py "$NEWPORT_SIGNING_ENTITLEMENTS" "$NEWPORT_PROVISIONING_PROFILE"
+node scripts/check-signing.mjs "$NEWPORT_SIGNING_ENTITLEMENTS" "$NEWPORT_PROVISIONING_PROFILE"
 npm run tauri build -- --bundles app --target aarch64-apple-darwin
 app="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Newport.app"
 cp "$NEWPORT_PROVISIONING_PROFILE" "$app/Contents/embedded.provisionprofile"
@@ -21,4 +21,4 @@ ditto -c -k --sequesterRsrc --keepParent "$app" "$submission"
 xcrun notarytool submit "$submission" --apple-id "$APPLE_ID" \
   --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
 xcrun stapler staple "$app"
-python3 scripts/package-update.py "$app" --output src-tauri/target/release/update
+node scripts/package-update.mjs "$app" --output src-tauri/target/release/update

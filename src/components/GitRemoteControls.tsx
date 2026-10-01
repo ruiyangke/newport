@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { MoreHorizontal } from "lucide-react";
+import { MoreHorizontal, Plus, Download, ArrowDownUp } from "lucide-react";
 import { gitPath, type GitWriteAction } from "../domain/git";
 import type { GitRemotes, GitRepository } from "../domain/gitResponses";
 import { gitKeys } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
 import { Button, Input } from "./controls";
-import { Modal } from "./Editors";
+import { GitInspectorSection } from "./GitInspectorSection";
 import { GitRemoteRefs } from "./GitRemoteRefs";
 import { GitRemotePicker } from "./GitRemotePicker";
 import { useGitRemoteSelection } from "../hooks/useGitRemoteSelection";
@@ -150,7 +150,7 @@ function RemotesDialog({
     }
   }
   return (
-    <Modal
+    <GitInspectorSection
       title={
         editor?.kind === "add"
           ? "Add remote"
@@ -166,13 +166,9 @@ function RemotesDialog({
       }
       busy={busy}
       onClose={onClose}
-      className="git-remote-dialog"
     >
       <div className="git-remote-body grid gap-[12px] px-[24px] pt-0 pb-[24px] [&_p]:text-[12px] [&_p]:wrap-anywhere [&_p]:text-muted-foreground">
-        <p className="git-remote-context m-0!">
-          {projectName}
-          {current ? ` · ${current}` : " · Detached HEAD"}
-        </p>
+        {editor && <p className="git-remote-context m-0!">{projectName}</p>}
         {error && <p role="alert">{error}</p>}
         {blockedReason && (
           <div>
@@ -287,6 +283,21 @@ function RemotesDialog({
             )}
             {!loading && !readError && (
               <>
+                <div className="git-inspector-toolbar">
+                  <span className="git-inspector-count">
+                    Repository connections
+                  </span>
+                  <Button
+                    disabled={disabled}
+                    onClick={() => {
+                      setName("");
+                      setUrl("");
+                      setEditor({ kind: "add" });
+                    }}
+                  >
+                    <Plus size={13} aria-hidden="true" /> Add remote
+                  </Button>
+                </div>
                 {selection.empty ? (
                   <p>
                     No remotes configured. Add one to fetch and publish
@@ -307,7 +318,12 @@ function RemotesDialog({
                       <>
                         <div className="git-remote-address flex items-center gap-[12px]">
                           <div className="min-w-0 flex-1">
-                            <p>{remote.url ?? "Fetch URL unavailable"}</p>
+                            <span className="git-inspector-count">
+                              Fetch URL
+                            </span>
+                            <p className="git-remote-url">
+                              {remote.url ?? "Fetch URL unavailable"}
+                            </p>
                             {remote.pushUrl && (
                               <p>Push URL: {remote.pushUrl}</p>
                             )}
@@ -360,11 +376,10 @@ function RemotesDialog({
                             </DropdownMenuContent>
                           </DropdownMenu>
                         </div>
-                        <div className="git-remote-fetch flex items-center gap-[12px]">
-                          <p className="min-w-0 flex-1">
-                            Update remote-tracking branches without changing
-                            your working files.
-                          </p>
+                        <div className="git-remote-fetch flex items-center justify-between gap-[12px]">
+                          <span className="git-inspector-count">
+                            Remote references
+                          </span>
                           <Button
                             disabled={disabled}
                             onClick={() =>
@@ -376,93 +391,88 @@ function RemotesDialog({
                               })
                             }
                           >
-                            Fetch {remote.name}
+                            <Download size={13} aria-hidden="true" /> Fetch{" "}
+                            {remote.name}
                           </Button>
                         </div>
-                        <div className="git-remote-transfer grid gap-[10px] border-y border-border px-0 py-[16px]">
-                          <label className="grid gap-[6px] text-[12px]">
-                            Remote branch
-                            <Input
-                              value={branch}
-                              onChange={(event) =>
-                                setBranch(event.target.value)
-                              }
-                              disabled={busy || !attached}
-                            />
-                          </label>
-                          {attached ? (
-                            <p>
-                              Pull {remote.name}/{branch || "…"} into {current},
-                              or push {current} to {remote.name}/{branch || "…"}
-                              .
-                            </p>
-                          ) : (
-                            <p>
-                              Switch to a local branch with a commit before
-                              pulling or pushing.
-                            </p>
-                          )}
-                          <div className="git-remote-actions flex flex-wrap gap-[8px]">
-                            <Button
-                              disabled={disabled || !attached || !branch.trim()}
-                              onClick={() =>
-                                void submit({
-                                  kind: "pull.fast_forward",
-                                  remote: remote.name,
-                                  expectedToken: remote.token,
-                                  remoteBranch: branch.trim(),
-                                })
-                              }
-                            >
-                              Pull fast-forward
-                            </Button>
-                            <Button
-                              disabled={disabled || !attached || !branch.trim()}
-                              onClick={() => {
-                                if (current && repository.head.oid)
+                        <details className="git-remote-transfer border-t border-border pt-3">
+                          <summary className="flex cursor-pointer items-center gap-2 text-[12px] font-medium">
+                            <ArrowDownUp size={13} aria-hidden="true" />{" "}
+                            Transfer a branch
+                          </summary>
+                          <div className="grid gap-3 pt-3">
+                            <label className="grid gap-[6px] text-[12px]">
+                              Remote branch
+                              <Input
+                                value={branch}
+                                onChange={(event) =>
+                                  setBranch(event.target.value)
+                                }
+                                disabled={busy || !attached}
+                              />
+                            </label>
+                            {attached ? (
+                              <p>
+                                Pull {remote.name}/{branch || "…"} into{" "}
+                                {current}, or push {current} to {remote.name}/
+                                {branch || "…"}.
+                              </p>
+                            ) : (
+                              <p>
+                                Switch to a local branch with a commit before
+                                pulling or pushing.
+                              </p>
+                            )}
+                            <div className="git-remote-actions flex flex-wrap gap-[8px]">
+                              <Button
+                                disabled={
+                                  disabled || !attached || !branch.trim()
+                                }
+                                onClick={() =>
                                   void submit({
-                                    kind: "push",
+                                    kind: "pull.fast_forward",
                                     remote: remote.name,
                                     expectedToken: remote.token,
-                                    branch: current,
-                                    expectedOid: repository.head.oid.hex,
-                                    destinationBranch: branch.trim(),
-                                  });
-                              }}
-                            >
-                              Push branch
-                            </Button>
+                                    remoteBranch: branch.trim(),
+                                  })
+                                }
+                              >
+                                Pull fast-forward
+                              </Button>
+                              <Button
+                                disabled={
+                                  disabled || !attached || !branch.trim()
+                                }
+                                onClick={() => {
+                                  if (current && repository.head.oid)
+                                    void submit({
+                                      kind: "push",
+                                      remote: remote.name,
+                                      expectedToken: remote.token,
+                                      branch: current,
+                                      expectedOid: repository.head.oid.hex,
+                                      destinationBranch: branch.trim(),
+                                    });
+                                }}
+                              >
+                                Push branch
+                              </Button>
+                            </div>
+                            <p>
+                              Pull stops if branches have diverged. Push does
+                              not overwrite remote history.
+                            </p>
                           </div>
-                          <p>
-                            Pull stops if branches have diverged. Push does not
-                            overwrite remote history.
-                          </p>
-                        </div>
+                        </details>
                       </>
                     )}
                   </>
                 )}
-                <div className="git-remote-footer flex items-center gap-[12px]">
-                  <Button
-                    disabled={disabled}
-                    onClick={() => {
-                      setName("");
-                      setUrl("");
-                      setEditor({ kind: "add" });
-                    }}
-                  >
-                    Add remote
-                  </Button>
-                  <p className="flex-1">
-                    SSH uses the server’s SSH agent. HTTPS uses the repository’s
-                    configured credentials on the server.
-                  </p>
-                </div>
               </>
             )}
           </>
         )}
       </div>
-    </Modal>
+    </GitInspectorSection>
   );
 }

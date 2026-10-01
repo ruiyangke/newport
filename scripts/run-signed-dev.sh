@@ -9,7 +9,7 @@ if [[ "$(basename "$binary")" == newport ]]; then
   : "${NEWPORT_SIGNING_ENTITLEMENTS:?Set the matching Keychain entitlements path}"
   binary_dir="$(cd "$(dirname "$binary")" && pwd)"
   script_dir="$(cd "$(dirname "$0")" && pwd)"
-  python3 "$script_dir/check-signing.py" "$NEWPORT_SIGNING_ENTITLEMENTS" "$NEWPORT_PROVISIONING_PROFILE"
+  node "$script_dir/check-signing.mjs" "$NEWPORT_SIGNING_ENTITLEMENTS" "$NEWPORT_PROVISIONING_PROFILE"
   bundle="$binary_dir/Newport.app"
   mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
   cp "$binary" "$bundle/Contents/MacOS/newport"

@@ -188,7 +188,7 @@ fn hash_file(path: &Path, hash: &mut Sha256, budget: &mut u64) -> Result<(), Err
         }
     } else if meta.is_file() {
         // Large build artifacts must not make status unavailable or force a
-        // full read on every page. As in the git2 backend, inode, size, mtime
+        // full read on every page. Inode, size, mtime
         // and ctime guard these files; small contents provide extra protection.
         if meta.len() > 64 * 1024 || meta.len() > *budget {
             return Ok(());

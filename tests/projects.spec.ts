@@ -28,6 +28,17 @@ async function openGitAction(page: Page, item: string) {
 test("saved projects open live reads, rename and remove bookmarks", async ({
   page,
 }, info) => {
+  test.setTimeout(90_000);
+  const loadAllTags = async () => {
+    const more = page.getByRole("button", {
+      name: "Load more tags",
+      exact: true,
+    });
+    const end = page.getByText("All tags loaded", { exact: true });
+    await expect(more.or(end)).toBeVisible();
+    while (await more.count()) await more.click();
+    await expect(end).toBeVisible();
+  };
   const styles = recordProjectStyles(page);
   await page.addInitScript(() => {
     const path = (display: string) => ({ display, bytesB64: btoa(display) });
@@ -1244,7 +1255,7 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   // showed this surface, and the grouping is the point of consolidating it.
   await page.getByRole("button", { name: "Git actions", exact: true }).click();
   await expect(
-    page.getByRole("menuitem", { name: "Stashes…", exact: true }),
+    page.getByRole("menuitem", { name: "Stashes", exact: true }),
   ).toBeVisible();
   await page.screenshot({
     animations: "disabled",
@@ -1323,9 +1334,9 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   expect(fused.control).toBe(true);
   // The diff header is one ruled row now, so no pair is intentional any more.
   expect(fused.pairs).toEqual([]);
-  await openGitAction(page, "Stashes…");
+  await openGitAction(page, "Stashes");
   await page
-    .getByRole("button", { name: "Save current changes…", exact: true })
+    .getByRole("button", { name: "Save changes…", exact: true })
     .click();
   await page.getByLabel("Stash message", { exact: true }).fill("Save work");
   await page
@@ -1337,7 +1348,7 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   });
   await page.getByRole("button", { name: "Save stash", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await openGitAction(page, "Stashes…");
+  await openGitAction(page, "Stashes");
   await page.getByRole("button", { name: /Save work/ }).click();
   await expect(
     page.getByRole("button", { name: "Untracked files", exact: true }),
@@ -1359,7 +1370,7 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   // number out of the computed string passes immediately in Chromium, where it
   // is `oklch(0.97 …)`, and the capture below would then be taken in light.
   await page.waitForFunction(() => {
-    const el = document.querySelector(".git-stash-dialog");
+    const el = document.querySelector(".git-stash-workspace");
     if (!el) return false;
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d")!;
@@ -1406,7 +1417,11 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
         // Screen-reader-only labels are 1x1 and clipped; where they are
         // positioned from does not affect anything anyone can see or click.
         if (r.width < 4 || r.height < 4) continue;
-        const op = (el as HTMLElement).offsetParent;
+        let op = el instanceof HTMLElement ? el.offsetParent : el.parentElement;
+        if (!(el instanceof HTMLElement)) {
+          while (op && getComputedStyle(op).position === "static")
+            op = op.parentElement;
+        }
         const opr = op ? op.getBoundingClientRect() : null;
         const out = opr
           ? Math.round(
@@ -1467,20 +1482,20 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
     .check();
   await page.getByRole("button", { name: "Apply stash", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await openGitAction(page, "Stashes…");
+  await openGitAction(page, "Stashes");
   await page
-    .getByRole("button", { name: "Save current changes…", exact: true })
+    .getByRole("button", { name: "Save changes…", exact: true })
     .click();
   await page.getByLabel("Stash message", { exact: true }).fill("Second stash");
   await page.getByRole("button", { name: "Save stash", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await openGitAction(page, "Stashes…");
+  await openGitAction(page, "Stashes");
   // Both entries deliberately share an OID; select the older entry at index 1.
   await page.getByRole("button", { name: /Save work/ }).click();
   await page.getByRole("button", { name: "Apply…", exact: true }).click();
   await page.getByRole("button", { name: "Apply stash", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await openGitAction(page, "Stashes…");
+  await openGitAction(page, "Stashes");
   await page.getByRole("button", { name: /Second stash/ }).click();
   await page.getByRole("button", { name: "Drop…", exact: true }).click();
   await page.screenshot({
@@ -1489,7 +1504,7 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   });
   await page.getByRole("button", { name: "Drop stash", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await openGitAction(page, "Stashes…");
+  await openGitAction(page, "Stashes");
   await page.getByRole("button", { name: /Save work/ }).click();
   await page.getByRole("button", { name: "Pop…", exact: true }).click();
   await page.getByRole("button", { name: "Pop stash", exact: true }).click();
@@ -1627,7 +1642,7 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
     .getByRole("button", { name: "Delete branch", exact: true })
     .click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await openGitAction(page, "Remotes…");
+  await openGitAction(page, "Remotes");
   await expect(
     page.getByText(
       "No remotes configured. Add one to fetch and publish branches.",
@@ -1641,9 +1656,11 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
     .fill("git@host:team/app.git");
   await page.getByRole("button", { name: "Save remote", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await openGitAction(page, "Remotes…");
+  await openGitAction(page, "Remotes");
   await expect(
-    page.getByRole("button", { name: "Fetch origin", exact: true }),
+    page
+      .getByRole("region", { name: "Remotes", exact: true })
+      .getByRole("button", { name: "Fetch origin", exact: true }),
   ).toBeEnabled();
   await page.getByRole("combobox", { name: "Remote", exact: true }).click();
   await page
@@ -1688,7 +1705,9 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
     animations: "disabled",
     path: `.impeccable/screenshots/projects-remote-refs-${info.project.name}.png`,
   });
-  const remoteDialogBounds = await page.getByRole("dialog").boundingBox();
+  const remoteDialogBounds = await page
+    .locator(".git-inspector-section")
+    .boundingBox();
   const backBounds = await page
     .getByRole("button", { name: "Back to remotes", exact: true })
     .boundingBox();
@@ -1756,17 +1775,22 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   await page
     .getByRole("button", { name: "Back to remotes", exact: true })
     .click();
-  await page.getByRole("button", { name: "Fetch origin", exact: true }).click();
+  await page
+    .getByRole("region", { name: "Remotes", exact: true })
+    .getByRole("button", { name: "Fetch origin", exact: true })
+    .click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await openGitAction(page, "Remotes…");
+  await openGitAction(page, "Remotes");
+  await page.locator(".git-remote-transfer summary").click();
   await page
     .getByRole("button", { name: "Pull fast-forward", exact: true })
     .click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await openGitAction(page, "Remotes…");
+  await openGitAction(page, "Remotes");
+  await page.locator(".git-remote-transfer summary").click();
   await page.getByRole("button", { name: "Push branch", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await openGitAction(page, "Tags…");
+  await openGitAction(page, "Tags");
   await expect(page.getByText("No tags in this repository.")).toBeVisible();
   await page.getByRole("button", { name: "New tag", exact: true }).click();
   await page.getByLabel("Tag name", { exact: true }).fill("v0.1.0");
@@ -1775,7 +1799,7 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   ).toHaveValue("a".repeat(40));
   await page.getByRole("button", { name: "Create tag", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await openGitAction(page, "Tags…");
+  await openGitAction(page, "Tags");
   await page.getByRole("button", { name: "New tag", exact: true }).click();
   await page.getByLabel("Tag name", { exact: true }).fill("v1.0.0");
   await page.getByRole("combobox", { name: "Tag type", exact: true }).click();
@@ -1789,10 +1813,8 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   });
   await page.getByRole("button", { name: "Create tag", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await openGitAction(page, "Tags…");
-  await expect(
-    page.getByText("All tags loaded", { exact: true }),
-  ).toBeVisible();
+  await openGitAction(page, "Tags");
+  await loadAllTags();
   await page.getByRole("button", { name: /v1.0.0 Annotated/ }).click();
   await expect(
     page.getByText("First stable release", { exact: false }),
@@ -1811,17 +1833,13 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   });
   await page.getByRole("button", { name: "Push tag", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await openGitAction(page, "Tags…");
-  await expect(
-    page.getByText("All tags loaded", { exact: true }),
-  ).toBeVisible();
+  await openGitAction(page, "Tags");
+  await loadAllTags();
 
   await expect(
     page.getByRole("button", { name: /v0.1.0 Lightweight/ }),
   ).toBeVisible();
-  await expect(
-    page.getByText("All tags loaded", { exact: true }),
-  ).toBeVisible();
+  await loadAllTags();
   await page.getByRole("button", { name: /v1.0.0 Annotated/ }).click();
   await page
     .getByRole("button", { name: "Delete local tag…", exact: true })
@@ -1836,7 +1854,7 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   await expect(page.getByRole("dialog")).toHaveCount(0);
 
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await openGitAction(page, "Remotes…");
+  await openGitAction(page, "Remotes");
   await page
     .getByRole("button", { name: "Actions for remote origin", exact: true })
     .click();
@@ -1844,7 +1862,7 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   await page.getByLabel("Remote name", { exact: true }).fill("upstream");
   await page.getByRole("button", { name: "Save remote", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await openGitAction(page, "Remotes…");
+  await openGitAction(page, "Remotes");
   await page
     .getByRole("button", { name: "Actions for remote upstream", exact: true })
     .click();
@@ -1856,7 +1874,7 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
     .fill("git@host:team/updated.git");
   await page.getByRole("button", { name: "Save remote", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await openGitAction(page, "Remotes…");
+  await openGitAction(page, "Remotes");
   await expect(
     page.getByText("git@host:team/updated.git", { exact: true }),
   ).toBeVisible();

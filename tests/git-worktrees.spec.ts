@@ -3,6 +3,11 @@ import { mkdirSync } from "node:fs";
 
 /** The four repository dialogs open from the grouped Git actions menu. */
 async function openGitAction(page: Page, item: string) {
+  if (item === "Worktrees") {
+    await page.getByRole("button", { name: /^Worktrees:/ }).click();
+    await page.getByRole("button", { name: "Manage…", exact: true }).click();
+    return;
+  }
   await page.getByRole("button", { name: "Git actions", exact: true }).click();
   await page.getByRole("menuitem", { name: item, exact: true }).click();
 }
@@ -92,6 +97,7 @@ for (const bare of [false, true])
                 serverId: "server",
                 info: {
                   capabilities: {
+                    features: ["worktrees.filter", "worktrees.snapshot_filter"],
                     methods: [
                       "repo.open",
                       "repo.status",
@@ -249,82 +255,68 @@ for (const bare of [false, true])
     await page
       .getByRole("button", { name: "Application", exact: true })
       .click();
-    await openGitAction(page, "Worktrees…");
-    const dialog = page.getByRole("dialog");
+    await openGitAction(page, "Worktrees");
+    const dialog = page.locator(".git-inspector-section");
     await expect(
-      dialog.getByText(
-        bare ? "Bare repository · Current" : "Main worktree · Current",
-      ),
+      dialog.getByText("main · Current", { exact: true }),
     ).toBeVisible();
-    await expect(
-      dialog.getByRole("button", { name: "Remove worktree…", exact: true }),
-    ).toHaveCount(0);
-    // Page 1 carries the only row that differs between bare and non-bare, so
-    // capture it here; page 2 alone would make the pair look identical.
-    mkdirSync(".impeccable/screenshots", { recursive: true });
-    await page.screenshot({
-      animations: "disabled",
-      path: `.impeccable/screenshots/projects-worktrees-${bare ? "bare-" : ""}${info.project.name}.png`,
-    });
-    await dialog
-      .getByRole("button", { name: "Next worktrees", exact: true })
-      .click();
-    await page.screenshot({
-      animations: "disabled",
-      path: `.impeccable/screenshots/projects-worktrees-page2-${bare ? "bare-" : ""}${info.project.name}.png`,
-    });
-    await dialog
+    const expand = async (name: string) => {
+      const row = dialog.locator("details").filter({
+        has: page.locator("summary strong", {
+          hasText: new RegExp("^" + name + "$"),
+        }),
+      });
+      await expect(async () => {
+        await dialog.evaluate((el) => {
+          for (let p: Element | null = el; p; p = p.parentElement) {
+            if (p.scrollHeight > p.clientHeight) p.scrollTop = p.scrollHeight;
+          }
+        });
+        await expect(row).toHaveCount(1);
+      }).toPass({ timeout: 5000 });
+      if (!(await row.getAttribute("open"))) {
+        if (!(await row.evaluate((el) => (el as HTMLDetailsElement).open)))
+          await row.locator("summary").click();
+      }
+      return row;
+    };
+    let moved = await expand("moved");
+    await moved
       .getByRole("button", { name: "Locate moved worktree…", exact: true })
       .click();
     await dialog.getByLabel("New location on server").fill("/srv/relocated");
-    await page.screenshot({
-      animations: "disabled",
-      path: `.impeccable/screenshots/projects-worktree-locate-${bare ? "bare-" : ""}${info.project.name}.png`,
-    });
     await dialog
       .getByRole("button", { name: "Locate moved worktree", exact: true })
       .click();
-    await dialog
-      .getByRole("button", { name: "Next worktrees", exact: true })
-      .click();
+    moved = await expand("moved");
     await expect(
-      dialog.getByText("/srv/relocated", { exact: true }),
+      moved.getByText("/srv/relocated", { exact: true }),
     ).toBeVisible();
-    await dialog.getByRole("button", { name: "Lock…", exact: true }).click();
+    await moved.getByRole("button", { name: "Lock…", exact: true }).click();
     await dialog.getByLabel("Reason (optional)").fill("Keep this checkout");
     await dialog
       .getByRole("button", { name: "Lock worktree", exact: true })
       .click();
-    await dialog
-      .getByRole("button", { name: "Next worktrees", exact: true })
-      .click();
+    moved = await expand("moved");
     await expect(
-      dialog.getByText("Lock reason: Keep this checkout"),
+      moved.getByText("Lock reason: Keep this checkout"),
     ).toBeVisible();
     await expect(
-      dialog.getByRole("button", { name: "Remove worktree…", exact: true }),
+      moved.getByRole("button", { name: "Remove worktree…", exact: true }),
     ).toHaveCount(0);
-    await dialog.getByRole("button", { name: "Unlock…", exact: true }).click();
+    await moved.getByRole("button", { name: "Unlock…", exact: true }).click();
     await dialog
       .getByRole("button", { name: "Unlock worktree", exact: true })
       .click();
-    await dialog
-      .getByRole("button", { name: "Next worktrees", exact: true })
-      .click();
-    await dialog
+    moved = await expand("moved");
+    await moved
       .getByRole("button", { name: "Remove worktree…", exact: true })
       .click();
-    await page.screenshot({
-      animations: "disabled",
-      path: `.impeccable/screenshots/projects-worktree-remove-${bare ? "bare-" : ""}${info.project.name}.png`,
-    });
     await dialog
       .getByRole("button", { name: "Remove worktree", exact: true })
       .click();
-    await dialog
-      .getByRole("button", { name: "Next worktrees", exact: true })
-      .click();
-    await dialog
+    const orphan = await expand("orphan");
+    await orphan
       .getByRole("button", {
         name: "Remove missing registration…",
         exact: true,
@@ -333,11 +325,6 @@ for (const bare of [false, true])
     await dialog
       .getByRole("button", { name: "Remove missing registration", exact: true })
       .click();
-    await expect(
-      dialog.getByText(
-        bare ? "Bare repository · Current" : "Main worktree · Current",
-      ),
-    ).toBeVisible();
     await dialog
       .getByRole("button", { name: "Add worktree", exact: true })
       .click();
@@ -351,18 +338,12 @@ for (const bare of [false, true])
       .getByRole("combobox", { name: "Local branch", exact: true })
       .click();
     await page.getByRole("option", { name: "feature", exact: true }).click();
-    await page.screenshot({
-      animations: "disabled",
-      path: `.impeccable/screenshots/projects-worktree-add-${bare ? "bare-" : ""}${info.project.name}.png`,
-    });
     await dialog
       .getByRole("button", { name: "Add worktree", exact: true })
       .click();
-    await dialog
-      .getByRole("button", { name: "Next worktrees", exact: true })
-      .click();
+    const added = await expand("feature-checkout");
     await expect(
-      dialog.getByText("/srv/feature-checkout", { exact: true }),
+      added.getByText("/srv/feature-checkout", { exact: true }),
     ).toBeVisible();
     expect(
       await page.evaluate(() =>
@@ -385,7 +366,7 @@ for (const bare of [false, true])
       .getByRole("button", { name: "Add worktree", exact: true })
       .click();
     await expect(
-      dialog.getByText("No available local branches on this page.", {
+      dialog.getByText("No available local branches in the loaded results.", {
         exact: false,
       }),
     ).toBeVisible();
@@ -502,7 +483,11 @@ test("follows agents across worktrees: switch, branch hand-off, and a new worktr
                     "operation.get",
                   ],
                   actions: ["worktree.add", "checkout"],
-                  features: ["worktree.new_branch"],
+                  features: [
+                    "worktree.new_branch",
+                    "worktrees.filter",
+                    "worktrees.snapshot_filter",
+                  ],
                 },
               },
             };
@@ -563,7 +548,10 @@ test("follows agents across worktrees: switch, branch hand-off, and a new worktr
           if (method === "repo.worktrees")
             return {
               snapshot: `worktrees${state.revision}`,
-              entries: rows(self),
+              entries: rows(self).filter(
+                (row) =>
+                  !params.branch || row.head?.name?.display === params.branch,
+              ),
               nextCursor: null,
               metadata: { listToken: `token${state.revision}` },
             };
@@ -665,9 +653,7 @@ test("follows agents across worktrees: switch, branch hand-off, and a new worktr
   await page
     .getByRole("button", { name: "Branches: agent/fix", exact: true })
     .click();
-  await expect(
-    page.getByText("In worktree Main worktree", { exact: true }),
-  ).toBeVisible();
+
   await page.getByRole("option", { name: /^main/ }).click();
   await expect(picker("Main worktree")).toBeVisible();
   await expect(
@@ -797,6 +783,7 @@ test("checking many agent worktrees never blocks or fails opening the project", 
               serverId: "server",
               info: {
                 capabilities: {
+                  features: ["worktrees.filter", "worktrees.snapshot_filter"],
                   methods: [
                     "repo.open",
                     "repo.status",
@@ -805,7 +792,7 @@ test("checking many agent worktrees never blocks or fails opening the project", 
                     "repo.branches",
                   ],
                   actions: [],
-                  features: [],
+                  features: ["worktrees.filter", "worktrees.snapshot_filter"],
                 },
               },
             };
@@ -893,12 +880,14 @@ test("checking many agent worktrees never blocks or fails opening the project", 
           /^repo\.status \/srv\/agent-/.test(r),
         ).length,
     );
-  // The run reaches the worktrees -- folded away under the project, thirty
-  // being more than the library unfolds on its own...
-  await expect.poll(reads).toBeGreaterThan(1);
+  // The project library does not eagerly inspect every worktree.
+  await expect(
+    page.getByRole("button", { name: "Application", exact: true }),
+  ).toBeVisible();
+  expect(await reads()).toBe(0);
   await expect(
     page.getByRole("button", { name: "30 worktrees", exact: true }),
-  ).toHaveAttribute("aria-expanded", "false");
+  ).toHaveCount(0);
   // ...and opening the project mid-run stops it.
   await page.getByRole("button", { name: "Application", exact: true }).click();
   await expect(
@@ -923,6 +912,8 @@ test("checking many agent worktrees never blocks or fails opening the project", 
   await page
     .getByRole("button", { name: "Worktrees: Main worktree", exact: true })
     .click();
+  await expect(page.getByRole("option")).toHaveCount(20);
+  await page.getByRole("option").last().scrollIntoViewIfNeeded();
   await expect(page.getByRole("option")).toHaveCount(31);
   await expect(page.getByRole("option", { name: /agent-29/ })).toBeAttached();
 });

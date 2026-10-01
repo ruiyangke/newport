@@ -22,7 +22,6 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine,
 };
-use git2::Repository;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     ffi::OsStr,
@@ -107,14 +106,7 @@ impl RepoRef {
     fn git_dir(&self) -> Result<Vec<u8>, Error> {
         bytes(&self.g)
     }
-    /// Re-opens the repository the token names, refusing a directory that is
-    /// gone or has been replaced since the token was issued.
-    pub fn open(&self) -> Result<Repository, Error> {
-        let path = self.checked_path()?;
-        Repository::open(path)
-            .map_err(|_| Error::new("REPO_NOT_FOUND", "The repository is no longer available."))
-    }
-    /// Validate identity without opening a Git engine. Shared by both adapters.
+    /// Validate the canonical repository directory identity.
     pub fn checked_path(&self) -> Result<std::path::PathBuf, Error> {
         let git_dir = self.git_dir()?;
         let path = Path::new(OsStr::from_bytes(&git_dir));
@@ -298,6 +290,6 @@ mod tests {
     #[test]
     fn a_missing_repository_is_not_found() {
         let token = RepoRef::new(Path::new("/definitely/not/here/.git"), 1, 2);
-        assert!(matches!(token.open(), Err(e) if e.code == "REPO_NOT_FOUND"));
+        assert!(matches!(token.checked_path(), Err(e) if e.code == "REPO_NOT_FOUND"));
     }
 }
