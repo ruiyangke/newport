@@ -149,6 +149,9 @@ test("class styles match the recorded baseline", async ({ page }) => {
   );
   const drift: string[] = [];
   for (const [name, before] of Object.entries(baseline)) {
+    // xterm owns these generated styles and adjusts them to measured cell
+    // dimensions. Its rendering is covered by terminal tests, not this app-CSS baseline.
+    if (name.startsWith("xterm") || name === "live-region") continue;
     const now = captured[name];
     // A class that has gone is expected while converting to utilities; what
     // matters is that the classes still in use look the same.
