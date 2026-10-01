@@ -1,4 +1,4 @@
-//! Common bounded page envelopes; opaque CLI cursors cannot enter git2 writes.
+//! Bounded page envelopes with typed, opaque cursors.
 use super::super::tokens::{CursorRef, SnapshotRef};
 use super::*;
 pub(super) fn page(

@@ -1,31 +1,14 @@
 //! Dedicated Git RPC channel; independent of clipboard/browser v5.
 mod backend;
 mod bootstrap;
-mod branches;
-mod checkout;
 mod cli;
 mod cloning;
 mod command_log;
-mod config_keys;
-mod conflicts;
-mod credentials;
-mod discard;
-mod hunks;
-mod integration;
 mod journal;
 mod metrics;
-mod operations;
 pub mod protocol;
-mod rebase;
-mod remote_rename;
 mod remotes;
-mod replay;
-mod repository;
-mod reset;
-mod stash;
-mod tags;
 mod tokens;
-mod worktrees;
 use backend::Output;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use protocol::{Error, Message};
@@ -114,7 +97,7 @@ fn run(
         )?;
         return Ok(());
     }
-    let mut service = backend::Backend::from_env(|| {
+    let mut service = backend::Backend::new(|| {
         journal_root.and_then(|root| journal::Journal::open(root, client_id).ok())
     })?;
     let methods: Vec<_> = service
@@ -131,7 +114,8 @@ fn run(
         &Message::Ready {
             id,
             version,
-            capabilities: service.capabilities(json!({"methods":methods,"actions":if service.writable(){vec!["stage","unstage","commit","conflict.resolve","commit.amend","branch.create","branch.rename","branch.delete","branch.set_upstream","checkout","remote.add","remote.rename","remote.set_url","remote.remove","fetch","push","push.with_lease","branch.delete_remote","worktree.add","worktree.remove","worktree.repair","worktree.prune","worktree.lock","worktree.unlock","tag.delete_remote","merge.fast_forward","pull.fast_forward","merge","merge.abort","stash.save","stash.apply","stash.pop","stash.drop","tag.create","tag.delete","tag.push","cherry_pick","revert","integration.continue","integration.abort","rebase","integration.skip","reset","discard"]}else{vec![]},"features":["status_summary.path","remote_refs.filter","status.filter","index.hunks","index.lines","discard.hunks","stash.entry_index","worktree.new_branch","diff.streaming","diff.tuple_v1","paths.bytes","history.snapshot_pagination","branches.filter","worktrees.filter","worktrees.snapshot_filter","history.summary","tags.summary"],"objectFormats":["sha1","sha256"]})),
+            capabilities: service
+                .capabilities(json!({"methods":methods,"objectFormats":["sha1","sha256"]})),
         },
     )?;
     loop {
@@ -201,6 +185,9 @@ fn run(
                         }
                     }
                     Ok(Output::Diff { snapshot, bytes }) => {
+                        let bytes = protocol::encode_value(
+                            &serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+                        )?;
                         stream_diff(&mut receive, output, id, snapshot, &bytes)?;
                     }
                 }
@@ -402,12 +389,92 @@ mod tests {
     }
 
     #[test]
+    fn msgpack_handshake_executes_repository_reads_and_logs() {
+        let selected_version = protocol::VERSION;
+        use std::os::unix::ffi::OsStrExt;
+        let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "--template=", "--initial-branch=main"])
+            .arg(repo.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let id = Uuid::new_v4().to_string();
+        let mut messages = vec![
+            Message::Initialize {
+                id: Uuid::new_v4().to_string(),
+                version: selected_version,
+                client_id: Uuid::new_v4().to_string(),
+                client_version: "test".into(),
+                command_logs: true,
+            },
+            Message::Request {
+                id: id.clone(),
+                method: "repo.open".into(),
+                params: json!({"path":protocol::Path::new(repo.path().as_os_str().as_bytes())}),
+            },
+            Message::Ping {
+                nonce: "alive".into(),
+            },
+        ]
+        .into_iter();
+        let mut output = Vec::new();
+        run(
+            |_| {
+                messages
+                    .next()
+                    .ok_or_else(|| io::ErrorKind::UnexpectedEof.into())
+            },
+            &mut output,
+            None,
+        )
+        .unwrap();
+        let mut frames = output.as_slice();
+        assert!(
+            matches!(protocol::read(&mut frames).unwrap(),Message::Hello { versions,.. } if versions.contains(&selected_version))
+        );
+        assert!(matches!(
+            protocol::read(&mut frames).unwrap(),
+            Message::Ready {
+                version,
+                ..
+            } if version == selected_version
+        ));
+        let mut logs = 0;
+        loop {
+            match protocol::read(&mut frames).unwrap() {
+                Message::CommandLog { id: reply, .. } => {
+                    assert_eq!(reply, id);
+                    logs += 1;
+                }
+                Message::Response {
+                    id: reply,
+                    result: Some(value),
+                    error: None,
+                } => {
+                    assert_eq!(reply, id);
+                    assert_eq!(value["bare"], false);
+                    assert!(value["repoId"].is_string());
+                    break;
+                }
+                other => panic!("Unexpected {other:?}"),
+            }
+        }
+        assert!(logs > 0);
+        assert!(
+            matches!(protocol::read(&mut frames).unwrap(),Message::Pong { nonce } if nonce=="alive")
+        );
+        assert!(frames.is_empty());
+    }
+
+    #[test]
     fn handshake_rejects_mutations_and_unknown_params() {
         let mut input = vec![
             Message::Initialize {
                 command_logs: false,
                 id: Uuid::new_v4().to_string(),
-                version: 1,
+                version: protocol::VERSION,
                 client_id: Uuid::new_v4().to_string(),
                 client_version: "test".into(),
             },
@@ -439,10 +506,11 @@ mod tests {
             protocol::read(&mut input).unwrap(),
             Message::Hello { .. }
         ));
-        assert!(matches!(
-            protocol::read(&mut input).unwrap(),
-            Message::Ready { .. }
-        ));
+        let Message::Ready { capabilities, .. } = protocol::read(&mut input).unwrap() else {
+            panic!("Expected CLI handshake");
+        };
+        assert_eq!(capabilities["backend"], "cli");
+        assert!(capabilities["actions"].as_array().unwrap().is_empty());
         assert!(
             matches!(protocol::read(&mut input).unwrap(),Message::Response { error:Some(Error { code,.. }),.. } if code=="UNSUPPORTED_METHOD")
         );

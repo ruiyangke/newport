@@ -345,62 +345,12 @@ it("separates a branch that was not read from one that is absent", async () => {
   expect(unread.textContent).toContain("Branch: Not read");
 });
 
-it("loads worktrees only on expansion and reports only visible loaded children", async () => {
-  const { GitTestProviders, createTestQueryClient, seedGitClient } =
-    await import("../git/testing");
-  const { gitProjectsFor } = await import("../git/registry");
-  const { decodeGitWorktrees } = await import("../domain/gitResponses");
-  const { notifyManager } = await import("@tanstack/react-query");
-  notifyManager.setScheduler(queueMicrotask);
-  const linked = (name: string) => ({
-    name: gitPath(name),
-    kind: "linked",
-    state: "available",
-    path: gitPath(`/repo-${name}`),
-    gitDir: gitPath(`/repo/.git/worktrees/${name}`),
-    current: false,
-    head: {
-      name: gitPath(`refs/heads/${name}`),
-      oid: { algorithm: "sha1", hex: "a".repeat(40) },
-      unborn: false,
-      detached: false,
-    },
-    locked: false,
-    lockReason: null,
-    prunable: false,
-  });
-  const worktrees = vi.fn(async (_repo: string, cursor?: string) =>
-    decodeGitWorktrees({
-      snapshot: "w",
-      nextCursor: cursor ? null : "next",
-      metadata: { listToken: "w" },
-      entries: cursor ? [linked("second")] : [linked("first")],
-    }),
+it("keeps the outer list limited to projects", async () => {
+  const { node } = render();
+  await act(async () => root.render(node));
+  expect(host.querySelectorAll(".git-library-row")).toHaveLength(
+    projects.length,
   );
-  const scope = seedGitClient({ worktrees });
-  const open = vi.fn(async () => ({ repoId: "repo" }));
-  Object.assign(gitProjectsFor(scope), { open });
-  const queryClient = createTestQueryClient();
-  const onVisibleWorktrees = vi.fn();
-  const { node } = render({ scope, onVisibleWorktrees });
-  await act(async () =>
-    root.render(
-      <GitTestProviders queryClient={queryClient}>{node}</GitTestProviders>,
-    ),
-  );
-  expect(open).not.toHaveBeenCalled();
-  expect(worktrees).not.toHaveBeenCalled();
-  await act(async () => button("Worktrees").click());
-  expect(open).toHaveBeenCalledTimes(1);
-  expect(worktrees).toHaveBeenCalledTimes(1);
-  expect(host.textContent).toContain("first");
-  expect(host.textContent).not.toContain("second");
-  await act(async () => button("Load more worktrees").click());
-  expect(worktrees).toHaveBeenCalledWith("repo", "next", undefined);
-  expect(host.textContent).toContain("second");
-  expect(onVisibleWorktrees.mock.calls.at(-1)?.[1]).toHaveLength(2);
-  await act(async () => button("Worktrees").click());
-  expect(onVisibleWorktrees.mock.calls.at(-1)?.[1]).toEqual([]);
-  expect(host.querySelectorAll(".git-library-worktree")).toHaveLength(0);
-  queryClient.clear();
+  expect(host.querySelector(".git-library-worktrees-toggle")).toBeNull();
+  expect(host.querySelector(".git-library-worktree")).toBeNull();
 });

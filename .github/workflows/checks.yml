@@ -29,11 +29,10 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npx playwright test --config playwright.production.config.ts
-      - run: python3 scripts/test-cockpit.py
+      - run: npm run test:cockpit
       - run: sudo apt-get update && sudo apt-get install -y minisign
-      - run: python3 scripts/test-update-manifests.py
+      - run: node scripts/test-update-manifests.mjs
       - run: node --test scripts/ci/*.test.mjs
-      - run: python3 scripts/ci/test-release.py
       - run: node scripts/ci/artifact.mjs record dist
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -66,7 +65,9 @@ jobs:
           workspaces: tools/agent
           key: nix-agent
           save-if: ${{ github.event_name != 'pull_request' }}
+      - run: nix develop --command npm run check:harness
       - run: nix develop --command npm run check:agent
+      - run: nix develop --command npm run test:https
       - name: Validate workflows
         if: runner.os == 'Linux'
         run: nix develop --command actionlint
@@ -85,10 +86,14 @@ jobs:
       - run: rustup show
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: tools/agent
-          key: linux-musl
+          workspaces: tools/test-harness
+          key: agent-build-harness
           save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: arm64
       - run: bash scripts/build-agent.sh
+      - run: cargo run --locked --manifest-path tools/test-harness/Cargo.toml -- runtime
       - run: node scripts/ci/artifact.mjs record src-tauri/agents
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -150,7 +155,10 @@ jobs:
           $llvm >> $env:GITHUB_PATH
       - run: npm ci
       - run: node scripts/prepare-build.mjs
+      - run: node --test scripts/ci/release.test.mjs
       - run: npm run check:rust
+      - run: npm run test:ssh
+        if: runner.os == 'macOS'
       - run: npm run tauri build -- --bundles ${{ matrix.bundle }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: runner.os == 'Windows'
@@ -181,9 +189,6 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
       - run: rustup show
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -204,7 +209,7 @@ jobs:
   passed:
     name: All checks passed
     if: always()
-    needs: [frontend, agent-tests, agents, desktop, remote]
+    needs: [frontend, agent-tests, agents, desktop, remote, website]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -212,9 +217,30 @@ jobs:
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
-          python3 - <<'PY'
-          import json, os
-          results = json.loads(os.environ['RESULTS'])
-          failed = [name for name, job in results.items() if job['result'] != 'success']
-          if failed: raise SystemExit('Checks did not pass: ' + ', '.join(failed))
-          PY
+          node --input-type=module <<'JS'
+          const results = JSON.parse(process.env.RESULTS);
+          const failed = Object.entries(results).filter(([, job]) => job.result !== 'success').map(([name]) => name);
+          if (failed.length) { console.error('Checks did not pass: ' + failed.join(', ')); process.exit(1); }
+          JS
+
+  website:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      # `build` runs `astro check` first, so a type error fails here.
+      - run: npm run build
+      - run: npm test

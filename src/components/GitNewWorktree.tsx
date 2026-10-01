@@ -16,7 +16,7 @@ import {
   worktreeNameFor,
 } from "../git/worktrees";
 import { Button, Checkbox, Input } from "./controls";
-import { Modal } from "./Editors";
+import { GitInspectorSection } from "./GitInspectorSection";
 import { GitFolderChooser } from "./GitFolderChooser";
 import {
   Select,
@@ -284,12 +284,7 @@ export function GitNewWorktree({
 
   return (
     <>
-      <Modal
-        title="New worktree"
-        busy={busy}
-        onClose={onClose}
-        className="git-worktree-dialog w-[min(520px,calc(100vw_-_32px))]!"
-      >
+      <GitInspectorSection title="New worktree" busy={busy} onClose={onClose}>
         <form
           id={formId}
           className="git-project-form"
@@ -569,7 +564,7 @@ export function GitNewWorktree({
             </Button>
           </footer>
         </form>
-      </Modal>
+      </GitInspectorSection>
       <GitFolderChooser
         serverId={serverId}
         open={browsing}

@@ -14,22 +14,10 @@ struct Processes {
     git: u64,
 }
 thread_local! {
-    // Git RPC execution and its credential callbacks run on the request thread.
+    // Git RPC execution runs on the request thread.
     static PROCESSES: Cell<Option<Processes>> = const { Cell::new(None) };
 }
-/// Count successful helper shell launches, including known `git credential-*`
-/// dispatches. Commands launched internally by arbitrary helpers are not visible.
-pub(super) fn helper_started(uses_git: bool) {
-    PROCESSES.with(|cell| {
-        if let Some(mut processes) = cell.get() {
-            processes.helpers += 1;
-            processes.git += u64::from(uses_git);
-            cell.set(Some(processes));
-        }
-    });
-}
-
-/// Count a successful direct Git CLI launch separately from credential helpers.
+/// Count directly launched Git commands. Git-internal helper processes are not visible.
 pub(super) fn git_started() {
     PROCESSES.with(|cell| {
         if let Some(mut processes) = cell.get() {
@@ -79,57 +67,23 @@ mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
     #[test]
-    fn helper_processes_are_measured_per_request_without_sensitive_fields() {
+    fn command_counts_reset_between_requests() {
         let dir = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(dir.path().join("repo")).unwrap();
-        let config_path = dir.path().join("config");
-        std::fs::write(&config_path, "").unwrap();
-        let mut config = git2::Config::open(&config_path).unwrap();
-        config
-            .set_str(
-                "credential.helper",
-                "!f() { printf 'username=fixture\\npassword=fixture\\n'; }; f",
-            )
-            .unwrap();
-        repo.set_config(&config).unwrap();
         let path = dir.path().join("measurements");
         let mut metrics = Metrics(Some(Metrics::open(&path).unwrap()));
-        for (id, named) in [
-            ("helper", false),
-            ("named-helper", true),
-            ("next-read", false),
-        ] {
-            let started = metrics.start();
-            if id != "next-read" {
-                if named {
-                    config
-                        .set_str("credential.helper", "newport-nonexistent-test-helper")
-                        .unwrap();
-                    repo.set_config(&config).unwrap();
-                }
-                let result = super::super::credentials::https(
-                    &repo,
-                    "https://example.test/repo",
-                    None,
-                    Instant::now() + std::time::Duration::from_secs(2),
-                );
-                assert_eq!(result.is_ok(), !named);
-            }
-            metrics.finish(id, started);
-        }
+        let start = metrics.start();
+        git_started();
+        git_started();
+        metrics.finish("first", start);
+        let start = metrics.start();
+        metrics.finish("second", start);
         let rows: Vec<serde_json::Value> = std::fs::read_to_string(path)
             .unwrap()
             .lines()
             .map(|s| serde_json::from_str(s).unwrap())
             .collect();
-        assert_eq!(rows[0]["credentialHelperProcesses"], 1);
-        assert_eq!(rows[0]["gitCommands"], 0);
-        assert_eq!(rows[1]["credentialHelperProcesses"], 1);
-        assert_eq!(rows[1]["gitCommands"], 1);
-        assert_eq!(rows[2]["credentialHelperProcesses"], 0);
-        assert_eq!(rows[2]["gitCommands"], 0);
-        assert!(rows.iter().all(|row| row.as_object().unwrap().len() == 4));
-        assert!(PROCESSES.with(Cell::get).is_none());
+        assert_eq!(rows[0]["gitCommands"], 2);
+        assert_eq!(rows[1]["gitCommands"], 0);
     }
     #[test]
     fn timings_are_private_correlated_and_do_not_replace_files() {

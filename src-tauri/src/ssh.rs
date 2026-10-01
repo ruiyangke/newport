@@ -531,7 +531,7 @@ mod integration_tests {
         assert!(execute(&s, "printf ok", None)
             .await
             .unwrap_err()
-            .contains("selected agent key"));
+            .contains("selected SSH agent key"));
         s.agent_key_fingerprint = None;
         s.agent_source = None;
         s.auth_method = AuthMethod::Password;
@@ -609,13 +609,14 @@ mod integration_tests {
                 .await
                 .is_err()
         );
-        let _port = TcpListener::bind(("127.0.0.1", local))
-            .await
-            .expect("Cancelled handshake must release listener");
         tokio::time::timeout(Duration::from_secs(2), peer)
             .await
             .expect("Cancelled handshake must close SSH transport")
             .unwrap();
+
+        let _port = TcpListener::bind(("127.0.0.1", local))
+            .await
+            .expect("Cancelled handshake must release listener");
     }
 }
 

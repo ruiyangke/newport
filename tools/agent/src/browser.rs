@@ -2,7 +2,7 @@
 use crate::{paths::root, wire};
 use std::{
     env, fs,
-    io::{self, Read, Write},
+    io::{self, Write},
     os::unix::net::{UnixListener, UnixStream},
     process::Command,
     time::{Duration, Instant},
@@ -37,18 +37,19 @@ pub fn open(args: &[String], desktop: bool) -> io::Result<()> {
         .map_err(|_| io::Error::other("enable Browser in Newport’s Integration page first"))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     stream.set_read_timeout(Some(Duration::from_secs(25)))?;
-    stream.write_all(args[0].as_bytes())?;
-    stream.shutdown(std::net::Shutdown::Write)?;
-    let mut reply = String::new();
-    stream.take(256).read_to_string(&mut reply)?;
-    if let Some(warning) = reply.strip_prefix("ok\n") {
+    wire::write(&mut stream, b'O', &wire::browser_request(0, &args[0])?)?;
+    let (kind, bytes) = wire::read_limited(&mut stream, 8224)?;
+    let (id, success, message) = wire::parse_browser_reply(&bytes)?;
+    if kind != b'B' || id != 0 {
+        return Err(io::Error::other("invalid browser response"));
+    }
+    if !success {
+        return Err(io::Error::other(
+            message.unwrap_or_else(|| "browser request failed".into()),
+        ));
+    }
+    if let Some(warning) = message {
         eprintln!("Newport: {warning}");
-    } else if reply != "ok" {
-        return Err(io::Error::other(if reply.is_empty() {
-            "browser connection closed"
-        } else {
-            &reply
-        }));
     }
     Ok(())
 }
@@ -81,22 +82,23 @@ impl Broker {
             .is_some_and(|(_, _, started)| started.elapsed() > Duration::from_secs(20))
         {
             if let Some((_, mut stream, _)) = self.pending.take() {
-                let _ = stream.write_all(b"Mac browser setup timed out; try again");
+                let _ = local_reply(
+                    &mut stream,
+                    false,
+                    Some("Mac browser setup timed out; try again"),
+                );
             }
         }
     }
     pub(crate) fn reply(&mut self, data: &[u8]) {
-        if let Some((id, reply)) = std::str::from_utf8(data)
-            .ok()
-            .and_then(|v| v.split_once('\n'))
-        {
+        if let Ok((id, success, message)) = wire::parse_browser_reply(data) {
             if self
                 .pending
                 .as_ref()
-                .is_some_and(|(expected, _, _)| id.parse::<u64>().ok() == Some(*expected))
+                .is_some_and(|(expected, _, _)| id == *expected)
             {
                 if let Some((_, mut stream, _)) = self.pending.take() {
-                    let _ = stream.write_all(reply.as_bytes());
+                    let _ = local_reply(&mut stream, success, message.as_deref());
                 }
             }
         }
@@ -106,28 +108,41 @@ impl Broker {
         if let Ok((mut stream, _)) = self.listener.accept() {
             stream.set_read_timeout(Some(Duration::from_millis(100)))?;
             stream.set_write_timeout(Some(Duration::from_millis(100)))?;
-            let mut request = String::new();
-            let read = (&mut stream).take(8225).read_to_string(&mut request);
-            if self.enabled
-                && read.is_ok()
-                && wire::web_url(&request).is_some()
-                && self.pending.is_none()
-                && self.last_open.elapsed() >= Duration::from_secs(1)
-            {
+            let request = wire::read_limited(&mut stream, 8224).and_then(|(kind, bytes)| {
+                if kind != b'O' {
+                    return Err(io::Error::other("invalid browser request"));
+                }
+                let (id, url) = wire::parse_browser_request(&bytes)?;
+                if id != 0 {
+                    return Err(io::Error::other("invalid local browser request ID"));
+                }
+                Ok(url)
+            });
+            if let Some(request) = request.ok().filter(|_| {
+                self.enabled
+                    && self.pending.is_none()
+                    && self.last_open.elapsed() >= Duration::from_secs(1)
+            }) {
                 self.request_id += 1;
                 wire::write(
                     output,
                     b'O',
-                    format!("{}\n{request}", self.request_id).as_bytes(),
+                    &wire::browser_request(self.request_id, &request)?,
                 )?;
                 self.last_open = Instant::now();
                 self.pending = Some((self.request_id, stream, Instant::now()));
             } else {
-                let _ = stream.write_all(
-                    b"browser request rejected or another request is pending; try again",
+                let _ = local_reply(
+                    &mut stream,
+                    false,
+                    Some("browser request rejected or another request is pending; try again"),
                 );
             }
         }
         Ok(())
     }
+}
+
+fn local_reply(stream: &mut UnixStream, success: bool, message: Option<&str>) -> io::Result<()> {
+    wire::write(stream, b'B', &wire::browser_reply(0, success, message)?)
 }

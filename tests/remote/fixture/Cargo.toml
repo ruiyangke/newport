@@ -1,0 +1,9 @@
+[package]
+name = "newport-test-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+[dependencies]
+serde_json = "1"
+tempfile = "3"
+libc = "0.2"

@@ -39,7 +39,7 @@ pub(super) fn rows(repo: &Repo) -> Result<(Vec<Value>, String), Error> {
         let reason = record.iter().find_map(|f| f.strip_prefix(b"locked "));
         let locked = reason.is_some() || record.contains(&b"locked".as_slice());
         let prunable = record.iter().any(|f| f.starts_with(b"prunable"));
-        rows.push(json!({"name":name,"kind":if bare{"bare"}else if main{"main"}else{"linked"},"path":WirePath::new(path),"gitDir":WirePath::new(git_dir.as_os_str().as_bytes()),"current":git_dir==repo.git_dir,"state":if root.exists(){"available"}else{"missing"},"head":{"oid":id.map(oid).transpose()?,"name":branch.map(WirePath::new).or_else(||Some(WirePath::new(b"HEAD"))),"detached":branch.is_none(),"unborn":id.is_none()},"locked":locked,"lockReason":reason.map(WirePath::new),"prunable":prunable}));
+        rows.push(json!({"name":name,"kind":if bare{"bare"}else if main{"main"}else{"linked"},"path":WirePath::new(path),"gitDir":WirePath::new(git_dir.as_os_str().as_bytes()),"current":git_dir==repo.git_dir,"state":if root.exists(){"available"}else{"missing"},"head":{"oid":id.map(oid).transpose()?,"name":branch.map(WirePath::new).or_else(||Some(WirePath::new(b"HEAD"))),"detached":branch.is_none(),"unborn":id.is_none()},"locked":locked,"lockReason":locked.then(||WirePath::new(reason.unwrap_or_default())),"prunable":prunable}));
         record.clear();
     }
     let fingerprint = pages::hash(&json!(rows))?;
@@ -230,7 +230,9 @@ pub(super) fn apply(repo: &Repo, action: &super::super::protocol::Action) -> Res
                 ],
             )?;
         }
-        return Ok(json!({"name":name,"path":path,"refreshRequired":true}));
+        return Ok(
+            json!({"name":name,"path":path,"openRequired":true,"branchCreated":new_branch,"refreshRequired":true}),
+        );
     }
     let name = match action {
         Action::WorktreeRemove { name }
@@ -299,7 +301,7 @@ pub(super) fn apply(repo: &Repo, action: &super::super::protocol::Action) -> Res
                     new_path.as_os_str().into(),
                 ],
             )?;
-            return Ok(json!({"refreshRequired":true}));
+            return Ok(json!({"changed":path != new_path,"refreshRequired":true}));
         }
         Action::WorktreeLock { reason, .. } => {
             args.push("lock".into());
@@ -316,5 +318,7 @@ pub(super) fn apply(repo: &Repo, action: &super::super::protocol::Action) -> Res
     args.push("--".into());
     args.push(path.as_os_str().into());
     execute(repo, args)?;
-    Ok(json!({"refreshRequired":true}))
+    Ok(
+        json!({"registrationOnly":matches!(action,Action::WorktreePrune{..}),"refreshRequired":true}),
+    )
 }

@@ -6,7 +6,6 @@ import type { GitWriteAction } from "../domain/git";
 import type { GitRepository, GitStatus } from "../domain/gitResponses";
 import { gitQueries } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
-import { ButtonGroup, ButtonGroupText } from "./ui/button-group";
 import { Button } from "./controls";
 import {
   DropdownMenu,
@@ -145,23 +144,14 @@ export function GitSyncControl({
     : undefined;
 
   return (
-    /*
-     * One outlined group on the toolbar's trailing edge, as tall as the other
-     * toolbar controls: the action, what is outstanding, and the other
-     * transfers. The upstream and the "from stored refs" caveat moved off a
-     * second line that truncated ("origin/main · from st…") into the tooltip
-     * and the footer.
-     *
-     * `!` only where `src/styles.css` has an UNLAYERED `[data-slot="button"]`
-     * claim (height, radius, padding-inline): that rule's 5px radius would
-     * otherwise round the joined inner corners the group squares off.
-     */
-    <ButtonGroup
-      className="git-sync h-[30px] flex-none"
+    <div
+      role="group"
+      aria-label="Remote transfers"
+      className="git-sync inline-flex h-[30px] flex-none items-center rounded-[5px] border border-border bg-(--native-surface)"
       title={reason ?? (error || basis)}
     >
       <Button
-        className="h-[30px]! min-w-0 gap-[6px] rounded-r-none! px-[10px]! text-[12px] font-medium text-foreground"
+        className="h-[28px]! min-w-0 gap-[6px] rounded-r-none! border-0 px-[10px]! text-[12px] font-medium text-foreground shadow-none"
         disabled={disabled}
         aria-label={`${primary.label} ${target}`}
         onClick={() => void transfer(primary.kind)}
@@ -176,30 +166,19 @@ export function GitSyncControl({
         <span className="truncate">
           {primary.label} {target}
         </span>
+        {(behind > 0 || ahead > 0) && (
+          <span
+            className="ml-[2px] text-[11px] text-muted-foreground tabular-nums"
+            aria-label={`${behind > 0 ? behind : ahead} commits to ${primary.kind}`}
+          >
+            {behind > 0 ? behind : ahead}
+          </span>
+        )}
       </Button>
-      {(ahead > 0 || behind > 0) && (
-        <ButtonGroupText
-          className="h-[30px] gap-[6px] rounded-none border-border bg-(--native-surface) px-[8px] text-[11px] font-medium text-muted-foreground tabular-nums"
-          aria-label={`${ahead} ahead, ${behind} behind, from stored refs`}
-        >
-          {ahead > 0 && (
-            <span className="flex items-center gap-[1px]">
-              <ArrowUp size={11} aria-hidden="true" />
-              {ahead}
-            </span>
-          )}
-          {behind > 0 && (
-            <span className="flex items-center gap-[1px]">
-              <ArrowDown size={11} aria-hidden="true" />
-              {behind}
-            </span>
-          )}
-        </ButtonGroupText>
-      )}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
-            className="h-[30px]! w-[26px] rounded-l-none! p-0! text-muted-foreground"
+            className="h-[28px]! w-[26px] rounded-l-none! border-0 p-0! text-muted-foreground shadow-none"
             disabled={busy}
             aria-label="Transfer options"
           >
@@ -227,9 +206,10 @@ export function GitSyncControl({
           >
             <ArrowUp size={14} aria-hidden="true" />
             Push {branch ?? "branch"} to {target}
+            {ahead > 0 ? ` (${ahead})` : ""}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-    </ButtonGroup>
+    </div>
   );
 }

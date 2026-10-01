@@ -1,3 +1,4 @@
+import { Archive, Plus, Search } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { GitWriteAction } from "../domain/git";
@@ -6,8 +7,8 @@ import { gitKeys, gitQueries } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
 import { Button, Input } from "./controls";
 import { Checkbox } from "./ui/checkbox";
-import { Modal } from "./Editors";
-import { GitCommitInspector } from "./GitCommitInspector";
+import { GitInspectorSection } from "./GitInspectorSection";
+import { GitCommitInspector, relativeTime } from "./GitCommitInspector";
 import { useGitPageLoader } from "../hooks/useGitPageLoader";
 import { GitLoadMore } from "./GitLoadMore";
 import { gitProjectsFor } from "../git/registry";
@@ -78,6 +79,7 @@ function StashDialog({
   const queryClient = useQueryClient();
   const [selected, setSelected] = useState<Stash | null>(null);
   const [message, setMessage] = useState("");
+  const [filter, setFilter] = useState("");
   const [includeUntracked, setIncludeUntracked] = useState(false);
   const [keepIndex, setKeepIndex] = useState(false);
   const [reinstateIndex, setReinstateIndex] = useState(false);
@@ -95,8 +97,8 @@ function StashDialog({
   const pages = useGitPageLoader({
     queryKey: gitQueries.stashes(scope, repoId).queryKey,
     page: stashes ?? null,
-    enabled: !loading && !first.isError && !selected && !saving,
-    prefetch: true,
+    enabled: !loading && !first.isError && !saving,
+    prefetch: false,
     entryKey: (stash: Stash) => `${stash.index}:${stash.oid}`,
     read: (cursor, signal) =>
       gitProjectsFor(scope)
@@ -169,7 +171,7 @@ function StashDialog({
     }
   }
   return (
-    <Modal
+    <GitInspectorSection
       title={
         saving
           ? "Save stash"
@@ -183,289 +185,322 @@ function StashDialog({
       }
       busy={busy}
       onClose={onClose}
-      className={
-        selected && !confirm
-          ? "git-stash-dialog w-[min(900px,calc(100vw-32px))]! max-w-[900px]!"
-          : ""
-      }
+      fill
     >
-      <div className="git-stash-body grid min-h-0 flex-[1_1_auto] [align-content:start] gap-[12px] overflow-y-auto overscroll-contain px-[24px] py-0 [&_p]:text-[12px] [&_p]:text-muted-foreground [&_p]:[overflow-wrap:anywhere]">
-        <p>{projectName}</p>
-        {error && <p role="alert">{error}</p>}
-        {blockedReason && (
-          <p>
-            {blockedReason}{" "}
-            <Button onClick={onClose}>Back to repository</Button>
-          </p>
-        )}
-        {readError && (
-          <p role="alert">
-            {readError}{" "}
-            <Button
-              disabled={busy || loading}
-              onClick={() => {
-                setSelected(null);
-                setConfirm(null);
-                void first.refetch();
-              }}
-            >
-              Retry stashes
-            </Button>
-          </p>
-        )}
-        {(loading || previewLoading) && <p role="status">Loading stashes…</p>}
-        {saving ? (
-          <form
-            className="git-project-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void submit({
-                kind: "stash.save",
-                message,
-                includeUntracked,
-                keepIndex,
-              });
-            }}
-          >
-            <label>
-              Stash message
-              <Input
-                value={message}
-                onChange={(event) => setMessage(event.target.value)}
-                disabled={busy}
-                placeholder="Optional description"
-              />
-            </label>
-            <label className="git-checkbox-row">
-              <Checkbox
-                checked={includeUntracked}
-                onCheckedChange={(value) => setIncludeUntracked(value === true)}
-                disabled={busy}
-              />
-              Include untracked files
-            </label>
-            <label className="git-checkbox-row">
-              <Checkbox
-                checked={keepIndex}
-                onCheckedChange={(value) => setKeepIndex(value === true)}
-                disabled={busy}
-              />
-              Keep staged changes in the working tree
-            </label>
-            <p>
-              {keepIndex
-                ? "Save changes while keeping staged changes in the working tree. Ignored files are kept."
-                : "Save changes and clean them from the working tree. Ignored files are kept."}
-            </p>
-            <footer>
-              <Button disabled={busy} onClick={() => setSaving(false)}>
-                Back
-              </Button>
-              <Button type="submit" disabled={disabled}>
-                Save stash
-              </Button>
-            </footer>
-          </form>
-        ) : confirm && selected && stashes ? (
-          <div className="git-project-form">
-            <p>
-              <strong>{selected.message || "Unnamed stash"}</strong> ·{" "}
-              <code>{selected.oid.slice(0, 12)}</code>
-            </p>
-            <p>
-              {confirm === "drop"
-                ? "Remove this stash from the stash list. You may lose the only saved copy of these changes."
-                : confirm === "pop"
-                  ? "Apply this stash, then remove it only if it applies without conflicts."
-                  : "Apply this stash to the working tree and keep it in the stash list."}
-            </p>
-            {confirm !== "drop" && (
-              <label className="git-checkbox-row">
-                <Checkbox
-                  checked={reinstateIndex}
-                  onCheckedChange={(value) => setReinstateIndex(value === true)}
-                  disabled={busy}
-                />
-                Restore which changes were staged
-              </label>
-            )}
-            <footer>
-              <Button disabled={busy} onClick={() => setConfirm(null)}>
-                Cancel
-              </Button>
-              <Button
-                variant={confirm === "drop" ? "destructive" : undefined}
-                disabled={disabled}
-                onClick={() =>
-                  void submit(
-                    confirm === "drop"
-                      ? {
-                          kind: "stash.drop",
-                          oid: selected.oid,
-                          index: selected.index,
-                          expectedToken: stashes.metadata.listToken,
-                        }
-                      : {
-                          kind: confirm === "pop" ? "stash.pop" : "stash.apply",
-                          oid: selected.oid,
-                          index: selected.index,
-                          expectedToken: stashes.metadata.listToken,
-                          reinstateIndex,
-                        },
-                  )
-                }
-              >
-                {confirm === "drop"
-                  ? "Drop stash"
-                  : confirm === "pop"
-                    ? "Pop stash"
-                    : "Apply stash"}
-              </Button>
-            </footer>
-          </div>
-        ) : selected ? (
-          <>
-            <p>
-              <strong>{selected.message || "Unnamed stash"}</strong> ·{" "}
-              <code>{selected.oid.slice(0, 12)}</code>
-            </p>
-            {preview && (
-              <>
-                <div className="git-stash-tools flex flex-wrap gap-[3px] rounded-[6px] bg-muted p-[4px] [justify-self:start]">
-                  <Button
-                    className={segment}
-                    aria-pressed={!showUntracked}
-                    onClick={() => setShowUntracked(false)}
-                  >
-                    Tracked changes
-                  </Button>
-                  {untrackedOid && (
-                    <Button
-                      className={segment}
-                      aria-pressed={showUntracked}
-                      onClick={() => setShowUntracked(true)}
-                    >
-                      Untracked files
-                    </Button>
-                  )}
-                </div>
-                <p>
-                  {showUntracked
-                    ? "Files saved as untracked content."
-                    : "Parent 1 is the original base; parent 2 is the saved index."}
-                </p>
-                {(!showUntracked || preview.untracked) && (
-                  <GitCommitInspector
-                    key={
-                      showUntracked
-                        ? preview.untracked!.oid.hex
-                        : preview.tracked.oid.hex
-                    }
-                    repoId={repoId}
-                    commit={
-                      showUntracked ? preview.untracked! : preview.tracked
-                    }
-                  />
-                )}
-              </>
-            )}
-            {/*
-             * The actions belong at the foot of the dialog, as in every
-             * other one here. A stash diff has no bound, so they stick to
-             * the bottom of the scrolling body rather than riding away
-             * above it.
-             */}
-            <footer className="git-stash-actions sticky bottom-0 mx-[-24px] my-0 flex flex-wrap justify-end gap-[8px] border-t border-border bg-(--native-surface) px-[24px] py-[12px]">
-              <Button disabled={busy} onClick={() => setSelected(null)}>
-                Back to stashes
-              </Button>
-              <Button
-                disabled={disabled}
-                onClick={() => {
-                  setReinstateIndex(false);
-                  setConfirm("apply");
-                }}
-              >
-                Apply…
-              </Button>
-              <Button
-                disabled={disabled}
-                onClick={() => {
-                  setReinstateIndex(false);
-                  setConfirm("pop");
-                }}
-              >
-                Pop…
-              </Button>
-              <Button disabled={disabled} onClick={() => setConfirm("drop")}>
-                Drop…
-              </Button>
-            </footer>
-          </>
-        ) : (
-          <>
+      <div className="git-stash-workspace">
+        <aside
+          className="git-stash-sidebar"
+          aria-label="Saved stashes"
+          data-git-scroll-root
+        >
+          <div className="git-inspector-toolbar">
+            <span className="git-inspector-count">
+              {stashes?.entries.length ?? 0} stashes
+              {stashes?.nextCursor ? " loaded" : ""}
+            </span>
             <Button
               disabled={disabled}
               onClick={() => {
                 setMessage("");
                 setIncludeUntracked(false);
                 setKeepIndex(false);
+                setConfirm(null);
                 setSaving(true);
               }}
             >
-              Save current changes…
+              <Plus size={13} aria-hidden="true" /> Save changes…
             </Button>
-            {stashes?.entries.length === 0 && <p>No saved stashes.</p>}
-            {stashes && stashes.entries.length > 0 && (
-              <p role="status">
-                {stashes.entries.length}{" "}
-                {stashes.metadata.totalEntries === undefined
-                  ? stashes.nextCursor
-                    ? "stashes loaded"
-                    : "stashes"
-                  : `of ${stashes.metadata.totalEntries} stashes loaded`}
-              </p>
-            )}
-            <ul className="git-stash-list max-h-[300px] overflow-auto [&_button]:[align-items:start]">
-              {stashes?.entries.map((stash) => (
-                <li key={`${stash.oid}:${stash.index}`}>
+          </div>
+          <div className="git-inspector-search">
+            <Search size={13} aria-hidden="true" />
+            <Input
+              aria-label="Filter loaded stashes"
+              placeholder="Filter loaded stashes"
+              value={filter}
+              onChange={(event) => setFilter(event.target.value)}
+            />
+          </div>
+          {stashes?.entries.length === 0 && <p>No saved stashes.</p>}
+          {filter &&
+            stashes &&
+            !stashes.entries.some((stash) =>
+              stash.message.toLowerCase().includes(filter.toLowerCase()),
+            ) && <p>No matching loaded stashes.</p>}
+          <ul className="git-stash-list git-inspector-list">
+            {stashes?.entries
+              .filter((stash) =>
+                stash.message.toLowerCase().includes(filter.toLowerCase()),
+              )
+              .map((stash) => (
+                <li
+                  key={`${stash.oid}:${stash.index}`}
+                  className="git-inspector-list-item"
+                >
                   <Button
                     variant="ghost"
-                    className="flex h-auto! w-full flex-col px-0! py-[10px] text-left whitespace-normal"
+                    className="git-inspector-row"
+                    aria-pressed={selected?.oid === stash.oid && !saving}
+                    title={stash.message || "Unnamed stash"}
                     disabled={busy}
                     onClick={() => {
                       setSelected(stash);
+                      setSaving(false);
+                      setConfirm(null);
                       setShowUntracked(false);
                     }}
                   >
-                    <span className="[overflow-wrap:anywhere]">
-                      {stash.message || "Unnamed stash"}
-                      {stash.messageTruncated ? "…" : ""}
+                    <Archive
+                      size={14}
+                      className="git-inspector-row-icon"
+                      aria-hidden="true"
+                    />
+                    <span className="git-inspector-row-copy">
+                      <span className="git-inspector-row-title">
+                        {stash.message || "Unnamed stash"}
+                        {stash.messageTruncated ? "…" : ""}
+                      </span>
+                      <span className="git-inspector-row-meta">
+                        stash@{`{${stash.index}}`} ·{" "}
+                        <time
+                          title={new Date(stash.time * 1000).toLocaleString()}
+                        >
+                          {relativeTime(stash.time)}
+                        </time>
+                      </span>
                     </span>
-                    <small className="text-[11px]! text-muted-foreground!">
-                      {stash.oid.slice(0, 12)} ·{" "}
-                      {new Date(stash.time * 1000).toLocaleString()}
-                    </small>
                   </Button>
                 </li>
               ))}
-              {stashes && (
-                <li className="list-none">
-                  <GitLoadMore
-                    cursor={stashes.nextCursor}
-                    loading={pages.loading}
-                    error={pages.error}
-                    disabled={busy || loading || first.isError}
-                    onLoad={pages.load}
-                    label="Load more stashes"
-                    endLabel="All stashes loaded"
+            {stashes && (
+              <li className="list-none">
+                <GitLoadMore
+                  scrollOnly
+                  cursor={stashes.nextCursor}
+                  loading={pages.loading}
+                  error={pages.error}
+                  disabled={busy || loading || first.isError}
+                  onLoad={pages.load}
+                  label="Load more stashes"
+                  endLabel="All stashes loaded"
+                />
+              </li>
+            )}
+          </ul>
+        </aside>
+        <div className="git-stash-detail">
+          {(saving || confirm) && <p>{projectName}</p>}
+          {error && <p role="alert">{error}</p>}
+          {blockedReason && (
+            <p>
+              {blockedReason}{" "}
+              <Button onClick={onClose}>Back to repository</Button>
+            </p>
+          )}
+          {readError && (
+            <p role="alert">
+              {readError}{" "}
+              <Button
+                disabled={busy || loading}
+                onClick={() => {
+                  setSelected(null);
+                  setConfirm(null);
+                  void first.refetch();
+                }}
+              >
+                Retry stashes
+              </Button>
+            </p>
+          )}
+          {(loading || previewLoading) && <p role="status">Loading stashes…</p>}
+          {saving ? (
+            <form
+              className="git-project-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void submit({
+                  kind: "stash.save",
+                  message,
+                  includeUntracked,
+                  keepIndex,
+                });
+              }}
+            >
+              <label>
+                Stash message
+                <Input
+                  value={message}
+                  onChange={(event) => setMessage(event.target.value)}
+                  disabled={busy}
+                  placeholder="Optional description"
+                />
+              </label>
+              <label className="git-checkbox-row">
+                <Checkbox
+                  checked={includeUntracked}
+                  onCheckedChange={(value) =>
+                    setIncludeUntracked(value === true)
+                  }
+                  disabled={busy}
+                />
+                Include untracked files
+              </label>
+              <label className="git-checkbox-row">
+                <Checkbox
+                  checked={keepIndex}
+                  onCheckedChange={(value) => setKeepIndex(value === true)}
+                  disabled={busy}
+                />
+                Keep staged changes in the working tree
+              </label>
+              <p>
+                {keepIndex
+                  ? "Save changes while keeping staged changes in the working tree. Ignored files are kept."
+                  : "Save changes and clean them from the working tree. Ignored files are kept."}
+              </p>
+              <footer>
+                <Button disabled={busy} onClick={() => setSaving(false)}>
+                  Back
+                </Button>
+                <Button type="submit" disabled={disabled}>
+                  Save stash
+                </Button>
+              </footer>
+            </form>
+          ) : confirm && selected && stashes ? (
+            <div className="git-project-form">
+              <p>
+                <strong>{selected.message || "Unnamed stash"}</strong> ·{" "}
+                <code>{selected.oid.slice(0, 12)}</code>
+              </p>
+              <p>
+                {confirm === "drop"
+                  ? "Remove this stash from the stash list. You may lose the only saved copy of these changes."
+                  : confirm === "pop"
+                    ? "Apply this stash, then remove it only if it applies without conflicts."
+                    : "Apply this stash to the working tree and keep it in the stash list."}
+              </p>
+              {confirm !== "drop" && (
+                <label className="git-checkbox-row">
+                  <Checkbox
+                    checked={reinstateIndex}
+                    onCheckedChange={(value) =>
+                      setReinstateIndex(value === true)
+                    }
+                    disabled={busy}
                   />
-                </li>
+                  Restore which changes were staged
+                </label>
               )}
-            </ul>
-          </>
-        )}
+              <footer>
+                <Button disabled={busy} onClick={() => setConfirm(null)}>
+                  Cancel
+                </Button>
+                <Button
+                  variant={confirm === "drop" ? "destructive" : undefined}
+                  disabled={disabled}
+                  onClick={() =>
+                    void submit(
+                      confirm === "drop"
+                        ? {
+                            kind: "stash.drop",
+                            oid: selected.oid,
+                            index: selected.index,
+                            expectedToken: stashes.metadata.listToken,
+                          }
+                        : {
+                            kind:
+                              confirm === "pop" ? "stash.pop" : "stash.apply",
+                            oid: selected.oid,
+                            index: selected.index,
+                            expectedToken: stashes.metadata.listToken,
+                            reinstateIndex,
+                          },
+                    )
+                  }
+                >
+                  {confirm === "drop"
+                    ? "Drop stash"
+                    : confirm === "pop"
+                      ? "Pop stash"
+                      : "Apply stash"}
+                </Button>
+              </footer>
+            </div>
+          ) : selected ? (
+            <>
+              {preview && (
+                <>
+                  <div className="git-stash-tools flex flex-none flex-wrap gap-1 border-b border-border p-2">
+                    <Button
+                      className={segment}
+                      aria-pressed={!showUntracked}
+                      onClick={() => setShowUntracked(false)}
+                    >
+                      Tracked changes
+                    </Button>
+                    {untrackedOid && (
+                      <Button
+                        className={segment}
+                        aria-pressed={showUntracked}
+                        onClick={() => setShowUntracked(true)}
+                      >
+                        Untracked files
+                      </Button>
+                    )}
+                  </div>
+                  {(!showUntracked || preview.untracked) && (
+                    <GitCommitInspector
+                      key={
+                        showUntracked
+                          ? preview.untracked!.oid.hex
+                          : preview.tracked.oid.hex
+                      }
+                      repoId={repoId}
+                      actions={
+                        <footer className="flex flex-wrap gap-2">
+                          <Button
+                            disabled={disabled}
+                            onClick={() => {
+                              setReinstateIndex(false);
+                              setConfirm("apply");
+                            }}
+                          >
+                            Apply…
+                          </Button>
+                          <Button
+                            disabled={disabled}
+                            onClick={() => {
+                              setReinstateIndex(false);
+                              setConfirm("pop");
+                            }}
+                          >
+                            Pop…
+                          </Button>
+                          <Button
+                            disabled={disabled}
+                            onClick={() => setConfirm("drop")}
+                          >
+                            Drop…
+                          </Button>
+                        </footer>
+                      }
+                      commit={
+                        showUntracked ? preview.untracked! : preview.tracked
+                      }
+                    />
+                  )}
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              <p className="git-projects-empty">
+                Select a stash to review its changes.
+              </p>
+            </>
+          )}
+        </div>
       </div>
-    </Modal>
+    </GitInspectorSection>
   );
 }

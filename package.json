@@ -10,7 +10,7 @@
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
     "test": "vitest run src --exclude '**/src-tauri/**'",
-    "check": "npm run check:frontend && npm run check:rust && python3 scripts/test-cockpit.py && npm run check:agent && python3 scripts/test-update-manifests.py",
+    "check": "npm run check:frontend && npm run check:rust && npm run test:cockpit && npm run check:agent && node scripts/test-update-manifests.mjs",
     "test:ui": "playwright test",
     "format": "prettier --write src tests *.ts *.json && cargo fmt --manifest-path src-tauri/Cargo.toml",
     "ui": "shadcn",
@@ -20,9 +20,17 @@
     "test:files": "npm run build && playwright test --config playwright.files.config.ts",
     "test:production": "npm run build && playwright test --config playwright.production.config.ts",
     "build:agent": "node scripts/build-agent.mjs",
-    "test:remote": "python3 scripts/test-remote.py",
+    "test:remote": "cargo run --locked --manifest-path tools/test-harness/Cargo.toml -- remote",
     "check:agent": "cargo fmt --manifest-path tools/agent/Cargo.toml --check && cargo clippy --manifest-path tools/agent/Cargo.toml --locked --all-targets -- -D warnings && cargo test --manifest-path tools/agent/Cargo.toml --locked",
-    "test:git-contract": "python3 scripts/test-git-contract.py"
+    "test:git-contract": "cargo run --locked --manifest-path tools/test-harness/Cargo.toml -- git-contract --frontend",
+    "test:tooling": "node --test scripts/ci/*.test.mjs scripts/test-update-manifests.mjs && npm run test:cockpit",
+    "test:ssh": "cargo run --locked --manifest-path tools/test-harness/Cargo.toml -- ssh",
+    "test:https": "node scripts/test-git-https.mjs",
+    "test:native": "cargo run --locked --manifest-path tools/test-harness/Cargo.toml -- native",
+    "test:git-cli-contract": "cargo run --locked --manifest-path tools/test-harness/Cargo.toml -- git-cli-contract --frontend",
+    "benchmark:git": "cargo run --locked --manifest-path tools/test-harness/Cargo.toml -- benchmark",
+    "test:cockpit": "cargo run --locked --manifest-path tools/test-harness/Cargo.toml -- cockpit",
+    "check:harness": "cargo fmt --manifest-path tools/test-harness/Cargo.toml --check && cargo clippy --manifest-path tools/test-harness/Cargo.toml --locked --all-targets -- -D warnings && cargo test --manifest-path tools/test-harness/Cargo.toml --locked"
   },
   "dependencies": {
     "@codemirror/language": "^6.12.4",

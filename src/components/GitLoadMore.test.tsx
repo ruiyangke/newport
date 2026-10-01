@@ -76,3 +76,54 @@ it("observes the list viewport, stops on errors/end, and leaves an explicit retr
     vi.unstubAllGlobals();
   }
 });
+
+it("loads one page per scroll to the end without fetching on mount or append", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const load = vi.fn();
+  const render = async (cursor: string) =>
+    act(async () =>
+      root.render(
+        <div data-git-scroll-root style={{ overflowY: "auto" }}>
+          <GitLoadMore
+            cursor={cursor}
+            scrollOnly
+            loading={false}
+            error=""
+            onLoad={load}
+            label="Load more tags"
+            endLabel="All tags loaded"
+          />
+        </div>,
+      ),
+    );
+  try {
+    await render("page2");
+    const viewport = host.firstElementChild as HTMLElement;
+    Object.defineProperties(viewport, {
+      clientHeight: { value: 300 },
+      scrollHeight: { value: 1000, configurable: true },
+    });
+    expect(load).not.toHaveBeenCalled();
+    viewport.scrollTop = 500;
+    await act(async () => viewport.dispatchEvent(new Event("scroll")));
+    expect(load).not.toHaveBeenCalled();
+    viewport.scrollTop = 700;
+    await act(async () => {
+      viewport.dispatchEvent(new Event("scroll"));
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+    Object.defineProperty(viewport, "scrollHeight", { value: 1500 });
+    await render("page3");
+    expect(load).toHaveBeenCalledTimes(1);
+    viewport.scrollTop = 1200;
+    await act(async () => viewport.dispatchEvent(new Event("scroll")));
+    expect(load).toHaveBeenCalledTimes(2);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});

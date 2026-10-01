@@ -303,25 +303,17 @@ async fn run_once(
         result = ExecSession::connect_integration(&server) => result?,
     };
     let outcome = async {
-        let installed = crate::agent::install(&session).await?;
+        let (stream, installed) = crate::agent::launch(
+            &session,
+            crate::agent::Service::Integration {
+                client,
+                clipboard: server.clipboard_enabled,
+                browser: server.browser_enabled,
+            },
+        ).await?;
         let path_needed = installed
             .lines()
             .any(|line| line == "NEWPORT_SHIM_PATH=missing");
-        let stream = session
-            .stream(&format!(
-                "exec \"$HOME/.local/bin/newport-agent\" serve {client} {} {}",
-                if server.clipboard_enabled {
-                    "--clipboard"
-                } else {
-                    ""
-                },
-                if server.browser_enabled {
-                    "--browser"
-                } else {
-                    ""
-                }
-            ))
-            .await?;
         let mut agent = crate::agent::Agent::start(
             stream,
             app.clone(),
@@ -727,20 +719,21 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(header[0], kind);
-            let mut data = vec![0; u32::from_be_bytes(header[1..].try_into().unwrap()) as usize];
+            assert_eq!(header[0], b'M');
+            let mut data =
+                vec![0; crate::agent::wire::payload_length(&header, 1024 * 1024).unwrap()];
             stream.read_exact(&mut data).await.unwrap();
+            let (actual, data) = crate::agent::wire::decode(&data, 1024 * 1024).unwrap();
+            assert_eq!(actual, kind);
             data
         }
-        assert_eq!(event(&mut stream, b'R').await, b"newport-agent/5");
+        assert_eq!(event(&mut stream, b'R').await, b"newport-agent/6");
         let bytes = archive(BTreeMap::from([(
             "text/plain".into(),
             "SSH clipboard 世界\n".as_bytes().to_vec(),
         )]))
         .unwrap();
-        let mut frame = vec![b'S'];
-        frame.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-        frame.extend(bytes);
+        let frame = crate::agent::wire::encode(b'S', &bytes).unwrap();
         stream.write_all(&frame).await.unwrap();
         event(&mut stream, b'A').await;
         assert_eq!(
@@ -749,16 +742,25 @@ mod tests {
         );
         let (opened, ()) = tokio::join!(session.execute("fixture-open", None), async {
             assert_eq!(
-                event(&mut stream, b'O').await,
-                b"1\nhttps://example.com/login?code=fixture"
+                crate::agent::wire::parse_browser_request(&event(&mut stream, b'O').await).unwrap(),
+                (1, "https://example.com/login?code=fixture".into())
             );
             stream
-                .write_all(&[b'B', 0, 0, 0, 4, b'1', b'\n', b'o', b'k'])
+                .write_all(
+                    &crate::agent::wire::encode(
+                        b'B',
+                        &crate::agent::wire::browser_reply(1, true, None).unwrap(),
+                    )
+                    .unwrap(),
+                )
                 .await
                 .unwrap();
         });
         opened.unwrap();
-        stream.write_all(&[b'Q', 0, 0, 0, 0]).await.unwrap();
+        stream
+            .write_all(&crate::agent::wire::encode(b'Q', &[]).unwrap())
+            .await
+            .unwrap();
         let mut end = Vec::new();
         stream.read_to_end(&mut end).await.unwrap();
         assert!(session.execute("fixture-clipboard", None).await.is_err());

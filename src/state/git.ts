@@ -19,11 +19,9 @@ export type DiffLayout = "unified" | "split";
  * reaches persistent storage.
  *
  * `opened` is the one entry that is not purely a choice: it is the descriptor
- * `repo.open` returned, and its `repoId` names a handle the agent is holding.
- * It lives here rather than in a query because a query may refetch or be
- * collected at any time, and each refetch of `repo.open` would take another
- * handle without closing the last. Opening and closing are explicit, and this
- * is where the result of the last open is kept until it is closed.
+ * `repo.open` returned. Its `repoId` is a stateless repository token, not an
+ * agent-owned handle. It lives here because the active checkout is a user
+ * selection; background query refreshes must not replace that selection.
  */
 export interface GitPageState {
   opened: { project: GitProject; repository: GitRepository } | null;

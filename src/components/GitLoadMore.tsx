@@ -8,6 +8,7 @@ export function GitLoadMore({
   error,
   disabled = false,
   automatic = true,
+  scrollOnly = false,
   onLoad,
   label,
   endLabel,
@@ -17,6 +18,8 @@ export function GitLoadMore({
   error: string;
   disabled?: boolean;
   automatic?: boolean;
+  /** Require a new scroll to the bottom for each page; never drain on mount. */
+  scrollOnly?: boolean;
   onLoad: () => void;
   label: string;
   endLabel: string;
@@ -24,19 +27,30 @@ export function GitLoadMore({
   const sentinel = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const node = sentinel.current;
-    if (
-      !node ||
-      !cursor ||
-      loading ||
-      error ||
-      disabled ||
-      !automatic ||
-      typeof IntersectionObserver === "undefined"
-    )
-      return;
+    if (!node || !cursor || loading || error || disabled || !automatic) return;
     let root = node.parentElement;
     while (root && !/(auto|scroll)/.test(getComputedStyle(root).overflowY))
       root = root.parentElement;
+    if (scrollOnly) {
+      const viewport =
+        node.closest<HTMLElement>("[data-git-scroll-root]") ?? root;
+      if (!viewport) return;
+      let requested = false;
+      const onScroll = () => {
+        if (
+          !requested &&
+          viewport.scrollTop > 0 &&
+          viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <=
+            2
+        ) {
+          requested = true;
+          onLoad();
+        }
+      };
+      viewport.addEventListener("scroll", onScroll, { passive: true });
+      return () => viewport.removeEventListener("scroll", onScroll);
+    }
+    if (typeof IntersectionObserver === "undefined") return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) onLoad();
@@ -45,7 +59,7 @@ export function GitLoadMore({
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, [cursor, loading, error, disabled, automatic, onLoad]);
+  }, [cursor, loading, error, disabled, automatic, scrollOnly, onLoad]);
   return (
     <div
       ref={sentinel}

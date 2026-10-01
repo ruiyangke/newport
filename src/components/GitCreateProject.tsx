@@ -10,7 +10,8 @@ export function GitCreateProject({
   serverId,
   serverName,
   busy,
-  blockedReason,
+  blockedReason: externalBlockedReason,
+  pendingOperationIds = [],
   error,
   onClose,
   onCreate,
@@ -20,10 +21,17 @@ export function GitCreateProject({
   serverName: string;
   busy: boolean;
   blockedReason?: string;
+  pendingOperationIds?: string[];
   error: string;
   onClose: () => void;
   onCreate: (request: GitBootstrapRequest, name: string) => Promise<unknown>;
 }) {
+  const [submittedId, setSubmittedId] = useState<string | null>(null);
+  const blockedReason =
+    externalBlockedReason ??
+    (submittedId && pendingOperationIds.includes(submittedId)
+      ? "Check the saved operation outcome before repeating this creation."
+      : undefined);
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
   const [browsing, setBrowsing] = useState(false);
@@ -61,6 +69,7 @@ export function GitCreateProject({
                         ...(branch.trim() ? { branch: branch.trim() } : {}),
                       },
                     };
+              setSubmittedId(params.operationId);
               void onCreate(request, name);
             } catch (reason) {
               setLocalError(

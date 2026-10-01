@@ -34,7 +34,6 @@ struct Session {
     connection: ExecSession,
     clients: [Mutex<Option<Client<Stream>>>; 4],
     client_id: String,
-    command: &'static str,
     access: RwLock<()>,
     cancelled: watch::Sender<bool>,
     /// The agent's hello and capabilities, returned to every caller that asks
@@ -60,30 +59,9 @@ pub struct Sessions {
     identity: Mutex<Option<String>>,
     reads: reads::Reads,
 }
-/// Fixed commands only: environment values never become shell fragments.
-fn backend_command(value: Option<&str>) -> Result<&'static str, Error> {
-    match value {
-        None | Some("git2") => Ok(
-            "exec env NEWPORT_GIT_BACKEND=git2 \"$HOME/.local/bin/newport-agent\" git-rpc --stdio",
-        ),
-        Some("cli") => Ok(
-            "exec env NEWPORT_GIT_BACKEND=cli \"$HOME/.local/bin/newport-agent\" git-rpc --stdio",
-        ),
-        _ => Err(Error::invalid("NEWPORT_GIT_BACKEND must be git2 or cli.")),
-    }
-}
-fn verify_backend(info: &Value, command: &str) -> Result<(), Error> {
-    let expected = if command.contains("NEWPORT_GIT_BACKEND=cli ") {
-        "cli"
-    } else {
-        "git2"
-    };
-    let actual = info["capabilities"]["backend"].as_str().unwrap_or("git2");
-    if actual != expected {
-        return Err(Error::new(
-            "UNSUPPORTED_CAPABILITY",
-            "The agent did not select the requested Git backend. Update the agent and reconnect.",
-        ));
+fn verify_backend(info: &Value) -> Result<(), Error> {
+    if info["capabilities"]["backend"].as_str() != Some("cli") {
+        return Err(Error::new("UNSUPPORTED_CAPABILITY", "The agent requires an update to support the Git CLI backend. Update the agent and reconnect."));
     }
     Ok(())
 }
@@ -237,13 +215,13 @@ async fn connection(
         }
         identity.clone().expect("initialized identity")
     };
-    let backend = std::env::var("NEWPORT_GIT_BACKEND").ok();
-    let command = backend_command(backend.as_deref())?;
     let connection = ExecSession::connect(&server)
         .await
         .map_err(Error::transport)?;
     let setup = tokio::time::timeout(DEADLINE, async {
-        let stream = connection.stream(command).await.map_err(Error::transport)?;
+        let (stream, _) = crate::agent::launch(&connection, crate::agent::Service::Git)
+            .await
+            .map_err(Error::transport)?;
         tokio::time::timeout(
             Duration::from_secs(5),
             Client::start_with_identity(stream, client_id.clone()),
@@ -266,7 +244,7 @@ async fn connection(
             return Err(e);
         }
     };
-    if let Err(error) = verify_backend(&info, command) {
+    if let Err(error) = verify_backend(&info) {
         connection.close().await;
         return Err(error);
     }
@@ -283,7 +261,6 @@ async fn connection(
     }
     let (cancelled, _) = watch::channel(false);
     let session = Arc::new(Session {
-        command,
         server_id,
         revision,
         connection,
@@ -397,14 +374,12 @@ pub async fn git_request(
     }
     if guard.is_none() {
         let setup = async {
-            let stream = session
-                .connection
-                .stream(session.command)
+            let (stream, _) = crate::agent::launch(&session.connection, crate::agent::Service::Git)
                 .await
                 .map_err(Error::transport)?;
             let (client, info) =
                 Client::start_with_identity(stream, session.client_id.clone()).await?;
-            verify_backend(&info, session.command)?;
+            verify_backend(&info)?;
             Ok((client, info))
         };
         let initialized = tokio::select! {
@@ -607,38 +582,15 @@ pub async fn git_disconnect(sessions: State<'_, Sessions>, server_id: Uuid) -> R
 }
 
 // Test the exact remote reader on Unix without importing the Linux display stack.
-#[cfg(all(test, unix))]
-#[allow(dead_code)]
-#[path = "../../../tools/agent/src/git/repository.rs"]
-mod repository;
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 #[path = "../../../tools/agent/src/git/journal.rs"]
 mod journal;
-#[cfg(all(test, unix))]
-#[allow(dead_code)]
-#[path = "../../../tools/agent/src/git/operations.rs"]
-mod operations;
 
 fn uncertain(operation_id: &str) -> Error {
     Error::new("OUTCOME_UNKNOWN", format!("Operation {operation_id} may have completed. Reconnect and query operation.get with this ID; do not repeat the write."))
 }
-
-#[cfg(all(test, unix))]
-#[allow(dead_code)]
-#[path = "../../../tools/agent/src/git/branches.rs"]
-mod branches;
-
-#[cfg(all(test, unix))]
-#[allow(dead_code)]
-#[path = "../../../tools/agent/src/git/checkout.rs"]
-mod checkout;
-
-#[cfg(all(test, unix))]
-#[allow(dead_code)]
-#[path = "../../../tools/agent/src/git/credentials.rs"]
-mod credentials;
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
@@ -651,62 +603,12 @@ mod metrics;
 mod remotes;
 
 #[cfg(all(test, unix))]
-#[allow(dead_code)]
-#[path = "../../../tools/agent/src/git/integration.rs"]
-mod integration;
-
-#[cfg(all(test, unix))]
-#[allow(dead_code)]
-#[path = "../../../tools/agent/src/git/stash.rs"]
-mod stash;
-
-#[cfg(all(test, unix))]
-#[path = "../../../tools/agent/src/git/tags.rs"]
-mod tags;
-
-#[cfg(all(test, unix))]
-#[path = "../../../tools/agent/src/git/replay.rs"]
-mod replay;
-
-#[cfg(all(test, unix))]
-#[path = "../../../tools/agent/src/git/rebase.rs"]
-mod rebase;
-
-#[cfg(all(test, unix))]
-#[path = "../../../tools/agent/src/git/reset.rs"]
-mod reset;
-
-#[cfg(all(test, unix))]
-#[path = "../../../tools/agent/src/git/discard.rs"]
-mod discard;
-
-#[cfg(all(test, unix))]
-#[path = "../../../tools/agent/src/git/conflicts.rs"]
-mod conflicts;
-
-#[cfg(all(test, unix))]
-#[path = "../../../tools/agent/src/git/config_keys.rs"]
-mod config_keys;
-
-#[cfg(all(test, unix))]
-#[path = "../../../tools/agent/src/git/remote_rename.rs"]
-mod remote_rename;
-
-#[cfg(all(test, unix))]
 #[path = "../../../tools/agent/src/git/bootstrap.rs"]
 mod bootstrap;
 
 #[cfg(all(test, unix))]
-#[path = "../../../tools/agent/src/git/worktrees.rs"]
-mod worktrees;
-
-#[cfg(all(test, unix))]
 #[path = "../../../tools/agent/src/git/cloning.rs"]
 mod cloning;
-
-#[cfg(all(test, unix))]
-#[path = "../../../tools/agent/src/git/hunks.rs"]
-mod hunks;
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
@@ -872,14 +774,23 @@ mod backend_selection_tests {
     use super::*;
     #[test]
     fn selection_is_fixed_and_never_silently_falls_back() {
-        let default = backend_command(None).unwrap();
-        let cli = backend_command(Some("cli")).unwrap();
-        assert_eq!(default, backend_command(Some("git2")).unwrap());
-        assert!(backend_command(Some("cli; echo unsafe")).is_err());
-        let old = json!({"capabilities":{}});
-        assert!(verify_backend(&old, default).is_ok());
-        assert!(verify_backend(&old, cli).is_err());
-        assert!(verify_backend(&json!({"capabilities":{"backend":"cli"}}), cli).is_ok());
-        assert!(verify_backend(&json!({"capabilities":{"backend":"git2"}}), cli).is_err());
+        assert!(verify_backend(&json!({"capabilities":{}})).is_err());
+        assert!(verify_backend(&json!({"capabilities":{"backend":"cli"}})).is_ok());
+        assert!(verify_backend(&json!({"capabilities":{"backend":"git2"}})).is_err());
     }
 }
+
+#[cfg(all(test, unix))]
+#[allow(dead_code)]
+#[path = "../../../tools/agent/src/git/backend.rs"]
+mod backend;
+
+#[cfg(all(test, unix))]
+#[allow(dead_code)]
+#[path = "../../../tools/agent/src/git/cli/mod.rs"]
+mod cli;
+
+#[cfg(all(test, unix))]
+#[allow(dead_code)]
+#[path = "../../../tools/agent/src/git/command_log.rs"]
+mod command_log;

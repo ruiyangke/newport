@@ -21,7 +21,7 @@
           rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           development = pkgs.mkShell {
             packages = with pkgs; [
-              rust nodejs_22 python3 pkg-config git openssh
+              rust nodejs_22 pkg-config git openssh openssl
               bashInteractive zsh fish coreutils perl actionlint shellcheck
             ] ++ lib.optionals stdenv.hostPlatform.isLinux [ xclip wl-clipboard ];
             shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''

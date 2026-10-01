@@ -20,7 +20,7 @@ import {
 // Query delivers results on a timer by default; act() only flushes microtasks.
 notifyManager.setScheduler(queueMicrotask);
 
-it("ignores a late tag page after the dialog has been reopened", async () => {
+it("ignores a late tag page after the inspector has been reopened", async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   const page = (
     message: string,
@@ -103,7 +103,7 @@ it("ignores a late tag page after the dialog has been reopened", async () => {
     );
     await click("Tags");
     await click("Load more tags");
-    await click("Close dialog");
+    await click("Close inspector");
     await click("Tags");
     expect(document.body.textContent).toContain("Fresh tag");
     await act(async () => resolvePage(page("Late stale tag", "old", null)));
@@ -186,7 +186,7 @@ async function mountTags(client: Partial<GitRepositoryClient>) {
   };
 }
 
-it("appends and deduplicates tags, prefetching only one upcoming page", async () => {
+it("waits for an explicit load before reading the next tag page", async () => {
   const tags = vi.fn(async (_repo, cursor) =>
     cursor
       ? tagPage([tagRow("v1"), tagRow("v2")], null)
@@ -197,7 +197,7 @@ it("appends and deduplicates tags, prefetching only one upcoming page", async ()
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 170));
     });
-    expect(tags).toHaveBeenCalledTimes(2);
+    expect(tags).toHaveBeenCalledTimes(1);
     expect(document.body.textContent).not.toContain("v2");
     await ui.click("Load more tags");
     expect(tags).toHaveBeenCalledTimes(2);

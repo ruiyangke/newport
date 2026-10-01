@@ -24,19 +24,11 @@ pub fn valid_format(s: &str) -> bool {
 }
 impl Offer {
     pub fn encode(&self) -> Vec<u8> {
-        format!("{}\n{}", self.revision, self.formats.join("\n")).into_bytes()
+        crate::serialization::encode(&(self.revision, &self.formats))
+            .expect("clipboard offer serializes")
     }
     pub fn decode(bytes: &[u8]) -> io::Result<Self> {
-        if bytes.len() > 66000 {
-            return Err(invalid());
-        }
-        let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
-        let (revision, names) = text.split_once('\n').ok_or_else(invalid)?;
-        let formats: Vec<String> = if names.is_empty() {
-            vec![]
-        } else {
-            names.split('\n').map(str::to_owned).collect()
-        };
+        let (revision, formats): (i64, Vec<String>) = crate::serialization::decode(bytes, 67000)?;
         if formats.len() > 256 || formats.iter().any(|s| !valid_format(s)) {
             return Err(invalid());
         }
@@ -46,30 +38,16 @@ impl Offer {
         if unique.len() != formats.len() {
             return Err(invalid());
         }
-        Ok(Self {
-            revision: revision.parse().map_err(|_| invalid())?,
-            formats,
-        })
+        Ok(Self { revision, formats })
     }
 }
 impl Request {
     pub fn encode(&self) -> Vec<u8> {
-        format!("{}\n{}\n{}", self.id, self.revision, self.format).into_bytes()
+        crate::serialization::encode(&(self.id, self.revision, &self.format))
+            .expect("clipboard request serializes")
     }
     pub fn decode(bytes: &[u8]) -> io::Result<Self> {
-        let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
-        let mut fields = text.splitn(3, '\n');
-        let id = fields
-            .next()
-            .ok_or_else(invalid)?
-            .parse()
-            .map_err(|_| invalid())?;
-        let revision = fields
-            .next()
-            .ok_or_else(invalid)?
-            .parse()
-            .map_err(|_| invalid())?;
-        let format = fields.next().ok_or_else(invalid)?.to_owned();
+        let (id, revision, format): (u64, i64, String) = crate::serialization::decode(bytes, 512)?;
         if !valid_format(&format) {
             return Err(invalid());
         }
@@ -82,24 +60,22 @@ impl Request {
 }
 #[allow(dead_code)] // Encoder is also compiled into the desktop client.
 pub fn reply(request: &Request, status: u8, done: bool, bytes: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(18 + bytes.len());
-    result.extend(request.id.to_be_bytes());
-    result.extend(request.revision.to_be_bytes());
-    result.extend([status, u8::from(done)]);
-    result.extend(bytes);
-    result
+    crate::serialization::encode(&(
+        request.id,
+        request.revision,
+        status,
+        done,
+        serde_bytes::Bytes::new(bytes),
+    ))
+    .expect("clipboard reply serializes")
 }
-pub fn parse_reply(bytes: &[u8]) -> io::Result<(u64, i64, u8, bool, &[u8])> {
-    if bytes.len() < 18 || bytes.len() > CHUNK + 18 || bytes[16] > 2 || bytes[17] > 1 {
+pub fn parse_reply(bytes: &[u8]) -> io::Result<(u64, i64, u8, bool, Vec<u8>)> {
+    let (id, revision, status, done, data): (u64, i64, u8, bool, serde_bytes::ByteBuf) =
+        crate::serialization::decode(bytes, CHUNK + 32)?;
+    if status > 2 || data.len() > CHUNK {
         return Err(invalid());
     }
-    Ok((
-        u64::from_be_bytes(bytes[..8].try_into().unwrap()),
-        i64::from_be_bytes(bytes[8..16].try_into().unwrap()),
-        bytes[16],
-        bytes[17] != 0,
-        &bytes[18..],
-    ))
+    Ok((id, revision, status, done, data.into_vec()))
 }
 
 /// Independent zlib chunks keep decoding bounded and other SSH messages responsive.
@@ -189,6 +165,50 @@ mod tests {
         assert!(decompress_chunk(2, &encoder.finish().unwrap()).is_err());
     }
     #[test]
+    fn messagepack_metadata_preserves_revisions_and_rejects_invalid_fields() {
+        let offer = Offer {
+            revision: i64::MIN,
+            formats: vec!["image/png".into(), "text/plain".into()],
+        };
+        let decoded = Offer::decode(&offer.encode()).unwrap();
+        assert_eq!(decoded.revision, offer.revision);
+        assert_eq!(decoded.formats, offer.formats);
+        for formats in [
+            vec!["image/png", "image/png"],
+            vec!["../text"],
+            vec!["image/\0"],
+            vec!["text/plain"; 257],
+        ] {
+            assert!(
+                Offer::decode(&crate::serialization::encode(&(1i64, formats)).unwrap()).is_err()
+            );
+        }
+        let request = Request {
+            id: u64::MAX,
+            revision: i64::MIN,
+            format: "image/png".into(),
+        };
+        let decoded = Request::decode(&request.encode()).unwrap();
+        assert_eq!(
+            (decoded.id, decoded.revision, decoded.format),
+            (request.id, request.revision, request.format.clone())
+        );
+        let mut trailing = request.encode();
+        trailing.push(0);
+        assert!(Request::decode(&trailing).is_err());
+        assert!(
+            Request::decode(&crate::serialization::encode(&(1u64, 1i64, "../text")).unwrap())
+                .is_err()
+        );
+        assert!(parse_reply(&reply(&request, 3, true, b"bad status")).is_err());
+        assert!(parse_reply(&reply(&request, 0, true, &vec![0; CHUNK + 1])).is_err());
+        let bytes = vec![255; CHUNK];
+        assert_eq!(
+            parse_reply(&reply(&request, 0, true, &bytes)).unwrap().4,
+            bytes
+        );
+    }
+    #[test]
     fn rejects_malformed_offers_requests_and_oversized_chunks() {
         for bytes in [
             b"1\nimage/png\nimage/png".as_slice(),
@@ -209,7 +229,7 @@ mod tests {
         let bytes = reply(&request, 0, true, b"image");
         assert_eq!(
             parse_reply(&bytes).unwrap(),
-            (42, -12, 0, true, b"image".as_slice())
+            (42, -12, 0, true, b"image".to_vec())
         );
     }
 }

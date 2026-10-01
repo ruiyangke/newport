@@ -666,9 +666,9 @@ mod tests {
     #[test]
     fn rejected_creation_preserves_files_and_can_be_dismissed_without_a_remote_record() {
         use crate::git::{
+            cli::Service,
             journal::Journal,
             protocol::{Path, Request},
-            repository::Service,
         };
         use std::os::unix::ffi::OsStrExt;
 
@@ -677,12 +677,18 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::write(root.join("keep.txt"), "preserve this file").unwrap();
         let existing = temp.path().join("existing");
-        git2::Repository::init(&existing).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "--template="])
+            .arg(&existing)
+            .output()
+            .unwrap()
+            .status
+            .success());
         let missing = temp.path().join("missing");
         let path = |p: &std::path::Path| Path::new(p.as_os_str().as_bytes());
         let journal =
             Journal::open(temp.path().join("journal"), Uuid::new_v4().to_string()).unwrap();
-        let mut service = Service::with_journal(journal.clone());
+        let mut service = Service::with_journal(Some(journal.clone()));
         let store = PendingOperations::new(temp.path().join("operations.json"));
         let server = Uuid::new_v4();
 
@@ -769,23 +775,30 @@ mod tests {
         );
         assert!(!root.join(".git").exists());
         assert!(!missing.exists());
-        assert!(git2::Repository::open(existing).is_ok());
+        assert!(existing.join(".git/HEAD").is_file());
     }
     #[cfg(unix)]
     #[test]
     fn stale_snapshot_rejection_never_enters_the_remote_operation_journal() {
         use crate::git::{
+            cli::Service,
             journal::Journal,
+            protocol::Output,
             protocol::{Action, Path, Request},
-            repository::{Output, Service},
         };
         use std::os::unix::ffi::OsStrExt;
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("repo");
-        git2::Repository::init(&root).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "--template="])
+            .arg(&root)
+            .output()
+            .unwrap()
+            .status
+            .success());
         let journal =
             Journal::open(temp.path().join("journal"), Uuid::new_v4().to_string()).unwrap();
-        let mut service = Service::with_journal(journal.clone());
+        let mut service = Service::with_journal(Some(journal.clone()));
         let Output::Json(opened) = service
             .request(Request::Open {
                 path: Path::new(root.as_os_str().as_bytes()),
@@ -837,12 +850,12 @@ mod tests {
     /// definitive negative rather than a permanent dead end.
     #[test]
     fn a_never_journaled_operation_resolves_instead_of_blocking_writes() {
-        use crate::git::{journal::Journal, repository::Service};
+        use crate::git::{cli::Service, journal::Journal};
 
         let temp = tempfile::tempdir().unwrap();
         let journal =
             Journal::open(temp.path().join("journal"), Uuid::new_v4().to_string()).unwrap();
-        let mut service = Service::with_journal(journal);
+        let mut service = Service::with_journal(Some(journal));
         let store = PendingOperations::new(temp.path().join("operations.json"));
         let server = Uuid::new_v4();
         let operation = Uuid::new_v4();

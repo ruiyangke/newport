@@ -28,7 +28,7 @@ import {
 
 type StatusEntry = GitStatus["entries"][number];
 
-/** git2 Status bits, as emitted by the agent. */
+/** Stable status flags defined by the Git RPC contract. */
 const INDEX_NEW = 1 << 0;
 const INDEX_DELETED = 1 << 2;
 const INDEX_RENAMED = 1 << 3;

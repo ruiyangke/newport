@@ -1,0 +1,10 @@
+**
+!tools/
+!tools/agent/
+!tools/agent/Cargo.toml
+!tools/agent/Cargo.lock
+!tools/agent/src/
+!tools/agent/src/**
+!tests/
+!tests/agent-runtime/
+!tests/agent-runtime/string-boundary.c

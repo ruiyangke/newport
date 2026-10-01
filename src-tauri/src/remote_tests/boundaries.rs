@@ -74,19 +74,23 @@ async fn browser_only_rejects_clipboard_and_unsafe_urls_but_accepts_matching_ack
             None
         ),
         async {
-            let request = String::from_utf8(receive(&mut stream, b'O').await).unwrap();
-            let (id, url) = request.split_once('\n').unwrap();
+            let (id, url) = wire::parse_browser_request(&receive(&mut stream, b'O').await).unwrap();
             assert_eq!(url, "https://example.com/device?user_code=test");
-            let wrong = id.parse::<u64>().unwrap() + 1;
+            let wrong = id + 1;
             frame(
                 &mut stream,
                 b'B',
-                format!("{wrong}\nwrong acknowledgement").as_bytes(),
+                &wire::browser_reply(wrong, false, Some("wrong acknowledgement")).unwrap(),
             )
             .await;
             frame(&mut stream, b'H', &[]).await;
             receive(&mut stream, b'A').await;
-            frame(&mut stream, b'B', format!("{id}\nok").as_bytes()).await;
+            frame(
+                &mut stream,
+                b'B',
+                &wire::browser_reply(id, true, None).unwrap(),
+            )
+            .await;
         }
     );
     opened.unwrap();
@@ -252,15 +256,7 @@ async fn temporary_callback_does_not_reconnect_a_closed_ssh_session() {
     drop(reservation);
     // Keep the destination alive on a separate SSH connection throughout.
     let mut httpd = control
-        .stream(&format!(
-            r#"python3 -u -c '
-from http.server import HTTPServer, SimpleHTTPRequestHandler
-from functools import partial
-s = HTTPServer(("127.0.0.1", {port}), partial(SimpleHTTPRequestHandler, directory="/srv/fixture"))
-print("ready", flush=True)
-s.serve_forever()
-'"#
-        ))
+        .stream(&format!("newport-test-fixture http {port}"))
         .await
         .unwrap();
     let mut ready = [0; 6];
@@ -300,7 +296,10 @@ s.serve_forever()
         response.is_err() || response.unwrap().is_empty(),
         "callback must not reconnect"
     );
-    let direct = control.execute(&format!("python3 -c 'import urllib.request; print(urllib.request.urlopen(\"http://127.0.0.1:{port}/\").status)'"), None).await.unwrap();
+    let direct = control
+        .execute(&format!("newport-test-fixture http-status {port}"), None)
+        .await
+        .unwrap();
     assert_eq!(
         direct.trim(),
         "200",
@@ -318,22 +317,7 @@ async fn file_listing_and_preview_enforce_types_and_size_limits() {
     let session = ExecSession::connect(&server).await.unwrap();
     let folder = format!("/home/fixture/preview-{}", Uuid::new_v4());
     session
-        .execute(
-            &format!(
-                r#"python3 -c '
-from pathlib import Path
-p = Path("{folder}")
-p.mkdir()
-(p / "hello 世界.html").write_text("<script>inert 世界</script>")
-(p / "binary.dat").write_bytes(bytes([0,255,1]))
-with (p / "large.bin").open("wb") as f: f.truncate(17 * 1024 * 1024)
-(p / "long.txt").write_text("x" * (1024 * 1024 + 1))
-(p / "link.txt").symlink_to(p / "hello 世界.html")
-(p / "broken").symlink_to(p / "missing")
-'"#
-            ),
-            None,
-        )
+        .execute(&format!("newport-test-fixture preview {folder}"), None)
         .await
         .unwrap();
     let sftp = Sftp::connect(&server).await.unwrap();

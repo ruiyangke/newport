@@ -9,6 +9,7 @@ use uuid::Uuid;
 pub struct Client<S> {
     stream: S,
     methods: Vec<String>,
+
     pub on_log: Option<Box<dyn Fn(protocol::CommandLog) + Send + Sync>>,
 }
 impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
@@ -40,12 +41,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
                 "Install an agent with compatible Git support.",
             ));
         }
+        let selected_version = protocol::VERSION;
         let id = Uuid::new_v4().to_string();
         send(
             &mut stream,
             &Message::Initialize {
                 id: id.clone(),
-                version: protocol::VERSION,
+                version: selected_version,
                 client_id,
                 client_version: env!("CARGO_PKG_VERSION").into(),
                 command_logs: limits["commandLogs"] == true,
@@ -60,7 +62,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
         else {
             return Err(invalid());
         };
-        if reply != id || version != protocol::VERSION {
+        if reply != id || version != selected_version {
             return Err(invalid());
         }
         let methods = capabilities["methods"]
@@ -180,7 +182,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
                         {
                             return Err(invalid());
                         }
-                        let diff: Value = serde_json::from_slice(&data).map_err(|_| invalid())?;
+                        let diff = protocol::decode_value(&data).map_err(|_| invalid())?;
                         return Ok(json!({"snapshot":expected_snapshot,"diff":diff}));
                     }
                     if expected_snapshot.is_some() {
@@ -210,6 +212,12 @@ async fn receive(stream: &mut (impl AsyncRead + Unpin)) -> Result<Message, Error
         .read_exact(&mut header)
         .await
         .map_err(|_| Error::transport("Git channel closed or could not be read."))?;
+    if header[0] != b'M' {
+        return Err(Error::new(
+            "UNSUPPORTED_PROTOCOL",
+            "Update the remote agent: this app requires MessagePack Git protocol v4.",
+        ));
+    }
     let size = protocol::payload_length(header).map_err(|_| invalid())?;
     let mut bytes = vec![0; size];
     stream
@@ -503,7 +511,7 @@ mod tests {
         response.await.unwrap();
     }
     async fn handshake(stream: &mut tokio::io::DuplexStream) {
-        send(stream,&Message::Hello { protocol:"newport.git".into(),versions:vec![1],instance_id:"test".into(),limits:json!({"maxFrameBytes":protocol::MAX_FRAME,"maxChunkBytes":protocol::CHUNK_SIZE}) }).await.unwrap();
+        send(stream,&Message::Hello { protocol:"newport.git".into(),versions:vec![protocol::VERSION],instance_id:"test".into(),limits:json!({"maxFrameBytes":protocol::MAX_FRAME,"maxChunkBytes":protocol::CHUNK_SIZE}) }).await.unwrap();
         let Message::Initialize { id, .. } = receive(stream).await.unwrap() else {
             panic!()
         };
@@ -511,7 +519,7 @@ mod tests {
             stream,
             &Message::Ready {
                 id,
-                version: 1,
+                version: protocol::VERSION,
                 capabilities: json!({"methods":protocol::METHODS}),
             },
         )
@@ -523,10 +531,101 @@ mod tests {
         let (a, mut b) = tokio::io::duplex(1024);
         let padding = protocol::CHUNK_SIZE * (protocol::STREAM_WINDOW as usize * 3 + 1);
         let stream_id = Uuid::new_v4().to_string();
-        let data = serde_json::to_vec(&json!({"files":[],"padding":"x".repeat(padding)})).unwrap();
+        let data =
+            protocol::encode_value(&json!({"files":[],"padding":"x".repeat(padding)})).unwrap();
         let expected = data.len();
         let agent = tokio::spawn(async move {
             handshake(&mut b).await;
+            let Message::Request { id, .. } = receive(&mut b).await.unwrap() else {
+                panic!()
+            };
+            send(
+                &mut b,
+                &Message::Begin {
+                    id: id.clone(),
+                    stream_id: stream_id.clone(),
+                    snapshot: "snap".into(),
+                },
+            )
+            .await
+            .unwrap();
+            let mut sent = 0;
+            for batch in data.chunks(protocol::CHUNK_SIZE * protocol::STREAM_WINDOW as usize) {
+                let first = sent + 1;
+                for chunk in batch.chunks(protocol::CHUNK_SIZE) {
+                    sent += 1;
+                    send(
+                        &mut b,
+                        &Message::Chunk {
+                            id: id.clone(),
+                            stream_id: stream_id.clone(),
+                            seq: sent,
+                            bytes_b64: STANDARD.encode(chunk),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+                for expected in first..=sent {
+                    assert!(
+                        matches!(receive(&mut b).await.unwrap(), Message::Ack { seq, .. } if seq == expected)
+                    );
+                }
+            }
+            send(
+                &mut b,
+                &Message::success(id, json!({"lastSeq":sent,"bytes":expected})),
+            )
+            .await
+            .unwrap();
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (mut client, _) = Client::start(a).await.unwrap();
+            let value = client
+                .request(Request::Diff {
+                    repo_id: "repo".into(),
+                    snapshot: "snap".into(),
+                    entry_id: "entry".into(),
+                    side: protocol::Side::IndexToWorktree,
+                    context_lines: 3,
+                })
+                .await
+                .unwrap();
+            assert_eq!(value["diff"]["padding"].as_str().unwrap().len(), padding);
+            agent.await.unwrap();
+        })
+        .await;
+        assert!(
+            result.is_ok(),
+            "pipelining must not deadlock an existing client"
+        );
+    }
+
+    #[tokio::test]
+    async fn msgpack_handshake_and_pipelined_binary_chunks() {
+        let selected_version = protocol::VERSION;
+        let (a, mut b) = tokio::io::duplex(1024);
+        let padding = protocol::CHUNK_SIZE * (protocol::STREAM_WINDOW as usize * 3 + 1);
+        let stream_id = Uuid::new_v4().to_string();
+        let data =
+            protocol::encode_value(&json!({"files":[],"padding":"x".repeat(padding)})).unwrap();
+        let expected = data.len();
+        let agent = tokio::spawn(async move {
+            send(&mut b, &Message::Hello { protocol: "newport.git".into(), versions: vec![selected_version], instance_id:"test".into(), limits:json!({"maxFrameBytes":protocol::MAX_FRAME,"maxChunkBytes":protocol::CHUNK_SIZE}) }).await.unwrap();
+            let Message::Initialize { id, version, .. } = receive(&mut b).await.unwrap() else {
+                panic!()
+            };
+            assert_eq!(version, selected_version);
+            send(
+                &mut b,
+                &Message::Ready {
+                    id,
+                    version,
+                    capabilities: json!({"methods":protocol::METHODS}),
+                },
+            )
+            .await
+            .unwrap();
             let Message::Request { id, .. } = receive(&mut b).await.unwrap() else {
                 panic!()
             };
@@ -610,14 +709,14 @@ mod tests {
             )
             .await
             .unwrap();
-            let data = br#"{"files":[],"truncated":false}"#;
+            let data = protocol::encode_value(&json!({"files":[],"truncated":false})).unwrap();
             send(
                 &mut b,
                 &Message::Chunk {
                     id: id.clone(),
                     stream_id: "s".into(),
                     seq: 1,
-                    bytes_b64: STANDARD.encode(data),
+                    bytes_b64: STANDARD.encode(&data),
                 },
             )
             .await

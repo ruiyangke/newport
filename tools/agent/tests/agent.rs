@@ -137,9 +137,12 @@ fn single_agent_clipboard_browser_displays_and_disconnect_cleanup() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    assert_eq!(agent.event(b'O'), b"1\nhttps://example.com/login?code=123");
+    assert_eq!(
+        wire::parse_browser_request(&agent.event(b'O')).unwrap(),
+        (1, "https://example.com/login?code=123".into())
+    );
     assert!(opener.try_wait().unwrap().is_none());
-    agent.send(b'B', b"1\nok");
+    agent.send(b'B', &wire::browser_reply(1, true, None).unwrap());
     let opened = opener.wait_with_output().unwrap();
     assert!(
         opened.status.success(),
@@ -269,7 +272,7 @@ fn rebrand_preserves_socket_paths_for_existing_shells() {
     fs::create_dir_all(&old).unwrap();
     fs::set_permissions(&old, fs::Permissions::from_mode(0o700)).unwrap();
     let mut agent = Agent::features(home.path(), false, &["--browser"]);
-    assert_eq!(agent.event(b'R'), b"newport-agent/5");
+    assert_eq!(agent.event(b'R'), b"newport-agent/6");
     assert!(old.join("agent.sock").exists());
     assert!(!home.path().join(".cache/newport").exists());
     agent.send(b'Q', &[]);
@@ -453,12 +456,18 @@ fn browser_only_does_not_create_clipboard_services_or_accept_snapshots() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    assert_eq!(agent.event(b'O'), b"1\nhttps://example.com/#fragment");
-    agent.send(b'B', b"999\nok");
+    assert_eq!(
+        wire::parse_browser_request(&agent.event(b'O')).unwrap(),
+        (1, "https://example.com/#fragment".into())
+    );
+    agent.send(b'B', &wire::browser_reply(999, true, None).unwrap());
     agent.send(b'H', b"");
     agent.event(b'A');
     assert!(opener.try_wait().unwrap().is_none());
-    agent.send(b'B', b"1\nCannot listen on callback port");
+    agent.send(
+        b'B',
+        &wire::browser_reply(1, false, Some("Cannot listen on callback port")).unwrap(),
+    );
     let result = opener.wait_with_output().unwrap();
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("Cannot listen on callback port"));
@@ -514,8 +523,14 @@ fn browser_warning_is_nonfatal_and_original_url_is_preserved() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    assert_eq!(agent.event(b'O'), format!("1\n{url}").as_bytes());
-    agent.send(b'B', b"1\nok\nBrowser opened without callback forwarding.");
+    assert_eq!(
+        wire::parse_browser_request(&agent.event(b'O')).unwrap(),
+        (1, url.into())
+    );
+    agent.send(
+        b'B',
+        &wire::browser_reply(1, true, Some("Browser opened without callback forwarding.")).unwrap(),
+    );
     let output = opener.wait_with_output().unwrap();
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("without callback forwarding"));
@@ -529,7 +544,10 @@ fn demand_clipboard_fetch_cache_invalidation_and_browser_interleave() {
     let root = home.path().join(".cache/newport/clipboard");
     let mut agent = Agent::start(home.path());
     agent.event(b'R');
-    agent.send(b'M', b"123\nimage/png\ntext/plain");
+    agent.send(
+        b'M',
+        &rmp_serde::to_vec(&(123i64, vec!["image/png", "text/plain"])).unwrap(),
+    );
     agent.event(b'A');
     assert!(!root.join("snapshot.tar").exists());
     let listed = cmd(home.path(), &["clipboard", "-o", "-t", "TARGETS"]);
@@ -541,17 +559,11 @@ fn demand_clipboard_fetch_cache_invalidation_and_browser_interleave() {
     );
     let path = home.path().to_owned();
     let read = std::thread::spawn(move || cmd(&path, &["clipboard", "-o", "-t", "image/png"]));
-    let request = String::from_utf8(agent.event(b'C')).unwrap();
-    let fields: Vec<_> = request.split('\n').collect();
-    assert_eq!(&fields[1..], &["123", "image/png"]);
-    let id: u64 = fields[0].parse().unwrap();
+    let (id, revision, format): (u64, i64, String) =
+        rmp_serde::from_slice(&agent.event(b'C')).unwrap();
+    assert_eq!((revision, format.as_str()), (123, "image/png"));
     let chunk = |done: bool, bytes: &[u8]| {
-        let mut out = vec![];
-        out.extend(id.to_be_bytes());
-        out.extend(123i64.to_be_bytes());
-        out.extend([0, u8::from(done)]);
-        out.extend(bytes);
-        out
+        rmp_serde::to_vec(&(id, 123i64, 0u8, done, serde_bytes::Bytes::new(bytes))).unwrap()
     };
     agent.send(b'D', &chunk(false, b"PNG first"));
     // Heartbeats and browser opens still work while a clipboard response is incomplete.
@@ -562,9 +574,8 @@ fn demand_clipboard_fetch_cache_invalidation_and_browser_interleave() {
         .env("HOME", home.path())
         .spawn()
         .unwrap();
-    let browser = String::from_utf8(agent.event(b'O')).unwrap();
-    let id = browser.split_once('\n').unwrap().0;
-    agent.send(b'B', format!("{id}\nok").as_bytes());
+    let (id, _) = wire::parse_browser_request(&agent.event(b'O')).unwrap();
+    agent.send(b'B', &wire::browser_reply(id, true, None).unwrap());
     assert!(opener.wait().unwrap().success());
     agent.send(b'D', &chunk(true, b" last"));
     let output = read.join().unwrap();
@@ -577,7 +588,10 @@ fn demand_clipboard_fetch_cache_invalidation_and_browser_interleave() {
         "cached read must not fetch again"
     );
     assert!(!root.join("snapshot.tar").exists());
-    agent.send(b'M', b"124\ntext/plain");
+    agent.send(
+        b'M',
+        &rmp_serde::to_vec(&(124i64, vec!["text/plain"])).unwrap(),
+    );
     agent.event(b'A');
     assert!(!cmd(home.path(), &["clipboard", "-o", "-t", "image/png"])
         .status
@@ -593,7 +607,10 @@ fn wayland_paste_fetches_image_on_demand() {
     let home = tempfile::tempdir().unwrap();
     let mut agent = Agent::start(home.path());
     agent.event(b'R');
-    agent.send(b'M', b"45\nimage/png");
+    agent.send(
+        b'M',
+        &rmp_serde::to_vec(&(45i64, vec!["image/png"])).unwrap(),
+    );
     agent.event(b'A');
     let root = home.path().join(".cache/newport/clipboard");
     std::env::set_var("WAYLAND_DISPLAY", root.join("wayland.sock"));
@@ -609,13 +626,15 @@ fn wayland_paste_fetches_image_on_demand() {
         std::io::Read::read_to_end(&mut pipe, &mut bytes).unwrap();
         bytes
     });
-    let request = String::from_utf8(agent.event(b'C')).unwrap();
-    let id: u64 = request.split('\n').next().unwrap().parse().unwrap();
-    let mut response = vec![];
-    response.extend(id.to_be_bytes());
-    response.extend(45i64.to_be_bytes());
-    response.extend([0, 1]);
-    response.extend(include_bytes!("pixel.png"));
+    let (id, _, _): (u64, i64, String) = rmp_serde::from_slice(&agent.event(b'C')).unwrap();
+    let response = rmp_serde::to_vec(&(
+        id,
+        45i64,
+        0u8,
+        true,
+        serde_bytes::Bytes::new(include_bytes!("pixel.png")),
+    ))
+    .unwrap();
     agent.send(b'D', &response);
     assert_eq!(read.join().unwrap(), include_bytes!("pixel.png"));
     agent.send(b'Q', &[]);
@@ -714,7 +733,10 @@ mod demand_x11 {
         let home = tempfile::tempdir().unwrap();
         let mut agent = Agent::start(home.path());
         agent.event(b'R');
-        agent.send(b'M', b"87\nimage/png");
+        agent.send(
+            b'M',
+            &rmp_serde::to_vec(&(87i64, vec!["image/png"])).unwrap(),
+        );
         agent.event(b'A');
         let root = home.path().join(".cache/newport/clipboard");
         let display = fs::read_to_string(root.join("display")).unwrap();
@@ -740,16 +762,18 @@ mod demand_x11 {
             assert!(read(&c, w, "TARGETS").is_some());
             read(&c, w, "image/png").unwrap()
         });
-        let request = String::from_utf8(agent.event(b'C')).unwrap();
-        let id: u64 = request.split('\n').next().unwrap().parse().unwrap();
+        let (id, _, _): (u64, i64, String) = rmp_serde::from_slice(&agent.event(b'C')).unwrap();
         let bytes: Vec<u8> = (0..300001).map(|i| (i % 251) as u8).collect();
         let chunks: Vec<_> = bytes.chunks(65536).collect();
         for (i, chunk) in chunks.iter().enumerate() {
-            let mut response = vec![];
-            response.extend(id.to_be_bytes());
-            response.extend(87i64.to_be_bytes());
-            response.extend([0, u8::from(i + 1 == chunks.len())]);
-            response.extend(*chunk);
+            let response = rmp_serde::to_vec(&(
+                id,
+                87i64,
+                0u8,
+                (i + 1 == chunks.len()),
+                serde_bytes::Bytes::new(chunk),
+            ))
+            .unwrap();
             agent.send(b'D', &response);
         }
         assert_eq!(reader.join().unwrap(), bytes);
@@ -763,12 +787,14 @@ fn compressed_chunks_are_decoded_before_serving_and_bad_data_is_retryable() {
     let home = tempfile::tempdir().unwrap();
     let mut agent = Agent::start(home.path());
     agent.event(b'R');
-    agent.send(b'M', b"900\ntext/plain");
+    agent.send(
+        b'M',
+        &rmp_serde::to_vec(&(900i64, vec!["text/plain"])).unwrap(),
+    );
     agent.event(b'A');
     let path = home.path().to_owned();
     let read = std::thread::spawn(move || cmd(&path, &["clipboard", "-o"]));
-    let req = String::from_utf8(agent.event(b'C')).unwrap();
-    let id: u64 = req.split('\n').next().unwrap().parse().unwrap();
+    let (id, _, _): (u64, i64, String) = rmp_serde::from_slice(&agent.event(b'C')).unwrap();
     let data = vec![b'a'; 131072];
     for (index, part) in data.chunks(65536).enumerate() {
         let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -779,11 +805,14 @@ fn compressed_chunks_are_decoded_before_serving_and_bad_data_is_retryable() {
         } else {
             (0, part.to_vec())
         };
-        let mut response = vec![];
-        response.extend(id.to_be_bytes());
-        response.extend(900i64.to_be_bytes());
-        response.extend([status, u8::from(index == 1)]);
-        response.extend(bytes);
+        let response = rmp_serde::to_vec(&(
+            id,
+            900i64,
+            status,
+            (index == 1),
+            serde_bytes::Bytes::new(&bytes),
+        ))
+        .unwrap();
         agent.send(b'D', &response);
     }
     let result = read.join().unwrap();
@@ -794,17 +823,16 @@ fn compressed_chunks_are_decoded_before_serving_and_bad_data_is_retryable() {
         agent.events.try_recv()
     );
     assert_eq!(result.stdout, data);
-    agent.send(b'M', b"901\ntext/plain");
+    agent.send(
+        b'M',
+        &rmp_serde::to_vec(&(901i64, vec!["text/plain"])).unwrap(),
+    );
     agent.event(b'A');
     let path = home.path().to_owned();
     let read = std::thread::spawn(move || cmd(&path, &["clipboard", "-o"]));
-    let req = String::from_utf8(agent.event(b'C')).unwrap();
-    let id: u64 = req.split('\n').next().unwrap().parse().unwrap();
-    let mut response = vec![];
-    response.extend(id.to_be_bytes());
-    response.extend(901i64.to_be_bytes());
-    response.extend([2, 1]);
-    response.extend(b"bad zlib");
+    let (id, _, _): (u64, i64, String) = rmp_serde::from_slice(&agent.event(b'C')).unwrap();
+    let response =
+        rmp_serde::to_vec(&(id, 901i64, 2u8, true, serde_bytes::Bytes::new(b"bad zlib"))).unwrap();
     agent.send(b'D', &response);
     assert!(!read.join().unwrap().status.success());
     agent.send(b'H', &[]);

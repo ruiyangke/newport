@@ -72,12 +72,45 @@ pub(super) fn write(root: &Path, args: &[std::ffi::OsString], input: Vec<u8>) ->
     if output.success {
         return Ok(());
     }
+    if output.code.is_none() {
+        return Err(Error::new(
+            "OUTCOME_UNKNOWN",
+            "Git was terminated by a signal. Inspect the saved outcome before retrying.",
+        ));
+    }
     let error = String::from_utf8_lossy(&output.stderr);
     let (code, message) = if error.contains("Authentication failed")
         || error.contains("could not read Username")
         || error.contains("Permission denied (publickey)")
     {
         ("AUTH_REQUIRED","Git authentication failed. Check the server's configured credential helper or SSH agent.")
+    } else if error.contains("Host key verification failed")
+        || error.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+        || error.contains("SSL certificate problem")
+        || error.contains("server certificate verification failed")
+    {
+        ("CERTIFICATE_REJECTED", "Git rejected the remote host key or TLS certificate. Verify the server identity and trust configuration.")
+    } else if args.first().is_some_and(|arg| arg == "push")
+        && output
+            .stdout
+            .split(|b| *b == b'\n')
+            .any(|line| line.starts_with(b"!\t"))
+    {
+        if output
+            .stdout
+            .windows(b"(stale info)".len())
+            .any(|w| w == b"(stale info)")
+        {
+            (
+                "STALE_REMOTE_REFERENCE",
+                "The remote reference changed. Refresh before continuing.",
+            )
+        } else {
+            (
+                "PUSH_REJECTED",
+                "The remote rejected the push. Refresh the remote references before continuing.",
+            )
+        }
     } else if error.contains("not possible to fast-forward")
         || error.contains("Not possible to fast-forward")
     {

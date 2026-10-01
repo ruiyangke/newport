@@ -1,3 +1,4 @@
+import { FolderTree, Plus, Search, ChevronRight } from "lucide-react";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { gitPath, type GitPath, type GitWorktreeAction } from "../domain/git";
@@ -5,7 +6,7 @@ import { type GitWorktrees, type GitRepository } from "../domain/gitResponses";
 import { gitQueries, invalidateRepository } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
 import { Button, Input, Checkbox } from "./controls";
-import { Modal } from "./Editors";
+import { GitInspectorSection } from "./GitInspectorSection";
 import { useGitPageLoader } from "../hooks/useGitPageLoader";
 import { gitErrorMessage } from "../git/errors";
 import { gitProjectsFor } from "../git/registry";
@@ -81,6 +82,7 @@ function WorktreeDialog({
 }: Omit<Props, "open" | "onOpenChange" | "hideTrigger"> & {
   onClose: () => void;
 }) {
+  const [filter, setFilter] = useState("");
   const scope = useCurrentServerScope();
   const queryClient = useQueryClient();
   const repoId = repository.repoId;
@@ -188,13 +190,12 @@ function WorktreeDialog({
     setEditing({ kind, row });
   }
   return (
-    <Modal
+    <GitInspectorSection
       title={editing ? titles[editing.kind] : "Worktrees"}
       busy={busy}
       onClose={onClose}
-      className="git-worktree-dialog w-[min(680px,calc(100vw_-_32px))]!"
     >
-      <div className="git-worktree-body min-h-0 overflow-y-auto px-[24px] pt-[16px] pb-[24px] wrap-anywhere">
+      <div className="git-worktree-body min-h-0 min-w-0 px-[16px] pb-[16px] wrap-anywhere">
         {blockedReason && (
           <p className={NOTE} role="status">
             {blockedReason}
@@ -445,11 +446,11 @@ function WorktreeDialog({
           </form>
         ) : (
           <>
-            <div className="git-worktree-toolbar mx-0 my-[12px] flex flex-wrap items-center gap-[8px]">
-              <p className={`${NOTE} flex-1`}>
-                Separate checkouts sharing this repository’s branches and
-                history.
-              </p>
+            <div className="git-inspector-toolbar">
+              <span className="git-inspector-count">
+                {page?.entries.length ?? 0} worktrees
+                {page?.nextCursor ? " loaded" : ""}
+              </span>
               <Button
                 disabled={disabled}
                 onClick={() => {
@@ -460,8 +461,18 @@ function WorktreeDialog({
                   setEditing({ kind: "add" });
                 }}
               >
-                Add worktree
+                <Plus size={13} aria-hidden="true" />
+                <span>Add worktree</span>
               </Button>
+            </div>
+            <div className="git-inspector-search">
+              <Search size={13} aria-hidden="true" />
+              <Input
+                aria-label="Filter loaded worktrees"
+                placeholder="Filter loaded worktrees"
+                value={filter}
+                onChange={(event) => setFilter(event.target.value)}
+              />
             </div>
             {loading && (
               <p className={NOTE} role="status">
@@ -471,92 +482,142 @@ function WorktreeDialog({
             {page?.entries.length === 0 && (
               <p className={NOTE}>No worktrees found.</p>
             )}
-            <ul className="git-worktree-list">
-              {page?.entries.map((row) => {
-                const mutable =
-                  row.kind === "linked" &&
-                  usable(row.name) &&
-                  (row.state === "available" || row.state === "missing");
-                return (
-                  <li
-                    key={row.gitDir.bytesB64}
-                    className="border-b border-border px-0 py-[16px]"
-                  >
-                    <strong>
-                      {row.name?.display ??
-                        (row.kind === "bare"
-                          ? "Bare repository"
-                          : "Main worktree")}
-                      {row.current ? " · Current" : ""}
-                    </strong>
-                    <p className={ROW_NOTE}>
-                      {row.path?.display ?? "Path unavailable"}
-                    </p>
-                    <p className={ROW_NOTE}>
-                      {row.head?.name?.display.replace(/^refs\/heads\//, "") ??
-                        (row.head?.detached
-                          ? "Detached HEAD"
-                          : "Branch unavailable")}{" "}
-                      · {row.state}
-                      {row.locked === true
-                        ? " · Locked"
-                        : row.locked === null
-                          ? " · Lock status unknown"
-                          : ""}
-                    </p>
-                    {row.lockReason && (
-                      <p className={ROW_NOTE}>
-                        Lock reason: {row.lockReason.display}
-                      </p>
-                    )}
-                    {row.lockReasonUnavailable && (
-                      <p className={ROW_NOTE}>Lock reason unavailable.</p>
-                    )}
-                    {row.errorCode && (
-                      <p className={ROW_NOTE}>
-                        Details unavailable: {row.errorCode}
-                      </p>
-                    )}
-                    {mutable && (
-                      <div className="git-worktree-actions mx-0 my-[12px] flex flex-wrap items-center gap-[8px]">
-                        {row.locked !== null && (
-                          <Button
-                            disabled={disabled}
-                            onClick={() =>
-                              edit(row.locked ? "unlock" : "lock", row)
-                            }
-                          >
-                            {row.locked ? "Unlock…" : "Lock…"}
-                          </Button>
-                        )}
-                        {row.state === "missing" && (
-                          <Button
-                            disabled={disabled}
-                            onClick={() => edit("repair", row)}
-                          >
-                            Locate moved worktree…
-                          </Button>
-                        )}
-                        {!row.current && row.locked === false && (
-                          <Button
-                            disabled={disabled}
-                            onClick={() =>
-                              edit(
-                                row.state === "missing" ? "prune" : "remove",
-                                row,
-                              )
-                            }
-                          >
-                            {row.state === "missing"
-                              ? "Remove missing registration…"
-                              : "Remove worktree…"}
-                          </Button>
-                        )}
-                      </div>
-                    )}
-                  </li>
-                );
-              })}
+            <ul className="git-worktree-list git-inspector-list">
+              {page?.entries
+                .filter(
+                  (row) =>
+                    [
+                      row.name?.display,
+                      row.path?.display,
+                      row.head?.name?.display,
+                    ].some((value) =>
+                      value?.toLowerCase().includes(filter.toLowerCase()),
+                    ) || !filter,
+                )
+                .map((row) => {
+                  const mutable =
+                    row.kind === "linked" &&
+                    usable(row.name) &&
+                    (row.state === "available" || row.state === "missing");
+                  return (
+                    <li
+                      key={row.gitDir.bytesB64}
+                      className="git-inspector-list-item"
+                    >
+                      <details className="git-worktree-disclosure">
+                        <summary className="git-inspector-row">
+                          <FolderTree
+                            size={14}
+                            className="git-inspector-row-icon"
+                            aria-hidden="true"
+                          />
+                          <span className="git-inspector-row-copy">
+                            <strong
+                              className="git-inspector-row-title"
+                              title={row.name?.display ?? "Main worktree"}
+                            >
+                              {row.name?.display ??
+                                (row.kind === "bare"
+                                  ? "Bare repository"
+                                  : "Main worktree")}
+                            </strong>
+                            <span
+                              className="git-inspector-row-meta git-inspector-row-title"
+                              title={row.head?.name?.display}
+                            >
+                              {row.head?.name?.display.replace(
+                                /^refs\/heads\//,
+                                "",
+                              ) ??
+                                (row.head?.detached
+                                  ? "Detached HEAD"
+                                  : "Branch unavailable")}
+                              {row.current ? " · Current" : ""}
+                              {row.locked ? " · Locked" : ""}
+                            </span>
+                          </span>
+                          <ChevronRight
+                            size={12}
+                            className="git-worktree-chevron"
+                            aria-hidden="true"
+                          />
+                        </summary>
+                        <div className="git-inspector-details">
+                          <p className={ROW_NOTE}>
+                            {row.path?.display ?? "Path unavailable"}
+                          </p>
+                          <p className={ROW_NOTE}>
+                            {row.head?.name?.display.replace(
+                              /^refs\/heads\//,
+                              "",
+                            ) ??
+                              (row.head?.detached
+                                ? "Detached HEAD"
+                                : "Branch unavailable")}{" "}
+                            · {row.state}
+                            {row.locked === true
+                              ? " · Locked"
+                              : row.locked === null
+                                ? " · Lock status unknown"
+                                : ""}
+                          </p>
+                          {row.lockReason && (
+                            <p className={ROW_NOTE}>
+                              Lock reason: {row.lockReason.display}
+                            </p>
+                          )}
+                          {row.lockReasonUnavailable && (
+                            <p className={ROW_NOTE}>Lock reason unavailable.</p>
+                          )}
+                          {row.errorCode && (
+                            <p className={ROW_NOTE}>
+                              Details unavailable: {row.errorCode}
+                            </p>
+                          )}
+                          {mutable && (
+                            <div className="git-worktree-actions mx-0 my-[12px] flex flex-wrap items-center gap-[8px]">
+                              {row.locked !== null && (
+                                <Button
+                                  disabled={disabled}
+                                  onClick={() =>
+                                    edit(row.locked ? "unlock" : "lock", row)
+                                  }
+                                >
+                                  {row.locked ? "Unlock…" : "Lock…"}
+                                </Button>
+                              )}
+                              {row.state === "missing" && (
+                                <Button
+                                  disabled={disabled}
+                                  onClick={() => edit("repair", row)}
+                                >
+                                  Locate moved worktree…
+                                </Button>
+                              )}
+                              {!row.current && row.locked === false && (
+                                <Button
+                                  disabled={disabled}
+                                  onClick={() =>
+                                    edit(
+                                      row.state === "missing"
+                                        ? "prune"
+                                        : "remove",
+                                      row,
+                                    )
+                                  }
+                                >
+                                  {row.state === "missing"
+                                    ? "Remove missing registration…"
+                                    : "Remove worktree…"}
+                                </Button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </details>
+                    </li>
+                  );
+                })}
             </ul>
             {page && (
               <GitLoadMore
@@ -572,6 +633,6 @@ function WorktreeDialog({
           </>
         )}
       </div>
-    </Modal>
+    </GitInspectorSection>
   );
 }
