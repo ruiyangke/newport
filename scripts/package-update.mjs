@@ -44,7 +44,10 @@ const temp = mkdtempSync(join(tmpdir(), "newport-package-"));
 try {
   // ditto preserves bundle permissions, symlinks, and the stapled ticket.
   run("ditto", [app, join(temp, "Newport.app")]);
-  run("tar", ["-czf", archive, "-C", temp, "Newport.app"]);
+  // AppleDouble sidecars can be mistaken for the app root by the updater.
+  run("tar", ["-czf", archive, "-C", temp, "Newport.app"], {
+    env: { ...process.env, COPYFILE_DISABLE: "1" },
+  });
 } finally {
   rmSync(temp, { recursive: true, force: true });
 }
