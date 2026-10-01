@@ -12,6 +12,12 @@ use tokio::{
 #[path = "../../tools/agent/src/wire.rs"]
 pub(crate) mod wire;
 
+// Named statics keep one copy of each payload across async deployment call sites.
+static AGENT_X86_64: [u8; include_bytes!("../agents/newport-agent-x86_64").len()] =
+    *include_bytes!("../agents/newport-agent-x86_64");
+static AGENT_AARCH64: [u8; include_bytes!("../agents/newport-agent-aarch64").len()] =
+    *include_bytes!("../agents/newport-agent-aarch64");
+
 /// All agent-backed features enter here before opening a protocol channel.
 /// Recheck every new channel so removal or an external replacement is repaired.
 pub enum Service {
@@ -74,8 +80,8 @@ async fn deploy(session: &ExecSession, force: bool) -> Result<String, String> {
         return Err("The Newport agent requires Linux.".into());
     }
     let binary: &[u8] = match lines.next() {
-        Some("x86_64") => include_bytes!("../agents/newport-agent-x86_64"),
-        Some("aarch64" | "arm64") => include_bytes!("../agents/newport-agent-aarch64"),
+        Some("x86_64") => &AGENT_X86_64,
+        Some("aarch64" | "arm64") => &AGENT_AARCH64,
         _ => return Err("The Newport agent supports x86_64 and ARM64 Linux servers.".into()),
     };
     let hash = Sha256::digest(binary)
