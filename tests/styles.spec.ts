@@ -77,6 +77,13 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const snapshotFor = (project: string) =>
   path.join(here, "__snapshots__", `styles.${project}.json`);
 const UPDATE = process.env.UPDATE_STYLE_SNAPSHOT === "1";
+// These resolved values measure content/font geometry, not CSS regressions:
+// auto margins, an implicit grid track, and 70ch vary with OS font metrics.
+const CONTENT_GEOMETRY: Record<string, string> = {
+  "source-count": "marginLeft",
+  "overview-refresh": "gridTemplateColumns",
+  "section-description": "maxWidth",
+};
 
 /** First element bearing each class, and what the browser computes for it. */
 async function captureByClass(page: Page) {
@@ -149,9 +156,11 @@ test("class styles match the recorded baseline", async ({ page }) => {
     const a = before.split("|");
     const b = now.split("|");
     const changed = PROPS.map((p, i) =>
-      a[i] === b[i] ? null : `${p}: ${a[i]} -> ${b[i]}`,
+      a[i] === b[i] || CONTENT_GEOMETRY[name] === p
+        ? null
+        : `${p}: ${a[i]} -> ${b[i]}`,
     ).filter(Boolean);
-    drift.push(`.${name} {${changed.join("; ")}}`);
+    if (changed.length) drift.push(`.${name} {${changed.join("; ")}}`);
   }
 
   expect(drift, `${drift.length} class(es) changed appearance`).toEqual([]);

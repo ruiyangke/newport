@@ -150,13 +150,14 @@ export function expectProjectStyles(
     if (now === undefined || now === before) continue;
     const a = before.split("|");
     const b = now.split("|");
-    drift.push(
-      `.${name} {${PROPS.map((p, i) =>
-        a[i] === b[i] ? null : `${p}: ${a[i]} -> ${b[i]}`,
-      )
-        .filter(Boolean)
-        .join("; ")}}`,
-    );
+    // ml-auto resolves to the remaining row width, which depends on OS
+    // font metrics. Keep checking every other style on the action group.
+    const changed = PROPS.map((p, i) =>
+      a[i] === b[i] || (name === "git-projects-actions" && p === "marginLeft")
+        ? null
+        : `${p}: ${a[i]} -> ${b[i]}`,
+    ).filter(Boolean);
+    if (changed.length) drift.push(`.${name} {${changed.join("; ")}}`);
   }
   expect(
     drift,
