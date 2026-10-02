@@ -10,12 +10,12 @@ import {
   GitBranch,
   MoreHorizontal,
   Plus,
-  RefreshCw,
   Search,
   Star,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Button } from "./controls";
+import { Button, RefreshButton } from "./controls";
+import { PageHeader } from "./PageHeader";
 import { Input } from "@/components/ui/input";
 import {
   DropdownMenu,
@@ -27,6 +27,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { GitProject } from "../domain/git";
+import { plural } from "../lib/utils";
 
 export type GitProjectFilter = "all" | "favorites" | "archived";
 export type GitProjectSort = "name" | "path";
@@ -54,10 +55,6 @@ const SORTS: { value: GitProjectSort; label: string }[] = [
   { value: "path", label: "Path" },
 ];
 
-function plural(count: number, noun: string) {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
-}
-
 /*
  * The library is a list like Services': a page heading at the app's scale, one
  * row of controls, and a bordered list whose columns line up. Row actions
@@ -74,7 +71,7 @@ const TREE_COLUMN = "w-[170px] flex-none min-w-0 max-[640px]:hidden";
 const ACTIONS_COLUMN =
   "flex w-[60px] flex-none items-center justify-end gap-[2px]";
 const ROW_ICON_BUTTON =
-  "h-[26px]! w-[26px] rounded-[5px]! px-0! text-muted-foreground hover:text-foreground";
+  "h-[28px] w-[28px] rounded-[5px] px-0 text-muted-foreground hover:text-foreground";
 const MENU_CONTENT = "git-library-menu-list min-w-[190px]";
 /** A dot and a word: the state a column reports, or that nothing was read. */
 function Fact({
@@ -323,73 +320,60 @@ export function GitProjectLibrary({
       className="git-library min-h-0 w-full max-w-[1240px] flex-1 overflow-y-auto px-[22px] pt-[18px] pb-[24px] text-[13px]"
       aria-label="Projects"
     >
-      <div className="git-library-heading flex flex-wrap items-center gap-[8px]">
-        <div className="min-w-0 flex-1">
-          <h1 className="text-[18px]! leading-[24px]! font-semibold! tracking-[-0.01em]!">
-            Projects
-          </h1>
-          <p className="git-library-subtitle mt-[1px]! text-[12px] text-muted-foreground">
-            {projects.length}{" "}
-            {projects.length === 1 ? "Git repository" : "Git repositories"}{" "}
-            bookmarked on this server
-          </p>
-        </div>
-        {onRefresh && (
-          <Button
-            size="icon"
-            aria-label="Refresh"
-            disabled={busy}
-            onClick={onRefresh}
-            className="h-[30px]! w-[30px]"
-          >
-            <RefreshCw size={14} aria-hidden="true" />
-          </Button>
-        )}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="default"
-              aria-label="Add project"
-              disabled={busy}
-              className="h-[30px]! gap-[6px] px-[12px]! text-[12px]! font-medium!"
-            >
-              <Plus size={14} aria-hidden="true" />
-              Add project
-              <ChevronDown
-                size={13}
-                aria-hidden="true"
-                className="-mr-[2px] opacity-80"
-              />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            align="end"
-            sideOffset={6}
-            className={MENU_CONTENT}
-          >
-            <DropdownMenuItem onSelect={() => onAdd()}>
-              <FolderPlus size={14} aria-hidden="true" />
-              Add existing
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => onClone()}>
-              <Download size={14} aria-hidden="true" />
-              Clone repository
-            </DropdownMenuItem>
-            {onCreate && (
-              <DropdownMenuItem onSelect={() => onCreate()}>
-                <FolderGit2 size={14} aria-hidden="true" />
-                New repository
-              </DropdownMenuItem>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
+      <PageHeader
+        className="git-library-heading"
+        title="Project library"
+        subtitle={`${projects.length} ${projects.length === 1 ? "Git repository" : "Git repositories"} bookmarked on this server`}
+        actions={
+          <>
+            {onRefresh && <RefreshButton busy={busy} onClick={onRefresh} />}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="default"
+                  aria-label="Add project"
+                  disabled={busy}
+                  className="h-[28px] gap-[6px] px-[12px] text-[12px] font-medium leading-[1.428571]"
+                >
+                  <Plus size={14} aria-hidden="true" />
+                  Add project
+                  <ChevronDown
+                    size={13}
+                    aria-hidden="true"
+                    className="-mr-[2px] opacity-80"
+                  />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="end"
+                sideOffset={6}
+                className={MENU_CONTENT}
+              >
+                <DropdownMenuItem onSelect={() => onAdd()}>
+                  <FolderPlus size={14} aria-hidden="true" />
+                  Add existing
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => onClone()}>
+                  <Download size={14} aria-hidden="true" />
+                  Clone repository
+                </DropdownMenuItem>
+                {onCreate && (
+                  <DropdownMenuItem onSelect={() => onCreate()}>
+                    <FolderGit2 size={14} aria-hidden="true" />
+                    New repository
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </>
+        }
+      />
 
-      <div className="mt-[16px] flex flex-wrap items-center gap-[8px]">
+      <div className="flex flex-wrap items-center gap-[8px]">
         {/* The wrapper stays a <label> so the field keeps its own text label
             rather than leaning on the placeholder. */}
         <label
-          className="flex h-[30px] w-[260px] max-w-full items-center gap-[6px] rounded-[6px] border border-border bg-background px-[8px] text-muted-foreground focus-within:border-ring"
+          className="flex h-[28px] w-[260px] max-w-full items-center gap-[6px] rounded-[6px] border border-border bg-background px-[8px] text-muted-foreground focus-within:border-ring"
           htmlFor={searchId}
         >
           <Search size={14} strokeWidth={1.6} aria-hidden="true" />
@@ -398,7 +382,7 @@ export function GitProjectLibrary({
             id={searchId}
             value={search}
             placeholder="Find a project…"
-            className="h-[22px]! w-full min-w-0 border-0 bg-transparent px-[2px] py-0 text-[12px] text-foreground shadow-none focus-visible:border-0 focus-visible:ring-0 dark:bg-transparent"
+            className="h-[22px] w-full min-w-0 border-0 bg-transparent px-[2px] py-0 text-[12px] text-foreground shadow-none focus-visible:border-0 focus-visible:ring-0 dark:bg-transparent"
             onChange={(event) => onSearch(event.target.value)}
           />
         </label>
@@ -418,7 +402,7 @@ export function GitProjectLibrary({
                 aria-pressed={active}
                 onClick={() => onFilter(option.value)}
                 className={cn(
-                  "h-[26px]! rounded-[5px]! border-0 px-[10px]! text-[12px] font-medium",
+                  "h-[26px] rounded-[5px] border-0 px-[10px] text-[12px] font-medium",
                   active
                     ? "bg-background text-foreground shadow-[0_1px_2px_rgb(0_0_0/0.1)] hover:bg-background dark:hover:bg-background"
                     : "bg-transparent text-muted-foreground hover:bg-transparent dark:hover:bg-transparent",
@@ -434,7 +418,7 @@ export function GitProjectLibrary({
           <Button
             disabled={anyChecking}
             onClick={() => onCheckAll(rows)}
-            className="h-[30px]! gap-[6px]"
+            className="h-[28px] gap-[6px]"
           >
             <Activity size={13} aria-hidden="true" />
             {anyChecking ? "Checking…" : "Check status"}
@@ -444,7 +428,7 @@ export function GitProjectLibrary({
           <DropdownMenuTrigger asChild>
             <Button
               aria-label={`Sort: ${sortLabel}`}
-              className="h-[30px]! gap-[6px]"
+              className="h-[28px] gap-[6px]"
             >
               <ArrowUpDown size={13} aria-hidden="true" />
               {sortLabel}
@@ -478,7 +462,7 @@ export function GitProjectLibrary({
             aria-hidden="true"
             className="text-muted-foreground"
           />
-          <h2 className="text-[14px]! font-semibold!">No projects yet</h2>
+          <h2 className="text-[14px] font-semibold">No projects yet</h2>
           <p className="max-w-[360px] text-[12px] text-muted-foreground">
             A project is a bookmark to a Git repository on this server. Add one
             you already have, clone one, or start a new one.
@@ -530,14 +514,14 @@ export function GitProjectLibrary({
                           neighbour only in the part that was hidden. */}
                         <Button
                           variant="ghost"
-                          className="git-library-open block h-auto! min-h-[18px] w-fit max-w-full rounded-[4px]! bg-transparent px-0! text-left text-[13px]! leading-[18px] font-semibold! whitespace-normal text-foreground hover:bg-transparent hover:underline dark:hover:bg-transparent [overflow-wrap:anywhere]"
+                          className="git-library-open block h-auto min-h-[18px] w-fit max-w-full rounded-[4px] bg-transparent px-0 text-left text-[13px] leading-[18px] font-semibold whitespace-normal text-foreground hover:bg-transparent hover:underline dark:hover:bg-transparent wrap-anywhere"
                           disabled={busy}
                           onClick={() => onOpen(project)}
                         >
                           {project.name}
                         </Button>
                         {blurb && (
-                          <p className="my-[2px]! truncate text-[12px] text-muted-foreground">
+                          <p className="my-[2px] truncate text-[12px] text-muted-foreground">
                             {blurb}
                           </p>
                         )}

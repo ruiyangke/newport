@@ -32,7 +32,7 @@ export function GitDiffSettings({
           variant="ghost"
           size="icon"
           aria-label="Diff Settings"
-          className="h-[26px]! w-[28px] flex-none text-muted-foreground hover:text-foreground"
+          className="h-[26px] w-[28px] flex-none text-muted-foreground hover:text-foreground"
         >
           <Settings2 size={15} aria-hidden="true" />
         </Button>
@@ -42,7 +42,7 @@ export function GitDiffSettings({
         className="grid w-[220px] gap-[12px] rounded-[8px] p-[12px] text-[12px]"
       >
         {/* The unlayered bare `h3` rule claims size, weight and margin. */}
-        <h3 className="text-[12px]! font-semibold!">Diff Settings</h3>
+        <h3 className="text-[12px] font-semibold">Diff Settings</h3>
         <fieldset className="grid gap-[6px]">
           <legend className="mb-[6px] text-[11px] font-medium text-muted-foreground">
             Diff display

@@ -5,6 +5,7 @@ import {
   SelectContent,
   SelectGroup,
 } from "./ui/select";
+import { cn } from "../lib/utils";
 import type { ComponentProps } from "react";
 import { LoaderCircle, RefreshCw } from "lucide-react";
 import { Button as BaseButton } from "./ui/button";
@@ -31,10 +32,17 @@ export function Button({
       data-loading={loading || undefined}
       variant={props.variant ?? "outline"}
       size={props.size ?? "default"}
-      className={className}
+      className={cn(
+        loading && "[&>svg:not([data-slot=button-spinner])]:hidden",
+        className,
+      )}
     >
       {loading && (
-        <LoaderCircle className="button-spinner" aria-hidden="true" />
+        <LoaderCircle
+          data-slot="button-spinner"
+          className="animate-[spin_0.8s_linear_infinite] motion-reduce:animate-none"
+          aria-hidden="true"
+        />
       )}
       {children}
     </BaseButton>

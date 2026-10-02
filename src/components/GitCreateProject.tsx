@@ -1,3 +1,11 @@
+import {
+  GitForm,
+  GitField,
+  GitFieldHint,
+  GitPathField,
+  GitError,
+  GitFormActions,
+} from "./GitForm";
 import { useState } from "react";
 import type { GitBootstrapRequest } from "../domain/git";
 import { gitPath } from "../domain/git";
@@ -42,8 +50,8 @@ export function GitCreateProject({
   return (
     <>
       <Modal title={title} busy={busy} onClose={onClose}>
-        <form
-          className="git-project-form"
+        <GitForm
+          dialog
           onSubmit={(event) => {
             event.preventDefault();
             if (busy || blockedReason) return;
@@ -79,7 +87,7 @@ export function GitCreateProject({
           }}
         >
           <p>On {serverName}. The repository will be saved in Projects.</p>
-          <label>
+          <GitField>
             Project name
             <Input
               autoFocus
@@ -88,9 +96,9 @@ export function GitCreateProject({
               onChange={(event) => setName(event.target.value)}
               disabled={busy}
             />
-          </label>
+          </GitField>
           {mode === "clone" && (
-            <label>
+            <GitField>
               Repository URL
               <Input
                 required
@@ -101,17 +109,17 @@ export function GitCreateProject({
                 autoCapitalize="none"
                 spellCheck={false}
               />
-              <small>
+              <GitFieldHint>
                 SSH uses the server’s SSH agent. HTTPS supports public
                 repositories.
-              </small>
-            </label>
+              </GitFieldHint>
+            </GitField>
           )}
-          <label>
+          <GitField>
             {mode === "init"
               ? "Existing directory on server"
               : "Destination on server"}
-            <div className="git-path-field">
+            <GitPathField>
               <Input
                 required
                 placeholder="/home/user/projects/app"
@@ -128,14 +136,14 @@ export function GitCreateProject({
               >
                 Browse…
               </Button>
-            </div>
-            <small>
+            </GitPathField>
+            <GitFieldHint>
               {mode === "init"
                 ? "Choose an existing directory without a Git repository. Its files will be kept."
                 : "The parent directory must exist. The destination must not exist yet."}
-            </small>
-          </label>
-          <label>
+            </GitFieldHint>
+          </GitField>
+          <GitField>
             {mode === "init" ? "Initial branch" : "Branch (optional)"}
             <Input
               required={mode === "init"}
@@ -148,9 +156,11 @@ export function GitCreateProject({
               autoCapitalize="none"
               spellCheck={false}
             />
-          </label>
+          </GitField>
           {blockedReason && <p role="status">{blockedReason}</p>}
-          {(localError || error) && <p role="alert">{localError || error}</p>}
+          {(localError || error) && (
+            <GitError role="alert">{localError || error}</GitError>
+          )}
           {busy && (
             <p role="status">
               {mode === "clone"
@@ -158,19 +168,20 @@ export function GitCreateProject({
                 : "Creating repository…"}
             </p>
           )}
-          <footer>
+          <GitFormActions>
             <Button disabled={busy} onClick={onClose}>
               Cancel
             </Button>
             <Button
               type="submit"
+              variant="default"
               loading={busy}
               disabled={busy || !!blockedReason}
             >
               {title}
             </Button>
-          </footer>
-        </form>
+          </GitFormActions>
+        </GitForm>
       </Modal>
       <GitFolderChooser
         serverId={serverId}

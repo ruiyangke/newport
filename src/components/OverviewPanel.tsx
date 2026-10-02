@@ -1,7 +1,12 @@
+import { SectionEmpty } from "./Feedback";
+import { MonitoringSection } from "./MonitoringSection";
+import { SectionHeader, CollectionCount } from "./SectionHeader";
 import { useWorkspaceState } from "../state/workspace";
 import { lazy, Suspense, useRef } from "react";
-import { Search } from "lucide-react";
-import { Checkbox, Input, RefreshButton, Select, SelectItem } from "./controls";
+import { SearchField } from "./SearchField";
+import { Disclosure } from "./Disclosure";
+import { Checkbox, RefreshButton, Select, SelectItem } from "./controls";
+import { PageHeader } from "./PageHeader";
 import {
   Table,
   TableHeader,
@@ -9,7 +14,7 @@ import {
   TableRow,
   TableHead,
   TableCell,
-} from "./ui/table";
+} from "./MonitoringTable";
 import { useMetricHistory } from "../hooks/useMetricHistory";
 import { useCollection } from "../hooks/useCollection";
 
@@ -43,25 +48,32 @@ function Gauge({
   const known = Number.isFinite(raw);
   const value = known ? Math.min(100, Math.max(0, raw)) : 0;
   return (
-    <div className="usage-gauge">
+    <div data-slot="usage-gauge" className="min-w-0 text-center">
       <div
-        className="gauge-dial"
+        data-slot="gauge-dial"
+        className="relative mx-auto h-[76px] w-[80px] max-[700px]:h-[70px] max-[700px]:w-[72px]"
         role={known ? "meter" : "img"}
         aria-label={`${label} usage${known ? "" : ": unavailable"}`}
         aria-valuemin={known ? 0 : undefined}
         aria-valuemax={known ? 100 : undefined}
         aria-valuenow={known ? Math.round(value) : undefined}
       >
-        <svg viewBox="0 0 100 100" aria-hidden="true">
+        <svg
+          className="size-[80px] overflow-visible max-[700px]:size-[72px]"
+          viewBox="0 0 100 100"
+          aria-hidden="true"
+        >
           <circle
-            className="gauge-track"
+            data-slot="gauge-track"
+            className="origin-center rotate-[135deg] fill-none stroke-border stroke-[5px] [stroke-dasharray:75_100]"
             cx="50"
             cy="50"
             r="40"
             pathLength="100"
           />
           <circle
-            className="gauge-fill"
+            data-slot="gauge-fill"
+            className="origin-center rotate-[135deg] fill-none stroke-primary stroke-[5px]"
             cx="50"
             cy="50"
             r="40"
@@ -69,18 +81,31 @@ function Gauge({
             strokeDasharray={`${value * 0.75} 100`}
           />
         </svg>
-        <strong aria-hidden="true">
+        <strong
+          className="absolute inset-x-0 top-0 flex aspect-square items-center justify-center text-[22px] leading-none font-medium tabular-nums max-[700px]:text-[19px]"
+          aria-hidden="true"
+        >
           {known ? Math.round(value) : "—"}
-          {known && <small>%</small>}
+          {known && (
+            <small className="absolute top-[calc(50%+14px)] left-0 m-0 w-full text-center text-[11px] leading-none font-normal text-muted-foreground">
+              %
+            </small>
+          )}
         </strong>
       </div>
-      <h3>{label}</h3>
-      <p>
+      <h3 className="mb-[3px] text-[12px] font-medium wrap-anywhere">
+        {label}
+      </h3>
+      <p className="m-0 text-[11px] text-muted-foreground wrap-anywhere">
         {total !== undefined
           ? `${bytes(used ?? 0)} of ${bytes(total)} used`
           : detail}
       </p>
-      {total !== undefined && detail && <small>{detail}</small>}
+      {total !== undefined && detail && (
+        <small className="mt-[5px] block text-[11px] leading-[1.5] text-muted-foreground wrap-anywhere">
+          {detail}
+        </small>
+      )}
     </div>
   );
 }
@@ -125,20 +150,22 @@ export function OverviewPanel({ id }: { id: string }) {
       ) ?? [];
   return (
     <div className="overview-panel" ref={scopeRef}>
-      <div className="workspace-masthead overview-masthead">
-        <div>
-          <h2>System health</h2>
-          <p role="status">
-            {d
-              ? `${d.hostname} · Up ${uptime(d.uptime)}`
-              : error
-                ? "Live metrics unavailable"
-                : "Waiting for first reading…"}
-          </p>
-        </div>
-        <div className="overview-refresh">
-          <div className="section-actions">
-            <label className="auto-refresh">
+      <PageHeader
+        title="System health"
+        subtitleRole="status"
+        subtitle={
+          d
+            ? `${d.hostname} · Up ${uptime(d.uptime)}`
+            : error
+              ? "Live metrics unavailable"
+              : "Waiting for first reading…"
+        }
+        actions={
+          <>
+            <label
+              data-slot="auto-refresh"
+              className="flex items-center gap-[6px] text-[12px] whitespace-nowrap text-muted-foreground"
+            >
               <Checkbox
                 checked={auto}
                 onCheckedChange={(checked) => setAuto(checked === true)}
@@ -146,30 +173,41 @@ export function OverviewPanel({ id }: { id: string }) {
               Auto-refresh
             </label>
             <RefreshButton busy={state.busy} onClick={refresh} />
-          </div>
-          <span className="muted">
-            {state.updated
-              ? `${state.stale || !auto ? "Last reading" : "Updated"} ${state.updated.toLocaleTimeString()}`
-              : auto
-                ? "Every 10 seconds"
-                : "Auto-refresh paused"}
-          </span>
-        </div>
-      </div>
+          </>
+        }
+        meta={
+          state.updated
+            ? `${state.stale || !auto ? "Last reading" : "Updated"} ${state.updated.toLocaleTimeString()}`
+            : auto
+              ? "Every 10 seconds"
+              : "Auto-refresh paused"
+        }
+      />
       {error && (
-        <p className="cockpit-error" role="alert">
+        <p
+          data-slot="cockpit-error"
+          className="text-[12px] leading-[1.6] text-(--red) wrap-anywhere"
+          role="alert"
+        >
           {error}
           {d && " Showing the last available reading."}
         </p>
       )}
       {(historyError || d?.historyError) && (
-        <p className="cockpit-error" role="alert">
+        <p
+          data-slot="cockpit-error"
+          className="text-[12px] leading-[1.6] text-(--red) wrap-anywhere"
+          role="alert"
+        >
           {d?.historyError || historyError}
         </p>
       )}
       {d && (
-        <section className="cockpit-section utilization-section">
-          <div className="gauge-grid">
+        <MonitoringSection flush>
+          <div
+            data-slot="gauge-grid"
+            className="grid grid-cols-3 gap-[18px] max-[700px]:gap-[8px]"
+          >
             <Gauge
               label="CPU"
               percent={d.cpu}
@@ -186,9 +224,14 @@ export function OverviewPanel({ id }: { id: string }) {
             ))}
           </div>
           {!d.disks.length && (
-            <p className="muted">Storage information unavailable.</p>
+            <p className="text-[12px] leading-[1.65] text-muted-foreground">
+              Storage information unavailable.
+            </p>
           )}
-          <div className="utilization-notes">
+          <div
+            data-slot="utilization-notes"
+            className="mt-[16px] flex flex-wrap gap-x-[18px] gap-y-[6px] text-[11px] text-muted-foreground"
+          >
             <span>
               Load average · {d.load.map((n) => n.toFixed(2)).join(" / ")} (1 /
               5 / 15 min)
@@ -199,39 +242,58 @@ export function OverviewPanel({ id }: { id: string }) {
               </span>
             )}
           </div>
-          <details className="system-details">
-            <summary>System details</summary>
-            <dl className="system-facts">
-              <div>
-                <dt>Operating system</dt>
-                <dd>{d.os}</dd>
+          <Disclosure title="System details">
+            <dl
+              data-slot="system-facts"
+              className="mt-[14px] mb-[10px] flex flex-wrap gap-x-[18px] gap-y-[10px]"
+            >
+              <div className="flex min-w-0 items-baseline gap-[7px]">
+                <dt className="m-0 text-[11px] text-muted-foreground">
+                  Operating system
+                </dt>
+                <dd className="m-0 text-[11px] wrap-anywhere">{d.os}</dd>
               </div>
-              <div>
-                <dt>Host</dt>
-                <dd>{d.hostname}</dd>
+              <div className="flex min-w-0 items-baseline gap-[7px]">
+                <dt className="m-0 text-[11px] text-muted-foreground">Host</dt>
+                <dd className="m-0 text-[11px] wrap-anywhere">{d.hostname}</dd>
               </div>
-              <div>
-                <dt>Uptime</dt>
-                <dd>{uptime(d.uptime)}</dd>
+              <div className="flex min-w-0 items-baseline gap-[7px]">
+                <dt className="m-0 text-[11px] text-muted-foreground">
+                  Uptime
+                </dt>
+                <dd className="m-0 text-[11px] wrap-anywhere">
+                  {uptime(d.uptime)}
+                </dd>
               </div>
-              <div>
-                <dt>Kernel</dt>
-                <dd>{d.kernel}</dd>
+              <div className="flex min-w-0 items-baseline gap-[7px]">
+                <dt className="m-0 text-[11px] text-muted-foreground">
+                  Kernel
+                </dt>
+                <dd className="m-0 text-[11px] wrap-anywhere">{d.kernel}</dd>
               </div>
             </dl>
-            <div className="filesystem-details">
+            <div
+              data-slot="filesystem-details"
+              className="text-[11px] text-muted-foreground wrap-anywhere"
+            >
               {d.disks.map((disk) => (
-                <p key={disk.mount}>
+                <p key={disk.mount} className="my-[6px]">
                   <strong>{disk.mount}</strong> · {disk.device} ·{" "}
                   {bytes(disk.available)} available to this account
                 </p>
               ))}
             </div>
-          </details>
-        </section>
+          </Disclosure>
+        </MonitoringSection>
       )}
       {(d || history.samples.length > 0) && (
-        <Suspense fallback={<p className="muted">Loading charts…</p>}>
+        <Suspense
+          fallback={
+            <p className="text-[12px] leading-[1.65] text-muted-foreground">
+              Loading charts…
+            </p>
+          }
+        >
           <MetricGraphs
             id={id}
             history={history.samples}
@@ -242,8 +304,8 @@ export function OverviewPanel({ id }: { id: string }) {
       )}
       {d ? (
         <>
-          <section className="cockpit-section">
-            <div className="section-heading">
+          <MonitoringSection>
+            <SectionHeader>
               <h2>
                 Processes <span>{d.processCount}</span>
               </h2>
@@ -255,48 +317,48 @@ export function OverviewPanel({ id }: { id: string }) {
                 <SelectItem value="cpu">Highest CPU</SelectItem>
                 <SelectItem value="memory">Highest memory</SelectItem>
               </Select>
-            </div>
-            <div className="search cockpit-search">
-              <Search size={14} />
-              <Input
-                aria-label="Filter processes"
-                placeholder="Find a process, user, or PID"
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-              />
-            </div>
-            <p className="muted">
+            </SectionHeader>
+            <SearchField
+              className="my-[16px]"
+              aria-label="Filter processes"
+              placeholder="Find a process, user, or PID"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+
+            <CollectionCount>
               {filter.trim()
-                ? `${rows.length} matching · ${d.processes.length} collected`
-                : `${d.processes.length} shown · ${d.processCount} total`}
-              {" · Top 50 by average CPU"}
-            </p>
-            <details className="system-details">
-              <summary>About process usage</summary>
-              <p className="muted">
+                ? `Showing ${rows.length} of ${d.processes.length} collected processes`
+                : `Showing ${d.processes.length} of ${d.processCount} processes · Top ${d.processes.length} by average CPU`}
+            </CollectionCount>
+            <Disclosure title="About process usage">
+              <p className="text-[12px] leading-[1.65] text-muted-foreground">
                 CPU is averaged over each process’s lifetime and can exceed 100%
                 across cores. Search and sorting apply to the collected list.
               </p>
-            </details>
-            <div className="table-scroll">
-              <Table className="cockpit-table" aria-label="Processes">
+            </Disclosure>
+            <div
+              data-slot="table-scroll"
+              className="mt-[12px] overflow-visible"
+            >
+              <Table aria-label="Processes">
                 <TableHeader>
                   <TableRow>
                     <TableHead scope="col">Process</TableHead>
-                    <TableHead scope="col" className="numeric">
+                    <TableHead scope="col" numeric>
                       PID
                     </TableHead>
                     <TableHead scope="col">User</TableHead>
                     <TableHead
                       scope="col"
-                      className="numeric"
+                      numeric
                       aria-sort={sort === "cpu" ? "descending" : undefined}
                     >
                       CPU
                     </TableHead>
                     <TableHead
                       scope="col"
-                      className="numeric"
+                      numeric
                       aria-sort={sort === "memory" ? "descending" : undefined}
                     >
                       Memory
@@ -307,43 +369,44 @@ export function OverviewPanel({ id }: { id: string }) {
                   {rows.map((p) => (
                     <TableRow key={p.pid}>
                       <TableCell>
-                        <span className="row-name">{p.name}</span>
+                        <span className="font-medium">{p.name}</span>
                       </TableCell>
-                      <TableCell className="numeric">
+                      <TableCell numeric>
                         <code>{p.pid}</code>
                       </TableCell>
                       <TableCell>{p.user}</TableCell>
-                      <TableCell className="numeric">
-                        {p.cpu.toFixed(1)}%
-                      </TableCell>
-                      <TableCell className="numeric">
-                        {bytes(p.memory)}
-                      </TableCell>
+                      <TableCell numeric>{p.cpu.toFixed(1)}%</TableCell>
+                      <TableCell numeric>{bytes(p.memory)}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
             </div>
             {!rows.length && (
-              <p className="section-empty">
+              <SectionEmpty>
                 {filter.trim()
                   ? "No matches in the collected processes."
                   : "No process information available."}
-              </p>
+              </SectionEmpty>
             )}
-          </section>
-          <section className="cockpit-section">
+          </MonitoringSection>
+          <MonitoringSection>
             <h2>Network totals</h2>
-            <p className="muted">Total traffic since each interface started.</p>
-            <div className="table-scroll">
-              <Table className="cockpit-table" aria-label="Network totals">
+            <p className="text-[12px] leading-[1.65] text-muted-foreground">
+              Total traffic since each interface started.
+            </p>
+            <div
+              data-slot="table-scroll"
+              className="mt-[12px] overflow-visible"
+            >
+              <Table aria-label="Network totals">
                 <TableHeader>
                   <TableRow>
                     <TableHead scope="col">Interface</TableHead>
-                    <TableHead scope="col" className="numeric">
+                    <TableHead scope="col" numeric>
                       Received
                     </TableHead>
-                    <TableHead scope="col" className="numeric">
+                    <TableHead scope="col" numeric>
                       Sent
                     </TableHead>
                   </TableRow>
@@ -351,7 +414,10 @@ export function OverviewPanel({ id }: { id: string }) {
                 <TableBody>
                   {!d.network.length && (
                     <TableRow>
-                      <TableCell colSpan={3} className="section-empty">
+                      <TableCell
+                        colSpan={3}
+                        className="rounded-[8px] bg-sidebar leading-[1.6] text-muted-foreground"
+                      >
                         No network interfaces reported.
                       </TableCell>
                     </TableRow>
@@ -359,19 +425,17 @@ export function OverviewPanel({ id }: { id: string }) {
                   {d.network.map((n) => (
                     <TableRow key={n.name}>
                       <TableCell>{n.name}</TableCell>
-                      <TableCell className="numeric">
-                        {bytes(n.received)}
-                      </TableCell>
-                      <TableCell className="numeric">{bytes(n.sent)}</TableCell>
+                      <TableCell numeric>{bytes(n.received)}</TableCell>
+                      <TableCell numeric>{bytes(n.sent)}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
             </div>
-          </section>
+          </MonitoringSection>
         </>
       ) : !state.busy && !state.error ? (
-        <p className="section-empty">Refresh to load metrics.</p>
+        <SectionEmpty>Refresh to load metrics.</SectionEmpty>
       ) : null}
     </div>
   );

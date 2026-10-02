@@ -1,3 +1,10 @@
+import {
+  GitConfirmationBody,
+  GitError,
+  GitCheckboxField,
+  GitField,
+  GitFormActions,
+} from "./GitForm";
 import { useState } from "react";
 import type { GitHistory, GitRepository } from "../domain/gitResponses";
 import type { GitWriteAction } from "../domain/git";
@@ -135,8 +142,8 @@ export function GitHistoryActions({
           onClose={() => setKind(null)}
           busy={busy}
         >
-          <div className="git-integration-confirm">
-            {error && <p role="alert">{error}</p>}
+          <GitConfirmationBody>
+            {error && <GitError role="alert">{error}</GitError>}
             <p>
               Current branch:{" "}
               <strong>
@@ -165,7 +172,7 @@ export function GitHistoryActions({
             </p>
             {kind === "merge" && (
               <>
-                <label className="git-branch-force">
+                <GitCheckboxField compact>
                   <input
                     type="checkbox"
                     checked={fastForward}
@@ -173,7 +180,7 @@ export function GitHistoryActions({
                     onChange={(event) => setFastForward(event.target.checked)}
                   />
                   Fast-forward only
-                </label>
+                </GitCheckboxField>
                 <p>
                   {fastForward
                     ? "Move the current branch straight to this commit. It is refused unless this commit already contains the branch’s history, so no merge commit is created and no conflict can occur."
@@ -193,13 +200,15 @@ export function GitHistoryActions({
                   before switching.
                 </p>
                 {confirmationStale && (
-                  <p role="alert">
+                  <GitError role="alert">
                     The repository or selected commit changed. Close this dialog
                     and review the checkout again.
-                  </p>
+                  </GitError>
                 )}
                 {conflicted && (
-                  <p role="alert">Resolve conflicts before checking out.</p>
+                  <GitError role="alert">
+                    Resolve conflicts before checking out.
+                  </GitError>
                 )}
               </>
             )}
@@ -211,7 +220,7 @@ export function GitHistoryActions({
                     as text. Enter a complete replacement message.
                   </p>
                 )}
-                <label>
+                <GitField>
                   Replacement commit message
                   <Textarea
                     aria-label="Replacement commit message"
@@ -221,26 +230,28 @@ export function GitHistoryActions({
                     disabled={busy}
                     rows={5}
                   />
-                </label>
+                </GitField>
                 <p>
                   Any staged changes will be included. Unstaged changes will
                   remain in your working files. No remote branch will be
                   updated.
                 </p>
                 {confirmationStale && (
-                  <p role="alert">
+                  <GitError role="alert">
                     The repository changed. Close this dialog and review the
                     latest commit again.
-                  </p>
+                  </GitError>
                 )}
                 {resetBlockedReason && (
-                  <p role="alert">Resolve conflicts before amending.</p>
+                  <GitError role="alert">
+                    Resolve conflicts before amending.
+                  </GitError>
                 )}
               </>
             )}
             {kind === "reset" && (
               <>
-                <label>
+                <GitField>
                   Reset mode
                   <Select
                     value={resetMode}
@@ -264,7 +275,7 @@ export function GitHistoryActions({
                       </SelectItem>
                     </SelectContent>
                   </Select>
-                </label>
+                </GitField>
                 <p>
                   {resetMode === "soft"
                     ? "Moves the branch pointer only. Staged changes and working files stay as they are."
@@ -276,16 +287,18 @@ export function GitHistoryActions({
                   This changes local history. No remote branch will be changed.
                 </p>
                 {confirmationStale && (
-                  <p role="alert">
+                  <GitError role="alert">
                     The repository changed. Close this dialog and review the
                     reset again.
-                  </p>
+                  </GitError>
                 )}
-                {resetBlockedReason && <p role="alert">{resetBlockedReason}</p>}
+                {resetBlockedReason && (
+                  <GitError role="alert">{resetBlockedReason}</GitError>
+                )}
               </>
             )}
             {replay && commit.parents.length > 1 && (
-              <label>
+              <GitField>
                 Mainline parent
                 <Select
                   value={parent}
@@ -303,9 +316,9 @@ export function GitHistoryActions({
                     ))}
                   </SelectContent>
                 </Select>
-              </label>
+              </GitField>
             )}
-            <footer>
+            <GitFormActions>
               <Button disabled={busy} onClick={() => setKind(null)}>
                 Cancel
               </Button>
@@ -390,8 +403,8 @@ export function GitHistoryActions({
                             ? "Revert commit"
                             : "Cherry-pick"}
               </Button>
-            </footer>
-          </div>
+            </GitFormActions>
+          </GitConfirmationBody>
         </Modal>
       )}
     </>

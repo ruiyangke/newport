@@ -1,3 +1,4 @@
+import { GitError } from "./GitForm";
 import { useEffect, useRef } from "react";
 import { Button } from "./controls";
 
@@ -66,9 +67,9 @@ export function GitLoadMore({
       className="shrink-0 px-[16px] py-[8px] text-[11px] text-muted-foreground"
     >
       {error && (
-        <p role="alert" className="mb-[6px] text-destructive">
+        <GitError role="alert" className="mb-[6px] text-destructive">
           {error}
-        </p>
+        </GitError>
       )}
       {cursor ? (
         <Button

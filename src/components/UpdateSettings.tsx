@@ -1,3 +1,10 @@
+import {
+  SettingsSection,
+  SettingsHeading,
+  SettingsRow,
+  SettingsHelp,
+  SettingsMessage,
+} from "./SettingsLayout";
 import { useSharedMutation } from "../hooks/useSharedMutation";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -72,12 +79,12 @@ export function UpdateSettings() {
                 ? "You’re up to date."
                 : "Updates download automatically. You choose when to restart.";
   return (
-    <section aria-labelledby="updates-heading">
-      <h2 id="updates-heading">Updates</h2>
-      <div className="settings-row settings-cache-row">
+    <SettingsSection aria-labelledby="updates-heading">
+      <SettingsHeading id="updates-heading">Updates</SettingsHeading>
+      <SettingsRow wrap>
         <div>
           <span>Newport {data?.currentVersion ?? version}</span>
-          <small role="status">{message}</small>
+          <SettingsHelp role="status">{message}</SettingsHelp>
         </div>
         <Button
           disabled={!data?.enabled || busy}
@@ -86,11 +93,13 @@ export function UpdateSettings() {
         >
           {ready ? "Restart to update" : "Check for updates"}
         </Button>
-      </div>
+      </SettingsRow>
       {confirm && ready && (
-        <div className="update-confirmation">
-          <p>Restarting disconnects active sessions and cancels transfers.</p>
-          <div className="update-actions">
+        <div className="mt-[16px]">
+          <SettingsMessage>
+            Restarting disconnects active sessions and cancels transfers.
+          </SettingsMessage>
+          <div className="mt-[8px] flex justify-end gap-[8px]">
             <Button
               variant="ghost"
               onClick={() => setConfirm(false)}
@@ -109,10 +118,13 @@ export function UpdateSettings() {
         </div>
       )}
       {problem && (
-        <p className="settings-error" role="alert">
+        <SettingsMessage
+          className="mt-[20px] [&_p]:text-(--danger)"
+          role="alert"
+        >
           {String(problem)}
-        </p>
+        </SettingsMessage>
       )}
-    </section>
+    </SettingsSection>
   );
 }

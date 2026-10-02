@@ -11,7 +11,7 @@ export function captureCollectionScroll(
   scope: HTMLElement | null,
 ): ScrollSnapshot[] {
   if (!scope || scope.closest("[hidden]")) return [];
-  const workspace = scope.closest<HTMLElement>(".workspace-scroll");
+  const workspace = scope.closest<HTMLElement>("[data-slot=workspace-scroll]");
   if (!workspace) return [];
   const scrollers = [
     workspace,

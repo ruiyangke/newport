@@ -1,3 +1,9 @@
+import {
+  GitConfirmationBody,
+  GitField,
+  GitError,
+  GitFormActions,
+} from "./GitForm";
 import { useState } from "react";
 import { Undo2 } from "lucide-react";
 import type { GitStatus } from "../domain/gitResponses";
@@ -52,7 +58,7 @@ export function GitDiscardControl({
               size: "icon" as const,
               "aria-label": "Discard changes…",
               className:
-                "h-[26px]! w-[28px] text-muted-foreground hover:text-destructive",
+                "h-[28px] w-[28px] text-muted-foreground hover:text-destructive",
             }
           : {})}
         onClick={() => {
@@ -71,7 +77,7 @@ export function GitDiscardControl({
           busy={busy}
           onClose={() => setSelection(null)}
         >
-          <div className="git-integration-confirm">
+          <GitConfirmationBody>
             <p>
               <strong>
                 {selection.entry.path?.display ??
@@ -84,7 +90,7 @@ export function GitDiscardControl({
                 selection.entry.path.bytesB64 && (
                 <p>Previous path: {selection.entry.oldPath.display}</p>
               )}
-            <label>
+            <GitField>
               Restore from
               <Select
                 value={source}
@@ -106,7 +112,7 @@ export function GitDiscardControl({
                   <SelectItem value="head">Last commit</SelectItem>
                 </SelectContent>
               </Select>
-            </label>
+            </GitField>
             <p>
               {source === "index"
                 ? "Discard this file’s unstaged changes and keep its staged changes."
@@ -117,13 +123,13 @@ export function GitDiscardControl({
               no automatic undo for discarded changes.
             </p>
             {stale && (
-              <p role="alert">
+              <GitError role="alert">
                 The selection changed. Close this dialog and review the file
                 again.
-              </p>
+              </GitError>
             )}
-            {error && <p role="alert">{error}</p>}
-            <footer>
+            {error && <GitError role="alert">{error}</GitError>}
+            <GitFormActions>
               <Button disabled={busy} onClick={() => setSelection(null)}>
                 Cancel
               </Button>
@@ -145,8 +151,8 @@ export function GitDiscardControl({
               >
                 Discard changes
               </Button>
-            </footer>
-          </div>
+            </GitFormActions>
+          </GitConfirmationBody>
         </Modal>
       )}
     </>

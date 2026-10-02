@@ -159,8 +159,14 @@ it("reads only selected stash commits and loads untracked details on demand", as
     await click("Stashes");
     await click("Saved edits");
     expect(commit.mock.calls).toEqual([["repo", tracked]]);
-    expect(document.querySelector(".git-stash-sidebar")).not.toBeNull();
-    expect(document.querySelector(".git-stash-sidebar [aria-pressed=true]")).not.toBeNull();
+    expect(
+      document.querySelector("[data-slot=git-stash-sidebar]"),
+    ).not.toBeNull();
+    expect(
+      document.querySelector(
+        "[data-slot=git-stash-sidebar] [aria-pressed=true]",
+      ),
+    ).not.toBeNull();
     expect(document.querySelector('[data-testid="preview"]')?.textContent).toBe(
       tracked,
     );

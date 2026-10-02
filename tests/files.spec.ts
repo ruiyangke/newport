@@ -201,11 +201,11 @@ test("files browse folders, paginate long lists, filter and recover from errors"
   ).toBeVisible();
   await page.getByRole("button", { name: "Home folder", exact: true }).click();
   await page
-    .locator(".file-list")
+    .locator("[data-slot=file-list]")
     .getByRole("button", { name: "logs", exact: true })
     .click();
   await expect(page.getByText("235 items", { exact: true })).toBeVisible();
-  await expect(page.locator(".file-list tbody tr")).toHaveCount(100);
+  await expect(page.locator("[data-slot=file-list] tbody tr")).toHaveCount(100);
   await page.getByRole("button", { name: "Next", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "application-100.log", exact: true }),
@@ -233,7 +233,7 @@ test("files browse folders, paginate long lists, filter and recover from errors"
   await page
     .getByRole("textbox", { name: "Filter files", exact: true })
     .fill("234");
-  await expect(page.locator(".file-list tbody tr")).toHaveCount(1);
+  await expect(page.locator("[data-slot=file-list] tbody tr")).toHaveCount(1);
   await page
     .getByRole("textbox", { name: "Remote path", exact: true })
     .fill("/denied");
@@ -247,7 +247,7 @@ test("files browse folders, paginate long lists, filter and recover from errors"
     (window as any).__denyDocuments = true;
   });
   await page
-    .locator(".file-list")
+    .locator("[data-slot=file-list]")
     .getByRole("button", { name: "Documents", exact: true })
     .click();
   await expect(page.getByRole("alert")).toContainText(
@@ -296,7 +296,7 @@ test("files preview inert text, real PDF pages and images; upload and cancel dow
     page.getByRole("button", { name: "Previous PDF page" }),
   ).toBeEnabled();
   const ink = await page
-    .locator(".pdf-sheet > canvas")
+    .locator("[data-slot=pdf-sheet] > canvas")
     .evaluate((canvas: HTMLCanvasElement) => {
       const pixels = canvas
         .getContext("2d")!
@@ -308,7 +308,9 @@ test("files preview inert text, real PDF pages and images; upload and cancel dow
   await page.setViewportSize({ width: 640, height: 480 });
   await expect
     .poll(async () => {
-      const canvas = await page.locator(".pdf-sheet > canvas").boundingBox();
+      const canvas = await page
+        .locator("[data-slot=pdf-sheet] > canvas")
+        .boundingBox();
       const text = await page.locator(".textLayer").boundingBox();
       return (
         Math.abs(canvas!.width - text!.width) < 2 &&

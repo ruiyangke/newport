@@ -38,10 +38,16 @@ export function WindowControls() {
     );
   };
   return (
-    <div className="window-controls" role="group" aria-label="Window controls">
+    <div
+      data-slot="window-controls"
+      className="ml-[6px] flex shrink-0 items-center gap-[2px] border-l border-border pl-[8px]"
+      role="group"
+      aria-label="Window controls"
+    >
       <Button
         variant="ghost"
         size="icon"
+        className="size-[32px] rounded-[5px]"
         aria-label="Minimize"
         title="Minimize"
         onClick={() => run(() => getCurrentWindow().minimize())}
@@ -51,6 +57,7 @@ export function WindowControls() {
       <Button
         variant="ghost"
         size="icon"
+        className="size-[32px] rounded-[5px]"
         aria-label={maximized ? "Restore" : "Maximize"}
         title={maximized ? "Restore" : "Maximize"}
         onClick={() => run(() => getCurrentWindow().toggleMaximize())}
@@ -60,7 +67,7 @@ export function WindowControls() {
       <Button
         variant="ghost"
         size="icon"
-        className="window-close"
+        className="size-[32px] rounded-[5px] hover:bg-destructive hover:text-white"
         aria-label="Close window"
         title="Close window"
         onClick={() => run(() => getCurrentWindow().close())}

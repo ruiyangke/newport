@@ -1,3 +1,9 @@
+import {
+  GitConfirmationBody,
+  GitError,
+  GitField,
+  GitFormActions,
+} from "./GitForm";
 import { useState } from "react";
 import type { GitStatus } from "../domain/gitResponses";
 import type { GitWriteAction } from "../domain/git";
@@ -36,13 +42,13 @@ export function GitIntegrationControls({
       aria-label="Active Git operation"
     >
       <div className="min-w-[220px] flex-1">
-        <strong className="text-[13px] font-[600]">
+        <strong className="text-[13px] font-semibold">
           {label} in progress
           {integration.total != null && integration.position != null
             ? ` · ${integration.position} of ${integration.total}`
             : ""}
         </strong>
-        <p className="mt-[4px]! text-[12px] text-muted-foreground">
+        <p className="mt-[4px] text-[12px] text-muted-foreground">
           {!integration.managed
             ? "This operation cannot be managed by Newport. Finish it with the tool that started it, then refresh."
             : conflicts
@@ -87,8 +93,8 @@ export function GitIntegrationControls({
           busy={busy}
           onClose={() => setConfirm(null)}
         >
-          <div className="git-integration-confirm">
-            {error && <p role="alert">{error}</p>}
+          <GitConfirmationBody>
+            {error && <GitError role="alert">{error}</GitError>}
             <p>
               {confirm === "abort"
                 ? "Return to the state before this operation. Conflict resolutions and edits made during it may be discarded."
@@ -97,7 +103,7 @@ export function GitIntegrationControls({
                   : "Omit the current commit from this rebase and discard its pending resolution. Later commits will still be processed."}
             </p>
             {confirm === "continue" && (
-              <label>
+              <GitField>
                 Commit message (optional)
                 <Textarea
                   value={commitMessage}
@@ -105,9 +111,9 @@ export function GitIntegrationControls({
                   disabled={busy}
                   rows={3}
                 />
-              </label>
+              </GitField>
             )}
-            <footer>
+            <GitFormActions>
               <Button disabled={busy} onClick={() => setConfirm(null)}>
                 Cancel
               </Button>
@@ -141,8 +147,8 @@ export function GitIntegrationControls({
                     ? "Continue operation"
                     : "Skip commit"}
               </Button>
-            </footer>
-          </div>
+            </GitFormActions>
+          </GitConfirmationBody>
         </Modal>
       )}
     </section>

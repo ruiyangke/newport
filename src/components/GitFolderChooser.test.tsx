@@ -90,11 +90,15 @@ function button(label: string) {
 }
 function folder(name: string) {
   return [
-    ...document.querySelectorAll<HTMLButtonElement>(".git-folder-name"),
+    ...document.querySelectorAll<HTMLButtonElement>(
+      "[data-slot=git-folder-name]",
+    ),
   ].find((b) => b.textContent === name)!;
 }
 const folderNames = () =>
-  [...document.querySelectorAll(".git-folder-name")].map((b) => b.textContent);
+  [...document.querySelectorAll("[data-slot=git-folder-name]")].map(
+    (b) => b.textContent,
+  );
 function pathField() {
   const label = [...document.querySelectorAll("label")].find(
     (element) => element.textContent === "Server path",
@@ -264,6 +268,6 @@ it("chooses straight through when the folder is already the root", async () => {
 it("renders nothing while it is closed", async () => {
   const { node } = render({ open: false });
   await act(async () => root.render(node));
-  expect(document.querySelector(".git-folder-list")).toBeNull();
+  expect(document.querySelector("[data-slot=git-folder-list]")).toBeNull();
   expect(api.desktop).not.toHaveBeenCalled();
 });

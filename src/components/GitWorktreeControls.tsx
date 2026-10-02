@@ -1,3 +1,17 @@
+import {
+  GitInspectorToolbar,
+  GitInspectorSearch,
+  GitInspectorList,
+  GitInspectorSummary,
+  GitInspectorDetails,
+} from "./GitInspectorPrimitives";
+import {
+  GitForm,
+  GitField,
+  GitFieldHint,
+  GitCheckboxField,
+  GitFormActions,
+} from "./GitForm";
 import { FolderTree, Plus, Search, ChevronRight } from "lucide-react";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -11,6 +25,7 @@ import { useGitPageLoader } from "../hooks/useGitPageLoader";
 import { gitErrorMessage } from "../git/errors";
 import { gitProjectsFor } from "../git/registry";
 import { GitLoadMore } from "./GitLoadMore";
+import { plural } from "../lib/utils";
 import {
   Select,
   SelectContent,
@@ -27,7 +42,7 @@ type Editing =
 /** Every paragraph in the dialog body reads as secondary copy. */
 const NOTE = "text-[12px] text-muted-foreground";
 /** A worktree row's details sit a step below its name. */
-const ROW_NOTE = `${NOTE} mt-[6px]!`;
+const ROW_NOTE = `${NOTE} mt-[6px]`;
 function usable(path: GitPath | null) {
   try {
     return !!path && gitPath(path.display).bytesB64 === path.bytesB64;
@@ -195,7 +210,7 @@ function WorktreeDialog({
       busy={busy}
       onClose={onClose}
     >
-      <div className="git-worktree-body min-h-0 min-w-0 px-[16px] pb-[16px] wrap-anywhere">
+      <div className="min-h-0 flex-auto overflow-y-auto overscroll-contain min-w-0 px-[16px] pb-[16px] wrap-anywhere">
         {blockedReason && (
           <p className={NOTE} role="status">
             {blockedReason}
@@ -217,8 +232,7 @@ function WorktreeDialog({
           </div>
         )}
         {editing ? (
-          <form
-            className="git-project-form"
+          <GitForm
             onSubmit={(event) => {
               event.preventDefault();
               if (disabled) return;
@@ -279,7 +293,7 @@ function WorktreeDialog({
                   Check out an existing local branch in a separate directory on
                   this server. Create a branch in Branches first if needed.
                 </p>
-                <label>
+                <GitField>
                   Worktree name
                   <Input
                     autoFocus
@@ -288,8 +302,8 @@ function WorktreeDialog({
                     onChange={(event) => setName(event.target.value)}
                     disabled={busy}
                   />
-                </label>
-                <label>
+                </GitField>
+                <GitField>
                   Destination on server
                   <Input
                     required
@@ -298,11 +312,11 @@ function WorktreeDialog({
                     disabled={busy}
                     placeholder="/home/user/projects/feature"
                   />
-                  <small>
+                  <GitFieldHint>
                     The parent directory must exist; the destination must not.
-                  </small>
-                </label>
-                <label>
+                  </GitFieldHint>
+                </GitField>
+                <GitField>
                   Local branch
                   <Select
                     open={branchSelectOpen}
@@ -339,7 +353,7 @@ function WorktreeDialog({
                       </div>
                     </SelectContent>
                   </Select>
-                </label>
+                </GitField>
                 {branchLoading && (
                   <p className={NOTE} role="status">
                     Loading branches…
@@ -351,7 +365,7 @@ function WorktreeDialog({
                     {!repository.bare && " The current branch cannot be used."}
                   </p>
                 )}
-                <label className="git-checkbox-row">
+                <GitCheckboxField>
                   <Checkbox
                     checked={locked}
                     onCheckedChange={(value) => setLocked(value === true)}
@@ -359,7 +373,7 @@ function WorktreeDialog({
                     aria-label="Lock against removal"
                   />
                   Lock against removal
-                </label>
+                </GitCheckboxField>
               </>
             ) : (
               <>
@@ -372,7 +386,7 @@ function WorktreeDialog({
                     <p className={NOTE}>
                       A lock protects this worktree from removal and pruning.
                     </p>
-                    <label>
+                    <GitField>
                       Reason (optional)
                       <Input
                         autoFocus
@@ -380,7 +394,7 @@ function WorktreeDialog({
                         onChange={(event) => setReason(event.target.value)}
                         disabled={busy}
                       />
-                    </label>
+                    </GitField>
                   </>
                 )}
                 {editing.kind === "unlock" && (
@@ -408,7 +422,7 @@ function WorktreeDialog({
                       Select the folder after moving it. Its files and
                       uncommitted changes will be kept.
                     </p>
-                    <label>
+                    <GitField>
                       New location on server
                       <Input
                         autoFocus
@@ -417,18 +431,19 @@ function WorktreeDialog({
                         onChange={(event) => setPath(event.target.value)}
                         disabled={busy}
                       />
-                    </label>
+                    </GitField>
                   </>
                 )}
               </>
             )}
-            <footer>
+            <GitFormActions>
               <Button disabled={busy} onClick={() => setEditing(null)}>
                 Back
               </Button>
               <Button
                 type="submit"
                 loading={busy}
+                variant={editing.kind === "remove" ? "destructive" : "default"}
                 disabled={
                   disabled ||
                   (editing.kind === "add" &&
@@ -442,13 +457,13 @@ function WorktreeDialog({
               >
                 {titles[editing.kind]}
               </Button>
-            </footer>
-          </form>
+            </GitFormActions>
+          </GitForm>
         ) : (
           <>
-            <div className="git-inspector-toolbar">
-              <span className="git-inspector-count">
-                {page?.entries.length ?? 0} worktrees
+            <GitInspectorToolbar>
+              <span className="text-[11px] font-normal text-muted-foreground">
+                {plural(page?.entries.length ?? 0, "worktree")}
                 {page?.nextCursor ? " loaded" : ""}
               </span>
               <Button
@@ -464,8 +479,8 @@ function WorktreeDialog({
                 <Plus size={13} aria-hidden="true" />
                 <span>Add worktree</span>
               </Button>
-            </div>
-            <div className="git-inspector-search">
+            </GitInspectorToolbar>
+            <GitInspectorSearch>
               <Search size={13} aria-hidden="true" />
               <Input
                 aria-label="Filter loaded worktrees"
@@ -473,7 +488,7 @@ function WorktreeDialog({
                 value={filter}
                 onChange={(event) => setFilter(event.target.value)}
               />
-            </div>
+            </GitInspectorSearch>
             {loading && (
               <p className={NOTE} role="status">
                 Loading worktrees…
@@ -482,7 +497,7 @@ function WorktreeDialog({
             {page?.entries.length === 0 && (
               <p className={NOTE}>No worktrees found.</p>
             )}
-            <ul className="git-worktree-list git-inspector-list">
+            <GitInspectorList className="git-worktree-list">
               {page?.entries
                 .filter(
                   (row) =>
@@ -500,20 +515,17 @@ function WorktreeDialog({
                     usable(row.name) &&
                     (row.state === "available" || row.state === "missing");
                   return (
-                    <li
-                      key={row.gitDir.bytesB64}
-                      className="git-inspector-list-item"
-                    >
-                      <details className="git-worktree-disclosure">
-                        <summary className="git-inspector-row">
+                    <li key={row.gitDir.bytesB64} className="my-[2px]">
+                      <details className="group/worktree">
+                        <GitInspectorSummary>
                           <FolderTree
                             size={14}
-                            className="git-inspector-row-icon"
+                            className="flex-none text-muted-foreground"
                             aria-hidden="true"
                           />
-                          <span className="git-inspector-row-copy">
+                          <span className="grid min-w-0 flex-1 gap-[3px]">
                             <strong
-                              className="git-inspector-row-title"
+                              className="truncate text-[12px] font-medium"
                               title={row.name?.display ?? "Main worktree"}
                             >
                               {row.name?.display ??
@@ -522,7 +534,7 @@ function WorktreeDialog({
                                   : "Main worktree")}
                             </strong>
                             <span
-                              className="git-inspector-row-meta git-inspector-row-title"
+                              className="truncate text-[12px] font-medium text-muted-foreground"
                               title={row.head?.name?.display}
                             >
                               {row.head?.name?.display.replace(
@@ -538,11 +550,11 @@ function WorktreeDialog({
                           </span>
                           <ChevronRight
                             size={12}
-                            className="git-worktree-chevron"
+                            className="group-open/worktree:rotate-90"
                             aria-hidden="true"
                           />
-                        </summary>
-                        <div className="git-inspector-details">
+                        </GitInspectorSummary>
+                        <GitInspectorDetails>
                           <p className={ROW_NOTE}>
                             {row.path?.display ?? "Path unavailable"}
                           </p>
@@ -575,7 +587,7 @@ function WorktreeDialog({
                             </p>
                           )}
                           {mutable && (
-                            <div className="git-worktree-actions mx-0 my-[12px] flex flex-wrap items-center gap-[8px]">
+                            <div className="[&>button]:max-w-full [&>button]:h-auto [&>button]:min-h-[26px] [&>button]:whitespace-normal mx-0 my-[12px] flex flex-wrap items-center gap-[8px]">
                               {row.locked !== null && (
                                 <Button
                                   disabled={disabled}
@@ -613,12 +625,12 @@ function WorktreeDialog({
                               )}
                             </div>
                           )}
-                        </div>
+                        </GitInspectorDetails>
                       </details>
                     </li>
                   );
                 })}
-            </ul>
+            </GitInspectorList>
             {page && (
               <GitLoadMore
                 cursor={page.nextCursor}

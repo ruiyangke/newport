@@ -1,7 +1,9 @@
+import { CollectionCount } from "./SectionHeader";
 import { useWorkspaceState } from "../state/workspace";
-import { Search } from "lucide-react";
-import { Button, RefreshButton, Input, Select, SelectItem } from "./controls";
-import "./services.css";
+import { Button, RefreshButton, Select, SelectItem } from "./controls";
+import { PageHeader } from "./PageHeader";
+import { ServiceRow, ServiceColumns } from "./ServiceRow";
+import { SearchField } from "./SearchField";
 
 export type { Service as SystemService } from "../domain/cockpit";
 import type { Service as SystemService, Log } from "../domain/cockpit";
@@ -47,46 +49,45 @@ export function ServicesPanel({
     state.data?.filter((service) => service.active === "active").length ?? 0;
 
   return (
-    <div className="services-panel">
-      <div className="services-masthead">
-        <div>
-          <h2>System services</h2>
-          <p>
-            {state.data
-              ? `${state.data.length} loaded · ${active} active · ${failed} failed`
-              : "Loaded systemd services"}
-          </p>
-        </div>
-        <div className="services-refresh">
-          <span className="muted">
-            {state.busy
-              ? "Reading server…"
-              : state.updated
-                ? `${state.error ? "Last success" : "Updated"} ${state.updated.toLocaleTimeString()}`
-                : "Not loaded"}
-          </span>
-          <RefreshButton busy={state.busy} onClick={state.refresh} />
-        </div>
-      </div>
+    <div data-slot="services-panel">
+      <PageHeader
+        title="System services"
+        subtitle={
+          state.data
+            ? `${state.data.length} loaded · ${active} active · ${failed} failed`
+            : "Loaded systemd services"
+        }
+        actions={<RefreshButton busy={state.busy} onClick={state.refresh} />}
+        meta={
+          state.busy
+            ? "Reading server…"
+            : state.updated
+              ? `${state.error ? "Last success" : "Updated"} ${state.updated.toLocaleTimeString()}`
+              : "Not loaded"
+        }
+      />
       {state.error && (
-        <p className="cockpit-error" role="alert">
+        <p
+          data-slot="cockpit-error"
+          className="text-[12px] leading-[1.6] text-(--red) wrap-anywhere"
+          role="alert"
+        >
           {state.error}
           {state.data
             ? " Showing previous results. Refresh to retry."
             : " Refresh to retry."}
         </p>
       )}
-      <div className="services-filterbar">
-        <div className="search cockpit-search">
-          <Search size={14} aria-hidden="true" />
-          <Input
-            aria-label="Filter services"
-            placeholder="Find a service or state"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </div>
+      <div className="mb-[16px] flex flex-wrap items-center gap-[8px]">
+        <SearchField
+          className="min-w-[170px] flex-1"
+          aria-label="Filter services"
+          placeholder="Find a service or state"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
         <Select
+          className="w-[112px]"
           aria-label="Filter by service state"
           value={filter}
           onValueChange={(value) =>
@@ -109,18 +110,18 @@ export function ServicesPanel({
           System journal
         </Button>
       </div>
-      <div className="services-results">
-        <p className="collection-count">
-          {rows
-            ? `Showing ${rows.length} of ${state.data?.length} services`
-            : state.error
-              ? "Service inventory unavailable"
-              : "Reading services…"}
-        </p>
-        {filtered && (
+      {filtered && (
+        <div className="flex min-h-[40px] items-center justify-between gap-[8px]">
+          <CollectionCount className="m-0">
+            {rows
+              ? `Showing ${rows.length} of ${state.data?.length} services`
+              : state.error
+                ? "Service inventory unavailable"
+                : "Reading services…"}
+          </CollectionCount>
           <Button
             variant="ghost"
-            className="text-button"
+
             onClick={() => {
               setQuery("");
               setFilter("all");
@@ -128,74 +129,49 @@ export function ServicesPanel({
           >
             Clear filters
           </Button>
-        )}
-      </div>
-      <div className="services-ledger" aria-busy={state.busy}>
-        <div className="services-columns" aria-hidden="true">
-          <span>Service</span>
-          <span>State</span>
-          <span>Logs</span>
         </div>
-        <ul className="services-list" role="list" aria-label="System services">
+      )}
+      <div
+        className="overflow-hidden rounded-[6px] border border-border"
+        aria-busy={state.busy}
+      >
+        <ServiceColumns />
+        <ul
+          className="m-0 list-none p-0"
+          role="list"
+          aria-label="System services"
+        >
           {rows?.map((service) => (
-            <li data-scroll-anchor className="services-row" key={service.name}>
-              <div className="services-identity">
-                <strong>{service.name}</strong>
-                {service.description && <small>{service.description}</small>}
-              </div>
-              <div className="services-state">
-                <span
-                  className={`status ${service.active === "failed" ? "error" : service.active === "active" ? "connected" : ""}`}
-                >
-                  <span className="status-dot" aria-hidden="true" />
-                  {service.active[0]?.toUpperCase()}
-                  {service.active.slice(1)}
-                </span>
-                {service.sub !== service.active && <small>{service.sub}</small>}
-                {service.load !== "loaded" && (
-                  <small>Load: {service.load}</small>
-                )}
-              </div>
-              <Button
-                variant="ghost"
-                aria-label={`View logs for ${service.name}`}
-                onClick={(event) =>
-                  onLogs(
-                    {
-                      source: "service",
-                      target: service.name,
-                      title: service.name,
-                    },
-                    event.currentTarget,
-                  )
-                }
-              >
-                Logs
-              </Button>
-            </li>
+            <ServiceRow key={service.name} service={service} onLogs={onLogs} />
           ))}
         </ul>
         {!state.data && !state.error && (
-          <p className="services-empty" role="status">
-            Loading system services…
+          <p
+            className="m-0 px-[16px] py-[24px] text-[12px] text-muted-foreground"
+            role="status"
+          >
+            Reading system services…
           </p>
         )}
         {!state.data && state.error && (
-          <p className="services-empty">
+          <p className="m-0 px-[16px] py-[24px] text-[12px] text-muted-foreground">
             Refresh to load this server’s services.
           </p>
         )}
         {rows?.length === 0 && (
-          <p className="services-empty" role="status">
+          <p
+            className="m-0 px-[16px] py-[24px] text-[12px] text-muted-foreground"
+            role="status"
+          >
             {filtered
               ? "No matching services. Try another name or state."
               : "No loaded services found."}
           </p>
         )}
       </div>
-      <p className="services-scope">
+      <p className="mt-[14px] text-[11px] leading-[1.5] text-muted-foreground">
         Up to 500 loaded services, including inactive ones. Failed services
-        first.
+        first. Monitoring is read-only; no agent is installed on the server.
       </p>
     </div>
   );

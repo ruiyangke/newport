@@ -5,17 +5,9 @@ import { fileURLToPath } from "node:url";
 import { installAppFixture } from "./fixtures/appFixture";
 
 /**
- * Computed-style regression for the move off hand-written CSS.
- *
- * Keyed by class name rather than by position in the tree: the question this
- * has to answer is "does `.server-item` still compute the same styles now that
- * its rules are utilities?", and that must hold regardless of how many rows
- * the fixture happens to render. Geometry is deliberately excluded — panel
- * content varies with load timing, and layout is already covered by the
- * behavioural suite in app.spec.ts.
- *
- * Refresh deliberately, never casually:
- *   UPDATE_STYLE_SNAPSHOT=1 npx playwright test tests/styles.spec.ts --project=chromium
+ * Track component identities (legacy CSS classes and data-slot attributes).
+ * Utility classes are shared across unrelated elements, so the first `.flex`
+ * on a page is not a stable visual regression target.
  */
 const PANELS = [
   "Overview",
@@ -29,7 +21,7 @@ const PANELS = [
 // Lazy panels mount after their chunk loads; a fixed wait raced the mount and
 // silently left the terminal pane out of the Chromium baseline.
 const PANEL_READY: Partial<Record<(typeof PANELS)[number], string>> = {
-  Terminal: ".terminal-bar",
+  Terminal: "[data-slot=terminal-bar]",
 };
 
 const PROPS = [
@@ -87,18 +79,42 @@ const UPDATE = process.env.UPDATE_STYLE_SNAPSHOT === "1";
 // auto margins, an implicit grid track, and 70ch vary with OS font metrics.
 const CONTENT_GEOMETRY: Record<string, string> = {
   "source-count": "marginLeft",
-  "overview-refresh": "gridTemplateColumns",
   "section-description": "maxWidth",
 };
 
-/** First element bearing each class, and what the browser computes for it. */
+// Read only authored CSS, not generated Tailwind utilities or vendor styles.
+const sourceRoot = path.resolve(here, "../src");
+const authoredClasses = new Set(
+  fs
+    .readdirSync(sourceRoot, { recursive: true })
+    .filter(
+      (name): name is string =>
+        typeof name === "string" && name.endsWith(".css"),
+    )
+    .flatMap((name) =>
+      [
+        ...fs
+          .readFileSync(path.join(sourceRoot, name), "utf8")
+          .matchAll(/\.([a-zA-Z_][\w-]*)/g),
+      ].map((match) => match[1]),
+    ),
+);
+
+/** Capture a component once, regardless of how many utilities it uses. */
 async function captureByClass(page: Page) {
   return page.evaluate(
-    (props) => {
+    ({ props, authoredClasses }) => {
       const out: Record<string, string> = {};
-      for (const el of document.querySelectorAll<HTMLElement>("[class]")) {
+      for (const el of document.querySelectorAll<HTMLElement>(
+        "[class], [data-slot]",
+      )) {
         const cs = getComputedStyle(el);
-        for (const name of el.classList) {
+        const names = [...el.classList].filter((name) =>
+          authoredClasses.includes(name),
+        );
+        const slot = el.dataset.slot;
+        if (slot) names.push(slot);
+        for (const name of names) {
           if (out[name]) continue;
           // Browsers serialise computed numbers to different precision --
           // WebKit reports `color(srgb 0.098039 …)` and `18.571428px` where
@@ -118,11 +134,14 @@ async function captureByClass(page: Page) {
       }
       return out;
     },
-    PROPS as unknown as string[],
+    {
+      props: PROPS as unknown as string[],
+      authoredClasses: [...authoredClasses],
+    },
   );
 }
 
-test("class styles match the recorded baseline", async ({ page }) => {
+test("component styles match the recorded baseline", async ({ page }) => {
   test.setTimeout(120_000);
   // Relative timestamps and uptime readouts otherwise change between runs.
   await page.clock.setFixedTime(new Date("2026-01-01T12:00:00Z"));

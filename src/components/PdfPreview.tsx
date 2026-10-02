@@ -1,3 +1,4 @@
+import "./pdfTextLayer.css";
 import { useEffect, useRef, useState } from "react";
 import {
   getDocument,
@@ -109,8 +110,11 @@ function DocumentPreview({ content }: { content: string }) {
     };
   }, [document, page, availableWidth]);
   return (
-    <div className="pdf-preview">
-      <div className="pdf-navigation">
+    <div data-slot="pdf-preview" className="flex h-full min-h-0 flex-col">
+      <div
+        data-slot="pdf-navigation"
+        className="flex shrink-0 items-center justify-center gap-[12px] border-b border-border bg-background p-[8px] text-[11px] tabular-nums"
+      >
         <Button
           size="icon"
           aria-label="Previous PDF page"
@@ -138,19 +142,28 @@ function DocumentPreview({ content }: { content: string }) {
         </Button>
       </div>
       {error ? (
-        <p role="alert" className="file-error">
+        <p
+          role="alert"
+          data-slot="file-error"
+          className="p-[10px] text-(--red) wrap-anywhere"
+        >
           {error}. Download the file to open it.
         </p>
       ) : (
         <div
-          className="pdf-page"
+          data-slot="pdf-page"
+          className="min-h-0 flex-1 overflow-auto bg-muted p-[24px] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring max-[800px]:p-[12px]"
           ref={scrollArea}
           role="region"
           aria-label="PDF page content"
           tabIndex={0}
         >
-          <div className="pdf-sheet">
-            <canvas ref={canvas} aria-hidden="true" />
+          <div data-slot="pdf-sheet" className="relative m-auto bg-white">
+            <canvas
+              className="m-auto block h-auto max-w-full bg-white shadow-[0_2px_8px_#00000018]"
+              ref={canvas}
+              aria-hidden="true"
+            />
             <div className="textLayer" ref={textLayer} />
           </div>
         </div>

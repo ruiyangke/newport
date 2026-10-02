@@ -1,3 +1,4 @@
+import { GitError } from "./GitForm";
 import type { GitStatus } from "../domain/gitResponses";
 import type { GitOperationReceipt, GitWriteAction } from "../domain/git";
 import { Button, Textarea } from "./controls";
@@ -5,6 +6,7 @@ import { GitDiscardControl } from "./GitDiscardControl";
 import { useState } from "react";
 import { Modal } from "./Editors";
 import { Checkbox } from "./ui/checkbox";
+import { cn } from "../lib/utils";
 
 /** Helper copy in the recovery panel: small and muted. */
 const note = "text-[12px] text-muted-foreground";
@@ -36,7 +38,10 @@ export function GitFileActions({
 }) {
   return (
     <div
-      className={`git-stage-controls flex flex-none flex-wrap items-center gap-[6px] ${className}`}
+      className={cn(
+        "git-stage-controls flex flex-none flex-wrap items-center gap-[6px]",
+        className,
+      )}
       role="group"
       aria-label={`Actions for ${entry.path?.display ?? entry.oldPath?.display ?? "the selected file"}`}
     >
@@ -132,7 +137,7 @@ export function GitWriteControls({
           </label>
           <Button
             type="submit"
-            className="[justify-self:start]"
+            className="justify-self-start"
             disabled={!canCommit}
           >
             Commit staged changes
@@ -184,7 +189,7 @@ export function GitRecoveryPanel({
       aria-label="Git operation recovery"
     >
       <header className="flex flex-wrap items-center gap-[8px]">
-        <h3 className="flex-1 text-[13px]! font-[600]!">
+        <h3 className="flex-1 text-[13px] font-semibold">
           Saved outcomes on this server
         </h3>
         <Button disabled={busy} onClick={onRefresh}>
@@ -195,9 +200,9 @@ export function GitRecoveryPanel({
         These operations may belong to another repository on this server.
       </p>
       {error && (
-        <p role="alert" className={note}>
+        <GitError role="alert" className="text-[12px]">
           {error}
-        </p>
+        </GitError>
       )}
       {receipts?.map((receipt) => {
         const unresolved =
@@ -207,14 +212,14 @@ export function GitRecoveryPanel({
             className="git-recovery-row flex flex-wrap items-center gap-[8px] pt-[12px]"
             key={receipt.operationId}
           >
-            <div className="min-w-[200px] flex-1 [overflow-wrap:anywhere]">
+            <div className="min-w-[200px] flex-1 wrap-anywhere">
               <strong className="text-[12px] font-[500]">
                 {receipt.action} · {outcomeLabels[receipt.state]}
               </strong>
               <p className={note}>
                 {repositories[receipt.operationId] ?? "Repository not recorded"}
               </p>
-              <code className="block text-[11px]! text-muted-foreground">
+              <code className="block text-[11px] text-muted-foreground">
                 {receipt.operationId}
               </code>
               {unresolved && (
@@ -282,6 +287,7 @@ export function GitRecoveryPanel({
                 Cancel
               </Button>
               <Button
+                variant="default"
                 disabled={busy || !inspected}
                 onClick={() => {
                   if (!inspected || busy) return;

@@ -1,7 +1,16 @@
+import { cn } from "../lib/utils";
+import {
+  EditorBody,
+  EditorSection,
+  EditorFooter,
+  EditorCheckboxField,
+} from "./EditorLayout";
+import { SectionActions } from "./SectionHeader";
 import type { AgentKey } from "../api/desktop";
 import { Label } from "./ui/label";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
-import { Checkbox, Button, Input, Select, SelectItem } from "./controls";
+import { Checkbox, Button, SelectItem } from "./controls";
+import { EditorInput as Input, EditorSelect as Select } from "./EditorControls";
 import { desktop } from "../api/desktop";
 import {
   useEffect,
@@ -36,17 +45,25 @@ export function Modal({
       }}
     >
       <DialogContent
-        className={`editor-dialog ${className}`}
+        className={cn(
+          "flex w-[480px] max-w-[calc(100vw-32px)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[calc(100vw-32px)]",
+          className,
+        )}
         showCloseButton={false}
         aria-describedby={describedBy}
         aria-busy={busy}
       >
-        <header className="dialog-header">
-          <DialogTitle>{title}</DialogTitle>
+        <header
+          data-slot="dialog-header"
+          className="flex shrink-0 items-center justify-between gap-[12px] px-[24px] pt-[20px] pb-[12px] [@media(max-height:560px),(max-width:540px)]:px-[18px] [@media(max-height:560px),(max-width:540px)]:pt-[14px] [@media(max-height:560px),(max-width:540px)]:pb-[8px]"
+        >
+          <DialogTitle className="text-[17px] font-semibold">
+            {title}
+          </DialogTitle>
           <Button
             variant="ghost"
             size="icon"
-            className="icon"
+            className="shrink-0 text-muted-foreground"
             disabled={busy}
             onClick={onClose}
             aria-label="Close dialog"
@@ -71,10 +88,13 @@ function Field({
   hint?: string;
 }) {
   return (
-    <Label className="field">
-      <span>{label}</span>
+    <Label
+      data-slot="field"
+      className="flex min-w-0 flex-col items-stretch gap-[7px] text-left text-[12px]"
+    >
+      <span className="text-[12px] font-medium">{label}</span>
       {children}
-      {hint && <small>{hint}</small>}
+      {hint && <small className="text-[11px] font-normal">{hint}</small>}
     </Label>
   );
 }
@@ -154,7 +174,7 @@ function KeyPicker({
           ))}
         </Select>
       </Field>
-      <div className="section-actions">
+      <SectionActions>
         <Button
           type="button"
           loading={loading}
@@ -162,19 +182,22 @@ function KeyPicker({
         >
           {loading ? "Reading agent keys…" : "Refresh agent keys"}
         </Button>
-      </div>
+      </SectionActions>
       {!loading && !keys.length && (
-        <p className="muted">
+        <p className="text-[12px] leading-[1.65] text-muted-foreground">
           No keys found. Unlock your SSH agent and refresh, or use a key file.
         </p>
       )}
       {warnings.map((warning) => (
-        <p className="muted" key={warning}>
+        <p
+          className="text-[12px] leading-[1.65] text-muted-foreground"
+          key={warning}
+        >
           {warning}
         </p>
       ))}
       {server.agentKeyFingerprint && (
-        <p className="muted" style={{ overflowWrap: "anywhere" }}>
+        <p className="text-[12px] leading-[1.65] text-muted-foreground wrap-anywhere">
           Selected key: {server.agentKeyFingerprint}
         </p>
       )}
@@ -244,9 +267,9 @@ export function ServerForm({
       busy={busy}
       onClose={onClose}
     >
-      <form onSubmit={submit}>
-        <div className="form-body">
-          <fieldset className="form-section">
+      <form className="flex min-h-0 flex-col" onSubmit={submit}>
+        <EditorBody>
+          <EditorSection>
             <legend>Connection</legend>
             <Field label="Name (optional)">
               <Input
@@ -256,7 +279,7 @@ export function ServerForm({
                 placeholder="Development server"
               />
             </Field>
-            <div className="form-grid">
+            <div className="grid grid-cols-[minmax(0,1fr)_95px] gap-[14px]">
               <Field label="SSH host">
                 <Input
                   required
@@ -289,8 +312,8 @@ export function ServerForm({
                 spellCheck={false}
               />
             </Field>
-          </fieldset>
-          <fieldset className="form-section">
+          </EditorSection>
+          <EditorSection>
             <legend>Sign in</legend>
             <Field label="Authentication">
               <Select
@@ -327,21 +350,21 @@ export function ServerForm({
                 />
               </Field>
             )}
-          </fieldset>
+          </EditorSection>
           {error && (
-            <p role="alert" className="error">
+            <p role="alert" className="text-(--red)">
               {error}
             </p>
           )}
-        </div>
-        <footer className="dialog-footer">
+        </EditorBody>
+        <EditorFooter>
           <Button type="button" disabled={busy} onClick={onClose}>
             Cancel
           </Button>
           <Button type="submit" variant="default" loading={busy}>
             {busy ? "Saving…" : "Save server"}
           </Button>
-        </footer>
+        </EditorFooter>
       </form>
     </Modal>
   );
@@ -402,8 +425,8 @@ export function TunnelForm({
       busy={busy}
       onClose={onClose}
     >
-      <form onSubmit={submit}>
-        <div className="form-body">
+      <form className="flex min-h-0 flex-col" onSubmit={submit}>
+        <EditorBody>
           <Field label="Name">
             <Input
               autoFocus
@@ -412,7 +435,7 @@ export function TunnelForm({
               placeholder="Web application"
             />
           </Field>
-          <div className="port-form">
+          <div className="grid grid-cols-[minmax(0,1fr)_18px_minmax(0,1fr)] items-center gap-[12px] [&>svg]:mt-[20px] [&>svg]:text-muted-foreground">
             <Field label="Local port or range">
               <Input
                 required
@@ -442,7 +465,7 @@ export function TunnelForm({
               spellCheck={false}
             />
           </Field>
-          <label className="check-field">
+          <EditorCheckboxField>
             <Checkbox
               checked={t.autoConnect}
               onCheckedChange={(checked) =>
@@ -450,8 +473,8 @@ export function TunnelForm({
               }
             />
             <span>Connect when Newport starts</span>
-          </label>
-          <label className="check-field">
+          </EditorCheckboxField>
+          <EditorCheckboxField>
             <Checkbox
               checked={t.autoReconnect}
               onCheckedChange={(checked) =>
@@ -462,21 +485,21 @@ export function TunnelForm({
               Reconnect if the connection drops
               <small>Retries up to 10 times.</small>
             </span>
-          </label>
+          </EditorCheckboxField>
           {error && (
-            <p role="alert" className="error">
+            <p role="alert" className="text-(--red)">
               {error}
             </p>
           )}
-        </div>
-        <footer className="dialog-footer">
+        </EditorBody>
+        <EditorFooter>
           <Button type="button" disabled={busy} onClick={onClose}>
             Cancel
           </Button>
           <Button type="submit" variant="default" loading={busy}>
             {busy ? "Saving…" : "Save tunnel"}
           </Button>
-        </footer>
+        </EditorFooter>
       </form>
     </Modal>
   );

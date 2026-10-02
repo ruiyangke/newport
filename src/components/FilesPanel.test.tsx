@@ -188,7 +188,7 @@ it("keeps the user in Files and shows the real error when the save fails", async
   };
   await render();
   await act(async () => button("Open docs as project")!.click());
-  const alert = host.querySelector(".files-project-error");
+  const alert = host.querySelector("[data-slot=files-project-error]");
   expect(alert?.textContent).toContain(
     "A project already bookmarks that folder.",
   );
@@ -201,7 +201,7 @@ it("keeps the user in Files and shows the real error when the save fails", async
       .find((element) => element.textContent === "Dismiss")!
       .click(),
   );
-  expect(host.querySelector(".files-project-error")).toBeNull();
+  expect(host.querySelector("[data-slot=files-project-error]")).toBeNull();
   expect(button("Open docs as project")!.disabled).toBe(false);
 });
 
@@ -222,5 +222,5 @@ it("discards a save that lands after the connection scope changed", async () => 
   });
   await act(async () => undefined);
   expect(location).toBe("/servers/alpha/files");
-  expect(host.querySelector(".files-project-error")).toBeNull();
+  expect(host.querySelector("[data-slot=files-project-error]")).toBeNull();
 });

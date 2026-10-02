@@ -1,3 +1,6 @@
+import { Disclosure } from "./Disclosure";
+import { MetricReading } from "./MetricReading";
+import { SectionHeader } from "./SectionHeader";
 import { useWorkspaceState } from "../state/workspace";
 import {
   Table,
@@ -6,7 +9,7 @@ import {
   TableHead,
   TableBody,
   TableCell,
-} from "./ui/table";
+} from "./MonitoringTable";
 import { Select, SelectItem } from "./controls";
 import {
   Area,
@@ -118,25 +121,27 @@ function Chart({
       );
     };
   return (
-    <figure className="metric-chart">
-      <figcaption>
-        <h3>{title}</h3>
+    <figure data-slot="metric-chart" className="m-0 min-w-0">
+      <figcaption className="flex items-baseline justify-between gap-[8px]">
+        <h3 className="text-[12px] font-medium text-muted-foreground">
+          {title}
+        </h3>
       </figcaption>
-      <div className="chart-readings">
+      <div
+        data-slot="chart-readings"
+        className="mt-[8px] mb-[4px] flex flex-wrap gap-[12px] text-[11px]"
+      >
         {series.map((s) => (
-          <span key={s.name} className={s.dashed ? "chart-secondary" : ""}>
-            <i className={s.dashed ? "dashed" : ""} />
-            {s.name}{" "}
-            <strong>
-              {selected && s.read(selected) !== null
-                ? format(s.read(selected)!)
-                : "—"}
-            </strong>
-          </span>
+          <MetricReading key={s.name} name={s.name} dashed={s.dashed}>
+            {selected && s.read(selected) !== null
+              ? format(s.read(selected)!)
+              : "—"}
+          </MetricReading>
         ))}
       </div>
       <div
-        className="recharts-plot"
+        data-slot="recharts-plot"
+        className="mt-[6px] h-[132px] w-full min-w-0"
         role="img"
         aria-label={`${title} history, ${samples.length} samples. ${series.map((s) => `${s.name}: ${selected && s.read(selected) !== null ? format(s.read(selected)!) : "unavailable"}`).join(". ")}`}
       >
@@ -196,17 +201,23 @@ function Chart({
               }}
               content={({ active, payload, label }) =>
                 active && payload?.length ? (
-                  <div className="metric-tooltip">
-                    <time>
+                  <div
+                    data-slot="metric-tooltip"
+                    className="min-w-[150px] rounded-[8px] border border-border bg-popover p-[12px] text-[12px] text-foreground"
+                  >
+                    <time className="mb-[8px] block text-[10px] text-muted-foreground">
                       {new Date(start).toDateString() !==
                       new Date(end).toDateString()
                         ? new Date(Number(label)).toLocaleString()
                         : time(Number(label))}
                     </time>
                     {payload.map((p) => (
-                      <div key={String(p.dataKey)}>
+                      <div
+                        key={String(p.dataKey)}
+                        className="mt-[5px] flex justify-between gap-[20px]"
+                      >
                         <span>{p.name}</span>
-                        <strong>
+                        <strong className="font-[550] tabular-nums">
                           {typeof p.value === "number" ? format(p.value) : "—"}
                         </strong>
                       </div>
@@ -287,8 +298,11 @@ export function MetricGraphs({
   const scale = netMax >= 1048576 ? 1048576 : netMax >= 1024 ? 1024 : 1;
   const unit = scale === 1048576 ? "MiB/s" : scale === 1024 ? "KiB/s" : "B/s";
   return (
-    <section className="metric-history">
-      <div className="section-heading">
+    <section
+      data-slot="metric-history"
+      className="mt-[22px] border-t border-border pt-[20px]"
+    >
+      <SectionHeader>
         <h2>Usage history</h2>
         <Select
           aria-label="History time window"
@@ -301,12 +315,18 @@ export function MetricGraphs({
           <SelectItem value="1440">Last 24 hours</SelectItem>
           <SelectItem value="10080">Last 7 days</SelectItem>
         </Select>
-      </div>
-      <p className="history-caption">
+      </SectionHeader>
+      <p
+        data-slot="history-caption"
+        className="mb-[16px] flex flex-wrap justify-between gap-x-[12px] gap-y-[5px] text-[11px] text-muted-foreground"
+      >
         {latest ? `Last reading · ${time(latest.at)}` : "No readings yet"}
         <span>Gaps indicate missing readings</span>
       </p>
-      <div className="metric-grid">
+      <div
+        data-slot="metric-grid"
+        className="grid grid-cols-2 [align-items:end] gap-[20px] max-[700px]:grid-cols-[minmax(0,1fr)]"
+      >
         <Chart
           title="CPU"
           samples={samples}
@@ -343,9 +363,13 @@ export function MetricGraphs({
           }
         />
         <div>
-          <label className="network-interface">
+          <label
+            data-slot="network-interface"
+            className="mb-[6px] flex items-center justify-end gap-[6px] text-[10px] text-muted-foreground"
+          >
             Interface{" "}
             <Select
+              className="h-[26px] max-w-[140px] text-[10px]"
               aria-label="Graph network interface"
               value={selected}
               onValueChange={setIface}
@@ -383,26 +407,25 @@ export function MetricGraphs({
         </div>
       </div>
       {samples.length > 0 && (
-        <details
-          className="history-data system-details"
+        <Disclosure
+          title="View readings"
+          data-slot="history-data"
+          className="border-t border-border pt-[14px]"
           onToggle={(event) => setShowSamples(event.currentTarget.open)}
         >
-          <summary>View readings</summary>
-          <p className="muted">
+          <p className="text-[12px] leading-[1.65] text-muted-foreground mt-[12px]">
             Newest first · Network: {selected || "unavailable"} · — means
             unavailable
           </p>
           <div
-            className="history-table"
+            data-slot="history-table"
+            className="mt-[12px] max-h-[260px] overflow-auto rounded-[6px] border border-border tabular-nums focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
             tabIndex={0}
             role="region"
             aria-label="Recorded metric samples"
           >
             {showSamples && (
-              <Table
-                className="cockpit-table recorded-samples-table"
-                aria-label="Recorded metric samples"
-              >
+              <Table kind="history" aria-label="Recorded metric samples">
                 <caption className="sr-only">
                   Recorded metric samples for the selected history window
                 </caption>
@@ -419,7 +442,7 @@ export function MetricGraphs({
                       <TableHead
                         scope="col"
                         key={label}
-                        className={label === "Time" ? undefined : "numeric"}
+                        numeric={label !== "Time"}
                       >
                         {label}
                       </TableHead>
@@ -449,10 +472,10 @@ export function MetricGraphs({
               </Table>
             )}
           </div>
-        </details>
+        </Disclosure>
       )}
       {samples.length < 2 && (
-        <p className="muted">
+        <p className="-mt-[7px] mb-[20px] text-[11px] text-muted-foreground">
           {samples.length === 0
             ? "No history yet. Readings will appear here as they arrive."
             : "Network speed needs two readings."}

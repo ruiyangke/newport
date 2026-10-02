@@ -1,3 +1,11 @@
+import {
+  GitInspectorToolbar,
+  GitInspectorSearch,
+  GitInspectorList,
+  GitInspectorRow,
+  GitInspectorDetails,
+} from "./GitInspectorPrimitives";
+import { GitForm, GitField, GitFieldHint, GitFormActions } from "./GitForm";
 import { Tag as TagIcon, Plus, Search } from "lucide-react";
 import { GitRemotePicker } from "./GitRemotePicker";
 import { useGitRemoteSelection } from "../hooks/useGitRemoteSelection";
@@ -11,6 +19,7 @@ import { gitProjectsFor } from "../git/registry";
 import { GitLoadMore } from "./GitLoadMore";
 import { gitKeys, gitQueries } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
+import { plural } from "../lib/utils";
 import { Button, Input } from "./controls";
 import { GitInspectorSection } from "./GitInspectorSection";
 import { Textarea } from "./ui/textarea";
@@ -194,7 +203,7 @@ function TagsDialog({
       busy={busy}
       onClose={onClose}
     >
-      <div className="git-tag-body min-h-0 px-[16px] pb-[16px] [overflow-wrap:anywhere]">
+      <div className="min-h-0 flex-auto overflow-y-auto overscroll-contain px-[16px] pb-[16px] wrap-anywhere">
         {blockedReason && (
           <p role="status" className={note}>
             {blockedReason}
@@ -211,8 +220,7 @@ function TagsDialog({
           </div>
         )}
         {editor ? (
-          <form
-            className="git-project-form"
+          <GitForm
             onSubmit={(event) => {
               event.preventDefault();
               if (disabled) return;
@@ -246,7 +254,7 @@ function TagsDialog({
           >
             {editor.kind === "create" ? (
               <>
-                <label>
+                <GitField>
                   Tag name
                   <Input
                     autoFocus
@@ -256,8 +264,8 @@ function TagsDialog({
                     disabled={busy}
                     placeholder="v1.0.0"
                   />
-                </label>
-                <label>
+                </GitField>
+                <GitField>
                   Target object ID
                   <Input
                     aria-label="Target object ID"
@@ -269,12 +277,12 @@ function TagsDialog({
                     pattern="[0-9a-fA-F]{40}"
                     spellCheck={false}
                   />
-                  <small id="git-tag-target-hint">
+                  <GitFieldHint id="git-tag-target-hint">
                     Defaults to the current commit. Enter a full 40-character
                     Git object ID.
-                  </small>
-                </label>
-                <label>
+                  </GitFieldHint>
+                </GitField>
+                <GitField>
                   Tag type
                   <Select
                     value={annotated ? "annotated" : "lightweight"}
@@ -291,9 +299,9 @@ function TagsDialog({
                       <SelectItem value="annotated">Annotated</SelectItem>
                     </SelectContent>
                   </Select>
-                </label>
+                </GitField>
                 {annotated && (
-                  <label>
+                  <GitField>
                     Tag message
                     <Textarea
                       aria-label="Tag message"
@@ -303,10 +311,10 @@ function TagsDialog({
                       onChange={(event) => setAnnotation(event.target.value)}
                       disabled={busy}
                     />
-                    <small id="git-tag-message-hint">
+                    <GitFieldHint id="git-tag-message-hint">
                       Uses the Git identity configured on the server.
-                    </small>
-                  </label>
+                    </GitFieldHint>
+                  </GitField>
                 )}
                 <p className={note}>
                   Creates a local tag. Push it separately to share it with a
@@ -341,7 +349,7 @@ function TagsDialog({
                       </p>
                     )}
                     {!remoteSelection.empty && (
-                      <label>
+                      <GitField>
                         Remote
                         <GitRemotePicker
                           repoId={repoId}
@@ -349,7 +357,7 @@ function TagsDialog({
                           onChange={setRemoteName}
                           disabled={busy}
                         />
-                      </label>
+                      </GitField>
                     )}
                     {remote && (
                       <p className={`git-tag-address ${note}`}>
@@ -362,14 +370,14 @@ function TagsDialog({
                 )}
               </>
             )}
-            <footer>
+            <GitFormActions>
               <Button disabled={busy} onClick={() => setEditor(null)}>
                 Back
               </Button>
               <Button
                 type="submit"
                 loading={busy}
-                variant={editor.kind === "delete" ? "destructive" : undefined}
+                variant={editor.kind === "delete" ? "destructive" : "default"}
                 disabled={
                   disabled ||
                   (editor.kind === "push" && !remote) ||
@@ -385,13 +393,13 @@ function TagsDialog({
                     ? "Delete local tag"
                     : "Push tag"}
               </Button>
-            </footer>
-          </form>
+            </GitFormActions>
+          </GitForm>
         ) : (
           <>
-            <div className="git-inspector-toolbar">
-              <span className="git-inspector-count">
-                {page?.entries.length ?? 0} tags
+            <GitInspectorToolbar>
+              <span className="text-[11px] font-normal text-muted-foreground">
+                {plural(page?.entries.length ?? 0, "tag")}
                 {page?.nextCursor ? " loaded" : ""}
               </span>
               <Button
@@ -406,8 +414,8 @@ function TagsDialog({
               >
                 <Plus size={13} aria-hidden="true" /> New tag
               </Button>
-            </div>
-            <div className="git-inspector-search">
+            </GitInspectorToolbar>
+            <GitInspectorSearch>
               <Search size={13} aria-hidden="true" />
               <Input
                 aria-label="Filter loaded tags"
@@ -415,7 +423,7 @@ function TagsDialog({
                 value={filter}
                 onChange={(event) => setFilter(event.target.value)}
               />
-            </div>
+            </GitInspectorSearch>
             {loading && (
               <p role="status" className={note}>
                 Loading tags…
@@ -429,54 +437,51 @@ function TagsDialog({
               !page.entries.some((tag) =>
                 tag.name.display.toLowerCase().includes(filter.toLowerCase()),
               ) && <p className={note}>No matching loaded tags.</p>}
-            <ul className="git-tag-list git-inspector-list">
+            <GitInspectorList className="git-tag-list">
               {page?.entries
                 .filter((tag) =>
                   tag.name.display.toLowerCase().includes(filter.toLowerCase()),
                 )
                 .map((tag) => (
-                  <li
-                    key={tag.name.bytesB64}
-                    className="git-inspector-list-item"
-                  >
-                    <Button
+                  <li key={tag.name.bytesB64} className="my-[2px]">
+                    <GitInspectorRow
                       variant="ghost"
-                      className="git-inspector-row"
+
                       title={tag.name.display}
                       aria-pressed={selected === tag.name.bytesB64}
                       onClick={() => setSelected(tag.name.bytesB64)}
                     >
                       <TagIcon
                         size={14}
-                        className="git-inspector-row-icon"
+                        className="flex-none text-muted-foreground"
                         aria-hidden="true"
                       />
-                      <span className="git-inspector-row-copy">
-                        <strong className="git-inspector-row-title">
+                      <span className="grid min-w-0 flex-1 gap-[3px]">
+                        <strong className="truncate text-[12px] font-medium">
                           {tag.name.display}
                         </strong>
-                        <span className="git-inspector-row-meta">
+                        <span className="text-[11px] font-normal text-muted-foreground">
                           {tag.annotated ? "Annotated tag" : "Lightweight tag"}
                         </span>
                       </span>
-                      <code className="git-inspector-row-meta">
+                      <code className="text-[11px] font-normal text-muted-foreground">
                         {tag.oid?.hex.slice(0, 7) ?? "—"}
                       </code>
-                    </Button>
+                    </GitInspectorRow>
                     {selectedTag && selected === tag.name.bytesB64 && (
-                      <div className="git-tag-details git-inspector-details">
+                      <GitInspectorDetails className="git-tag-details">
                         <strong>{selectedTag.name.display}</strong>
-                        <p className={`mt-[6px]! ${note}`}>
+                        <p className={`mt-[6px] ${note}`}>
                           Object: {selectedTag.oid?.hex ?? "Unavailable"}
                         </p>
                         {selectedTag.peeledOid && (
-                          <p className={`mt-[6px]! ${note}`}>
+                          <p className={`mt-[6px] ${note}`}>
                             Target: {selectedTag.peeledOid.hex} (
                             {selectedTag.peeledType})
                           </p>
                         )}
                         {selectedTag.tagger && (
-                          <p className={`mt-[6px]! ${note}`}>
+                          <p className={`mt-[6px] ${note}`}>
                             {selectedTag.tagger.name} &lt;
                             {selectedTag.tagger.email}
                             &gt;
@@ -488,7 +493,7 @@ function TagsDialog({
                           </pre>
                         )}
                         {selectedTag.messageTruncated && (
-                          <p className={`mt-[6px]! ${note}`}>
+                          <p className={`mt-[6px] ${note}`}>
                             {detail.isFetching
                               ? "Loading full annotation…"
                               : "The annotation is truncated."}
@@ -503,12 +508,12 @@ function TagsDialog({
                           </div>
                         )}
                         {selectedTag.detailsOmitted && (
-                          <p className={`mt-[6px]! ${note}`}>
+                          <p className={`mt-[6px] ${note}`}>
                             Some tag details could not be loaded.
                           </p>
                         )}
                         {!usable(selectedTag) && (
-                          <p className={`mt-[6px]! ${note}`}>
+                          <p className={`mt-[6px] ${note}`}>
                             This tag cannot be changed because its name or
                             direct object ID is unavailable.
                           </p>
@@ -532,7 +537,7 @@ function TagsDialog({
                             Delete local tag…
                           </Button>
                         </div>
-                      </div>
+                      </GitInspectorDetails>
                     )}
                   </li>
                 ))}
@@ -550,7 +555,7 @@ function TagsDialog({
                   />
                 </li>
               )}
-            </ul>
+            </GitInspectorList>
           </>
         )}
       </div>

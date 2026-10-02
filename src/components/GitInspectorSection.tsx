@@ -1,5 +1,6 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { X } from "lucide-react";
+import { cn } from "../lib/utils";
 import { Button } from "./controls";
 
 /** An in-flow tool surface: no overlay, focus trap, or body scroll lock. */
@@ -23,10 +24,11 @@ export function GitInspectorSection({
   }, []);
   return (
     <section
+      data-slot="git-inspector-section"
       ref={section}
       tabIndex={-1}
       aria-label={title}
-      className="git-inspector-section flex min-h-0 flex-1 flex-col outline-none"
+      className="flex min-h-0 min-w-0 flex-1 flex-col outline-none"
       data-fill={fill}
       onKeyDown={(event) => {
         if (event.key === "Escape" && !event.defaultPrevented && !busy) {
@@ -46,6 +48,7 @@ export function GitInspectorSection({
           {title}
         </h3>
         <Button
+          className="group-data-[full-page=true]/repository:hidden"
           size="icon"
           variant="ghost"
           disabled={busy}
@@ -57,7 +60,13 @@ export function GitInspectorSection({
       </header>
       <div
         data-git-scroll-root
-        className="git-inspector-content min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4 pt-3"
+        data-slot="git-inspector-content"
+        className={cn(
+          "min-h-0 min-w-0 flex-1 overscroll-contain",
+          fill
+            ? "flex overflow-hidden p-0"
+            : "overflow-y-auto pb-4 pt-3 group-data-[full-page=true]/repository:pt-[16px] [&>div]:px-[16px] [&>form]:px-[16px] group-data-[full-page=true]/repository:[&>div]:mx-auto group-data-[full-page=true]/repository:[&>div]:w-full group-data-[full-page=true]/repository:[&>div]:max-w-[1100px] group-data-[full-page=true]/repository:[&>div]:px-[24px]",
+        )}
       >
         {children}
       </div>

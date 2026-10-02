@@ -1,3 +1,4 @@
+import { GitDiffViewport } from "../GitDiffViewport";
 /**
  * The diff's code area: read-only CodeMirror views of the agent's hunks.
  *
@@ -180,10 +181,10 @@ function UnifiedDiff({ file, controls, handlers, ui, footer }: ViewProps) {
   // `.git-diff-code` is the scroll box in both directions: the editor grows to
   // its content, so a long line scrolls this box rather than widening the pane.
   return (
-    <div className="git-diff-code" role="region" aria-label="Diff lines">
+    <GitDiffViewport role="region" aria-label="Diff lines">
       <div ref={parent} data-diff-layout="unified" />
       {footer}
-    </div>
+    </GitDiffViewport>
   );
 }
 
@@ -234,7 +235,7 @@ function SplitDiff({ file, controls, handlers, ui, footer }: ViewProps) {
     };
   }, [before.view, after.view, models]);
   return (
-    <div className="git-diff-code" role="region" aria-label="Diff lines">
+    <GitDiffViewport role="region" aria-label="Diff lines">
       <div
         className="grid grid-cols-[minmax(0,1fr)_8px_minmax(0,1fr)]"
         data-diff-layout="split"
@@ -255,7 +256,7 @@ function SplitDiff({ file, controls, handlers, ui, footer }: ViewProps) {
         />
       </div>
       {footer}
-    </div>
+    </GitDiffViewport>
   );
 }
 
@@ -271,7 +272,7 @@ function SideHost({
   // A side with no lines at all (an added or deleted file) has nothing to
   // align, and an empty editor would still draw one blank line.
   return empty ? (
-    <p className="m-0! min-w-0 px-[12px] py-[4px] text-[12px] text-muted-foreground">
+    <p className="m-0 min-w-0 px-[12px] py-[4px] text-[12px] text-muted-foreground">
       {note}
     </p>
   ) : (

@@ -83,10 +83,12 @@ export async function captureProjectStyles(page: Page) {
         new Promise((resolve) => setTimeout(resolve, 2000)),
       ]);
       const out: Record<string, string> = {};
-      for (const el of document.querySelectorAll<HTMLElement>("[class]")) {
+      for (const el of document.querySelectorAll<HTMLElement>(
+        "[class], [data-slot]",
+      )) {
         if (typeof el.className !== "string") continue;
         const cs = getComputedStyle(el);
-        for (const name of el.classList) {
+        for (const name of [...el.classList, el.dataset.slot ?? ""]) {
           if (!/^(git|projects)-/.test(name) || out[name]) continue;
           // Browsers serialise computed numbers to different precisions, so
           // rounding keeps the comparison about values rather than formatting.

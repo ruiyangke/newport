@@ -201,7 +201,7 @@ it("keeps search mounted while loading, reports server matches and stages only m
   try {
     await render(false);
     const input = host.querySelector("input");
-    expect(host.textContent).toContain("1 of 1 matching files loaded.");
+    expect(host.textContent).toContain("1 matching file loaded.");
     const button = host.querySelector<HTMLButtonElement>(
       'button[aria-label="Stage shown 1 unstaged"]',
     );

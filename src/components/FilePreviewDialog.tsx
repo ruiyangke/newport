@@ -1,3 +1,4 @@
+import { cn } from "../lib/utils";
 import { lazy, Suspense, useState } from "react";
 import { Download, WrapText, X } from "lucide-react";
 import { type FileEntry, type FilePreview, fileSize } from "../domain/files";
@@ -34,12 +35,27 @@ export function FilePreviewDialog({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="file-preview-dialog" showCloseButton={false}>
-        <header className="file-preview-header">
+      <DialogContent
+        data-preview-dialog
+        className="flex h-[min(760px,calc(100vh-48px))] max-h-[calc(100vh-48px)] w-[min(1040px,calc(100vw-48px))] max-w-none flex-col gap-0 overflow-hidden p-0 sm:max-w-none max-[800px]:h-[calc(100vh-24px)] max-[800px]:max-h-[calc(100vh-24px)] max-[800px]:w-[calc(100vw-24px)]"
+        showCloseButton={false}
+      >
+        <header
+          data-slot="file-preview-header"
+          className="flex shrink-0 items-center gap-[12px] border-b border-border bg-transparent px-[20px] py-[16px] [&>svg]:text-muted-foreground max-[800px]:gap-[8px] [@media(max-height:560px),(max-width:540px)]:gap-[8px] [@media(max-height:560px),(max-width:540px)]:p-[12px]"
+        >
           <FileIcon name={entry.name} kind={entry.kind} size={22} />
-          <div className="file-preview-identity">
-            <DialogTitle title={entry.name}>{entry.name}</DialogTitle>
-            <DialogDescription title={entry.path}>
+          <div data-slot="file-preview-identity" className="min-w-0 flex-1">
+            <DialogTitle
+              className="truncate text-[13px] leading-[1.35]"
+              title={entry.name}
+            >
+              {entry.name}
+            </DialogTitle>
+            <DialogDescription
+              className="mt-[2px] truncate text-[11px]"
+              title={entry.path}
+            >
               {entry.path}
             </DialogDescription>
           </div>
@@ -58,35 +74,63 @@ export function FilePreviewDialog({
           </Button>
         </header>
         <div
-          className={`file-preview-content file-preview-${data?.kind ?? "pending"}`}
+          data-slot="file-preview-content"
+          className={cn(
+            "min-h-0 flex-1 overflow-auto focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring",
+            !data && "flex items-center justify-center",
+            data?.kind === "image" &&
+              "flex items-center justify-center bg-muted p-[20px]",
+            data?.kind === "pdf" && "overflow-hidden",
+          )}
           role="region"
           aria-label="File preview"
           tabIndex={0}
         >
           {error ? (
-            <div className="file-preview-message">
-              <p role="alert" className="file-error">
+            <div
+              data-slot="file-preview-message"
+              className="m-auto max-w-[65ch] p-[28px] text-center text-muted-foreground"
+            >
+              <p
+                role="alert"
+                data-slot="file-error"
+                className="pb-[8px] text-(--red) wrap-anywhere"
+              >
                 {error}
               </p>
               <p>Download to open on your computer.</p>
             </div>
           ) : !data ? (
-            <p className="file-preview-message" role="status">
+            <p
+              data-slot="file-preview-message"
+              className="m-auto max-w-[65ch] p-[28px] text-center text-muted-foreground"
+              role="status"
+            >
               Loading preview…
             </p>
           ) : data.kind === "text" ? (
-            <pre className={wrap ? "file-text-wrap" : undefined}>
+            <pre
+              className={cn(
+                "m-0 p-[20px] font-[ui-monospace,SFMono-Regular,Menlo,monospace] text-[12px] leading-[1.7] tab-4",
+                wrap ? "whitespace-pre-wrap wrap-anywhere" : "whitespace-pre",
+              )}
+            >
               {data.content || "(Empty file)"}
             </pre>
           ) : data.kind === "image" ? (
             <img
+              className="block max-h-full max-w-full object-contain"
               src={`data:${data.mime};base64,${data.content}`}
               alt={entry.name}
             />
           ) : (
             <Suspense
               fallback={
-                <p className="file-preview-message" role="status">
+                <p
+                  data-slot="file-preview-message"
+                  className="m-auto max-w-[65ch] p-[28px] text-center text-muted-foreground"
+                  role="status"
+                >
                   Loading PDF viewer…
                 </p>
               }
@@ -95,7 +139,10 @@ export function FilePreviewDialog({
             </Suspense>
           )}
         </div>
-        <footer className="file-preview-footer">
+        <footer
+          data-slot="file-preview-footer"
+          className="flex min-h-[40px] shrink-0 items-center justify-between gap-[8px] border-t border-border bg-transparent px-[20px] py-[10px] text-[11px] text-muted-foreground"
+        >
           <span>
             {fileSize(entry.size)}
             {entry.permissions && ` · Permissions ${entry.permissions}`}
@@ -103,6 +150,7 @@ export function FilePreviewDialog({
           {data?.kind === "text" && (
             <Button
               variant="ghost"
+              className="aria-pressed:bg-accent"
               aria-pressed={wrap}
               onClick={() => setWrap(!wrap)}
             >

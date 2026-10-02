@@ -978,7 +978,7 @@ test("a panel error lines up with the library it sits above", async ({
   const report = await page.evaluate(() => {
     const el = document.querySelector(".git-projects > [role='alert']")!;
     const library = document.querySelector(".git-library")!;
-    const heading = library.querySelector("h1")!;
+    const heading = library.querySelector("h2")!;
     return {
       alertLeft: Math.round(el.getBoundingClientRect().left),
       alertRight: Math.round(el.getBoundingClientRect().right),
@@ -1128,14 +1128,14 @@ test("a source line wider than the diff pane scrolls rather than escaping it", a
     .getByRole("region", { name: "Unstaged", exact: true })
     .getByRole("button", { name: "src/app.ts", exact: true })
     .click();
-  await expect(page.locator(".git-diff-code")).toBeVisible();
+  await expect(page.locator("[data-slot=git-diff-code]")).toBeVisible();
   mkdirSync(".impeccable/screenshots", { recursive: true });
   await page.screenshot({
     animations: "disabled",
     path: ".impeccable/screenshots/projects-long-line.png",
   });
   const report = await page.evaluate(() => {
-    const code = document.querySelector(".git-diff-code")!;
+    const code = document.querySelector("[data-slot=git-diff-code]")!;
     const cr = code.getBoundingClientRect();
     const panel = document.querySelector(".git-projects")!;
     const pr = panel.getBoundingClientRect();

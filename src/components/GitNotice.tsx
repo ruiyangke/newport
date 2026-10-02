@@ -13,12 +13,7 @@ import { Alert, AlertDescription } from "./ui/alert";
  *   status -> `status` (polite; a state that changed)
  *   info   -> `note`   (not a live region; read when reached)
  *
- * The look is the design's, not the primitive's. Measured on the prototype, a
- * notice is a flat band -- surface tint, no border, no radius, 12px text -- so
- * the card treatment is removed here. The band's padding, fill and ink come
- * from the unlayered `.git-projects-notice` rule in projects.css, which the
- * utilities could not beat anyway, and which other rules key on (the
- * panel-error alignment, the rule where a notice meets the diff header).
+ * The component owns the flat notice band and its error treatment.
  */
 export function GitNotice({
   tone,
@@ -31,12 +26,16 @@ export function GitNotice({
 }) {
   return (
     <Alert
+      data-slot="git-projects-notice"
       role={tone === "error" ? "alert" : tone === "status" ? "status" : "note"}
       className={cn(
         // `static`, `text-start` and a normal gap undo base properties of the
         // primitive's card (it positions an action button this band never
         // has), so the band computes exactly as it did before.
-        "git-projects-notice static block w-auto gap-[normal] rounded-none border-0 text-start text-[length:inherit]",
+        "static w-auto rounded-none border-0 border-b border-border bg-(--native-toolbar) px-[16px] py-[10px] text-start text-[length:inherit] wrap-anywhere",
+        tone === "error"
+          ? "m-0 flex flex-wrap items-center gap-[8px] text-(--danger)"
+          : "block gap-[normal] text-foreground",
         className,
       )}
     >

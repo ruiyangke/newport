@@ -67,7 +67,9 @@ export class TerminalSession {
   private appearance: MutationObserver;
   private observer: ResizeObserver;
   constructor(private serverId: string) {
-    this.element.className = "terminal-surface";
+    this.element.dataset.slot = "terminal-surface";
+    this.element.className =
+      "min-h-0 min-w-0 flex-1 overflow-hidden [&_.xterm]:h-full [&_.xterm]:px-[10px] [&_.xterm]:py-[8px] [&_.xterm-viewport]:bg-background! [&_.xterm-viewport]:overscroll-contain";
     this.term.loadAddon(this.fit);
     this.term.loadAddon(this.search);
     // Unicode 15 widths with grapheme clustering: TUIs place their cursor by

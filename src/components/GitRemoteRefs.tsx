@@ -1,3 +1,9 @@
+import {
+  GitFormFields,
+  GitError,
+  GitFormActions,
+  GitFieldHint,
+} from "./GitForm";
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { gitPath, type GitWriteAction } from "../domain/git";
@@ -145,12 +151,12 @@ export function GitRemoteRefs({
           confirmation.source.oid !== source?.oid)));
   const blocked = disabled || loading || !snapshot || stale;
   return (
-    <div className="git-project-form git-remote-refs min-w-0">
+    <GitFormFields className="git-remote-refs min-w-0">
       <p>
         Remote <strong>{remote.name}</strong> ·{" "}
         {remote.pushUrl ?? remote.url ?? "Address unavailable"}
       </p>
-      {error && <p role="alert">{error}</p>}
+      {error && <GitError role="alert">{error}</GitError>}
       {confirmation ? (
         <>
           {confirmation.kind === "push" ? (
@@ -192,12 +198,12 @@ export function GitRemoteRefs({
             </>
           )}
           {stale && (
-            <p role="alert">
+            <GitError role="alert">
               The repository changed. Go back and inspect the remote reference
               again.
-            </p>
+            </GitError>
           )}
-          <footer className="flex-wrap">
+          <GitFormActions className="flex-wrap">
             <Button disabled={busy} onClick={() => setConfirmation(null)}>
               Back to remote references
             </Button>
@@ -253,7 +259,7 @@ export function GitRemoteRefs({
                 ? "Replace remote branch"
                 : `Delete remote ${confirmation.entry.kind}`}
             </Button>
-          </footer>
+          </GitFormActions>
         </>
       ) : (
         <>
@@ -274,19 +280,24 @@ export function GitRemoteRefs({
             <p>Switch to a local branch with a commit to push with lease.</p>
           )}
           {loading && <p role="status">Loading remote references…</p>}
-          <div className="git-branch-list">
+          <div className="max-h-[320px] overflow-auto">
             <ul>
               {page?.entries.map((entry) => (
-                <li key={entry.reference.bytesB64}>
-                  <div>
-                    <strong>{entry.reference.display}</strong>
-                    <small>
+                <li
+                  className="flex items-center gap-[8px] border-b border-border py-[10px]"
+                  key={entry.reference.bytesB64}
+                >
+                  <div className="min-w-0 flex-1">
+                    <strong className="block text-[13px] font-medium wrap-anywhere">
+                      {entry.reference.display}
+                    </strong>
+                    <GitFieldHint className="text-[11px]">
                       {entry.kind.replace("_", " ")} ·{" "}
                       {entry.oid.hex.slice(0, 12)}
                       {entry.symbolicTarget
                         ? ` → ${entry.symbolicTarget.display}`
                         : ""}
-                    </small>
+                    </GitFieldHint>
                   </div>
                   {deletable(entry) && (
                     <>
@@ -347,7 +358,7 @@ export function GitRemoteRefs({
               />
             )}
           </div>
-          <footer className="git-remote-refs-footer flex-wrap gap-[8px]">
+          <GitFormActions className="git-remote-refs-footer flex-wrap gap-[8px]">
             <div className="git-remote-refs-actions flex flex-wrap gap-[8px]">
               <Button disabled={busy} onClick={onBack}>
                 Back to remotes
@@ -356,9 +367,9 @@ export function GitRemoteRefs({
                 Refresh remote references
               </Button>
             </div>
-          </footer>
+          </GitFormActions>
         </>
       )}
-    </div>
+    </GitFormFields>
   );
 }

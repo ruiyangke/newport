@@ -1,3 +1,10 @@
+import {
+  GitError,
+  GitForm,
+  GitField,
+  GitCheckboxField,
+  GitFormActions,
+} from "./GitForm";
 import { gitErrorMessage } from "../git/errors";
 import {
   useEffect,
@@ -96,13 +103,9 @@ function usable(branch: Branch) {
 }
 /** Helper copy in the branch surfaces: small and muted, as the design has it. */
 const hint = "text-[12px] text-muted-foreground";
-/**
- * A failure in the popover. The dialogs get this from the shared Git alert rule
- * in projects.css; the popover is portalled out from under every surface that
- * rule names, so it states the same treatment itself.
- */
+/** The popover uses a bordered error; dialog errors use GitError. */
 const failureTone =
-  "flex flex-wrap items-center gap-[8px] rounded-[6px] border border-destructive px-[8px] py-[6px] text-[12px] text-destructive [overflow-wrap:anywhere]";
+  "flex flex-wrap items-center gap-[8px] rounded-[6px] border border-destructive px-[8px] py-[6px] text-[12px] text-destructive wrap-anywhere";
 /**
  * Why a repository cannot be written right now, and the way to find out more.
  * Set apart from the ordinary helper copy around it, which is the same size.
@@ -479,9 +482,9 @@ function BranchPanel({
     }
   }
   const failure = (holderError || error) && (
-    <p role="alert" className={failureTone}>
+    <GitError role="alert" className={failureTone}>
       {holderError || error}
-    </p>
+    </GitError>
   );
   const notice = !writable && blockedReason && (
     <BlockedNotice
@@ -582,7 +585,10 @@ function BranchPanel({
             </p>
           )}
           {readError && (
-            <p role="alert" className={`mx-[12px] mb-[8px] ${failureTone}`}>
+            <GitError
+              role="alert"
+              className={`mx-[12px] mb-[8px] ${failureTone}`}
+            >
               {readError}{" "}
               <Button
                 disabled={busy || loading}
@@ -591,7 +597,7 @@ function BranchPanel({
               >
                 Retry branches
               </Button>
-            </p>
+            </GitError>
           )}
           {loading && (
             <p role="status" className={`px-[12px] pb-[8px] ${hint}`}>
@@ -600,7 +606,7 @@ function BranchPanel({
           )}
           <CommandList
             label="Branches"
-            className="git-branch-list px-[4px] pb-[4px]"
+            className="max-h-[320px] overflow-auto px-[4px] pb-[4px]"
           >
             {/* A list being (re)read offers nothing, so it has no empty state. */}
             {branches && !loading && (
@@ -757,18 +763,16 @@ function BranchPanel({
           }
           onClose={() => setEditing(null)}
           busy={busy}
-          // `!` because `.editor-dialog` sets its width in an unlayered rule.
-          className="git-branch-dialog w-[min(560px,calc(100vw-32px))]!"
+          className="git-branch-dialog w-[min(560px,calc(100vw-32px))]"
         >
-          <div className="git-branch-body px-[24px] pb-[24px]">
+          <div className="min-h-0 flex-auto overflow-y-auto overscroll-contain px-[24px] pb-[24px]">
             {notice}
             {error && (
-              <p role="alert" className={hint}>
+              <GitError role="alert" className="text-[12px]">
                 {error}
-              </p>
+              </GitError>
             )}
-            <form
-              className="git-project-form"
+            <GitForm
               onSubmit={(event) => {
                 event.preventDefault();
                 if (disabled || staleUpstream) return;
@@ -827,7 +831,7 @@ function BranchPanel({
                     Current upstream:{" "}
                     {editing.branch.upstream?.display ?? "None"}
                   </p>
-                  <label>
+                  <GitField>
                     Upstream branch
                     <Select
                       value={upstream}
@@ -857,7 +861,7 @@ function BranchPanel({
                         ))}
                       </SelectContent>
                     </Select>
-                  </label>
+                  </GitField>
                   <p className={hint}>
                     Only stored branches are listed. Fetch from a remote to
                     discover its latest branches.
@@ -876,15 +880,15 @@ function BranchPanel({
                     </p>
                   )}
                   {readError && (
-                    <p role="alert" className={hint}>
+                    <GitError role="alert" className="text-[12px]">
                       {readError}
-                    </p>
+                    </GitError>
                   )}
                   {staleUpstream && (
-                    <p role="alert" className={hint}>
+                    <GitError role="alert" className="text-[12px]">
                       The repository changed. Go back and select the branch
                       again.
-                    </p>
+                    </GitError>
                   )}
                 </>
               ) : editing.kind === "delete" ? (
@@ -894,7 +898,7 @@ function BranchPanel({
                     will refuse if the branch contains unmerged commits or is in
                     use by a worktree.
                   </p>
-                  <label className="git-branch-force">
+                  <GitCheckboxField compact>
                     <input
                       type="checkbox"
                       checked={force}
@@ -902,17 +906,17 @@ function BranchPanel({
                       onChange={(event) => setForce(event.target.checked)}
                     />
                     Delete even if it contains unmerged commits
-                  </label>
+                  </GitCheckboxField>
                   {force && (
-                    <p role="alert" className={hint}>
+                    <GitError role="alert" className="text-[12px]">
                       Commits reachable only from this branch become
                       unreferenced. A worktree using the branch still blocks
                       deletion.
-                    </p>
+                    </GitError>
                   )}
                 </>
               ) : (
-                <label>
+                <GitField>
                   Branch name
                   <Input
                     autoFocus
@@ -921,7 +925,7 @@ function BranchPanel({
                     required
                     disabled={busy}
                   />
-                </label>
+                </GitField>
               )}
               {editing.kind === "create" && (
                 <p className={hint}>
@@ -929,14 +933,14 @@ function BranchPanel({
                   {repository.head.oid?.hex.slice(0, 8)}.
                 </p>
               )}
-              <footer>
+              <GitFormActions>
                 <Button disabled={busy} onClick={() => setEditing(null)}>
                   Back
                 </Button>
                 <Button
                   type="submit"
                   variant={
-                    editing.kind === "delete" ? "destructive" : undefined
+                    editing.kind === "delete" ? "destructive" : "default"
                   }
                   disabled={
                     disabled ||
@@ -955,8 +959,8 @@ function BranchPanel({
                         ? "Save upstream"
                         : "Delete branch"}
                 </Button>
-              </footer>
-            </form>
+              </GitFormActions>
+            </GitForm>
           </div>
         </Modal>
       )}

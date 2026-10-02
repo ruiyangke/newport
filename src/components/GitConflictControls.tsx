@@ -91,7 +91,7 @@ export function GitConflictControls({
                 <div className="min-w-0 flex-1">
                   <strong>{LABELS[side].title}</strong>
                   <span> — {LABELS[side].detail}</span>
-                  <p className="mt-[2px]! text-[12px] text-muted-foreground">
+                  <p className="mt-[2px] text-[12px] text-muted-foreground">
                     {present ? (
                       <code>{conflict[side]!.oid.hex.slice(0, 12)}</code>
                     ) : (
@@ -128,6 +128,7 @@ export function GitConflictControls({
               {/* Keep the content with the side it belongs to. */}
               {viewing === side && oidOf(side) && (
                 <GitBlobPreview
+                  className="mt-[8px] max-h-[260px]"
                   key={`${repoId}:${oidOf(side)}`}
                   repoId={repoId}
                   oid={oidOf(side)!}

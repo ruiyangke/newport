@@ -19,7 +19,7 @@ it("speaks only as loudly as its tone: failures interrupt, the rest do not", asy
     ),
   );
   const notices = [
-    ...host.querySelectorAll<HTMLElement>(".git-projects-notice"),
+    ...host.querySelectorAll<HTMLElement>("[data-slot=git-projects-notice]"),
   ];
   // shadcn's Alert defaults to role="alert", an assertive live region; only a
   // failure may keep it.

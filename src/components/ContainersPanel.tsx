@@ -1,22 +1,33 @@
+import { SectionEmpty } from "./Feedback";
+import {
+  ContainerProject,
+  ContainerProjectDetails,
+  ContainerProjectSummary,
+  ContainerProjectControls,
+} from "./ContainerProject";
+import { SearchField } from "./SearchField";
+import { EditorBody, EditorFooter } from "./EditorLayout";
+import { ContainerRow, ContainerColumns } from "./ContainerRow";
+import { CollectionCount } from "./SectionHeader";
 import { useWorkspaceState } from "../state/workspace";
 import { useSharedMutation } from "../hooks/useSharedMutation";
 import { keys, useServerScope } from "../query/keys";
 import { useRef, useState } from "react";
 import { desktop } from "../api/desktop";
-import { Search, MoreHorizontal, Layers, Box } from "lucide-react";
+import { MoreHorizontal, Layers, Box } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
 } from "./ui/dropdown-menu";
-import { Button, Input } from "./controls";
+import { Button, RefreshButton } from "./controls";
+import { PageHeader } from "./PageHeader";
 import { Modal } from "./Editors";
 import { groupContainers, type Container } from "../docker";
 import { type Server } from "../types";
 import { type Log } from "../domain/cockpit";
 import { useCollection } from "../hooks/useCollection";
-import { CollectionBar } from "./CollectionBar";
 
 export function ContainersPanel({
   server,
@@ -75,73 +86,61 @@ export function ContainersPanel({
       p.containers.some(matches),
   );
   const standalone = grouped.standalone.filter(matches);
-  const row = (c: Container) => (
-    <li data-scroll-anchor className="service-row container-row" key={c.id}>
-      <div className="container-identity">
-        <strong>{c.composeService || c.name}</strong>
-        {c.composeService && (
-          <small>
-            {c.name}
-            {c.composeOneoff?.toLowerCase() === "true" ? " · One-off task" : ""}
-          </small>
-        )}
-      </div>
-      <div className="container-image">
-        <span>{c.image}</span>
-        {c.ports && <code title="Container ports">{c.ports}</code>}
-      </div>
-      <div className="container-state">
-        <span
-          className={`status ${c.status.toLowerCase().includes("unhealthy") ? "container-warning" : c.state === "running" ? "connected" : ""}`}
-        >
-          <span className="status-dot" />
-          {c.status}
-        </span>
-      </div>
-      <Button
-        variant="ghost"
-        aria-label={`View logs for ${c.name}`}
-        onClick={(event) =>
-          onLogs(
-            { source: "container", target: c.id, title: c.name },
-            event.currentTarget,
-          )
-        }
-      >
-        Logs
-      </Button>
-    </li>
-  );
+
   return (
     <div className="containers-panel" ref={scopeRef}>
-      <div className="container-masthead">
-        <div>
-          <h2>Docker & Compose</h2>
-          <p>
-            {state.data
-              ? `${state.data.length} containers · ${grouped.projects.length} ${grouped.projects.length === 1 ? "project" : "projects"}`
-              : "Container inventory"}
-          </p>
-        </div>
-        <CollectionBar {...state} />
-      </div>
+      <PageHeader
+        title="Docker & Compose"
+        subtitle={
+          state.data
+            ? `${state.data.length} containers · ${grouped.projects.length} ${grouped.projects.length === 1 ? "project" : "projects"}`
+            : "Container inventory"
+        }
+        actions={<RefreshButton busy={state.busy} onClick={state.refresh} />}
+        meta={
+          state.busy
+            ? "Reading server…"
+            : state.updated
+              ? `${state.error ? "Last success" : "Updated"} ${state.updated.toLocaleTimeString()}`
+              : "Not loaded"
+        }
+      />
+      {state.error && (
+        <p
+          data-slot="cockpit-error"
+          className="text-[12px] leading-[1.6] text-(--red) wrap-anywhere"
+          role="alert"
+        >
+          {state.error}
+          {state.updated && " Showing the last available reading."}
+        </p>
+      )}
       {notice && (
-        <p role="status" className="container-notice">
+        <p
+          role="status"
+          data-slot="container-notice"
+          className="text-[12px] text-(--green)"
+        >
           {notice}
         </p>
       )}
-      <div className="container-filterbar">
-        <div className="search cockpit-search">
-          <Search size={14} />
-          <Input
-            aria-label="Filter Docker projects and containers"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Find a project, service, or container"
-          />
-        </div>
-        <div className="container-tools">
-          <span className="muted">
+      <div
+        data-slot="container-filterbar"
+        className="mb-[16px] flex flex-wrap items-center gap-[16px]"
+      >
+        <SearchField
+          className="min-w-[200px] flex-1"
+          aria-label="Filter Docker projects and containers"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Find a project, service, or container"
+        />
+
+        <div
+          data-slot="container-tools"
+          className="flex items-center gap-[8px] text-[11px] max-[800px]:w-full [&>span]:whitespace-nowrap max-[800px]:[&>span]:mr-auto"
+        >
+          <span className="text-[12px] leading-[1.65] text-muted-foreground">
             {state.data
               ? `${state.data.filter((c) => c.state === "running").length} running · ${state.data.filter((c) => c.state !== "running").length} not running`
               : state.error
@@ -151,7 +150,7 @@ export function ContainersPanel({
           {query && (
             <Button
               variant="ghost"
-              className="text-button"
+
               onClick={() => setQuery("")}
             >
               Clear filter
@@ -160,7 +159,7 @@ export function ContainersPanel({
           {projects.length > 0 && (
             <Button
               variant="ghost"
-              className="text-button"
+
               onClick={() =>
                 setCollapsed((previous) => {
                   const next = new Set(previous);
@@ -180,11 +179,14 @@ export function ContainersPanel({
         </div>
       </div>
       {query.trim() && state.data && (
-        <p className="collection-count">
-          Showing {projects.length} matching projects and {standalone.length}{" "}
-          standalone containers. Matching projects include all their containers;
-          project actions apply to the whole project.
-        </p>
+        <CollectionCount>
+          Showing {projects.length}{" "}
+          {projects.length === 1 ? "project" : "projects"} and{" "}
+          {standalone.length} standalone{" "}
+          {standalone.length === 1 ? "container" : "containers"}. Matching
+          projects include all of their containers; project actions apply to the
+          whole project.
+        </CollectionCount>
       )}
       {projects.map((p) => {
         const services = p.containers.filter(
@@ -204,9 +206,8 @@ export function ContainersPanel({
                 ? "Stopped"
                 : "Partially running";
         return (
-          <div className="container-project" key={p.name}>
-            <details
-              className="compose-project"
+          <ContainerProject key={p.name}>
+            <ContainerProjectDetails
               open={!collapsed.has(p.name)}
               onToggle={(event) => {
                 const open = event.currentTarget.open;
@@ -219,11 +220,15 @@ export function ContainersPanel({
                 });
               }}
             >
-              <summary>
-                <Layers size={17} className="project-icon" />
-                <span>
-                  <strong>{p.name}</strong>
-                  <small>
+              <ContainerProjectSummary>
+                <Layers
+                  size={17}
+                  data-slot="project-icon"
+                  className="shrink-0 text-muted-foreground"
+                />
+                <span className="min-w-0 flex-1 wrap-anywhere">
+                  <strong className="text-[13px] font-[550]">{p.name}</strong>
+                  <small className="mt-[3px] block text-[11px]">
                     {p.services.length} service
                     {p.services.length === 1 ? "" : "s"} · {running}/
                     {services.length} service containers running
@@ -232,28 +237,31 @@ export function ContainersPanel({
                   </small>
                 </span>
                 <span
-                  className={`status ${projectStatus === "Running" ? "connected" : unhealthy ? "container-warning" : ""}`}
+                  data-slot="container-project-status"
+                  className={`inline-flex items-center gap-[6px] text-[11px] whitespace-nowrap max-[800px]:ml-[26px] max-[800px]:basis-full ${projectStatus === "Running" ? "text-(--green)" : unhealthy ? "text-(--orange)" : "text-muted-foreground"}`}
                 >
                   {projectStatus}
                 </span>
-              </summary>
-              <div className="compose-project-body">
-                <div className="container-columns" aria-hidden="true">
-                  <span>Container</span>
-                  <span>Image / ports</span>
-                  <span>Status</span>
-                  <span />
-                </div>
+              </ContainerProjectSummary>
+              <div data-slot="compose-project-body" className="p-0">
+                <ContainerColumns />
                 <ul
-                  className="service-list"
+                  data-slot="service-list"
+                  className="m-0 list-none p-0"
                   role="list"
                   aria-label={`${p.name} containers`}
                 >
-                  {p.containers.map(row)}
+                  {p.containers.map((container) => (
+                    <ContainerRow
+                      key={container.id}
+                      container={container}
+                      onLogs={onLogs}
+                    />
+                  ))}
                 </ul>
               </div>
-            </details>
-            <div className="container-project-controls">
+            </ContainerProjectDetails>
+            <ContainerProjectControls>
               {" "}
               <Button
                 onClick={(event) =>
@@ -275,7 +283,7 @@ export function ContainersPanel({
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="icon"
+
                     aria-label={`Actions for project ${p.name}`}
                   >
                     <MoreHorizontal size={16} />
@@ -312,40 +320,50 @@ export function ContainersPanel({
                   ))}
                 </DropdownMenuContent>
               </DropdownMenu>
-            </div>
-          </div>
+            </ContainerProjectControls>
+          </ContainerProject>
         );
       })}
       {standalone.length > 0 && (
-        <section className="container-standalone">
-          <h2>
+        <section
+          data-slot="container-standalone"
+          className="mt-[20px] overflow-hidden rounded-[6px] border border-border"
+        >
+          <h2 className="m-0 flex items-center gap-[8px] bg-(--native-toolbar) px-[16px] py-[14px] text-[13px]">
             <Box size={16} /> Standalone containers{" "}
-            <span>{standalone.length}</span>
+            <span className="ml-auto font-normal text-muted-foreground">
+              {standalone.length}
+            </span>
           </h2>
-          <div className="container-columns" aria-hidden="true">
-            <span>Container</span>
-            <span>Image / ports</span>
-            <span>Status</span>
-            <span />
-          </div>
+          <ContainerColumns />
           <ul
-            className="service-list"
+            data-slot="service-list"
+            className="m-0 list-none p-0"
             role="list"
             aria-label="Standalone containers"
           >
-            {standalone.map(row)}
+            {standalone.map((container) => (
+              <ContainerRow
+                key={container.id}
+                container={container}
+                onLogs={onLogs}
+              />
+            ))}
           </ul>
         </section>
       )}
       {state.data && !projects.length && !standalone.length && (
-        <p className="section-empty">
+        <SectionEmpty>
           {query
             ? "No matches. Try another name or clear the filter."
             : "No Docker containers on this server."}
-        </p>
+        </SectionEmpty>
       )}
       {state.data && (
-        <details className="container-scope">
+        <details
+          data-slot="container-scope"
+          className="my-[16px] text-[11px] text-muted-foreground [&>p]:my-[8px] [&>p]:max-w-[70ch]"
+        >
           <summary>About this inventory</summary>
           <p>
             Up to 500 containers, including stopped ones. Empty projects are
@@ -360,7 +378,7 @@ export function ContainersPanel({
           onClose={() => setConfirmation(null)}
           describedBy="container-action-description"
         >
-          <div className="form-body">
+          <EditorBody>
             <p id="container-action-description">
               This will {confirmation.action} {confirmation.containers.length}{" "}
               existing service containers in{" "}
@@ -371,7 +389,8 @@ export function ContainersPanel({
                 " Active connections to these services may be interrupted."}
             </p>
             <ul
-              className="compose-confirmation-list"
+              data-slot="compose-confirmation-list"
+              className="max-h-[180px] list-disc overflow-auto pl-[20px] leading-[1.7] wrap-anywhere focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
               tabIndex={0}
               aria-label="Affected service containers"
             >
@@ -381,18 +400,22 @@ export function ContainersPanel({
                 </li>
               ))}
             </ul>
-            <p className="muted">
+            <p className="text-[12px] leading-[1.65] text-muted-foreground">
               Existing containers only; one-off jobs are excluded. No image
               pulls, recreation, or configuration changes. Compose dependency
               order is not applied.
             </p>
             {actionError && (
-              <p role="alert" className="cockpit-error">
+              <p
+                role="alert"
+                data-slot="cockpit-error"
+                className="text-[12px] leading-[1.6] text-(--red) wrap-anywhere"
+              >
                 {actionError}
               </p>
             )}
-          </div>
-          <footer className="dialog-footer">
+          </EditorBody>
+          <EditorFooter>
             <Button disabled={actionBusy} onClick={() => setConfirmation(null)}>
               Cancel
             </Button>
@@ -401,16 +424,13 @@ export function ContainersPanel({
               variant={
                 confirmation.action === "start" ? "default" : "destructive"
               }
-              className={
-                confirmation.action === "start" ? "primary" : "destructive"
-              }
               onClick={() => void perform()}
             >
               {actionBusy
                 ? "Working…"
                 : `${confirmation.action[0].toUpperCase() + confirmation.action.slice(1)} project`}
             </Button>
-          </footer>
+          </EditorFooter>
         </Modal>
       )}
     </div>

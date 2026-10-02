@@ -1,3 +1,4 @@
+import { GitError } from "./GitForm";
 import { readSharedQuery } from "../query/client";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -360,7 +361,7 @@ export function GitWorktreePicker({
               </Button>
             </div>
             {listingError && (
-              <p
+              <GitError
                 role="alert"
                 className="mx-[12px] mb-[8px] flex flex-wrap items-center gap-[8px] rounded-[6px] border border-destructive px-[8px] py-[6px] text-[12px] text-destructive"
               >
@@ -374,7 +375,7 @@ export function GitWorktreePicker({
                 >
                   Refresh worktrees
                 </Button>
-              </p>
+              </GitError>
             )}
             {listing.isPending && (
               <p

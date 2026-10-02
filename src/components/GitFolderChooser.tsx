@@ -1,10 +1,11 @@
+import { GitError } from "./GitForm";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { ArrowUp, File, Folder, Link2 } from "lucide-react";
+import { ArrowUp } from "lucide-react";
 import { desktop } from "../api/desktop";
 import { type FileEntry, parentPath } from "../domain/files";
 import { Modal } from "./Editors";
 import { Button, Input } from "./controls";
-import "./folderChooser.css";
+import { FolderEntryRow } from "./FolderEntryRow";
 
 /** A directory the user picked next to the repository root it turned out to be in. */
 interface RootChoice {
@@ -141,10 +142,15 @@ export function GitFolderChooser({
       title={title}
       busy={blocked}
       onClose={onCancel}
-      className="git-folder-dialog"
     >
-      <div className="git-folder-body">
-        <div className="git-folder-toolbar">
+      <div
+        data-slot="git-folder-body"
+        className="flex min-w-0 flex-col gap-[10px] px-[24px] pt-[4px] pb-[8px]"
+      >
+        <div
+          data-slot="git-folder-toolbar"
+          className="flex items-end gap-[8px]"
+        >
           <Button
             size="icon"
             aria-label="Parent folder"
@@ -154,16 +160,22 @@ export function GitFolderChooser({
             <ArrowUp size={14} aria-hidden="true" />
           </Button>
           <form
-            className="git-folder-form"
+            data-slot="git-folder-form"
+            className="flex min-w-0 flex-1 flex-wrap items-center gap-[8px]"
             onSubmit={(event) => {
               event.preventDefault();
               if (pathInput.trim()) go(pathInput.trim());
             }}
           >
-            <label className="git-folder-label" htmlFor={pathId}>
+            <label
+              data-slot="git-folder-label"
+              className="whitespace-nowrap text-[11px] font-medium text-[#626b79] dark:text-muted-foreground"
+              htmlFor={pathId}
+            >
               Server path
             </label>
             <Input
+              className="h-[28px] min-w-[140px] flex-1 rounded-[6px] text-[12px]"
               id={pathId}
               value={pathInput}
               placeholder="/srv/projects"
@@ -176,8 +188,16 @@ export function GitFolderChooser({
             </Button>
           </form>
         </div>
-        <div className="git-folder-crumbs">
-          <span className="git-folder-current" title={path}>
+        <div
+          data-slot="git-folder-crumbs"
+          className="flex min-w-0 items-center justify-between gap-[8px]"
+        >
+          <span
+            dir="rtl"
+            data-slot="git-folder-current"
+            className="truncate text-left font-mono text-[12px] text-[#626b79] dark:text-muted-foreground"
+            title={path}
+          >
             <bdi>{path || "No folder open yet."}</bdi>
           </span>
           <Button
@@ -189,58 +209,38 @@ export function GitFolderChooser({
           </Button>
         </div>
         {error && (
-          <p className="git-folder-error" role="alert">
+          <GitError
+            data-slot="git-folder-error"
+            className="m-0 wrap-anywhere text-(--danger)"
+            role="alert"
+          >
             Cannot open {attempted}: {error}
-          </p>
+          </GitError>
         )}
         <div
-          className="git-folder-list"
+          data-slot="git-folder-list"
+          className="h-[260px] overflow-y-auto rounded-[6px] border border-[#e1e4e9] bg-white dark:border-border dark:bg-card"
           role="region"
           aria-label="Folders"
           aria-busy={loading}
         >
-          <ul>
-            {folders.map((entry) => (
-              <li key={entry.path} className="git-folder-row">
-                <button
-                  type="button"
-                  className="git-folder-name"
-                  title={entry.path}
-                  onClick={() => go(entry.path)}
-                >
-                  <Folder size={13} aria-hidden="true" />
-                  <span>{entry.name}</span>
-                </button>
-                <Button
-                  variant="ghost"
-                  disabled={blocked}
-                  aria-label={`Choose ${entry.name}`}
-                  onClick={() => void choose(entry.path)}
-                >
-                  Choose
-                </Button>
-              </li>
-            ))}
-            {rest.map((entry) => (
-              <li
+          <ul className="m-0 list-none p-0">
+            {[...folders, ...rest].map((entry) => (
+              <FolderEntryRow
                 key={entry.path}
-                className="git-folder-row git-folder-other"
-                title={entry.path}
-              >
-                <span className="git-folder-name">
-                  {entry.kind === "symlink" ? (
-                    <Link2 size={13} aria-hidden="true" />
-                  ) : (
-                    <File size={13} aria-hidden="true" />
-                  )}
-                  <span>{entry.name}</span>
-                </span>
-                <small>{entry.kind === "symlink" ? "Link" : "File"}</small>
-              </li>
+                entry={entry}
+                disabled={blocked}
+                onOpen={go}
+                onChoose={(path) => void choose(path)}
+              />
             ))}
           </ul>
           {!folders.length && (
-            <p className="git-folder-empty" role="status">
+            <p
+              data-slot="git-folder-empty"
+              className="m-0 px-[8px] py-[10px] text-[12px] text-[#626b79] dark:text-muted-foreground"
+              role="status"
+            >
               {loading
                 ? "Reading folder…"
                 : path
@@ -250,17 +250,32 @@ export function GitFolderChooser({
           )}
         </div>
         {loading && !!folders.length && (
-          <p className="git-folder-note" role="status">
+          <p
+            data-slot="git-folder-note"
+            className="m-0 pb-[2px] text-[11px] text-[#626b79] dark:text-muted-foreground"
+            role="status"
+          >
             Reading folder…
           </p>
         )}
       </div>
       {choice ? (
-        <div className="git-folder-resolve" role="group" aria-label="Which one">
-          <p id={noticeId}>
+        <div
+          data-slot="git-folder-resolve"
+          className="flex flex-col gap-[8px] px-[24px]"
+          role="group"
+          aria-label="Which one"
+        >
+          <p
+            id={noticeId}
+            className="m-0 rounded-[6px] border border-[#e1e4e9] bg-[#f8f9fb] px-[10px] py-[8px] text-[12px] leading-[18px] wrap-anywhere dark:border-border dark:bg-muted"
+          >
             You picked {choice.chosen}; its repository root is {choice.root}.
           </p>
-          <div className="git-folder-actions">
+          <div
+            data-slot="git-folder-actions"
+            className="flex flex-wrap justify-end gap-[8px] pb-[20px]"
+          >
             <Button disabled={blocked} onClick={() => setChoice(null)}>
               Back
             </Button>
@@ -282,7 +297,10 @@ export function GitFolderChooser({
           </div>
         </div>
       ) : (
-        <div className="git-folder-actions">
+        <div
+          data-slot="git-folder-actions"
+          className="flex flex-wrap justify-end gap-[8px] px-[24px] pt-[8px] pb-[20px]"
+        >
           <Button disabled={blocked} onClick={onCancel}>
             Cancel
           </Button>

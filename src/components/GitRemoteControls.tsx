@@ -1,3 +1,5 @@
+import { GitInspectorToolbar } from "./GitInspectorPrimitives";
+import { GitError, GitForm, GitField, GitFormActions } from "./GitForm";
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { MoreHorizontal, Plus, Download, ArrowDownUp } from "lucide-react";
@@ -167,9 +169,9 @@ function RemotesDialog({
       busy={busy}
       onClose={onClose}
     >
-      <div className="git-remote-body grid gap-[12px] px-[24px] pt-0 pb-[24px] [&_p]:text-[12px] [&_p]:wrap-anywhere [&_p]:text-muted-foreground">
-        {editor && <p className="git-remote-context m-0!">{projectName}</p>}
-        {error && <p role="alert">{error}</p>}
+      <div className="min-h-0 flex-auto overflow-y-auto overscroll-contain grid gap-[12px] px-[24px] pt-0 pb-[24px] [&_p]:text-[12px] [&_p]:wrap-anywhere [&_p]:text-muted-foreground">
+        {editor && <p className="git-remote-context m-0">{projectName}</p>}
+        {error && <GitError role="alert">{error}</GitError>}
         {blockedReason && (
           <div>
             <p>{blockedReason}</p>
@@ -194,8 +196,7 @@ function RemotesDialog({
             onBack={() => setEditor(null)}
           />
         ) : editor ? (
-          <form
-            className="git-project-form"
+          <GitForm
             onSubmit={(event) => {
               event.preventDefault();
               if (disabled) return;
@@ -236,7 +237,7 @@ function RemotesDialog({
             ) : (
               <>
                 {(editor.kind === "add" || editor.kind === "rename") && (
-                  <label>
+                  <GitField>
                     Remote name
                     <Input
                       autoFocus
@@ -245,10 +246,10 @@ function RemotesDialog({
                       required
                       disabled={busy}
                     />
-                  </label>
+                  </GitField>
                 )}
                 {(editor.kind === "add" || editor.kind === "url") && (
-                  <label>
+                  <GitField>
                     Remote URL
                     <Input
                       value={url}
@@ -257,34 +258,38 @@ function RemotesDialog({
                       required
                       disabled={busy}
                     />
-                  </label>
+                  </GitField>
                 )}
               </>
             )}
-            <footer>
+            <GitFormActions>
               <Button disabled={busy} onClick={() => setEditor(null)}>
                 Back
               </Button>
-              <Button type="submit" disabled={disabled}>
+              <Button
+                type="submit"
+                variant={editor.kind === "remove" ? "destructive" : "default"}
+                disabled={disabled}
+              >
                 {editor.kind === "remove" ? "Remove remote" : "Save remote"}
               </Button>
-            </footer>
-          </form>
+            </GitFormActions>
+          </GitForm>
         ) : (
           <>
             {loading && <p role="status">Loading remotes…</p>}
             {readError && (
-              <p role="alert">
+              <GitError role="alert">
                 {readError}{" "}
                 <Button disabled={busy || loading} onClick={selection.refresh}>
                   Retry remotes
                 </Button>
-              </p>
+              </GitError>
             )}
             {!loading && !readError && (
               <>
-                <div className="git-inspector-toolbar">
-                  <span className="git-inspector-count">
+                <GitInspectorToolbar>
+                  <span className="text-[11px] font-normal text-muted-foreground">
                     Repository connections
                   </span>
                   <Button
@@ -297,7 +302,7 @@ function RemotesDialog({
                   >
                     <Plus size={13} aria-hidden="true" /> Add remote
                   </Button>
-                </div>
+                </GitInspectorToolbar>
                 {selection.empty ? (
                   <p>
                     No remotes configured. Add one to fetch and publish
@@ -318,10 +323,10 @@ function RemotesDialog({
                       <>
                         <div className="git-remote-address flex items-center gap-[12px]">
                           <div className="min-w-0 flex-1">
-                            <span className="git-inspector-count">
+                            <span className="text-[11px] font-normal text-muted-foreground">
                               Fetch URL
                             </span>
-                            <p className="git-remote-url">
+                            <p className="mt-[4px] wrap-anywhere">
                               {remote.url ?? "Fetch URL unavailable"}
                             </p>
                             {remote.pushUrl && (
@@ -377,7 +382,7 @@ function RemotesDialog({
                           </DropdownMenu>
                         </div>
                         <div className="git-remote-fetch flex items-center justify-between gap-[12px]">
-                          <span className="git-inspector-count">
+                          <span className="text-[11px] font-normal text-muted-foreground">
                             Remote references
                           </span>
                           <Button
@@ -395,7 +400,7 @@ function RemotesDialog({
                             {remote.name}
                           </Button>
                         </div>
-                        <details className="git-remote-transfer border-t border-border pt-3">
+                        <details className="[&_summary::-webkit-details-marker]:hidden border-t border-border pt-3">
                           <summary className="flex cursor-pointer items-center gap-2 text-[12px] font-medium">
                             <ArrowDownUp size={13} aria-hidden="true" />{" "}
                             Transfer a branch

@@ -256,7 +256,7 @@ for (const bare of [false, true])
       .getByRole("button", { name: "Application", exact: true })
       .click();
     await openGitAction(page, "Worktrees");
-    const dialog = page.locator(".git-inspector-section");
+    const dialog = page.locator("[data-slot=git-inspector-section]");
     await expect(
       dialog.getByText("main · Current", { exact: true }),
     ).toBeVisible();

@@ -1,3 +1,6 @@
+import { cn } from "../lib/utils";
+import { GitDiffViewport } from "./GitDiffViewport";
+import { GitEmptyState } from "./GitEmptyState";
 import { lazy, Suspense, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { appendGitBlobPage } from "../domain/gitResponses";
@@ -16,10 +19,12 @@ export function GitBlobPreview({
   repoId,
   oid,
   label,
+  className,
 }: {
   repoId: string;
   oid: string;
   label: string;
+  className?: string;
 }) {
   const scope = useCurrentServerScope();
   const params = { repoId, oid, maxBytes: 65536 };
@@ -45,8 +50,8 @@ export function GitBlobPreview({
     prefetch: true,
   });
   return (
-    <div
-      className="git-diff-code max-h-[360px] overflow-auto"
+    <GitDiffViewport
+      className={cn("max-h-[360px]", className)}
       role="region"
       aria-label={label}
       tabIndex={0}
@@ -57,9 +62,7 @@ export function GitBlobPreview({
           <Button onClick={() => void blob.refetch()}>Retry preview</Button>
         </GitNotice>
       ) : !page ? (
-        <p className="git-projects-empty" role="status">
-          Loading…
-        </p>
+        <GitEmptyState role="status">Loading…</GitEmptyState>
       ) : text === null ? (
         <GitNotice tone="info">
           This side contains binary data. It can still be chosen.
@@ -80,6 +83,6 @@ export function GitBlobPreview({
           />
         </>
       )}
-    </div>
+    </GitDiffViewport>
   );
 }

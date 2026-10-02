@@ -3,14 +3,21 @@
 import * as React from "react";
 import { cn } from "cn";
 
-function Table({ className, ...props }: React.ComponentProps<"table">) {
+function Table({
+  className,
+  containerClassName,
+  ...props
+}: React.ComponentProps<"table"> & { containerClassName?: string }) {
   return (
     <div
       data-slot="table-container"
       tabIndex={0}
       role="region"
       aria-label={`${props["aria-label"] ?? "Data table"} scroll area`}
-      className="relative w-full overflow-x-auto"
+      className={cn(
+        "relative max-h-[min(420px,60vh)] w-full overflow-auto scroll-pt-[32px] focus-visible:rounded-[3px] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring",
+        containerClassName,
+      )}
     >
       <table
         data-slot="table"

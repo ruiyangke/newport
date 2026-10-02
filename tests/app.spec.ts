@@ -9,7 +9,7 @@ test("integration switches are independent and setup is copyable", async ({
 }) => {
   await page.goto("/");
   await page.getByRole("tab", { name: "Integration", exact: true }).click();
-  const section = page.locator(".integration-panel");
+  const section = page.locator("[data-slot=integration-panel]");
   const clipboard = section.getByRole("switch", {
     name: "Clipboard",
     exact: true,
@@ -31,7 +31,7 @@ test("integration switches are independent and setup is copyable", async ({
     "  unset _newport_env",
     "fi",
   ].join("\n");
-  await expect(section.locator(".setup-code-block code")).toHaveText(
+  await expect(section.locator("[data-slot=code-block] code")).toHaveText(
     setupCommand,
   );
   await page.evaluate(() =>
@@ -67,7 +67,7 @@ test("integration switches are independent and setup is copyable", async ({
   ).toBe(true);
   await clipboard.click();
   await expect(section.getByText("Off", { exact: true })).toBeVisible();
-  await expect(section.locator(".setup-code-block")).toHaveCount(0);
+  await expect(section.locator("[data-slot=code-block]")).toHaveCount(0);
 });
 
 test("connect, disconnect, discover and add a forwarded port", async ({
@@ -215,7 +215,9 @@ test("cockpit health, service logs, capability errors and explicit commands", as
     .first()
     .hover({ position: { x: 180, y: 70 } });
   await page.clock.runFor(50);
-  await expect(page.locator(".metric-tooltip").first()).toBeVisible();
+  await expect(
+    page.locator("[data-slot=metric-tooltip]").first(),
+  ).toBeVisible();
   await page.screenshot({
     path: "test-results/screenshots/recharts-tooltip.png",
   });
@@ -243,7 +245,7 @@ test("cockpit health, service logs, capability errors and explicit commands", as
   await expect(
     page
       .getByRole("table", { name: "Processes", exact: true })
-      .locator(".row-name")
+      .locator("tbody tr td:first-child")
       .filter({ hasText: /^postgres$/ }),
   ).toBeVisible();
   await page.getByRole("tab", { name: "Services", exact: true }).click();
@@ -318,7 +320,7 @@ test("overview waiting state keeps a compact header and saved history", async ({
   ).toBeChecked();
   for (const width of [960, 640]) {
     await page.setViewportSize({ width, height: 680 });
-    const header = await page.locator(".overview-masthead").boundingBox();
+    const header = await page.locator("[data-slot=page-header]").boundingBox();
     expect(header!.height).toBeLessThan(110);
     expect(
       await page.evaluate(
@@ -344,9 +346,15 @@ test("saved metric history remains visible when the server is offline", async ({
     page.getByRole("img", { name: /^Memory history/ }),
   ).toHaveAttribute("aria-label", /50.0%/);
   await expect(
-    page.locator(".metric-chart").first().locator(".isolated-metric-point"),
+    page
+      .locator("[data-slot=metric-chart]")
+      .first()
+      .locator(".isolated-metric-point"),
   ).toHaveCount(2);
-  await page.locator(".metric-chart").first().scrollIntoViewIfNeeded();
+  await page
+    .locator("[data-slot=metric-chart]")
+    .first()
+    .scrollIntoViewIfNeeded();
   await page.screenshot({ path: "test-results/screenshots/recharts-gaps.png" });
 });
 
@@ -435,7 +443,7 @@ test("Compose projects, logs and confirmed lifecycle controls", async ({
       "2 services · 2/2 service containers running · 1 one-off job",
     ),
   ).toBeVisible();
-  await expect(page.locator(".compose-project summary .status")).toHaveText(
+  await expect(page.locator("[data-slot=container-project-status]")).toHaveText(
     "Running",
   );
   await page.getByRole("button", { name: "Actions for project shop" }).click();
@@ -460,7 +468,7 @@ test("Compose projects, logs and confirmed lifecycle controls", async ({
   ).toBeFocused();
   await page.getByRole("button", { name: "Clear filter" }).click();
   await page.getByRole("button", { name: "Collapse all" }).click();
-  await expect(page.locator(".compose-project")).not.toHaveAttribute(
+  await expect(page.locator("[data-slot=compose-project]")).not.toHaveAttribute(
     "open",
     "",
   );
@@ -504,7 +512,7 @@ test("Compose projects, logs and confirmed lifecycle controls", async ({
     .click();
   await expect(page.getByText("shop: restart completed.")).toBeVisible();
   await page.setViewportSize({ width: 640, height: 480 });
-  await page.locator(".compose-project").scrollIntoViewIfNeeded();
+  await page.locator("[data-slot=compose-project]").scrollIntoViewIfNeeded();
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= innerWidth,
@@ -752,7 +760,9 @@ test("lists expose context, sort state and filtered results", async ({
   ).toHaveAttribute("aria-sort", "descending");
   await page.getByLabel("Filter processes").fill("  postgres  ");
   await expect(processes.getByRole("row")).toHaveCount(2);
-  await expect(page.getByText(/1 matching · 3 collected/)).toBeVisible();
+  await expect(
+    page.getByText(/Showing 1 of 3 collected processes/),
+  ).toBeVisible();
   await page.getByLabel("Filter processes").fill("not-a-process");
   await expect(
     page.getByText("No matches in the collected processes."),
@@ -843,7 +853,7 @@ test("500-row collections render, scroll and filter responsively", async ({
   await expect(services.getByRole("listitem")).toHaveCount(500);
   const readyMs = Date.now() - started;
   const frames = await page.evaluate(async () => {
-    const pane = document.querySelector(".workspace-scroll")!;
+    const pane = document.querySelector("[data-slot=workspace-scroll]")!;
     const intervals: number[] = [];
     let previous = performance.now();
     for (let i = 0; i < 60; i++) {
@@ -902,8 +912,12 @@ test("interactive terminal streams input, resizes and survives navigation", asyn
     await expect
       .poll(() =>
         page.evaluate(() => {
-          const workspace = document.querySelector(".workspace-scroll")!;
-          const surface = document.querySelector(".terminal-surface")!;
+          const workspace = document.querySelector(
+            "[data-slot=workspace-scroll]",
+          )!;
+          const surface = document.querySelector(
+            "[data-slot=terminal-surface]",
+          )!;
           const screen = document.querySelector(".xterm-screen")!;
           return (
             workspace.scrollHeight <= workspace.clientHeight + 1 &&
@@ -984,7 +998,9 @@ test("terminal find highlights matches and leaves on Escape", async ({
   const find = page.getByRole("textbox", { name: "Find in terminal" });
   await expect(find).toBeVisible();
   await find.fill("dev");
-  await expect(page.locator(".terminal-find-count")).toHaveText(/\d+\/\d+/);
+  await expect(page.locator("[data-slot=terminal-find-count]")).toHaveText(
+    /\d+\/\d+/,
+  );
   await page.screenshot({
     path: "test-results/screenshots/terminal-find.png",
   });
@@ -1086,8 +1102,8 @@ test("terminal tabs take the shell title, rename, and immerse the window", async
   });
 
   await page.getByRole("button", { name: "Enter immersive mode" }).click();
-  await expect(page.locator(".window-toolbar")).toHaveCount(0);
-  await expect(page.locator(".sidebar")).toBeHidden();
+  await expect(page.locator("[data-slot=window-toolbar]")).toHaveCount(0);
+  await expect(page.locator("[data-slot=sidebar]")).toBeHidden();
   await expect(
     page.getByRole("separator", { name: "Sidebar width" }),
   ).toHaveCount(0);
@@ -1105,15 +1121,15 @@ test("terminal tabs take the shell title, rename, and immerse the window", async
     path: "test-results/screenshots/terminal-immersive.png",
   });
   await page.getByRole("button", { name: "Exit immersive mode" }).click();
-  await expect(page.locator(".window-toolbar")).toBeVisible();
-  await expect(page.locator(".sidebar")).toBeVisible();
+  await expect(page.locator("[data-slot=window-toolbar]")).toBeVisible();
+  await expect(page.locator("[data-slot=sidebar]")).toBeVisible();
   await expect(page.locator(".terminal-status")).toHaveText("Connected");
 
   // Leaving the terminal page restores the shell even in immersive mode.
   await page.getByRole("button", { name: "Enter immersive mode" }).click();
-  await expect(page.locator(".window-toolbar")).toHaveCount(0);
+  await expect(page.locator("[data-slot=window-toolbar]")).toHaveCount(0);
   await page.keyboard.press("ControlOrMeta+1");
-  await expect(page.locator(".window-toolbar")).toBeVisible();
+  await expect(page.locator("[data-slot=window-toolbar]")).toBeVisible();
   await expect(
     page.getByRole("tab", { name: "Deploy logs", exact: true }),
   ).toHaveCount(0);
@@ -1151,7 +1167,7 @@ test("terminal tabs take the shell title, rename, and immerse the window", async
 
   // Middle-click closes a tab that is not the last one.
   await page.getByRole("button", { name: "New terminal", exact: true }).click();
-  const tabs = page.locator('.terminal-tablist [role="tab"]');
+  const tabs = page.locator('[data-slot=terminal-tablist] [role="tab"]');
   await expect(tabs).toHaveCount(2);
   await tabs.last().click({ button: "middle" });
   await expect(tabs).toHaveCount(1);
@@ -1411,7 +1427,7 @@ test("remembered integrations can retry or be disabled while disconnected", asyn
 }) => {
   await page.goto("/");
   await page.getByRole("tab", { name: "Integration", exact: true }).click();
-  const section = page.locator(".integration-panel");
+  const section = page.locator("[data-slot=integration-panel]");
   const browser = section.getByRole("switch", { name: "Browser", exact: true });
   await browser.click();
   await page.reload();
@@ -1465,7 +1481,13 @@ test("buttons explain icon actions and prevent repeat submission while busy", as
   const saving = page.getByRole("button", { name: "Saving…", exact: true });
   await expect(saving).toBeDisabled();
   await expect(saving).toHaveAttribute("aria-busy", "true");
-  await expect(saving.locator(".button-spinner")).toBeVisible();
+  const spinner = saving.locator("[data-slot=button-spinner]");
+  await expect(spinner).toBeVisible();
+  await expect(spinner).toHaveCSS("animation-name", "none");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await expect(spinner).toHaveCSS("animation-duration", "0.8s");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(spinner).toHaveCSS("animation-name", "none");
   await page.keyboard.press("Enter");
   expect(await page.evaluate(() => (window as any).__saveCount)).toBe(1);
   await page.evaluate(() => (window as any).__finishSave());
@@ -1720,7 +1742,7 @@ test("changing a host clears its old metrics and discovered ports", async ({
   page,
 }) => {
   await page.goto("/");
-  await expect(page.locator(".metric-history")).toBeVisible();
+  await expect(page.locator("[data-slot=metric-history]")).toBeVisible();
   await page.getByRole("tab", { name: "Connections", exact: true }).click();
   await page
     .getByRole("button", { name: "Discover ports", exact: true })
@@ -1763,7 +1785,7 @@ test("changing a host clears its old metrics and discovered ports", async ({
   await expect(page.getByRole("alert")).toContainText(
     "New endpoint is offline",
   );
-  await expect(page.locator(".metric-history")).toHaveCount(0);
+  await expect(page.locator("[data-slot=metric-history]")).toHaveCount(0);
   await expect(
     page.getByRole("meter", { name: "CPU usage", exact: true }),
   ).toHaveCount(0);
@@ -2231,7 +2253,9 @@ test("process context highlights application and service details across runtimes
   await expect(table).toContainText("/opt/orders app.jar");
   await expect(table).toContainText("/var/lib/postgresql/orders");
   const ssh = table.getByRole("row").filter({ hasText: "sshd" });
-  await expect(ssh.locator(".port-project-directory")).toHaveCount(0);
+  await expect(ssh.locator("[data-slot=port-project-directory]")).toHaveCount(
+    0,
+  );
   for (const width of [960, 640]) {
     await page.setViewportSize({ width, height: 680 });
     await table.scrollIntoViewIfNeeded();
@@ -2446,7 +2470,7 @@ test("runtime notifications update health and focus reconciles a missed event", 
     };
   });
   await page.goto("/");
-  await expect(page.locator(".toolbar-health")).toHaveText("Reachable");
+  await expect(page.locator("[data-slot=toolbar-health]")).toHaveText("Reachable");
   await page.waitForFunction(() => !!(window as any).__stateChanged);
   await page.evaluate(() => {
     (window as any).__health = "error";
@@ -2455,13 +2479,13 @@ test("runtime notifications update health and focus reconciles a missed event", 
       payload: { instanceId: "test-instance", revision: 2 },
     });
   });
-  await expect(page.locator(".toolbar-health")).toHaveText("Connection failed");
+  await expect(page.locator("[data-slot=toolbar-health]")).toHaveText("Connection failed");
   await page.evaluate(() => {
     (window as any).__health = "reachable";
     (window as any).__revision = 3;
     window.dispatchEvent(new Event("focus"));
   });
-  await expect(page.locator(".toolbar-health")).toHaveText("Reachable");
+  await expect(page.locator("[data-slot=toolbar-health]")).toHaveText("Reachable");
 });
 
 test("Overview retains an old reading with its refresh error and clears it on recovery", async ({
@@ -2489,7 +2513,9 @@ test("Overview retains an old reading with its refresh error and clears it on re
   await expect(
     page.getByText("Connection interrupted", { exact: false }),
   ).toBeVisible();
-  await expect(page.locator(".overview-refresh")).toContainText("Last reading");
+  await expect(page.locator("[data-slot=page-header]")).toContainText(
+    "Last reading",
+  );
   await expect(
     page.getByRole("heading", { name: "System health" }),
   ).toBeVisible();
@@ -2497,7 +2523,9 @@ test("Overview retains an old reading with its refresh error and clears it on re
   await expect(
     page.getByText("Connection interrupted", { exact: false }),
   ).toHaveCount(0);
-  await expect(page.locator(".overview-refresh")).toContainText("Updated");
+  await expect(page.locator("[data-slot=page-header]")).toContainText(
+    "Updated",
+  );
 });
 
 test("workspace filters survive page navigation", async ({ page }) => {
@@ -2574,7 +2602,7 @@ test("failed cache clearing retains cached overview readings", async ({
   page,
 }) => {
   await page.goto("/");
-  await expect(page.locator(".usage-gauge")).not.toHaveCount(0);
+  await expect(page.locator("[data-slot=usage-gauge]")).not.toHaveCount(0);
   await page.evaluate(() => {
     const bridge = (window as any).__TAURI_INTERNALS__;
     const original = bridge.invoke;
@@ -2592,7 +2620,7 @@ test("failed cache clearing retains cached overview readings", async ({
   await page.getByRole("button", { name: "Clear cache", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Cannot clear cache");
   await page.getByRole("tab", { name: "Overview", exact: true }).click();
-  await expect(page.locator(".usage-gauge")).not.toHaveCount(0);
+  await expect(page.locator("[data-slot=usage-gauge]")).not.toHaveCount(0);
 });
 
 test("backend restart discards the old terminal session", async ({ page }) => {

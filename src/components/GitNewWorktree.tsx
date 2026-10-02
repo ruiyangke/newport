@@ -1,3 +1,12 @@
+import {
+  GitForm,
+  GitError,
+  GitField,
+  GitFieldHint,
+  GitPathField,
+  GitCheckboxField,
+  GitFormActions,
+} from "./GitForm";
 import { readSharedQuery } from "../query/client";
 import { gitErrorMessage } from "../git/errors";
 import { useEffect, useId, useMemo, useState } from "react";
@@ -285,9 +294,9 @@ export function GitNewWorktree({
   return (
     <>
       <GitInspectorSection title="New worktree" busy={busy} onClose={onClose}>
-        <form
+        <GitForm
           id={formId}
-          className="git-project-form"
+
           onSubmit={(event) => {
             event.preventDefault();
             submit();
@@ -304,7 +313,7 @@ export function GitNewWorktree({
             </p>
           )}
           {(readError || localError || error) && (
-            <p role="alert">{readError || localError || error}</p>
+            <GitError role="alert">{readError || localError || error}</GitError>
           )}
           <div
             role="radiogroup"
@@ -325,15 +334,15 @@ export function GitNewWorktree({
                 onClick={() => setMode(value)}
                 className={
                   mode === value
-                    ? "h-[26px]! rounded-[5px]! border-0 bg-background px-[10px]! text-[12px] font-medium text-foreground shadow-[0_1px_2px_rgb(0_0_0/0.1)] hover:bg-background dark:hover:bg-background"
-                    : "h-[26px]! rounded-[5px]! border-0 bg-transparent px-[10px]! text-[12px] font-medium text-muted-foreground hover:bg-transparent dark:hover:bg-transparent"
+                    ? "h-[26px] rounded-[5px] border-0 bg-background px-[10px] text-[12px] font-medium text-foreground shadow-[0_1px_2px_rgb(0_0_0/0.1)] hover:bg-background dark:hover:bg-background"
+                    : "h-[26px] rounded-[5px] border-0 bg-transparent px-[10px] text-[12px] font-medium text-muted-foreground hover:bg-transparent dark:hover:bg-transparent"
                 }
               >
                 {label}
               </Button>
             ))}
           </div>
-          <label>
+          <GitField>
             Find a branch
             <Input
               aria-label="Find a branch"
@@ -351,7 +360,7 @@ export function GitNewWorktree({
                 setSearch(event.target.value);
               }}
             />
-          </label>
+          </GitField>
           {(branches.isFetching || search.trim() !== filter) && (
             <p role="status" className={NOTE}>
               Finding branches…
@@ -364,7 +373,7 @@ export function GitNewWorktree({
           )}
           {mode === "new" ? (
             <>
-              <label>
+              <GitField>
                 Branch name
                 <Input
                   autoFocus
@@ -375,13 +384,13 @@ export function GitNewWorktree({
                   aria-invalid={branchTaken || undefined}
                 />
                 {branchTaken && (
-                  <small>
+                  <GitFieldHint>
                     That branch exists. Choose it under Existing branch, or pick
                     another name.
-                  </small>
+                  </GitFieldHint>
                 )}
-              </label>
-              <label>
+              </GitField>
+              <GitField>
                 Start from
                 <Select
                   value={baseRef}
@@ -436,17 +445,17 @@ export function GitNewWorktree({
                   </SelectContent>
                 </Select>
                 {baseEntry?.oid && (
-                  <small>
+                  <GitFieldHint>
                     Starts at <code>{baseEntry.oid.hex.slice(0, 7)}</code>
                     {baseEntry.remote
                       ? ", the last fetched commit of that remote branch."
                       : "."}
-                  </small>
+                  </GitFieldHint>
                 )}
-              </label>
+              </GitField>
             </>
           ) : (
-            <label>
+            <GitField>
               Branch
               <Select
                 value={existing}
@@ -478,12 +487,12 @@ export function GitNewWorktree({
                   })}
                 </SelectContent>
               </Select>
-              <small>
+              <GitFieldHint>
                 {holder
                   ? `Already checked out in ${worktreeLabel(holder)}.`
                   : "A branch can be checked out in one worktree at a time."}
-              </small>
-            </label>
+              </GitFieldHint>
+            </GitField>
           )}
           {branches.data && (
             <GitLoadMore
@@ -501,7 +510,7 @@ export function GitNewWorktree({
               endLabel="All matching branches loaded"
             />
           )}
-          <label>
+          <GitField>
             Worktree name
             <Input
               value={effectiveName}
@@ -509,13 +518,15 @@ export function GitNewWorktree({
               disabled={busy}
               aria-invalid={nameTaken || undefined}
             />
-            {nameTaken && <small>A worktree with that name exists.</small>}
-          </label>
+            {nameTaken && (
+              <GitFieldHint>A worktree with that name exists.</GitFieldHint>
+            )}
+          </GitField>
           {/* Not one wrapping label: that would name the field after the
               Browse button and the help text as well. */}
           <div className="grid gap-[6px]">
-            <label htmlFor={`${formId}-path`}>Location on server</label>
-            <div className="git-path-field">
+            <GitField htmlFor={`${formId}-path`}>Location on server</GitField>
+            <GitPathField>
               <Input
                 id={`${formId}-path`}
                 aria-describedby={`${formId}-path-help`}
@@ -531,13 +542,13 @@ export function GitNewWorktree({
               >
                 Browse…
               </Button>
-            </div>
-            <small id={`${formId}-path-help`}>
+            </GitPathField>
+            <GitFieldHint id={`${formId}-path-help`}>
               Beside the main checkout by default. The folder is created; its
               parent must exist.
-            </small>
+            </GitFieldHint>
           </div>
-          <label className="git-checkbox-row">
+          <GitCheckboxField>
             <Checkbox
               checked={openAfter}
               onCheckedChange={(value) => setOpenAfter(value === true)}
@@ -545,8 +556,8 @@ export function GitNewWorktree({
               aria-label="Open it when created"
             />
             Open it when created
-          </label>
-          <label className="git-checkbox-row">
+          </GitCheckboxField>
+          <GitCheckboxField>
             <Checkbox
               checked={locked}
               onCheckedChange={(value) => setLocked(value === true)}
@@ -554,16 +565,16 @@ export function GitNewWorktree({
               aria-label="Lock against removal"
             />
             Lock against removal
-          </label>
-          <footer>
+          </GitCheckboxField>
+          <GitFormActions>
             <Button disabled={busy} onClick={onClose}>
               Cancel
             </Button>
             <Button type="submit" loading={busy} disabled={!ready}>
               Create worktree
             </Button>
-          </footer>
-        </form>
+          </GitFormActions>
+        </GitForm>
       </GitInspectorSection>
       <GitFolderChooser
         serverId={serverId}

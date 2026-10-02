@@ -19,23 +19,25 @@ export class ErrorBoundary extends Component<
       );
     return (
       <section
-        className="workspace-recovery"
+        data-slot="workspace-recovery"
+        className="max-w-[560px] p-[28px]"
         role="alert"
         aria-label="View unavailable"
       >
-        <h2>
+        <h2 className="mb-[8px] text-[16px]">
           {this.props.scope === "workspace"
             ? "This workspace couldn’t be displayed"
             : "Newport couldn’t display this window"}
         </h2>
-        <p>
+        <p className="mb-[16px] text-muted-foreground">
           {this.props.scope === "workspace"
             ? "Try opening it again, or choose another workspace from the sidebar."
             : "Reload the window to try again."}
         </p>
-        <div>
+        <div className="flex gap-[8px]">
           <Button
             variant="outline"
+            className="rounded-[5px] border border-border px-[10px] py-[5px] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
             type="button"
             onClick={() =>
               this.setState(({ attempt }) => ({
@@ -48,6 +50,7 @@ export class ErrorBoundary extends Component<
           </Button>
           <Button
             variant="outline"
+            className="rounded-[5px] border border-border px-[10px] py-[5px] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
             type="button"
             onClick={() => window.location.reload()}
           >

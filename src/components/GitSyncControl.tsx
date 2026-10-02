@@ -6,7 +6,9 @@ import type { GitWriteAction } from "../domain/git";
 import type { GitRepository, GitStatus } from "../domain/gitResponses";
 import { gitQueries } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
-import { Button } from "./controls";
+import { plural } from "../lib/utils";
+import { Button } from "./ui/button";
+import { ButtonGroup } from "./ui/button-group";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -144,14 +146,13 @@ export function GitSyncControl({
     : undefined;
 
   return (
-    <div
-      role="group"
+    <ButtonGroup
       aria-label="Remote transfers"
-      className="git-sync inline-flex h-[30px] flex-none items-center rounded-[5px] border border-border bg-(--native-surface)"
       title={reason ?? (error || basis)}
+      className="git-sync flex-none"
     >
       <Button
-        className="h-[28px]! min-w-0 gap-[6px] rounded-r-none! border-0 px-[10px]! text-[12px] font-medium text-foreground shadow-none"
+        variant="outline"
         disabled={disabled}
         aria-label={`${primary.label} ${target}`}
         onClick={() => void transfer(primary.kind)}
@@ -169,7 +170,7 @@ export function GitSyncControl({
         {(behind > 0 || ahead > 0) && (
           <span
             className="ml-[2px] text-[11px] text-muted-foreground tabular-nums"
-            aria-label={`${behind > 0 ? behind : ahead} commits to ${primary.kind}`}
+            aria-label={`${plural(behind > 0 ? behind : ahead, "commit")} to ${primary.kind}`}
           >
             {behind > 0 ? behind : ahead}
           </span>
@@ -178,11 +179,12 @@ export function GitSyncControl({
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
-            className="h-[28px]! w-[26px] rounded-l-none! border-0 p-0! text-muted-foreground shadow-none"
+            variant="outline"
+            size="icon"
             disabled={busy}
             aria-label="Transfer options"
           >
-            <ChevronDown size={13} aria-hidden="true" />
+            <ChevronDown size={14} aria-hidden="true" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="min-w-[240px]">
@@ -210,6 +212,6 @@ export function GitSyncControl({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-    </div>
+    </ButtonGroup>
   );
 }

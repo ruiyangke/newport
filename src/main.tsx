@@ -10,7 +10,6 @@ import { UpdateNotice } from "./components/UpdateSettings";
 import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./styles.css";
-import "./components/dialogs.css";
 const queryClient = createQueryClient();
 applyAppearance();
 window

@@ -6,7 +6,7 @@ import {
 } from "./collectionScroll";
 it("anchors scoped service rows and leaves other workspaces alone", () => {
   const workspace = document.createElement("div");
-  workspace.className = "workspace-scroll";
+  workspace.dataset.slot = "workspace-scroll";
   const scope = document.createElement("div");
   const row = document.createElement("div");
   row.dataset.scrollAnchor = "";

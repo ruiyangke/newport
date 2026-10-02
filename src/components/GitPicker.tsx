@@ -35,7 +35,7 @@ export function GitPicker({
       variant="ghost"
       data-label={label}
       className={cn(
-        "h-[30px]! max-w-[280px] min-w-0 flex-[0_1_auto] justify-start gap-[6px] rounded-[6px]! border-0 bg-transparent px-[8px]! text-left text-foreground hover:bg-accent aria-expanded:bg-accent",
+        "h-[28px] max-w-[280px] min-w-0 flex-[0_1_auto] justify-start gap-[6px] rounded-[6px] border-0 bg-transparent px-[8px] text-left text-foreground hover:bg-accent aria-expanded:bg-accent",
         className,
       )}
       {...props}

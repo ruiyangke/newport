@@ -1,3 +1,4 @@
+import { cn } from "../lib/utils";
 import type { DestinationHealth } from "../types";
 
 export function destinationSummary(health: DestinationHealth[]) {
@@ -26,17 +27,26 @@ export function DestinationStatus({
     health.length > 0 && health.every((h) => h.status === "reachable");
   return (
     <div
-      className={`destination-health ${healthy ? "healthy" : issues.length ? "attention" : ""}`}
+      className={cn(
+        "mt-[6px] text-[12px] wrap-anywhere",
+        healthy
+          ? "text-(--success)"
+          : issues.length
+            ? "text-(--danger)"
+            : "text-muted-foreground",
+      )}
     >
       <span>{destinationSummary(health)}</span>
       {issues.length > 0 && (
         <details>
-          <summary>Destination details</summary>
+          <summary className="mt-[4px] cursor-pointer">
+            Destination details
+          </summary>
           {issues.map((h) => (
-            <p key={h.remotePort}>
+            <p className="my-[6px]" key={h.remotePort}>
               Port {h.remotePort}: {h.message}
               {h.checkedAt && (
-                <small>
+                <small className="block">
                   Checked {new Date(h.checkedAt * 1000).toLocaleTimeString()}
                 </small>
               )}

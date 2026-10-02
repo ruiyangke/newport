@@ -1,3 +1,13 @@
+import { GitEmptyState } from "./GitEmptyState";
+import {
+  GitForm,
+  GitField,
+  GitPathField,
+  GitFieldHint,
+  GitError,
+  GitFormActions,
+  GitFormFields,
+} from "./GitForm";
 import { GitCommandLog } from "./GitCommandLog";
 import { useGitPageLoader } from "../hooks/useGitPageLoader";
 import { GitLoadMore } from "./GitLoadMore";
@@ -72,7 +82,6 @@ import {
   DropdownMenuSeparator,
 } from "./ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
-import "./projects.css";
 import { GitChangesPreview } from "./GitChangesPreview";
 import { GitChangesSplit } from "./diff/GitChangesSplit";
 import { GitCommitComposer } from "./GitCommitComposer";
@@ -773,7 +782,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
 
   return (
     <section
-      className="git-projects flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden text-foreground"
+      className="git-projects @container/git-project flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden text-foreground"
       aria-label="Git projects"
       aria-busy={busy}
     >
@@ -908,7 +917,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
               size="icon"
               aria-label="Refresh"
               disabled={busy}
-              className="h-[30px]! w-[30px]"
+              className="h-[28px] w-[28px]"
               onClick={() => void refreshShown()}
             >
               <RefreshCw size={14} aria-hidden="true" />
@@ -919,7 +928,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
                   size="icon"
                   aria-label="Git actions"
                   disabled={busy}
-                  className="h-[30px]! w-[30px]"
+                  className="h-[28px] w-[28px]"
                 >
                   <Ellipsis size={15} aria-hidden="true" />
                 </Button>
@@ -1006,7 +1015,10 @@ export function ProjectsPanel({ server }: { server: Server }) {
         onRefresh={() => void run(refreshReceipts)}
       />
       {error && (
-        <GitNotice tone="error">
+        <GitNotice
+          tone="error"
+          className={opened ? "mx-[12px] my-[8px]" : "mx-[22px] mt-[18px] mb-0"}
+        >
           {error}
           {!opened && (
             <Button
@@ -1089,12 +1101,18 @@ export function ProjectsPanel({ server }: { server: Server }) {
             />
           )}
           <div
-            className="git-repository-workspace flex min-h-0 flex-1"
+            className="git-repository-workspace group/repository flex min-h-0 flex-1"
             data-inspector={!!actionsPanel || newWorktree}
             data-full-page={fullPageTool}
           >
             <Tabs
-              className="git-repository-tabs min-w-0 flex min-h-0 flex-1 flex-col"
+              className={cn(
+                "git-repository-tabs min-w-0 flex min-h-0 flex-1 flex-col",
+                fullPageTool
+                  ? "hidden"
+                  : (actionsPanel || newWorktree) &&
+                      "@max-[760px]/git-project:hidden",
+              )}
               value={tab}
               // Choosing a tab is all this does: the tab's read is enabled by it,
               // and runs only if nothing fresh is cached.
@@ -1107,8 +1125,8 @@ export function ProjectsPanel({ server }: { server: Server }) {
                 a keyboard user's focus is never on something that unmounts. */}
               <GitChangesSplit
                 className="min-h-0 flex-1 overflow-hidden"
-                listClassName="git-changes-files flex flex-col"
-                detailClassName="git-changes-detail h-full overflow-y-auto"
+                listClassName="git-changes-files flex min-h-0 flex-col overflow-hidden"
+                detailClassName="git-changes-detail h-full min-h-0 overflow-y-auto"
                 detailTitle={
                   tab === "changes"
                     ? previewEntry
@@ -1138,7 +1156,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
                         <TabsTrigger
                           value="changes"
                           disabled={busy || opened.repository.bare}
-                          className="h-[26px]! flex-1 gap-[6px] rounded-[5px]! text-[12px] font-medium text-muted-foreground data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-[0_1px_2px_rgb(0_0_0/0.1)]"
+                          className="h-[26px] flex-1 gap-[6px] rounded-[5px] text-[12px] font-medium text-muted-foreground data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-[0_1px_2px_rgb(0_0_0/0.1)]"
                         >
                           Changes
                           {!!(
@@ -1159,7 +1177,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
                         <TabsTrigger
                           value="history"
                           disabled={busy}
-                          className="h-[26px]! flex-1 rounded-[5px]! text-[12px] font-medium text-muted-foreground data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-[0_1px_2px_rgb(0_0_0/0.1)]"
+                          className="h-[26px] flex-1 rounded-[5px] text-[12px] font-medium text-muted-foreground data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-[0_1px_2px_rgb(0_0_0/0.1)]"
                         >
                           History
                         </TabsTrigger>
@@ -1170,16 +1188,16 @@ export function ProjectsPanel({ server }: { server: Server }) {
                       className="flex min-h-0 flex-1 flex-col"
                     >
                       {statusQuery.isFetching && !status ? (
-                        <p className="git-projects-empty" role="status">
+                        <GitEmptyState role="status">
                           Loading changes…
-                        </p>
+                        </GitEmptyState>
                       ) : status &&
                         clean &&
                         !fileFilter &&
                         groupFilter === "all" ? (
-                        <p className="git-projects-empty text-[12px]">
+                        <GitEmptyState className="text-[12px]">
                           No changed files
-                        </p>
+                        </GitEmptyState>
                       ) : status ? (
                         <>
                           <GitChangeList
@@ -1238,15 +1256,13 @@ export function ProjectsPanel({ server }: { server: Server }) {
                       className="flex min-h-0 flex-1 flex-col"
                     >
                       {historyQuery.isFetching && !history ? (
-                        <p className="git-projects-empty" role="status">
+                        <GitEmptyState role="status">
                           Loading history…
-                        </p>
+                        </GitEmptyState>
                       ) : history ? (
                         <div className="git-history-list flex min-h-0 flex-1 flex-col overflow-y-auto">
                           {history.entries.length === 0 ? (
-                            <p className="git-projects-empty">
-                              No commits yet.
-                            </p>
+                            <GitEmptyState>No commits yet.</GitEmptyState>
                           ) : (
                             <ul className="git-history-commits m-0 list-none px-[6px] py-[6px]">
                               {history.entries.map((commit) => {
@@ -1262,7 +1278,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
                                         setSelectedCommit(commit.oid.hex)
                                       }
                                       className={cn(
-                                        "h-auto! w-full flex-col items-stretch gap-[2px] rounded-[5px]! border-0 px-[10px]! py-[6px] text-left font-normal text-foreground",
+                                        "h-auto w-full flex-col items-stretch gap-[2px] rounded-[5px] border-0 px-[10px] py-[6px] text-left font-normal text-foreground",
                                         chosen
                                           ? "bg-(--git-tint) hover:bg-(--git-tint)"
                                           : "hover:bg-accent",
@@ -1288,7 +1304,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
                                         >
                                           {relativeTime(commit.time, now)}
                                         </time>
-                                        <code className="ml-auto flex-none pl-[6px] text-[10.5px]!">
+                                        <code className="ml-auto flex-none pl-[6px] text-[10.5px]">
                                           {commit.oid.hex.slice(0, 7)}
                                         </code>
                                       </span>
@@ -1422,7 +1438,12 @@ export function ProjectsPanel({ server }: { server: Server }) {
             {(actionsPanel || newWorktree) && (
               <aside
                 key={`${connection}:${opened.repository.repoId}`}
-                className="git-repository-inspector relative flex min-h-0 flex-col border-l border-border bg-(--native-surface)"
+                className={cn(
+                  "git-repository-inspector relative flex min-h-0 min-w-0 flex-col bg-(--native-surface)",
+                  fullPageTool
+                    ? "w-full max-w-none flex-1"
+                    : "w-[400px] max-w-[48%] flex-none border-l border-border @max-[760px]/git-project:w-full @max-[760px]/git-project:max-w-none @max-[760px]/git-project:border-l-0",
+                )}
                 role={fullPageTool ? "region" : undefined}
                 aria-label={
                   fullPageTool ? "Repository tools" : "Repository inspector"
@@ -1574,8 +1595,8 @@ export function ProjectsPanel({ server }: { server: Server }) {
           busy={busy}
           onClose={() => setEditor(null)}
         >
-          <form
-            className="git-project-form"
+          <GitForm
+            dialog
             onSubmit={(event) => {
               event.preventDefault();
               void run(async (projects) => {
@@ -1591,7 +1612,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
               });
             }}
           >
-            <label>
+            <GitField>
               Project name
               <Input
                 autoFocus
@@ -1600,11 +1621,11 @@ export function ProjectsPanel({ server }: { server: Server }) {
                 onChange={(event) => setName(event.target.value)}
                 disabled={busy}
               />
-            </label>
+            </GitField>
             {editor === "add" && (
-              <label>
+              <GitField>
                 Repository path on server
-                <div className="git-path-field">
+                <GitPathField>
                   <Input
                     required
                     placeholder="/home/user/projects/app"
@@ -1619,22 +1640,22 @@ export function ProjectsPanel({ server }: { server: Server }) {
                   >
                     Browse…
                   </Button>
-                </div>
-                <small>
+                </GitPathField>
+                <GitFieldHint>
                   Use an absolute path. The server agent must be installed.
-                </small>
-              </label>
+                </GitFieldHint>
+              </GitField>
             )}
-            {error && <p role="alert">{error}</p>}
-            <footer>
+            {error && <GitError role="alert">{error}</GitError>}
+            <GitFormActions>
               <Button disabled={busy} onClick={() => setEditor(null)}>
                 Cancel
               </Button>
               <Button type="submit" loading={busy}>
                 {editor === "add" ? "Add repository" : "Save name"}
               </Button>
-            </footer>
-          </form>
+            </GitFormActions>
+          </GitForm>
         </Modal>
       )}
       {creating && (
@@ -1669,13 +1690,13 @@ export function ProjectsPanel({ server }: { server: Server }) {
         >
           {/* Inside the form, which is what carries the dialog's body padding:
               a bare child of the Modal sits flush against its left edge. */}
-          <div className="git-project-form">
+          <GitFormFields dialog>
             <p>
               Only the saved bookmark will be removed. Repository files on the
               server will remain.
             </p>
-            {error && <p role="alert">{error}</p>}
-            <footer>
+            {error && <GitError role="alert">{error}</GitError>}
+            <GitFormActions>
               <Button disabled={busy} onClick={() => setRemoving(null)}>
                 Cancel
               </Button>
@@ -1699,8 +1720,8 @@ export function ProjectsPanel({ server }: { server: Server }) {
               >
                 Remove bookmark
               </Button>
-            </footer>
-          </div>
+            </GitFormActions>
+          </GitFormFields>
         </Modal>
       )}
       {opened && (
@@ -1723,12 +1744,15 @@ export function ProjectsPanel({ server }: { server: Server }) {
 /** A pane with nothing chosen yet: a quiet mark and one line of instruction. */
 function EmptyPane({ icon, text }: { icon: ReactNode; text: string }) {
   return (
-    <div className="git-projects-empty flex h-full flex-col items-center justify-center gap-[10px] text-[12px] text-muted-foreground">
+    <GitEmptyState
+      as="div"
+      className="flex h-full flex-col items-center justify-center gap-[10px] text-[12px] text-muted-foreground"
+    >
       <span className="opacity-60" aria-hidden="true">
         {icon}
       </span>
       <p>{text}</p>
-    </div>
+    </GitEmptyState>
   );
 }
 
@@ -1764,11 +1788,11 @@ function CleanWorkingTree({
         className="mb-[4px] text-(--green)"
         aria-hidden="true"
       />
-      <h3 className="text-[15px]! font-semibold!">No local changes</h3>
+      <h3 className="text-[15px] font-semibold">No local changes</h3>
       <p className="text-[12px] text-muted-foreground">
         {branch ? (
           <>
-            <code className="text-[12px]!">{branch}</code> matches its last
+            <code className="text-[12px]">{branch}</code> matches its last
             commit.
           </>
         ) : (

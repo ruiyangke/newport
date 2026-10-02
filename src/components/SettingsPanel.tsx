@@ -1,3 +1,10 @@
+import {
+  SettingsSection,
+  SettingsHeading,
+  SettingsRow,
+  SettingsHelp,
+  SettingsMessage,
+} from "./SettingsLayout";
 import { useSharedMutation } from "../hooks/useSharedMutation";
 import { UpdateSettings } from "./UpdateSettings";
 import { useState } from "react";
@@ -9,7 +16,6 @@ import { isTauri } from "@tauri-apps/api/core";
 import { desktop } from "../api/desktop";
 import { useAppearance, setAppearance, type Appearance } from "../appearance";
 import { Button, Checkbox, Select, SelectItem } from "./controls";
-import "./settings.css";
 
 function MetricsCacheSettings() {
   const client = useQueryClient();
@@ -48,17 +54,20 @@ function MetricsCacheSettings() {
   });
   const error = mutation.error || cache.error;
   return (
-    <section aria-labelledby="cache-heading">
-      <h2 id="cache-heading">Cache</h2>
-      <div className="settings-row settings-cache-row">
+    <SettingsSection aria-labelledby="cache-heading">
+      <SettingsHeading id="cache-heading">Cache</SettingsHeading>
+      <SettingsRow wrap>
         <div>
           <span>Metrics history</span>
-          <small id="cache-help">
+          <SettingsHelp id="cache-help">
             Recorded history for all servers. New readings continue.
-          </small>
+          </SettingsHelp>
         </div>
-        <div className="settings-cache-actions">
-          <span className="settings-cache-size" aria-label="Metrics cache size">
+        <div className="ml-auto flex items-center gap-[12px]">
+          <span
+            className="whitespace-nowrap text-muted-foreground tabular-nums"
+            aria-label="Metrics cache size"
+          >
             {!available
               ? "—"
               : cache.data
@@ -80,11 +89,15 @@ function MetricsCacheSettings() {
             Clear cache
           </Button>
         </div>
-      </div>
-      {!available && <p className="muted">Available in the desktop app.</p>}
+      </SettingsRow>
+      {!available && (
+        <SettingsMessage className="text-[12px] leading-[1.65] text-muted-foreground">
+          Available in the desktop app.
+        </SettingsMessage>
+      )}
       {error ? (
-        <div className="settings-error" role="alert">
-          <p>{String(error)}</p>
+        <div className="mt-[20px] [&_p]:text-(--danger)" role="alert">
+          <SettingsMessage>{String(error)}</SettingsMessage>
           {cache.error && (
             <Button onClick={() => void cache.refetch()}>
               Retry cache size
@@ -92,11 +105,13 @@ function MetricsCacheSettings() {
           )}
         </div>
       ) : mutation.isSuccess ? (
-        <p role="status">Cache cleared.</p>
+        <SettingsMessage role="status">Cache cleared.</SettingsMessage>
       ) : cache.data?.samples === 0 ? (
-        <p className="muted">No recorded history.</p>
+        <SettingsMessage className="text-[12px] leading-[1.65] text-muted-foreground">
+          No recorded history.
+        </SettingsMessage>
       ) : null}
-    </section>
+    </SettingsSection>
   );
 }
 
@@ -143,12 +158,17 @@ export function SettingsPanel() {
     mutation.mutate(enabled);
   };
   return (
-    <div className="settings-panel" aria-label="App settings">
-      <section aria-labelledby="appearance-heading">
-        <h2 id="appearance-heading">Appearance</h2>
-        <div className="settings-row">
+    <div
+      data-slot="settings-panel"
+      className="mx-auto max-w-[720px]"
+      aria-label="App settings"
+    >
+      <SettingsSection aria-labelledby="appearance-heading">
+        <SettingsHeading id="appearance-heading">Appearance</SettingsHeading>
+        <SettingsRow>
           <label id="theme-label">Theme</label>
           <Select
+            className="w-[160px]"
             aria-labelledby="theme-label"
             value={appearance}
             onValueChange={(value) => {
@@ -166,18 +186,18 @@ export function SettingsPanel() {
             <SelectItem value="light">Light</SelectItem>
             <SelectItem value="dark">Dark</SelectItem>
           </Select>
-        </div>
-      </section>
-      <section aria-labelledby="startup-heading">
-        <h2 id="startup-heading">Startup</h2>
-        <label className="settings-row settings-toggle">
+        </SettingsRow>
+      </SettingsSection>
+      <SettingsSection aria-labelledby="startup-heading">
+        <SettingsHeading id="startup-heading">Startup</SettingsHeading>
+        <label className="flex items-center justify-between gap-[24px] text-[12px]">
           <span>
             Launch at login
-            <small id="startup-help">
+            <SettingsHelp id="startup-help">
               {startup && !startup.available
                 ? "Available in the installed app."
                 : "Start in the background when you sign in."}
-            </small>
+            </SettingsHelp>
           </span>
           <Checkbox
             aria-describedby="startup-help"
@@ -188,16 +208,19 @@ export function SettingsPanel() {
           />
         </label>
         {((!startup && !error) || busy) && (
-          <p className="muted" role="status">
+          <SettingsMessage
+            className="text-[12px] leading-[1.65] text-muted-foreground"
+            role="status"
+          >
             {busy ? "Saving…" : "Loading settings…"}
-          </p>
+          </SettingsMessage>
         )}
-      </section>
+      </SettingsSection>
       <UpdateSettings />
       <MetricsCacheSettings />
       {error && (
-        <div className="settings-error" role="alert">
-          <p>{error}</p>
+        <div className="mt-[20px] [&_p]:text-(--danger)" role="alert">
+          <SettingsMessage>{error}</SettingsMessage>
           {!startup && (
             <Button
               onClick={() => void refreshQuery(client, options).catch(() => {})}

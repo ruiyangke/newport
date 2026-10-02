@@ -1,3 +1,4 @@
+import { GitEmptyState } from "./GitEmptyState";
 import { createDiffRenderer } from "../git/historicalDiff";
 import { useGitPageLoader } from "../hooks/useGitPageLoader";
 import { gitProjectsFor } from "../git/registry";
@@ -32,7 +33,7 @@ import {
   type DiffFile,
 } from "./diff/diffModel";
 import { useCurrentGitState } from "../state/git";
-import "./changesPreview.css";
+import { GitDiffSelection } from "./GitDiffSelection";
 import { GitNotice } from "./GitNotice";
 import { DiffStat, GitDiffSettings } from "./diff/GitDiffSettings";
 import { GitStatusBadge, type GitStatusMark } from "./GitStatusBadge";
@@ -263,7 +264,7 @@ export function GitChangesPreview({
             variant="ghost"
             size="icon"
             aria-label="Back to changes"
-            className="git-diff-back -ml-[4px] h-[26px]! w-[26px] flex-none"
+            className="git-diff-back -ml-[4px] h-[28px] w-[28px] flex-none"
             onClick={showList}
           >
             <ChevronLeft size={16} aria-hidden="true" />
@@ -289,7 +290,7 @@ export function GitChangesPreview({
         {!entry.conflicted && choices.length > 1 && (
           <Select
             aria-label="Diff comparison"
-            className="h-[26px]! w-auto min-w-[104px] flex-none"
+            className="h-[28px] w-auto min-w-[104px] flex-none"
             value={side}
             onValueChange={(value) => setSide(value as Side)}
           >
@@ -336,9 +337,7 @@ export function GitChangesPreview({
           </Button>
         </GitNotice>
       ) : !currentDiff ? (
-        <p className="git-projects-empty" role="status">
-          Loading diff…
-        </p>
+        <GitEmptyState role="status">Loading diff…</GitEmptyState>
       ) : (
         <GitDiffView
           key={queryKey}
@@ -472,9 +471,7 @@ export function GitDiffView({
   );
   const file = diff.files[fileIndex];
   if (!file)
-    return (
-      <p className="git-projects-empty">No differences in this comparison.</p>
-    );
+    return <GitEmptyState>No differences in this comparison.</GitEmptyState>;
   const supportsHunks = hunksSupported(diff, file);
   const action = supportsHunks ? hunkAction : undefined;
   // Exactly what a selection sends: the agent's line ids in the order they
@@ -544,17 +541,13 @@ export function GitDiffView({
         </GitNotice>
       )}
       {action && picked.length > 0 && (
-        <div
-          className="git-diff-selection"
-          role="group"
-          aria-label="Selected lines"
-        >
+        <GitDiffSelection role="group" aria-label="Selected lines">
           <span>
             {picked.length} {picked.length === 1 ? "line" : "lines"} selected
           </span>
           {/* The three actions travel together; a bar too narrow for the note
               beside them wraps the note, not the last button away from them. */}
-          <div className="git-diff-selection-actions">
+          <div className="flex flex-wrap items-center gap-[8px]">
             <Button
               size="sm"
               disabled={action.disabled}
@@ -578,29 +571,29 @@ export function GitDiffView({
             </Button>
           </div>
           {mixed && (
-            <span className="git-diff-selection-note">
+            <span className="text-muted-foreground">
               Deletions you did not select stay in the file.
             </span>
           )}
-        </div>
+        </GitDiffSelection>
       )}
       {(file.binary || !hasLines) && footer}
       {file.binary ? (
-        <p className="git-projects-empty">
+        <GitEmptyState>
           Binary file changed. A text diff is not available.
-        </p>
+        </GitEmptyState>
       ) : !hasLines ? (
-        <p className="git-projects-empty">
+        <GitEmptyState>
           {hasMore
             ? "Load more changes to finish this line."
             : "No text changes to display."}
-        </p>
+        </GitEmptyState>
       ) : (
         <Suspense
           fallback={
-            <p className="git-projects-empty" role="status">
+            <GitEmptyState role="status">
               Preparing the diff view…
-            </p>
+            </GitEmptyState>
           }
         >
           <GitDiffEditor

@@ -1,3 +1,9 @@
+import { SectionEmpty } from "./Feedback";
+import {
+  SectionHeader,
+  SectionActions,
+  CollectionCount,
+} from "./SectionHeader";
 import { DestinationStatus } from "./DestinationStatus";
 import { processDetails } from "../portDetails";
 import { forwardingHost, forwardsForPort } from "../forwarding";
@@ -9,31 +15,16 @@ import {
   TableRow,
   TableHead,
   TableCell,
-} from "./ui/table";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-} from "./ui/dropdown-menu";
+} from "./MonitoringTable";
 import { Button } from "./controls";
+import { PageHeader } from "./PageHeader";
 import { StatusLabel } from "./StatusLabel";
-import {
-  ArrowRight,
-  ExternalLink,
-  MoreHorizontal,
-  Pencil,
-  Play,
-  Plus,
-  Search,
-  Square,
-  Trash2,
-} from "lucide-react";
+import { Plus, Search } from "lucide-react";
+import { TunnelRow } from "./TunnelRow";
 import { desktop } from "../api/desktop";
 import {
   active,
   newTunnel,
-  range,
   type Server,
   type Tunnel,
   type Snapshot,
@@ -74,17 +65,31 @@ export function ConnectionsPanel({
   const ports = usePorts(selected);
   return (
     <div className="connections-panel">
-      <div className="workspace-masthead">
-        <div>
-          <h2>Port forwarding</h2>
-        </div>
-      </div>
-      <section className="tunnels-section">
-        <div className="section-heading">
+      <PageHeader
+        title="Port forwarding"
+        subtitle="Forward local ports to services on this server."
+        actions={
+          <Button
+            variant="default"
+            onClick={() =>
+              setEditor({
+                kind: "tunnel",
+                value: newTunnel(selected),
+                existing: false,
+              })
+            }
+          >
+            <Plus size={15} />
+            Add tunnel
+          </Button>
+        }
+      />
+      <section>
+        <SectionHeader>
           <h2>
             Tunnels <span>{tunnels.length}</span>
           </h2>
-          <div className="section-actions">
+          <SectionActions>
             {tunnels.length > 1 && (
               <Button
                 loading={pending.has("all")}
@@ -105,161 +110,39 @@ export function ConnectionsPanel({
                   : "Connect all"}
               </Button>
             )}
-            <Button
-              variant={tunnels.length === 0 ? "default" : "outline"}
-              onClick={() =>
-                setEditor({
-                  kind: "tunnel",
-                  value: newTunnel(selected),
-                  existing: false,
-                })
-              }
-            >
-              <Plus size={15} />
-              Add tunnel
-            </Button>
-          </div>
-        </div>
+          </SectionActions>
+        </SectionHeader>
         {tunnels.length === 0 ? (
-          <div className="section-empty">
+          <SectionEmpty as="div">
             <p>No tunnels yet</p>
-            <small>Add a tunnel or discover ports below.</small>
-          </div>
+            <small>Use Add tunnel above, or discover ports below.</small>
+          </SectionEmpty>
         ) : (
-          <ul className="tunnel-list" role="list" aria-label="Tunnels">
+          <ul
+            className="m-0 list-none rounded-[6px] border border-border p-0"
+            role="list"
+            aria-label="Tunnels"
+          >
             {tunnels.map((t) => {
               const state = runtime.tunnels[t.id] ?? disconnected;
               return (
-                <li key={t.id} className="tunnel-row">
-                  <div className="tunnel-info">
-                    <div className="tunnel-title">
-                      <h3 id={`tunnel-${t.id}`}>
-                        {t.name || `Port ${t.localPort}`}
-                      </h3>
-                      <StatusLabel state={state} />
-                    </div>
-                    <div className="port-route">
-                      <div className="route-endpoint">
-                        <small>On this computer</small>
-                        <code>
-                          127.0.0.1:
-                          <b>{range(t.localPort, t.localPortEnd)}</b>
-                        </code>
-                      </div>
-                      <ArrowRight size={14} />
-                      <div className="route-endpoint">
-                        <small>Remote destination</small>
-                        <code>
-                          {t.remoteHost}:
-                          <b>{range(t.remotePort, t.remotePortEnd)}</b>
-                        </code>
-                      </div>
-                    </div>
-                    {(t.autoConnect || t.autoReconnect) && (
-                      <small className="tunnel-options">
-                        {[
-                          t.autoConnect && "Connect on launch",
-                          t.autoReconnect && "Auto reconnect",
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")}
-                      </small>
-                    )}
-                    {state.status === "connected" && (
-                      <DestinationStatus
-                        health={runtime.tunnelHealth?.[t.id]}
-                      />
-                    )}
-                    {state.errorMessage && (
-                      <p className="connection-error">{state.errorMessage}</p>
-                    )}
-                  </div>
-                  <div className="tunnel-actions">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="icon"
-                      aria-label={`Open ${t.name || t.localPort} in browser`}
-                      title="Open in browser (HTTP)"
-                      disabled={state.status !== "connected"}
-                      onClick={() =>
-                        void act(`open-${t.id}`, () =>
-                          desktop("open_tunnel", { id: t.id }),
-                        )
-                      }
-                    >
-                      <ExternalLink size={15} />
-                    </Button>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="icon"
-                          aria-label={`Actions for tunnel ${t.name || t.localPort}`}
-                        >
-                          <MoreHorizontal size={16} />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        {" "}
-                        <DropdownMenuItem
-                          aria-label={`Edit ${t.name || t.localPort}`}
-                          onSelect={() =>
-                            setEditor({
-                              kind: "tunnel",
-                              value: t,
-                              existing: true,
-                            })
-                          }
-                        >
-                          <Pencil size={15} /> Edit tunnel
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          variant="destructive"
-                          aria-label={`Delete ${t.name || t.localPort}`}
-                          onSelect={() =>
-                            setDeleting({
-                              kind: "tunnel",
-                              id: t.id,
-                              name: t.name || `Port ${t.localPort}`,
-                            })
-                          }
-                        >
-                          <Trash2 size={15} /> Delete tunnel
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                    <Button
-                      className="connect-button"
-                      aria-describedby={`tunnel-${t.id}`}
-                      loading={pending.has(t.id)}
-                      disabled={pending.has("all")}
-                      onClick={() =>
-                        void act(t.id, () =>
-                          desktop("set_tunnel_connected", {
-                            id: t.id,
-                            connected: !active(state.status),
-                          }),
-                        )
-                      }
-                    >
-                      {active(state.status) ? (
-                        <Square size={13} />
-                      ) : (
-                        <Play size={13} />
-                      )}
-                      {active(state.status) ? "Disconnect" : "Connect"}
-                    </Button>
-                  </div>
-                </li>
+                <TunnelRow
+                  key={t.id}
+                  tunnel={t}
+                  state={state}
+                  health={runtime.tunnelHealth?.[t.id]}
+                  pending={pending}
+                  act={act}
+                  setEditor={setEditor}
+                  setDeleting={setDeleting}
+                />
               );
             })}
           </ul>
         )}
       </section>
-      <section className="remote-ports-section">
-        <div className="section-heading">
+      <section data-slot="remote-ports-section" className="mt-[27px]">
+        <SectionHeader>
           <h2>Remote ports</h2>
           <Button
             loading={ports.isFetching}
@@ -273,148 +156,166 @@ export function ConnectionsPanel({
             <Search size={15} />
             {ports.isFetching ? "Discovering…" : "Discover ports"}
           </Button>
-        </div>
-        <p className="section-description">
+        </SectionHeader>
+        <p
+          data-slot="section-description"
+          className="max-w-[70ch] text-[12px] leading-[1.65] text-muted-foreground"
+        >
           Refreshes automatically every 30 seconds while this page is open.
         </p>
         {ports.error && (
-          <p role="alert" className="section-empty">
+          <p
+            role="alert"
+            data-slot="cockpit-error"
+            className="text-[12px] leading-[1.6] text-(--red) wrap-anywhere"
+          >
             Could not refresh ports: {ports.error.message}
           </p>
         )}
         {ports.isFetching && !ports.data && (
-          <p role="status" className="section-empty">
+          <SectionEmpty role="status">
             Discovering listening ports…
-          </p>
+          </SectionEmpty>
         )}
         {ports.data ? (
           ports.data.length ? (
-            <Table
-              className="cockpit-table remote-ports-table"
-              aria-label="Remote ports"
-            >
-              <TableHeader>
-                <TableRow>
-                  <TableHead scope="col">Port</TableHead>
-                  <TableHead scope="col">Application / address</TableHead>
-                  <TableHead scope="col" className="numeric">
-                    PID
-                  </TableHead>
-                  <TableHead scope="col">User</TableHead>
-                  <TableHead scope="col">Forwarding</TableHead>
-                  <TableHead scope="col">
-                    <span className="sr-only">Actions</span>
-                  </TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {ports.data.map((p) => {
-                  const forwards = forwardsForPort(tunnels, selected, p);
-                  const details = processDetails(p);
-                  return (
-                    <TableRow key={`${p.address}:${p.port}`}>
-                      <TableCell>
-                        <code id={`remote-port-${p.address}-${p.port}`}>
-                          {p.port}
-                        </code>
-                      </TableCell>
-                      <TableCell>
-                        <span>
-                          {p.containerName
-                            ? `${p.containerName} · Docker`
-                            : p.applicationName ||
-                              p.processName ||
-                              "Owner not reported"}
-                        </span>
-                        <small>{p.address}</small>
-                        {details.map((detail) => (
-                          <div
-                            className="port-project-directory"
-                            key={detail.label}
-                          >
-                            <span>{detail.label}</span>
-                            <code>{detail.value}</code>
-                          </div>
-                        ))}
-                      </TableCell>
-                      <TableCell className="numeric">{p.pid ?? "—"}</TableCell>
-                      <TableCell>{p.user || "—"}</TableCell>
-                      <TableCell>
-                        {forwards.length ? (
-                          forwards.map((t) => (
-                            <div key={t.id} className="port-forward-state">
-                              <StatusLabel
-                                state={runtime.tunnels[t.id] ?? disconnected}
-                              />
-                              <small>
-                                127.0.0.1:{t.localPort + p.port - t.remotePort}
-                              </small>
-                              {runtime.tunnels[t.id]?.status ===
-                                "connected" && (
-                                <DestinationStatus
-                                  health={runtime.tunnelHealth?.[t.id]?.filter(
-                                    (h) => h.remotePort === p.port,
-                                  )}
-                                />
-                              )}
-                              {runtime.tunnels[t.id]?.errorMessage && (
-                                <small>
-                                  {runtime.tunnels[t.id].errorMessage}
-                                </small>
-                              )}
-                              <Button
-                                variant="ghost"
-                                onClick={() =>
-                                  setEditor({
-                                    kind: "tunnel",
-                                    value: t,
-                                    existing: true,
-                                  })
-                                }
-                                aria-label={`Edit forward for port ${p.port}`}
-                              >
-                                Edit
-                              </Button>
+            <>
+              <CollectionCount>
+                Showing {ports.data.length} listening{" "}
+                {ports.data.length === 1 ? "port" : "ports"}
+              </CollectionCount>
+              <Table kind="ports" aria-label="Remote ports">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead scope="col">Port</TableHead>
+                    <TableHead scope="col">Application / address</TableHead>
+                    <TableHead scope="col" numeric>
+                      PID
+                    </TableHead>
+                    <TableHead scope="col">User</TableHead>
+                    <TableHead scope="col">Forwarding</TableHead>
+                    <TableHead scope="col">
+                      <span className="sr-only">Actions</span>
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {ports.data.map((p) => {
+                    const forwards = forwardsForPort(tunnels, selected, p);
+                    const details = processDetails(p);
+                    return (
+                      <TableRow key={`${p.address}:${p.port}`}>
+                        <TableCell>
+                          <code id={`remote-port-${p.address}-${p.port}`}>
+                            {p.port}
+                          </code>
+                        </TableCell>
+                        <TableCell>
+                          <span>
+                            {p.containerName
+                              ? `${p.containerName} · Docker`
+                              : p.applicationName ||
+                                p.processName ||
+                                "Owner not reported"}
+                          </span>
+                          <small>{p.address}</small>
+                          {details.map((detail) => (
+                            <div
+                              data-slot="port-project-directory"
+                              className="mt-[6px] text-muted-foreground [&>span]:block [&>code]:block [&>code]:select-text [&>code]:[font:inherit] [&>code]:whitespace-pre-wrap [&>code]:wrap-anywhere"
+                              key={detail.label}
+                            >
+                              <span>{detail.label}</span>
+                              <code>{detail.value}</code>
                             </div>
-                          ))
-                        ) : (
-                          <span className="muted">Not forwarded</span>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        {!forwards.length && (
-                          <Button
-                            variant="ghost"
-                            className="text-button"
-                            aria-describedby={`remote-port-${p.address}-${p.port}`}
-                            onClick={() =>
-                              setEditor({
-                                kind: "tunnel",
-                                value: {
-                                  ...newTunnel(selected, p.port),
-                                  remoteHost: forwardingHost(p.address),
-                                  name:
-                                    p.containerName ||
-                                    p.applicationName ||
-                                    p.processName ||
-                                    "",
-                                },
-                                existing: false,
-                              })
-                            }
-                          >
-                            <Plus size={14} />
-                            Forward
-                          </Button>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
+                          ))}
+                        </TableCell>
+                        <TableCell numeric>{p.pid ?? "—"}</TableCell>
+                        <TableCell>{p.user || "—"}</TableCell>
+                        <TableCell>
+                          {forwards.length ? (
+                            forwards.map((t) => (
+                              <div
+                                key={t.id}
+                                data-slot="port-forward-state"
+                                className="not-first:mt-[8px] [&>small:first-of-type]:whitespace-nowrap"
+                              >
+                                <StatusLabel
+                                  state={runtime.tunnels[t.id] ?? disconnected}
+                                />
+                                <small>
+                                  127.0.0.1:
+                                  {t.localPort + p.port - t.remotePort}
+                                </small>
+                                {runtime.tunnels[t.id]?.status ===
+                                  "connected" && (
+                                  <DestinationStatus
+                                    health={runtime.tunnelHealth?.[
+                                      t.id
+                                    ]?.filter((h) => h.remotePort === p.port)}
+                                  />
+                                )}
+                                {runtime.tunnels[t.id]?.errorMessage && (
+                                  <small>
+                                    {runtime.tunnels[t.id].errorMessage}
+                                  </small>
+                                )}
+                                <Button
+                                  variant="ghost"
+                                  onClick={() =>
+                                    setEditor({
+                                      kind: "tunnel",
+                                      value: t,
+                                      existing: true,
+                                    })
+                                  }
+                                  aria-label={`Edit forward for port ${p.port}`}
+                                >
+                                  Edit
+                                </Button>
+                              </div>
+                            ))
+                          ) : (
+                            <span className="text-[12px] leading-[1.65] text-muted-foreground">
+                              Not forwarded
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          {!forwards.length && (
+                            <Button
+                              variant="ghost"
+
+                              aria-describedby={`remote-port-${p.address}-${p.port}`}
+                              onClick={() =>
+                                setEditor({
+                                  kind: "tunnel",
+                                  value: {
+                                    ...newTunnel(selected, p.port),
+                                    remoteHost: forwardingHost(p.address),
+                                    name:
+                                      p.containerName ||
+                                      p.applicationName ||
+                                      p.processName ||
+                                      "",
+                                  },
+                                  existing: false,
+                                })
+                              }
+                            >
+                              <Plus size={14} />
+                              Forward
+                            </Button>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </>
           ) : (
-            <p className="section-empty">No listening TCP ports found.</p>
+            <SectionEmpty>No listening TCP ports found.</SectionEmpty>
           )
         ) : null}
       </section>

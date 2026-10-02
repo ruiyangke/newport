@@ -1,3 +1,5 @@
+import { StatusIndicator } from "./StatusIndicator";
+import { StatusDot } from "./StatusDot";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createStore, useSelector } from "@tanstack/react-store";
 import type { ISearchOptions } from "@xterm/addon-search";
@@ -12,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { type Server } from "../types";
+import { cn } from "../lib/utils";
 import { useServerScope } from "../query/keys";
 import {
   dropTerminalSession,
@@ -34,7 +37,7 @@ import {
   ContextMenuTrigger,
 } from "./ui/context-menu";
 import "@xterm/xterm/css/xterm.css";
-import "./terminal.css";
+import { TerminalTabFrame } from "./TerminalTabFrame";
 
 /** The native backend accepts eight concurrent terminal sessions. */
 const MAX_TERMINALS = 8;
@@ -135,7 +138,8 @@ function TerminalWorkspace({
 
   return (
     <Tabs
-      className="remote-terminal"
+      data-slot="remote-terminal"
+      className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col gap-0 p-0"
       aria-label="SSH terminal"
       value={layout.active}
       onValueChange={selectTab}
@@ -158,10 +162,10 @@ function TerminalWorkspace({
 }
 
 function statusTone(status: string, error: string) {
-  if (error) return "error";
-  if (status === "Connected") return "connected";
-  if (status === "Connecting…") return "connecting";
-  return "";
+  if (error) return "danger";
+  if (status === "Connected") return "success";
+  if (status === "Connecting…") return "warning";
+  return "muted";
 }
 
 /** Custom name, then the shell's OSC title, then the default name. */
@@ -197,17 +201,22 @@ function TerminalTabs({
     setEditing(null);
   };
   return (
-    <div className="terminal-tabs">
+    <div
+      data-slot="terminal-tabs"
+      className="flex min-w-0 items-center gap-[2px] overflow-x-auto scrollbar-none [&::-webkit-scrollbar]:hidden"
+    >
       <TabsList
-        className="terminal-tablist"
+        data-slot="terminal-tablist"
+        className="flex min-w-0 flex-row items-center justify-start gap-[2px] bg-transparent p-0 group-data-vertical/tabs:flex-row"
         aria-label="Terminal sessions"
         {...(dragRegion ? { "data-tauri-drag-region": true } : {})}
       >
         {layout.tabs.map((tab) =>
           editing === tab.id ? (
-            <div key={tab.id} className="terminal-tab" data-editing="">
+            <TerminalTabFrame key={tab.id} data-editing="">
               <input
-                className="terminal-tab-input"
+                data-slot="terminal-tab-input"
+                className="h-[26px] w-[132px] min-w-0 select-text rounded-[5px] border-0 border-current bg-transparent px-[8px] py-0 text-[12px] text-foreground focus:outline-2 focus:-outline-offset-1 focus:outline-ring"
                 value={draft}
                 autoFocus
                 maxLength={60}
@@ -225,7 +234,7 @@ function TerminalTabs({
                   }
                 }}
               />
-            </div>
+            </TerminalTabFrame>
           ) : (
             <TerminalTabItem
               key={tab.id}
@@ -272,20 +281,19 @@ function TerminalTabItem({
   onResetName: () => void;
 }) {
   const session = peekTerminalSession(connection, tab.id);
-  const {
-    status,
-    error,
-    title,
-    active: sessionActive,
-  } = useSelector(session?.state ?? emptyTabState, (state) => state);
+  const { title, active: sessionActive } = useSelector(
+    session?.state ?? emptyTabState,
+    (state) => state,
+  );
   const name = tab.custom || title || tab.name;
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
-        <div className="terminal-tab" data-active={active ? "" : undefined}>
+        <TerminalTabFrame data-active={active ? "" : undefined}>
           <TabsTrigger
             value={tab.id}
-            className="terminal-tab-select"
+            data-slot="terminal-tab-select"
+            className="flex h-[26px] w-auto min-w-0 flex-initial items-center gap-[6px] rounded-[5px] border-0 border-current bg-transparent! py-0 pr-[4px] pl-[8px] text-[12px] text-muted-foreground [box-shadow:none]! group-data-vertical/tabs:w-auto group-data-[active]/terminal-tab:font-medium group-data-[active]/terminal-tab:text-foreground focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring"
             title={name}
             onClick={(event) => {
               // Pointer selection resumes typing; keyboard navigation stays on
@@ -295,9 +303,8 @@ function TerminalTabItem({
                 requestAnimationFrame(() => {
                   // A double-click opened a rename; never steal its focus.
                   if (
-                    document.activeElement?.classList.contains(
-                      "terminal-tab-input",
-                    )
+                    document.activeElement?.getAttribute("data-slot") ===
+                    "terminal-tab-input"
                   )
                     return;
                   session.term.focus();
@@ -311,23 +318,23 @@ function TerminalTabItem({
               }
             }}
           >
-            <span
-              className={`status-dot ${statusTone(status, error)}`}
-              aria-hidden="true"
-            />
-            <span className="terminal-tab-name">{name}</span>
+            <StatusDot />
+            <span data-slot="terminal-tab-name" className="truncate">
+              {name}
+            </span>
           </TabsTrigger>
           {canClose && (
             <button
               type="button"
-              className="terminal-tab-close"
+              data-slot="terminal-tab-close"
+              className="mr-[3px] grid size-[16px] place-items-center rounded-[4px] border-0 border-current bg-transparent p-0 text-muted-foreground opacity-0 group-hover/terminal-tab:opacity-100 group-data-[active]/terminal-tab:opacity-100 hover:bg-[color-mix(in_srgb,var(--foreground)_12%,transparent)] hover:text-foreground focus-visible:opacity-100 focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring"
               aria-label={`Close ${name}`}
               onClick={onClose}
             >
               <X size={11} aria-hidden="true" />
             </button>
           )}
-        </div>
+        </TerminalTabFrame>
       </ContextMenuTrigger>
       <ContextMenuContent aria-label={`Actions for ${name}`}>
         <ContextMenuItem onSelect={onRename}>Rename</ContextMenuItem>
@@ -476,7 +483,8 @@ function TerminalView({
   return (
     <>
       <div
-        className="terminal-bar"
+        data-slot="terminal-bar"
+        className={`flex h-[38px] shrink-0 select-none items-center justify-between gap-[8px] border-b border-border pr-[8px] ${immersive ? "pl-[96px]" : "pl-[8px]"}`}
         {...(immersive ? { "data-tauri-drag-region": true } : {})}
       >
         <TerminalTabs
@@ -488,16 +496,18 @@ function TerminalView({
           onRename={onRename}
         />
         <div
-          className="terminal-actions"
+          data-slot="terminal-actions"
+          className="flex shrink-0 items-center gap-[8px]"
           {...(immersive ? { "data-tauri-drag-region": true } : {})}
         >
-          <span
-            className={`status terminal-state ${statusTone(status, error)}${steady ? " sr-only" : ""}`}
+          <StatusIndicator
+            data-slot="terminal-state"
+            tone={statusTone(status, error)}
+            className={steady ? "sr-only" : "whitespace-nowrap"}
             role="status"
           >
-            <span className="status-dot" aria-hidden="true" />
             <span className="terminal-status">{status}</span>
-          </span>
+          </StatusIndicator>
           <Button
             size="icon-xs"
             variant="ghost"
@@ -525,41 +535,65 @@ function TerminalView({
         </div>
       </div>
       {error && (
-        <p className="terminal-error cockpit-error" role="alert">
+        <p
+          data-slot="terminal-error"
+          className="m-0 shrink-0 border-b border-border bg-[color-mix(in_srgb,var(--red)_6%,transparent)] px-[12px] py-[9px] text-[12px] leading-[1.6] text-(--red) wrap-anywhere"
+          role="alert"
+        >
           {error}
         </p>
       )}
-      <TabsContent value={layout.active} className="terminal-frame">
+      <TabsContent
+        value={layout.active}
+        data-slot="terminal-frame"
+        className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background"
+      >
         <div
-          className="terminal-mount"
+          data-slot="terminal-mount"
+          className={cn(
+            "flex min-h-0 min-w-0 flex-1 flex-col",
+            started ? "visible" : "invisible",
+          )}
           ref={host}
-          style={{ visibility: started ? "visible" : "hidden" }}
         />
         {!started && (
-          <div className="terminal-welcome">
+          <div
+            data-slot="terminal-welcome"
+            className="absolute inset-0 flex flex-col items-center justify-center gap-[6px] bg-background p-[24px] text-center"
+          >
             <TerminalIcon
-              className="terminal-mark"
+              data-slot="terminal-mark"
+              className="mb-[8px] text-muted-foreground opacity-80"
               size={28}
               strokeWidth={1.4}
               aria-hidden="true"
             />
-            <h3>
+            <h3 className="m-0 text-[15px] font-semibold">
               {active
                 ? "Connecting…"
                 : error
                   ? "Connection failed"
                   : "Open a remote shell"}
             </h3>
-            <p className="terminal-endpoint">
+            <p
+              data-slot="terminal-endpoint"
+              className="font-[ui-monospace,SFMono-Regular,Menlo,monospace] text-[12px] leading-[1.6] text-muted-foreground wrap-anywhere"
+            >
               {server.sshUser}@{server.sshHost}
             </p>
           </div>
         )}
         {findOpen && (
-          <div className="terminal-find" role="search" aria-label="Find">
+          <div
+            data-slot="terminal-find"
+            className="absolute top-[8px] right-[12px] z-[2] flex items-center gap-[2px] rounded-[8px] border border-border bg-popover p-[3px] [box-shadow:0_6px_20px_rgb(0_0_0/12%)]"
+            role="search"
+            aria-label="Find"
+          >
             <input
               ref={findInput}
-              className="terminal-find-input"
+              data-slot="terminal-find-input"
+              className="h-[24px] w-[180px] rounded-[5px] border-0 border-current bg-transparent px-[6px] py-0 text-[12px] text-foreground placeholder:text-muted-foreground focus:outline-2 focus:-outline-offset-2 focus:outline-ring"
               value={query}
               placeholder="Find"
               aria-label="Find in terminal"
@@ -583,7 +617,11 @@ function TerminalView({
                 }
               }}
             />
-            <span className="terminal-find-count" aria-live="polite">
+            <span
+              data-slot="terminal-find-count"
+              className="min-w-[52px] pr-[4px] text-right text-[11px] text-muted-foreground tabular-nums"
+              aria-live="polite"
+            >
               {query && results
                 ? results.count
                   ? `${results.index + 1}/${results.count}`

@@ -1122,7 +1122,7 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   // Head-truncating the path costs its character order unless it is isolated.
   expect(
     await page
-      .locator(".git-folder-current bdi")
+      .locator("[data-slot=git-folder-current] bdi")
       .evaluate((node) => node.textContent),
   ).toBe("/srv");
   await page.screenshot({
@@ -1178,7 +1178,7 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   await expect(changedSearch).toBeFocused();
   await changedSearch.fill("APP");
   await expect(
-    page.getByText("1 of 1 matching files loaded.", { exact: true }),
+    page.getByText("1 matching file loaded.", { exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "src/App.tsx", exact: true }).first(),
@@ -1370,7 +1370,7 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
   // number out of the computed string passes immediately in Chromium, where it
   // is `oklch(0.97 …)`, and the capture below would then be taken in light.
   await page.waitForFunction(() => {
-    const el = document.querySelector(".git-stash-workspace");
+    const el = document.querySelector("[data-slot=git-stash-workspace]");
     if (!el) return false;
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d")!;
@@ -1706,7 +1706,7 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
     path: `.impeccable/screenshots/projects-remote-refs-${info.project.name}.png`,
   });
   const remoteDialogBounds = await page
-    .locator(".git-inspector-section")
+    .locator("[data-slot=git-inspector-section]")
     .boundingBox();
   const backBounds = await page
     .getByRole("button", { name: "Back to remotes", exact: true })
@@ -1781,13 +1781,13 @@ test("saved projects open live reads, rename and remove bookmarks", async ({
     .click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await openGitAction(page, "Remotes");
-  await page.locator(".git-remote-transfer summary").click();
+  await page.getByText("Transfer a branch", { exact: true }).click();
   await page
     .getByRole("button", { name: "Pull fast-forward", exact: true })
     .click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await openGitAction(page, "Remotes");
-  await page.locator(".git-remote-transfer summary").click();
+  await page.getByText("Transfer a branch", { exact: true }).click();
   await page.getByRole("button", { name: "Push branch", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await openGitAction(page, "Tags");

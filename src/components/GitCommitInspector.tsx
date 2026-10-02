@@ -1,3 +1,4 @@
+import { GitEmptyState } from "./GitEmptyState";
 import { gitErrorMessage } from "../git/errors";
 import {
   useId,
@@ -118,7 +119,7 @@ function CommitBody({ body }: { body: string }) {
       <div
         ref={ref}
         className={cn(
-          "git-commit-message overflow-hidden text-[12px] leading-[18px] whitespace-pre-wrap text-muted-foreground [overflow-wrap:anywhere]",
+          "git-commit-message overflow-hidden text-[12px] leading-[18px] whitespace-pre-wrap text-muted-foreground wrap-anywhere",
           !expanded && "max-h-[72px]",
           !expanded &&
             overflowing &&
@@ -132,7 +133,7 @@ function CommitBody({ body }: { body: string }) {
           variant="link"
           aria-expanded={expanded}
           onClick={() => setExpanded((value) => !value)}
-          className="h-auto! px-0! py-[2px] text-[11px]! font-medium! text-primary"
+          className="h-auto px-0 py-[2px] text-[11px] font-medium text-primary leading-[1.428571]"
         >
           {expanded ? "Show less" : "Show more"}
         </Button>
@@ -173,7 +174,7 @@ export function GitCommitInspector({
         <div className="flex items-start gap-[12px]">
           <div className="min-w-0 flex-1">
             {/* The unlayered bare `h3` rule claims size, weight and margin. */}
-            <h3 className="text-[14px]! leading-[20px] font-semibold! [overflow-wrap:anywhere]">
+            <h3 className="text-[14px] leading-[20px] font-semibold wrap-anywhere">
               {subject || "Empty commit message"}
             </h3>
             {body && <CommitBody key={commit.oid.hex} body={body} />}
@@ -214,7 +215,7 @@ export function GitCommitInspector({
               variant="ghost"
               size="icon-xs"
               aria-label={copied ? "Commit ID copied" : "Copy commit ID"}
-              className="h-[20px]! w-[20px] px-0! text-muted-foreground"
+              className="h-[20px] w-[20px] px-0 text-muted-foreground"
               onClick={() => {
                 void navigator.clipboard
                   ?.writeText(commit.oid.hex)
@@ -235,7 +236,7 @@ export function GitCommitInspector({
           {commit.parents.length > 1 ? (
             <Select
               aria-label="Compare with parent"
-              className="h-[24px]! w-auto text-[11px]!"
+              className="data-[size=default]:h-[24px] w-auto text-[11px] leading-[1.428571]"
               value={String(parentIndex)}
               onValueChange={(value) => setParentIndex(Number(value))}
             >
@@ -320,9 +321,7 @@ function CommitFiles({
         {page.metadata.totalFiles === 1 ? "changed file" : "changed files"}
       </p>
       {!page.entries.length ? (
-        <p className="git-projects-empty">
-          No changed files against this parent.
-        </p>
+        <GitEmptyState>No changed files against this parent.</GitEmptyState>
       ) : (
         <ul className="git-commit-files m-0 min-h-0 flex-1 list-none overflow-y-auto px-[6px] pb-[6px]">
           {page.entries.map((file, index) => {
@@ -343,7 +342,7 @@ function CommitFiles({
                   aria-pressed={chosen}
                   aria-describedby={`${statusId}-${index}`}
                   onClick={() => setSelected(path)}
-                  className="h-[28px]! min-w-0 flex-1 justify-start gap-[8px] rounded-[5px]! border-0 bg-transparent px-[10px]! text-left text-[12px] font-normal text-foreground hover:bg-transparent dark:hover:bg-transparent"
+                  className="h-[28px] min-w-0 flex-1 justify-start gap-[8px] rounded-[5px] border-0 bg-transparent px-[10px] text-left text-[12px] font-normal text-foreground hover:bg-transparent dark:hover:bg-transparent"
                 >
                   <GitStatusBadge
                     mark={markForStatus(file.status)}
@@ -384,9 +383,7 @@ function CommitFiles({
           path={selected}
         />
       ) : (
-        <p className="git-projects-empty">
-          Select a file to inspect this commit.
-        </p>
+        <GitEmptyState>Select a file to inspect this commit.</GitEmptyState>
       )}
     </>
   );
@@ -408,9 +405,7 @@ function CommitFiles({
       )}
       {!page ? (
         busy && (
-          <p role="status" className="git-projects-empty">
-            Loading commit files…
-          </p>
+          <GitEmptyState role="status">Loading commit files…</GitEmptyState>
         )
       ) : (
         <>
@@ -563,9 +558,7 @@ function CommitDiff({
           )}
         </>
       ) : (
-        <p role="status" className="git-projects-empty">
-          Loading historical diff…
-        </p>
+        <GitEmptyState role="status">Loading historical diff…</GitEmptyState>
       )}
     </section>
   );

@@ -1,3 +1,22 @@
+import { StatusDot } from "./components/StatusDot";
+import { WorkspaceBanner, WorkspaceEmpty } from "./components/Feedback";
+import {
+  AppShell,
+  AppSidebar,
+  SidebarResizer,
+  WindowToolbar,
+} from "./components/AppShell";
+import {
+  SidebarNavigation,
+  SidebarTab,
+  SidebarAction,
+} from "./components/SidebarNavigation";
+import { EditorBody, EditorFooter } from "./components/EditorLayout";
+import {
+  WorkspaceViewport,
+  WorkspaceDetail,
+  WorkspaceContent,
+} from "./components/WorkspaceLayout";
 import { retainWorkspaces } from "./state/workspace";
 import { retainGitState } from "./state/git";
 import { retainGitProjects } from "./git/registry";
@@ -13,6 +32,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import {
   useWorkspaceNavigation,
   workspaceViews,
+  type WorkspaceView,
 } from "./hooks/useWorkspaceNavigation";
 import { IntegrationPanel } from "./components/IntegrationPanel";
 import { ConnectionsPanel } from "./components/ConnectionsPanel";
@@ -31,7 +51,6 @@ import {
 } from "./components/ui/dropdown-menu";
 import { toast } from "sonner";
 import { ServerPicker } from "./components/ServerPicker";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
 import {
   Command,
   CommandDialog,
@@ -66,7 +85,6 @@ import {
   Activity,
   Boxes,
   Cable,
-  Command as CommandIcon,
   Layers,
   Terminal,
   CircleAlert,
@@ -76,6 +94,7 @@ import {
   Server as ServerIcon,
   Settings2,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import { displayName, newServer, type Server, type Tunnel } from "./types";
 
@@ -84,6 +103,18 @@ const FilesPanel = lazy(() =>
     default: module.FilesPanel,
   })),
 );
+
+/** The sidebar and the command palette share one ordered view list. */
+const viewItems: { value: WorkspaceView; label: string; icon: LucideIcon }[] = [
+  { value: "overview", label: "Overview", icon: Activity },
+  { value: "connections", label: "Connections", icon: Cable },
+  { value: "services", label: "Services", icon: Layers },
+  { value: "containers", label: "Containers", icon: Boxes },
+  { value: "terminal", label: "Terminal", icon: Terminal },
+  { value: "files", label: "Files", icon: FolderOpen },
+  { value: "projects", label: "Projects", icon: FolderGit2 },
+  { value: "integration", label: "Integration", icon: Plug },
+];
 
 type Editor =
   | { kind: "server"; value: Server; existing: boolean }
@@ -129,7 +160,7 @@ export default function App() {
                 ? "server-test"
                 : event.shiftKey && event.key.toLowerCase() === "l"
                   ? "sidebar-toggle"
-                  : /^[1-6]$/.test(event.key)
+                  : /^[1-8]$/.test(event.key)
                     ? `view-${workspaceViews[Number(event.key) - 1]}`
                     : "";
       if (action) {
@@ -280,23 +311,34 @@ export default function App() {
   });
   const openServerMenu = () => setServerMenuOpen(true);
   return (
-    <Tabs
+    <AppShell
       value={settings ? "settings" : view}
       onValueChange={selectView}
       orientation="vertical"
-      className={`app-shell native-shell mac-shell ${windows ? "windows-shell" : ""} ${sidebar.hidden ? "sidebar-hidden" : ""} ${immersive ? "immersive" : ""}`}
+      collapsed={sidebar.hidden}
+      immersive={immersive}
       style={{ "--source-width": `${sidebar.width}px` } as CSSProperties}
     >
-      <aside
-        className="sidebar"
-        hidden={sidebar.hidden}
+      <AppSidebar
+        windows={windows}
+        hidden={sidebar.hidden || immersive}
         onContextMenu={(event) => {
           event.preventDefault();
           openServerMenu();
         }}
       >
-        <div className="sidebar-titlebar" data-tauri-drag-region />
-        <div className="app-brand" data-tauri-drag-region>
+        <div
+          data-slot="sidebar-titlebar"
+          className={
+            windows ? "hidden" : "-mx-[10px] h-[52px] min-h-[52px] select-none"
+          }
+          data-tauri-drag-region
+        />
+        <div
+          data-slot="app-brand"
+          className={`${windows ? "h-[52px]" : "h-[30px]"} mb-[6px] flex shrink-0 select-none items-center gap-[8px] px-[9px] text-[14px] font-semibold text-foreground [&_img]:pointer-events-none [&_img]:rounded-[5px]`}
+          data-tauri-drag-region
+        >
           <img src={appIcon} alt="" width={22} height={22} draggable={false} />
           <span data-tauri-drag-region>Newport</span>
         </div>
@@ -312,40 +354,41 @@ export default function App() {
           onAdd={addServer}
         />
 
-        <TabsList className="source-list" aria-label="Server views">
-          {[
-            { value: "overview", label: "Overview", icon: Activity },
-            { value: "connections", label: "Connections", icon: Cable },
-            { value: "services", label: "Services", icon: Layers },
-            { value: "containers", label: "Containers", icon: Boxes },
-            { value: "terminal", label: "Terminal", icon: Terminal },
-            { value: "files", label: "Files", icon: FolderOpen },
-            { value: "projects", label: "Projects", icon: FolderGit2 },
-            { value: "integration", label: "Integration", icon: Plug },
-          ].map(({ value, label, icon: Icon }) => (
-            <TabsTrigger
+        <SidebarNavigation aria-label="Server views">
+          {viewItems.map(({ value, label, icon: Icon }) => (
+            <SidebarTab
               key={value}
               value={value}
               aria-label={label}
+              title={!server ? "Add a server to open this view" : undefined}
               disabled={!server}
             >
               <Icon size={17} />
               <span>{label}</span>
               {value === "connections" && tunnels.length > 0 && (
-                <span className="source-count">{tunnels.length}</span>
+                <span
+                  data-slot="source-count"
+                  className="ml-auto text-[11px] text-muted-foreground tabular-nums group-data-[state=active]/navigation:text-(--native-selection-foreground)"
+                >
+                  {tunnels.length}
+                </span>
               )}
-            </TabsTrigger>
+            </SidebarTab>
           ))}
-        </TabsList>
-        <div className="sidebar-secondary">
-          <Button
+        </SidebarNavigation>
+        <div
+          data-slot="sidebar-secondary"
+          className="mt-auto flex flex-col gap-[3px] border-0 border-current pt-[16px] pb-[8px] [@media(max-height:560px)]:pt-[4px]"
+        >
+          <SidebarAction
             variant="ghost"
+            className="aria-[current=page]:bg-(--native-selection)"
             onClick={openSettings}
             aria-current={settings ? "page" : undefined}
           >
             <Settings2 size={16} /> Settings
-          </Button>
-          <Button
+          </SidebarAction>
+          <SidebarAction
             variant="ghost"
             onClick={addServer}
             disabled={blocked}
@@ -353,23 +396,23 @@ export default function App() {
           >
             <Plus size={16} />
             Add Server
-          </Button>
+          </SidebarAction>
         </div>
-        <div className="sidebar-footer" role="status">
-          <span
-            aria-hidden="true"
-            className={`status-dot ${connected ? "online" : ""}`}
-          />
+        <div
+          data-slot="sidebar-footer"
+          className="m-0 grid grid-cols-[6px_1fr] items-center gap-x-[8px] gap-y-[5px] border-t border-border px-[8px] pt-[10px] pb-[14px] text-[11px]"
+          role="status"
+        >
+          <StatusDot className={connected ? "bg-(--green)" : undefined} />
           <span>
             {connected
               ? `${connected} active tunnel${connected === 1 ? "" : "s"}`
               : "No active tunnels"}
           </span>
         </div>
-      </aside>
+      </AppSidebar>
       {!sidebar.hidden && !immersive && (
-        <div
-          className="sidebar-resizer"
+        <SidebarResizer
           role="separator"
           aria-label="Sidebar width"
           aria-orientation="vertical"
@@ -406,15 +449,21 @@ export default function App() {
           }}
         />
       )}
-      <main>
+      <main className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-background">
         {(!immersive || windows) && (
-          <header className="window-toolbar" data-tauri-drag-region>
+          <WindowToolbar
+            windows={windows}
+            collapsed={sidebar.hidden}
+            immersive={immersive}
+            data-tauri-drag-region
+          >
             {!immersive && (
               <>
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="icon sidebar-toggle"
+                  data-slot="sidebar-toggle"
+                  className="size-[28px] rounded-[5px]"
                   data-workspace-focus
                   aria-label={sidebar.hidden ? "Show sidebar" : "Hide sidebar"}
                   title={sidebar.hidden ? "Show sidebar" : "Hide sidebar"}
@@ -422,9 +471,16 @@ export default function App() {
                 >
                   <PanelLeft size={18} />
                 </Button>
-                <div className="toolbar-title" data-tauri-drag-region>
-                  <div className="toolbar-heading">
-                    <h1>
+                <div
+                  data-slot="toolbar-title"
+                  className="min-w-0 flex-1 [&_*]:pointer-events-none"
+                  data-tauri-drag-region
+                >
+                  <div
+                    data-slot="toolbar-heading"
+                    className="flex flex-wrap items-center gap-x-[10px] gap-y-[5px]"
+                  >
+                    <h1 className="text-[13px] leading-[1.3] font-semibold tracking-normal">
                       {settings
                         ? "Settings"
                         : server
@@ -437,9 +493,10 @@ export default function App() {
                           data.runtime.connectivity?.[server.id]?.error ??
                           undefined
                         }
-                        className={`status toolbar-health ${health === "reachable" ? "connected" : health === "unreachable" || health === "error" ? "error" : ""}`}
+                        data-slot="toolbar-health"
+                        className={`inline-flex items-center gap-[6px] text-[10px] whitespace-nowrap ${health === "reachable" ? "text-(--green)" : health === "unreachable" || health === "error" ? "text-(--red)" : "text-muted-foreground"}`}
                       >
-                        <span className="status-dot" />
+                        <span className="inline-block size-[5px] shrink-0 rounded-full bg-current" />
                         {health === "unknown"
                           ? "Connection unknown"
                           : health === "error"
@@ -449,20 +506,23 @@ export default function App() {
                     )}
                   </div>
 
-                  <span>
+                  <span className="mt-[2px] block truncate text-[11px] text-muted-foreground max-[700px]:max-w-[210px]">
                     {settings
-                      ? "Newport"
+                      ? "Application preferences"
                       : server
                         ? `${displayName(server)} · ${server.sshUser}@${server.sshHost}`
                         : "Your SSH workspace"}
                   </span>
                 </div>
                 {server && !settings && (
-                  <div className="toolbar-actions">
+                  <div
+                    data-slot="toolbar-actions"
+                    className="flex shrink-0 items-center gap-[2px] text-muted-foreground [&_button]:size-[28px] [&_button]:rounded-[5px]"
+                  >
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="icon"
+
                       title="Test connection"
                       aria-label="Test connection"
                       loading={pending.has(`test-${selected}`)}
@@ -476,11 +536,14 @@ export default function App() {
                     >
                       <Cable size={16} />
                     </Button>
-                    <span className="toolbar-divider" />
+                    <span
+                      data-slot="toolbar-divider"
+                      className="mx-[5px] h-[16px] w-px bg-border"
+                    />
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="icon"
+
                       title="Edit server"
                       aria-label="Edit server"
                       onClick={() =>
@@ -501,7 +564,7 @@ export default function App() {
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="icon"
+
                           aria-label="Server actions"
                         >
                           <Ellipsis size={18} />
@@ -539,31 +602,28 @@ export default function App() {
               </>
             )}
             <WindowControls />
-          </header>
+          </WindowToolbar>
         )}
-        <div
-          className={`workspace-scroll${!settings && view === "terminal" ? " terminal-workspace" : !settings && view === "files" ? " files-pane" : !settings && view === "projects" ? " projects-pane" : ""}`}
-          key={selected}
-        >
+        <WorkspaceViewport mode={settings ? undefined : view} key={selected}>
           {!live && (
-            <div className="banner">
+            <WorkspaceBanner>
               Interface preview. Open the desktop app to manage your servers.
-            </div>
+            </WorkspaceBanner>
           )}
           {data.loadError && (
-            <div className="banner error" role="alert">
+            <WorkspaceBanner error role="alert">
               Profiles could not be loaded. Your original files are unchanged.{" "}
               {data.loadError}
-            </div>
+            </WorkspaceBanner>
           )}
           {error && (
-            <div className="banner error" role="alert">
+            <WorkspaceBanner error role="alert">
               <CircleAlert size={16} />
               <span>{error}</span>
               <Button
                 variant="ghost"
                 size="icon"
-                className="icon"
+
                 aria-label="Dismiss error"
                 onClick={() => {
                   setError("");
@@ -572,7 +632,7 @@ export default function App() {
               >
                 <X size={16} />
               </Button>
-            </div>
+            </WorkspaceBanner>
           )}
           <ErrorBoundary
             key={`${selected}:${settings ? "settings" : view}`}
@@ -580,22 +640,26 @@ export default function App() {
           >
             <Suspense
               fallback={
-                <p className="workspace-loading" role="status">
+                <p
+                  data-slot="workspace-loading"
+                  className="p-[24px] text-muted-foreground"
+                  role="status"
+                >
                   Loading workspace…
                 </p>
               }
             >
               {settings ? (
-                <div className="detail">
+                <WorkspaceDetail mode={settings ? undefined : view}>
                   <SettingsPanel />
-                </div>
+                </WorkspaceDetail>
               ) : !loaded ? (
-                <div className="empty">
+                <WorkspaceEmpty>
                   <RefreshCw size={26} />
                   <h1>Loading your servers…</h1>
-                </div>
+                </WorkspaceEmpty>
               ) : !server ? (
-                <div className="empty">
+                <WorkspaceEmpty>
                   <Network size={42} strokeWidth={1.25} />
                   <h1>Your servers, one hop away.</h1>
                   <p>
@@ -604,16 +668,15 @@ export default function App() {
                   </p>
                   <Button
                     variant="default"
-                    className="primary"
                     onClick={addServer}
                     disabled={blocked}
                   >
                     <Plus size={16} />
                     Add your first server
                   </Button>
-                </div>
+                </WorkspaceEmpty>
               ) : (
-                <div className="detail">
+                <WorkspaceDetail mode={settings ? undefined : view}>
                   <ServerScopeProvider
                     server={server}
                     instanceId={data.instanceId}
@@ -621,7 +684,7 @@ export default function App() {
                       data.runtime.connectionRevisions?.[server.id] ?? 0
                     }
                   >
-                    <TabsContent value={view} className="workspace-content">
+                    <WorkspaceContent value={view} mode={view}>
                       {view === "projects" ? (
                         <ProjectsPanel
                           key={
@@ -679,20 +742,19 @@ export default function App() {
                           />
                         </>
                       )}
-                    </TabsContent>
+                    </WorkspaceContent>
                   </ServerScopeProvider>
-                </div>
+                </WorkspaceDetail>
               )}
             </Suspense>
           </ErrorBoundary>
-        </div>
+        </WorkspaceViewport>
       </main>
       <CommandDialog
         open={commandOpen}
         onOpenChange={setCommandOpen}
         title="Go to"
         description="Find a server or workspace action."
-        className="workspace-command"
       >
         <Command>
           <CommandInput placeholder="Search servers and actions…" />
@@ -732,17 +794,20 @@ export default function App() {
               >
                 <Settings2 /> Settings
               </CommandItem>
-              {workspaceViews.map((tab) => (
+              {viewItems.map(({ value, icon: Icon }, index) => (
                 <CommandItem
-                  key={tab}
+                  key={value}
                   disabled={!server}
                   onSelect={() => {
-                    selectView(tab);
+                    selectView(value);
                     setCommandOpen(false);
                   }}
                 >
-                  <CommandIcon />
-                  <span>Open {tab}</span>
+                  <Icon />
+                  <span>Open {value}</span>
+                  <CommandShortcut>
+                    {windows ? `Ctrl+${index + 1}` : `⌘${index + 1}`}
+                  </CommandShortcut>
                 </CommandItem>
               ))}
               <CommandItem
@@ -801,9 +866,9 @@ export default function App() {
           describedBy="delete-description"
           onClose={() => setDeleting(null)}
         >
-          <div className="form-body">
+          <EditorBody>
             {error && (
-              <p role="alert" className="error">
+              <p role="alert" className="text-(--red)">
                 {error}
               </p>
             )}
@@ -813,8 +878,8 @@ export default function App() {
                 ? "Its tunnels will disconnect and be removed, along with its saved password."
                 : "The tunnel will disconnect and its configuration will be removed."}
             </p>
-          </div>
-          <footer className="dialog-footer">
+          </EditorBody>
+          <EditorFooter>
             <Button
               disabled={pending.has("delete")}
               onClick={() => setDeleting(null)}
@@ -833,9 +898,9 @@ export default function App() {
             >
               {pending.has("delete") ? "Deleting…" : `Delete ${deleting.kind}`}
             </Button>
-          </footer>
+          </EditorFooter>
         </Modal>
       )}
-    </Tabs>
+    </AppShell>
   );
 }

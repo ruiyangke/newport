@@ -32,12 +32,13 @@ export const Cockpit = memo(function Cockpit({
   const openLogs = (next: Log, origin: HTMLElement) => {
     logOrigin.current = {
       element: origin,
-      scroll: root.current?.closest(".workspace-scroll")?.scrollTop ?? 0,
+      scroll:
+        root.current?.closest("[data-slot=workspace-scroll]")?.scrollTop ?? 0,
     };
     setLog(next);
   };
   useLayoutEffect(() => {
-    const viewport = root.current?.closest(".workspace-scroll");
+    const viewport = root.current?.closest("[data-slot=workspace-scroll]");
     if (log) {
       root.current
         ?.querySelector<HTMLElement>('[aria-label="Close logs"]')
@@ -51,7 +52,14 @@ export const Cockpit = memo(function Cockpit({
   }, [log]);
   useEffect(() => setLog(null), [tab]);
   return (
-    <div className="cockpit" ref={root}>
+    <div
+      className={
+        tab === "terminal"
+          ? "cockpit flex min-h-0 min-w-0 flex-1 flex-col p-0"
+          : "cockpit"
+      }
+      ref={root}
+    >
       {tab === "services" && (
         <div hidden={!!log}>
           <ServicesCollectionPanel id={server.id} onLogs={openLogs} />
@@ -72,12 +80,21 @@ export const Cockpit = memo(function Cockpit({
       ) : tab === "overview" ? (
         <OverviewPanel id={server.id} />
       ) : tab === "services" || tab === "containers" ? null : (
-        <Suspense fallback={<p className="muted">Loading terminal…</p>}>
+        <Suspense
+          fallback={
+            <p className="text-[12px] leading-[1.65] text-muted-foreground">
+              Loading terminal…
+            </p>
+          }
+        >
           <TerminalPanel key={server.id} server={server} />
         </Suspense>
       )}
-      {(tab === "overview" || tab === "services") && (
-        <p className="cockpit-footnote">
+      {tab === "overview" && (
+        <p
+          data-slot="cockpit-footnote"
+          className="mt-[28px] text-[11px] leading-[1.6] text-muted-foreground"
+        >
           Monitoring is read-only. No agent is installed on the server.
         </p>
       )}

@@ -1,3 +1,4 @@
+import { GitEmptyState } from "./GitEmptyState";
 import { GitLoadMore } from "./GitLoadMore";
 import { useId } from "react";
 import { ListFilter, Minus, Plus, Search } from "lucide-react";
@@ -20,6 +21,7 @@ import {
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 import { GitNotice } from "./GitNotice";
+import { plural } from "../lib/utils";
 import {
   GitStatusBadge,
   gitStatusName,
@@ -111,10 +113,6 @@ export function changeGroups(
     (group) =>
       group.entries.length > 0 && (only === "all" || group.key === only),
   );
-}
-
-function countLabel(count: number, noun: string) {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 /**
@@ -257,7 +255,7 @@ export function GitChangeList({
             placeholder="Filter files"
             value={filter}
             onChange={(event) => onFilter(event.target.value)}
-            className="h-[26px] min-w-0 px-[4px] text-[12px]"
+            className="min-w-0 px-[4px] text-[12px]"
           />
           <InputGroupAddon
             align="inline-end"
@@ -271,7 +269,7 @@ export function GitChangeList({
                   disabled={busy}
                   data-slot="button"
                   className={cn(
-                    "h-[22px]! w-[22px] rounded-[4px]! px-0!",
+                    "h-[22px] w-[22px] rounded-[4px] px-0",
                     group !== "all" ? "text-primary" : "text-muted-foreground",
                   )}
                 >
@@ -326,12 +324,16 @@ export function GitChangeList({
         (filtering || partial) && (
           <p className="git-projects-summary flex-none px-[16px] pb-[4px] text-[11px] text-muted-foreground">
             {filtering && matched !== undefined ? (
-              `${shown.toLocaleString()} of ${matched.toLocaleString()} matching files loaded.`
+              matched === 1 ? (
+                `${plural(shown, "matching file")} loaded.`
+              ) : (
+                `${shown.toLocaleString()} of ${matched.toLocaleString()} matching files loaded.`
+              )
             ) : (
               <>
                 {partial
                   ? `${status.entries.length.toLocaleString()} of ${total?.toLocaleString() ?? "more"} changed files loaded.`
-                  : countLabel(status.entries.length, "changed file")}
+                  : plural(status.entries.length, "changed file")}
                 {filtering &&
                   ` ${shown.toLocaleString()} matching loaded ${shown === 1 ? "file" : "files"}.`}
                 {filtering && partial && " Filters apply to loaded files only."}
@@ -365,7 +367,7 @@ export function GitChangeList({
               key={each.key}
               aria-label={each.label}
             >
-              <h4 className="sticky top-0 z-[1] flex h-[28px] items-center gap-[6px] bg-background pr-[10px] pl-[16px] text-[11px]! font-semibold! text-muted-foreground">
+              <h4 className="sticky top-0 z-[1] flex h-[28px] items-center gap-[6px] bg-background pr-[10px] pl-[16px] text-[11px] font-semibold text-muted-foreground">
                 <span>{each.label}</span>
                 <span className="font-normal tabular-nums">
                   {status.metadata.groupCounts?.[each.key] !== undefined &&
@@ -379,7 +381,7 @@ export function GitChangeList({
                     aria-label={bulk.name}
                     disabled={busy}
                     onClick={bulk.run}
-                    className="ml-auto h-[22px]! rounded-[4px]! px-[6px]! text-[11px]! font-medium! text-muted-foreground hover:text-foreground"
+                    className="ml-auto h-[22px] rounded-[4px] px-[6px] text-[11px] font-medium text-muted-foreground hover:text-foreground leading-[1.428571]"
                   >
                     {bulk.label}
                   </Button>
@@ -425,7 +427,7 @@ export function GitChangeList({
                         aria-pressed={selected}
                         aria-describedby={`${statusId}-${entry.entryId}-${each.key}`}
                         onClick={() => onSelect(entry.entryId, each.key)}
-                        className="h-[28px]! min-w-0 flex-1 justify-start gap-[8px] rounded-[5px]! border-0 bg-transparent pr-[6px]! pl-[10px]! text-left text-[12px] font-normal text-foreground hover:bg-transparent dark:hover:bg-transparent"
+                        className="h-[28px] min-w-0 flex-1 justify-start gap-[8px] rounded-[5px] border-0 bg-transparent pr-[6px] pl-[10px] text-left text-[12px] font-normal text-foreground hover:bg-transparent dark:hover:bg-transparent"
                       >
                         <GitStatusBadge
                           mark={changeMark(entry, each.key)}
@@ -457,7 +459,7 @@ export function GitChangeList({
                           disabled={busy}
                           onClick={quick.run}
                           className={cn(
-                            "h-[22px]! w-[22px] flex-none rounded-[4px]! px-0! text-muted-foreground opacity-0 group-hover/row:opacity-100 hover:bg-background hover:text-foreground focus-visible:opacity-100",
+                            "h-[22px] w-[22px] flex-none rounded-[4px] px-0 text-muted-foreground opacity-0 group-hover/row:opacity-100 hover:bg-background hover:text-foreground focus-visible:opacity-100",
                             selected && "opacity-100",
                           )}
                         >
@@ -472,11 +474,15 @@ export function GitChangeList({
           );
         })}
         {!filterLoading && !filterError && filtering && groups.length === 0 && (
-          <div className="git-projects-empty git-filter-empty px-[16px] py-[28px] text-center">
-            <h3 className="text-[12px]! font-semibold!">
+          <GitEmptyState
+            as="div"
+            filtered
+            className="px-[16px] py-[28px] text-center"
+          >
+            <h3 className="text-[12px] font-semibold">
               No files match your current filters
             </h3>
-            <p className="mt-[4px]! text-[11px] text-muted-foreground">
+            <p className="mt-[4px] text-[11px] text-muted-foreground">
               {filter.trim()
                 ? `No changed file matches “${filter.trim()}”.`
                 : "This group has no files."}
@@ -493,7 +499,7 @@ export function GitChangeList({
             >
               Clear filters
             </Button>
-          </div>
+          </GitEmptyState>
         )}
         {onLoadMore && !filterLoading && !filterError && (
           <GitLoadMore

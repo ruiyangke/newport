@@ -1,3 +1,4 @@
+import { FileListRow } from "./FileListRow";
 import { useWorkspaceState } from "../state/workspace";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { keys, useServerScope } from "../query/keys";
@@ -10,7 +11,6 @@ import {
   ArrowUp,
   ChevronDown,
   ChevronRight,
-  Download,
   FolderGit2,
   Home,
   RefreshCw,
@@ -29,16 +29,9 @@ import {
 } from "../domain/files";
 import { type Server } from "../types";
 import { Button, Input } from "./controls";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "./ui/table";
-import "./files.css";
-import "./filesProject.css";
+import { Table, TableBody, TableHeader, TableRow } from "./ui/table";
+import { cn } from "../lib/utils";
+import { FileTableHead as TableHead } from "./FileTable";
 const PAGE_SIZE = 100;
 type Load = (path: string) => Promise<FileListing>;
 
@@ -97,10 +90,15 @@ function FolderBranch({
   }
   return (
     <li>
-      <div className="folder-branch" data-current={current === path}>
+      <div
+        data-slot="folder-branch"
+        className="flex items-center rounded-[5px] data-[current=true]:bg-accent"
+        data-current={current === path}
+      >
         <Button
           variant="ghost"
           size="icon"
+          className="w-[20px] min-w-[20px] p-0"
           aria-label={`${open ? "Collapse" : "Expand"} ${label}`}
           aria-expanded={open}
           disabled={busy || depth >= 16}
@@ -109,24 +107,33 @@ function FolderBranch({
           {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         </Button>
         <button
-          className="folder-name"
+          data-slot="folder-name"
+          className="flex h-[28px] min-w-0 flex-1 cursor-pointer items-center gap-[6px] border-0 border-current bg-transparent text-left text-inherit focus-visible:rounded-[5px] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring [&_svg]:text-muted-foreground"
           aria-current={current === path ? "location" : undefined}
           onClick={() => navigate(path)}
           title={path}
         >
           <FileIcon name={label} kind="directory" open={open} size={14} />
-          <span>{label}</span>
+          <span className="truncate">{label}</span>
         </button>
       </div>
       {open && (
-        <ul>
+        <ul className="m-0 list-none py-0 pr-0 pl-[12px]">
           {busy && (
-            <li className="file-tree-note" role="status">
+            <li
+              data-slot="file-tree-note"
+              className="p-[6px] text-[11px] text-muted-foreground wrap-anywhere"
+              role="status"
+            >
               Loading…
             </li>
           )}
           {error && (
-            <li className="file-tree-note" role="alert">
+            <li
+              data-slot="file-tree-note"
+              className="p-[6px] text-[11px] text-muted-foreground wrap-anywhere"
+              role="alert"
+            >
               {error}
               <button
                 onClick={() => {
@@ -158,7 +165,14 @@ function FolderBranch({
             !error &&
             !children.some(
               (entry) => hidden || !entry.name.startsWith("."),
-            ) && <li className="file-tree-note">No subfolders</li>}
+            ) && (
+              <li
+                data-slot="file-tree-note"
+                className="p-[6px] text-[11px] text-muted-foreground wrap-anywhere"
+              >
+                No subfolders
+              </li>
+            )}
         </ul>
       )}
     </li>
@@ -441,8 +455,15 @@ export const FilesPanel = memo(function FilesPanel({
     void navigate(path);
   };
   return (
-    <section className="files-workspace" aria-label="Remote files">
-      <div className="files-toolbar">
+    <section
+      data-slot="files-workspace"
+      className="flex min-h-0 flex-1 flex-col text-foreground"
+      aria-label="Remote files"
+    >
+      <div
+        data-slot="files-toolbar"
+        className="flex shrink-0 items-center gap-[8px] px-[16px] py-[12px] max-[800px]:gap-[4px] max-[800px]:px-[10px]"
+      >
         <Button
           size="icon"
           aria-label="Home folder"
@@ -460,6 +481,7 @@ export const FilesPanel = memo(function FilesPanel({
           <ArrowUp size={14} />
         </Button>
         <form
+          className="min-w-0 flex-1"
           onSubmit={(event) => {
             event.preventDefault();
             if (pathInput.trim()) go(pathInput);
@@ -481,7 +503,14 @@ export const FilesPanel = memo(function FilesPanel({
             go(listing!.path);
           }}
         >
-          <RefreshCw size={14} className={busy ? "spin" : ""} />
+          <RefreshCw
+            size={14}
+            className={
+              busy
+                ? "animate-[spin_0.8s_linear_infinite] motion-reduce:animate-none"
+                : undefined
+            }
+          />
         </Button>
         <Button
           disabled={!!transfer || busy || !listing}
@@ -502,15 +531,20 @@ export const FilesPanel = memo(function FilesPanel({
           )}
         </Button>
       </div>
-      <div className="files-filters">
+      <div
+        data-slot="files-filters"
+        className="flex shrink-0 items-center gap-[8px] border-t border-border px-[16px] py-[7px] max-[800px]:gap-[4px] max-[800px]:px-[10px]"
+      >
         <Button
           variant="ghost"
+          className="aria-pressed:bg-accent"
           aria-pressed={tree}
           onClick={() => setTree(!tree)}
         >
           Folders
         </Button>
         <Input
+          className="w-[min(240px,45%)]"
           aria-label="Filter files"
           placeholder="Filter this folder…"
           value={query}
@@ -519,8 +553,21 @@ export const FilesPanel = memo(function FilesPanel({
             setPage(0);
           }}
         />
+        {query && (
+          <Button
+            variant="ghost"
+
+            onClick={() => {
+              setQuery("");
+              setPage(0);
+            }}
+          >
+            Clear filter
+          </Button>
+        )}
         <Button
           variant="ghost"
+          className="ml-auto aria-pressed:bg-accent"
           aria-pressed={hidden}
           onClick={() => {
             setHidden(!hidden);
@@ -531,27 +578,47 @@ export const FilesPanel = memo(function FilesPanel({
         </Button>
       </div>
       {error && (
-        <div className="file-error" role="alert">
+        <div
+          data-slot="file-error"
+          className="p-[10px] text-(--red) wrap-anywhere"
+          role="alert"
+        >
           Cannot open {attemptedPath}: {error}{" "}
           <Button onClick={() => go(attemptedPath)}>Retry</Button>
         </div>
       )}
       {projectError && (
-        <div className="files-project-error" role="alert">
-          <span>
+        <div
+          data-slot="files-project-error"
+          className="flex items-center gap-[8px] border-t border-border bg-muted px-[16px] py-[8px] text-[12px] text-(--red) wrap-anywhere"
+          role="alert"
+        >
+          <span className="min-w-0 flex-1">
             Cannot save a project for {projectError.path}:{" "}
             {projectError.message}
-            <small>
+            <small className="block text-muted-foreground">
               No project was saved. Nothing has changed on the server.
             </small>
           </span>
           <Button onClick={() => setProjectError(null)}>Dismiss</Button>
         </div>
       )}
-      <div className={`files-layout${tree ? "" : " files-no-tree"}`}>
+      <div
+        data-slot="files-layout"
+        className={cn(
+          "grid min-h-0 flex-1 border-y border-border",
+          tree
+            ? "grid-cols-[180px_minmax(0,1fr)] max-[800px]:grid-cols-[140px_minmax(0,1fr)]"
+            : "grid-cols-[minmax(0,1fr)]",
+        )}
+      >
         {tree && (
-          <nav className="file-tree" aria-label="Folder tree">
-            <ul key={treeVersion}>
+          <nav
+            data-slot="file-tree"
+            className="overflow-auto border-r border-border bg-(--native-toolbar) p-[8px]"
+            aria-label="Folder tree"
+          >
+            <ul className="m-0 list-none p-0" key={treeVersion}>
               {home && (
                 <FolderBranch
                   path={home}
@@ -574,88 +641,47 @@ export const FilesPanel = memo(function FilesPanel({
           </nav>
         )}
         <div
-          className="file-list"
+          data-slot="file-list"
+          className="min-w-0 overflow-auto focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
           aria-busy={busy}
           role="region"
           aria-label="Files in current folder"
           tabIndex={0}
           ref={listElement}
         >
-          <Table>
+          <Table className="table-fixed" containerClassName="overflow-visible">
             <TableHeader>
               <TableRow>
                 <TableHead>Name</TableHead>
-                <TableHead className="file-size">Size</TableHead>
-                <TableHead className="file-modified">Modified</TableHead>
-                <TableHead className="files-project-column">
+                <TableHead column="size">Size</TableHead>
+                <TableHead column="modified">Modified</TableHead>
+                <TableHead column="actions">
                   <span className="sr-only">Actions</span>
                 </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {visible.map((entry) => (
-                <TableRow key={entry.path}>
-                  <TableCell>
-                    <button
-                      className="file-name"
-                      disabled={busy}
-                      title={entry.name}
-                      onClick={() =>
-                        entry.kind === "directory"
-                          ? go(entry.path)
-                          : void openPreview(entry)
-                      }
-                    >
-                      <FileIcon name={entry.name} kind={entry.kind} />
-                      <span>{entry.name}</span>
-                      {entry.kind === "symlink" && <small>Link</small>}
-                    </button>
-                  </TableCell>
-                  <TableCell className="file-size">
-                    {entry.kind === "directory" ? "—" : fileSize(entry.size)}
-                  </TableCell>
-                  <TableCell className="file-modified">
-                    {entry.modified
-                      ? new Date(entry.modified * 1000).toLocaleDateString()
-                      : "—"}
-                  </TableCell>
-                  <TableCell className="files-project-cell">
-                    <div className="files-project-actions">
-                      {entry.kind === "directory" && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Open ${entry.name} as project`}
-                          loading={savingProject === entry.path}
-                          disabled={busy || !!savingProject}
-                          onClick={() => void openAsProject(entry.path)}
-                        >
-                          {savingProject === entry.path ? null : (
-                            <FolderGit2 size={14} />
-                          )}
-                        </Button>
-                      )}
-                      {entry.kind !== "directory" && entry.kind !== "other" && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Download ${entry.name}`}
-                          disabled={!!transfer || busy}
-                          onClick={() =>
-                            void transferFile("download", entry.path)
-                          }
-                        >
-                          <Download size={14} />
-                        </Button>
-                      )}
-                    </div>
-                  </TableCell>
-                </TableRow>
+                <FileListRow
+                  key={entry.path}
+                  entry={entry}
+                  busy={busy}
+                  transferring={!!transfer}
+                  savingProject={savingProject}
+                  onOpenFolder={go}
+                  onPreview={(entry) => void openPreview(entry)}
+                  onOpenProject={(path) => void openAsProject(path)}
+                  onDownload={(path) => void transferFile("download", path)}
+                />
               ))}
             </TableBody>
           </Table>
           {!visible.length && (
-            <p className="file-empty" role="status">
+            <p
+              data-slot="file-empty"
+              className="px-[16px] py-[35px] text-center text-muted-foreground"
+              role="status"
+            >
               {busy
                 ? "Reading folder…"
                 : !listing
@@ -667,14 +693,17 @@ export const FilesPanel = memo(function FilesPanel({
           )}
         </div>
       </div>
-      <footer className="files-footer">
+      <footer
+        data-slot="files-footer"
+        className="flex min-h-[36px] shrink-0 items-center justify-between gap-[8px] px-[16px] py-[7px] text-[11px] text-muted-foreground"
+      >
         <span role="status">
           {busy
             ? "Reading folder…"
             : `${entries.length} ${entries.length === 1 ? "item" : "items"}`}
         </span>
         {pages > 1 && (
-          <div>
+          <div className="flex items-center gap-[6px]">
             <Button
               variant="ghost"
               disabled={activePage === 0}
@@ -696,18 +725,23 @@ export const FilesPanel = memo(function FilesPanel({
         )}
       </footer>
       {transfer && (
-        <div className="file-transfer" role="status">
-          <div>
-            <strong>
+        <div
+          data-slot="file-transfer"
+          className="m-0 flex shrink-0 items-center gap-[14px] border-t border-border px-[16px] py-[10px]"
+          role="status"
+        >
+          <div className="flex min-w-0 flex-1 flex-col gap-[3px]">
+            <strong className="truncate font-medium">
               {transfer.direction === "upload" ? "Uploading" : "Downloading"}
               {transfer.progress?.name ? ` ${transfer.progress.name}` : "…"}
             </strong>
-            <span>
+            <span className="text-[11px] text-muted-foreground">
               {transfer.progress?.name
                 ? `${fileSize(transfer.progress.completed)}${transfer.progress.total !== null ? ` of ${fileSize(transfer.progress.total)}` : ""}`
                 : "Choose a file in the file dialog…"}
             </span>
             <progress
+              className="h-[5px] w-full accent-primary"
               aria-label="File transfer"
               value={
                 transfer.progress?.total

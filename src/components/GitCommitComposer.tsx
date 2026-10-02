@@ -74,7 +74,7 @@ export function GitCommitComposer({
           server, which this form does not read. */}
       <Input
         aria-label="Commit summary"
-        className="h-[28px]! rounded-[5px]! bg-background px-[8px] text-[12px]!"
+        className="h-[28px] rounded-[5px] bg-background px-[8px] text-[12px] leading-[1.428571]"
         placeholder="Summary (required)"
         value={summary}
         disabled={disabled}
@@ -95,7 +95,7 @@ export function GitCommitComposer({
       )}
       <Textarea
         aria-label="Commit description"
-        className="min-h-[58px] resize-none rounded-[5px]! bg-background px-[8px] py-[6px] text-[12px]!"
+        className="min-h-[58px] resize-none rounded-[5px] bg-background px-[8px] py-[6px] text-[12px] leading-[1.428571]"
         placeholder="Description"
         value={description}
         disabled={disabled}
@@ -112,7 +112,7 @@ export function GitCommitComposer({
       <Button
         type="submit"
         variant="default"
-        className="git-composer-commit mt-[2px] h-[30px]! w-full rounded-[5px]! text-[12px]! font-medium! disabled:border-border disabled:bg-background disabled:text-muted-foreground disabled:opacity-100"
+        className="git-composer-commit mt-[2px] h-[30px] w-full rounded-[5px] text-[12px] font-medium disabled:border-border disabled:bg-background disabled:text-muted-foreground disabled:opacity-100 leading-[1.428571]"
         disabled={!canCommit}
       >
         {conflicts > 0

@@ -54,18 +54,21 @@ export function ServerPicker({
       <PopoverTrigger asChild>
         <Button
           variant="ghost"
-          className="server-picker"
+          data-slot="server-picker"
+          className="mb-[20px] h-auto min-h-[56px] w-full justify-start gap-[8px] rounded-[6px] px-[8px] py-[6px] text-left data-[state=open]:bg-(--native-selection) [@media(max-height:560px)]:mb-[8px]"
           aria-label="Choose server"
           disabled={!loaded}
         >
-          <span className="server-avatar">
+          <span className="grid h-[36px] w-[26px] shrink-0 place-items-center text-muted-foreground">
             <ServerIcon size={20} strokeWidth={1.5} />
           </span>
-          <span className="server-picker-label">
-            <strong>
+          <span className="flex min-w-0 flex-1 flex-col gap-[3px]">
+            <strong className="overflow-hidden text-ellipsis text-[13px] font-semibold">
               {current ? displayName(current) : "Choose a server"}
             </strong>
-            <small>{current ? endpoint(current) : "Your SSH workspace"}</small>
+            <small className="overflow-hidden text-ellipsis text-[11px]">
+              {current ? endpoint(current) : "Your SSH workspace"}
+            </small>
           </span>
           <ChevronsUpDown size={12} aria-hidden="true" />
         </Button>
@@ -75,10 +78,11 @@ export function ServerPicker({
         side="bottom"
         sideOffset={4}
         collisionPadding={12}
-        className="server-picker-menu"
+        className="max-h-(--radix-popover-content-available-height) w-[min(336px,calc(100vw-24px))] gap-0 overflow-hidden rounded-[7px] p-0"
         aria-label="Server picker"
       >
         <Command
+          className="h-auto min-h-0 p-0"
           defaultValue={selected}
           label="Search servers"
           filter={(_value, search, keywords) => {
@@ -93,16 +97,21 @@ export function ServerPicker({
           }}
         >
           <CommandInput
+            className="text-[12px]"
+            wrapperClassName="border-b border-border p-[8px]"
             placeholder="Find a server…"
             aria-label="Search servers"
           />
-          <CommandList label="Saved servers">
-            <CommandEmpty>
+          <CommandList
+            label="Saved servers"
+            className="max-h-[min(320px,calc(var(--radix-popover-content-available-height)-100px))] scroll-py-[4px] scrollbar-thin [scrollbar-color:var(--muted-foreground)_transparent]"
+          >
+            <CommandEmpty className="px-[12px] py-[24px] text-[12px] text-muted-foreground">
               {servers.length
                 ? "No matching servers."
                 : "No saved servers yet."}
             </CommandEmpty>
-            <CommandGroup>
+            <CommandGroup className="p-[4px]">
               {sorted.map((server) => (
                 <CommandItem
                   key={server.id}
@@ -115,21 +124,23 @@ export function ServerPicker({
                     endpoint(server),
                   ]}
                   data-checked={server.id === selected}
-                  className="server-picker-option"
+                  className="min-h-[46px] gap-[10px] rounded-[4px] px-[8px] py-[7px] text-[12px]"
                   onSelect={() => {
                     onSelect(server.id);
                     setOpen(false);
                   }}
                 >
                   <ServerIcon
-                    className="server-picker-option-icon"
+                    className="text-muted-foreground"
                     aria-hidden="true"
                   />
-                  <span className="server-picker-option-label">
-                    <span className="server-picker-option-name">
+                  <span className="flex min-w-0 flex-1 flex-col gap-[2px] leading-[1.35] wrap-anywhere">
+                    <span className="text-[12px] font-medium">
                       {displayName(server)}
                     </span>
-                    <span className="picker-host">{endpoint(server)}</span>
+                    <span className="block text-[11px] font-normal text-muted-foreground">
+                      {endpoint(server)}
+                    </span>
                     {server.id === selected && (
                       <span className="sr-only">Current server</span>
                     )}
@@ -139,9 +150,10 @@ export function ServerPicker({
             </CommandGroup>
           </CommandList>
         </Command>
-        <div className="server-picker-footer">
+        <div className="flex items-center justify-between gap-[8px] border-t border-border p-[4px]">
           <Button
             variant="ghost"
+            className="h-[28px] justify-start gap-[8px] px-[8px] py-0 text-[12px]"
             disabled={blocked}
             onClick={() => {
               setOpen(false);
@@ -150,7 +162,7 @@ export function ServerPicker({
           >
             <Plus size={14} aria-hidden="true" /> Add server…
           </Button>
-          <span>
+          <span className="pr-[8px] text-[11px] whitespace-nowrap text-muted-foreground">
             {servers.length} {servers.length === 1 ? "server" : "servers"}
           </span>
         </div>

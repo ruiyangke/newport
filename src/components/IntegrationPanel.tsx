@@ -1,7 +1,9 @@
-import { Switch } from "radix-ui";
+import { SectionHeader } from "./SectionHeader";
+import { Switch } from "./ui/switch";
 import { desktop } from "../api/desktop";
 import { active, type Server, type Snapshot } from "../types";
 import { Button } from "./controls";
+import { PageHeader } from "./PageHeader";
 import { CodeBlock } from "./CodeBlock";
 import { StatusLabel } from "./StatusLabel";
 
@@ -36,11 +38,11 @@ export function IntegrationPanel({ server, runtime, pending, act }: Props) {
     );
 
   return (
-    <div className="integration-panel">
-      <div className="integration-heading">
-        <h2>Connect your computer and server</h2>
-        <p>Enable only for servers you trust.</p>
-      </div>
+    <div data-slot="integration-panel" className="mx-auto w-full max-w-[720px]">
+      <PageHeader
+        title="Integrations"
+        subtitle="Enable only for servers you trust."
+      />
       {(
         [
           [
@@ -57,38 +59,53 @@ export function IntegrationPanel({ server, runtime, pending, act }: Props) {
           ],
         ] as const
       ).map(([feature, title, description, checked]) => (
-        <div className="integration-row" key={feature}>
+        <div
+          className="flex items-center justify-between gap-[24px] border-b border-border py-[22px]"
+          key={feature}
+        >
           <div>
-            <label htmlFor={feature}>{title}</label>
-            <p id={`${feature}-description`}>{description}</p>
+            <label
+              className="cursor-pointer text-[14px] font-semibold"
+              htmlFor={feature}
+            >
+              {title}
+            </label>
+            <p
+              className="mt-[6px] text-[13px] leading-[1.6] text-muted-foreground"
+              id={`${feature}-description`}
+            >
+              {description}
+            </p>
           </div>
-          <Switch.Root
+          <Switch
             id={feature}
-            className="integration-switch"
             checked={checked}
             aria-describedby={`${feature}-description`}
             disabled={busy}
             onCheckedChange={(value) => setFeature(feature, value)}
-          >
-            <Switch.Thumb className="integration-switch-thumb" />
-          </Switch.Root>
+          />
         </div>
       ))}
-      <section className="integration-setup" aria-label="Agent connection">
-        <div className="section-heading">
-          <h2>Connection</h2>
+      <section className="mt-[30px]" aria-label="Agent connection">
+        <SectionHeader>
+          <h2 className="text-[14px] font-semibold">Connection</h2>
           {enabled ? (
             <StatusLabel state={state} />
           ) : (
-            <span className="integration-off">Off</span>
+            <span className="text-[12px] text-muted-foreground">Off</span>
           )}
-        </div>
+        </SectionHeader>
         {!enabled ? (
-          <p>Enable an integration to connect.</p>
+          <p className="mt-[6px] text-[13px] leading-[1.6] text-muted-foreground">
+            Enable an integration to connect.
+          </p>
         ) : (
           <>
             {state.errorMessage && (
-              <p className="connection-error" role="alert">
+              <p
+                className="mt-[6px] mb-[12px] text-[13px] leading-[1.6] whitespace-pre-wrap text-(--danger) wrap-anywhere"
+                role="alert"
+              >
                 {state.errorMessage}
               </p>
             )}
@@ -108,10 +125,11 @@ export function IntegrationPanel({ server, runtime, pending, act }: Props) {
             )}
             {state.status === "connected" && (
               <>
-                <p>
+                <p className="mt-[6px] text-[13px] leading-[1.6] text-muted-foreground">
                   Open a new shell, or run this in your current Bash/Zsh shell.
                 </p>
                 <CodeBlock
+                  className="mt-[16px]"
                   label="Shell configuration"
                   code={
                     'if [ -x "$HOME/.local/bin/newport-agent" ]; then\n  if _newport_env=$("$HOME/.local/bin/newport-agent" env 2>/dev/null); then\n    eval "$_newport_env"\n  fi\n  unset _newport_env\nfi'
@@ -119,7 +137,7 @@ export function IntegrationPanel({ server, runtime, pending, act }: Props) {
                 />
                 {server.clipboardEnabled &&
                   runtime.clipboardPathNeeded?.[server.id] && (
-                    <p className="integration-path-note">
+                    <p className="mt-[6px] text-[13px] leading-[1.6] text-muted-foreground">
                       This also adds the clipboard commands to your PATH.
                     </p>
                   )}
@@ -127,7 +145,7 @@ export function IntegrationPanel({ server, runtime, pending, act }: Props) {
             )}
           </>
         )}
-        <div className="integration-maintenance">
+        <div className="mt-[20px]">
           <Button
             loading={pending.has(reinstallKey)}
             disabled={busy}

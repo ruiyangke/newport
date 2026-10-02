@@ -1,3 +1,18 @@
+import {
+  GitInspectorToolbar,
+  GitInspectorSearch,
+  GitInspectorList,
+  GitInspectorRow,
+} from "./GitInspectorPrimitives";
+import {
+  GitError,
+  GitForm,
+  GitField,
+  GitCheckboxField,
+  GitFormActions,
+  GitFormFields,
+} from "./GitForm";
+import { GitEmptyState } from "./GitEmptyState";
 import { Archive, Plus, Search } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -13,6 +28,7 @@ import { useGitPageLoader } from "../hooks/useGitPageLoader";
 import { GitLoadMore } from "./GitLoadMore";
 import { gitProjectsFor } from "../git/registry";
 import { gitErrorMessage } from "../git/errors";
+import { plural } from "../lib/utils";
 
 /**
  * A segmented choice on its rail: the pressed chip is raised, the other sits
@@ -20,7 +36,7 @@ import { gitErrorMessage } from "../git/errors";
  * hover fill shows through as it always did.
  */
 const segment =
-  "aria-pressed:font-[600]! aria-pressed:[box-shadow:0_1px_3px_rgb(24_34_55/8.6%)] aria-pressed:[&:not(:hover)]:bg-background! aria-[pressed=false]:border-transparent! aria-[pressed=false]:[&:not(:hover)]:bg-transparent!";
+  "aria-pressed:font-semibold! aria-pressed:[box-shadow:0_1px_3px_rgb(24_34_55/8.6%)] aria-pressed:[&:not(:hover)]:bg-background! aria-[pressed=false]:border-transparent! aria-[pressed=false]:[&:not(:hover)]:bg-transparent!";
 type Stash = GitStashes["entries"][number];
 type Props = {
   repoId: string;
@@ -187,15 +203,19 @@ function StashDialog({
       onClose={onClose}
       fill
     >
-      <div className="git-stash-workspace">
+      <div
+        data-slot="git-stash-workspace"
+        className="flex min-h-0 max-w-none flex-1 p-0"
+      >
         <aside
-          className="git-stash-sidebar"
+          data-slot="git-stash-sidebar"
+          className="min-h-0 w-[280px] flex-[0_0_280px] overflow-y-auto border-r border-border p-[8px] @max-[700px]/git-project:w-[210px] @max-[700px]/git-project:basis-[210px]"
           aria-label="Saved stashes"
           data-git-scroll-root
         >
-          <div className="git-inspector-toolbar">
-            <span className="git-inspector-count">
-              {stashes?.entries.length ?? 0} stashes
+          <GitInspectorToolbar className="px-[4px] pt-[4px] pb-[8px]">
+            <span className="text-[11px] font-normal text-muted-foreground">
+              {plural(stashes?.entries.length ?? 0, "stash")}
               {stashes?.nextCursor ? " loaded" : ""}
             </span>
             <Button
@@ -210,8 +230,8 @@ function StashDialog({
             >
               <Plus size={13} aria-hidden="true" /> Save changes…
             </Button>
-          </div>
-          <div className="git-inspector-search">
+          </GitInspectorToolbar>
+          <GitInspectorSearch className="mb-[8px]">
             <Search size={13} aria-hidden="true" />
             <Input
               aria-label="Filter loaded stashes"
@@ -219,26 +239,23 @@ function StashDialog({
               value={filter}
               onChange={(event) => setFilter(event.target.value)}
             />
-          </div>
+          </GitInspectorSearch>
           {stashes?.entries.length === 0 && <p>No saved stashes.</p>}
           {filter &&
             stashes &&
             !stashes.entries.some((stash) =>
               stash.message.toLowerCase().includes(filter.toLowerCase()),
             ) && <p>No matching loaded stashes.</p>}
-          <ul className="git-stash-list git-inspector-list">
+          <GitInspectorList className="git-stash-list">
             {stashes?.entries
               .filter((stash) =>
                 stash.message.toLowerCase().includes(filter.toLowerCase()),
               )
               .map((stash) => (
-                <li
-                  key={`${stash.oid}:${stash.index}`}
-                  className="git-inspector-list-item"
-                >
-                  <Button
+                <li key={`${stash.oid}:${stash.index}`} className="my-[2px]">
+                  <GitInspectorRow
                     variant="ghost"
-                    className="git-inspector-row"
+
                     aria-pressed={selected?.oid === stash.oid && !saving}
                     title={stash.message || "Unnamed stash"}
                     disabled={busy}
@@ -251,15 +268,15 @@ function StashDialog({
                   >
                     <Archive
                       size={14}
-                      className="git-inspector-row-icon"
+                      className="flex-none text-muted-foreground"
                       aria-hidden="true"
                     />
-                    <span className="git-inspector-row-copy">
-                      <span className="git-inspector-row-title">
+                    <span className="grid min-w-0 flex-1 gap-[3px]">
+                      <span className="truncate text-[12px] font-medium">
                         {stash.message || "Unnamed stash"}
                         {stash.messageTruncated ? "…" : ""}
                       </span>
-                      <span className="git-inspector-row-meta">
+                      <span className="text-[11px] font-normal text-muted-foreground">
                         stash@{`{${stash.index}}`} ·{" "}
                         <time
                           title={new Date(stash.time * 1000).toLocaleString()}
@@ -268,7 +285,7 @@ function StashDialog({
                         </time>
                       </span>
                     </span>
-                  </Button>
+                  </GitInspectorRow>
                 </li>
               ))}
             {stashes && (
@@ -285,11 +302,14 @@ function StashDialog({
                 />
               </li>
             )}
-          </ul>
+          </GitInspectorList>
         </aside>
-        <div className="git-stash-detail">
+        <div
+          data-slot="git-stash-detail"
+          className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto [&>p]:m-[16px] [&>[data-slot=git-project-form]]:m-[16px] [&>.git-commit-inspector]:flex-1"
+        >
           {(saving || confirm) && <p>{projectName}</p>}
-          {error && <p role="alert">{error}</p>}
+          {error && <GitError role="alert">{error}</GitError>}
           {blockedReason && (
             <p>
               {blockedReason}{" "}
@@ -297,7 +317,7 @@ function StashDialog({
             </p>
           )}
           {readError && (
-            <p role="alert">
+            <GitError role="alert">
               {readError}{" "}
               <Button
                 disabled={busy || loading}
@@ -309,12 +329,11 @@ function StashDialog({
               >
                 Retry stashes
               </Button>
-            </p>
+            </GitError>
           )}
           {(loading || previewLoading) && <p role="status">Loading stashes…</p>}
           {saving ? (
-            <form
-              className="git-project-form"
+            <GitForm
               onSubmit={(event) => {
                 event.preventDefault();
                 void submit({
@@ -325,7 +344,7 @@ function StashDialog({
                 });
               }}
             >
-              <label>
+              <GitField>
                 Stash message
                 <Input
                   value={message}
@@ -333,8 +352,8 @@ function StashDialog({
                   disabled={busy}
                   placeholder="Optional description"
                 />
-              </label>
-              <label className="git-checkbox-row">
+              </GitField>
+              <GitCheckboxField>
                 <Checkbox
                   checked={includeUntracked}
                   onCheckedChange={(value) =>
@@ -343,31 +362,31 @@ function StashDialog({
                   disabled={busy}
                 />
                 Include untracked files
-              </label>
-              <label className="git-checkbox-row">
+              </GitCheckboxField>
+              <GitCheckboxField>
                 <Checkbox
                   checked={keepIndex}
                   onCheckedChange={(value) => setKeepIndex(value === true)}
                   disabled={busy}
                 />
                 Keep staged changes in the working tree
-              </label>
+              </GitCheckboxField>
               <p>
                 {keepIndex
                   ? "Save changes while keeping staged changes in the working tree. Ignored files are kept."
                   : "Save changes and clean them from the working tree. Ignored files are kept."}
               </p>
-              <footer>
+              <GitFormActions>
                 <Button disabled={busy} onClick={() => setSaving(false)}>
                   Back
                 </Button>
-                <Button type="submit" disabled={disabled}>
+                <Button type="submit" variant="default" disabled={disabled}>
                   Save stash
                 </Button>
-              </footer>
-            </form>
+              </GitFormActions>
+            </GitForm>
           ) : confirm && selected && stashes ? (
-            <div className="git-project-form">
+            <GitFormFields>
               <p>
                 <strong>{selected.message || "Unnamed stash"}</strong> ·{" "}
                 <code>{selected.oid.slice(0, 12)}</code>
@@ -380,7 +399,7 @@ function StashDialog({
                     : "Apply this stash to the working tree and keep it in the stash list."}
               </p>
               {confirm !== "drop" && (
-                <label className="git-checkbox-row">
+                <GitCheckboxField>
                   <Checkbox
                     checked={reinstateIndex}
                     onCheckedChange={(value) =>
@@ -389,14 +408,14 @@ function StashDialog({
                     disabled={busy}
                   />
                   Restore which changes were staged
-                </label>
+                </GitCheckboxField>
               )}
-              <footer>
+              <GitFormActions>
                 <Button disabled={busy} onClick={() => setConfirm(null)}>
                   Cancel
                 </Button>
                 <Button
-                  variant={confirm === "drop" ? "destructive" : undefined}
+                  variant={confirm === "drop" ? "destructive" : "default"}
                   disabled={disabled}
                   onClick={() =>
                     void submit(
@@ -424,8 +443,8 @@ function StashDialog({
                       ? "Pop stash"
                       : "Apply stash"}
                 </Button>
-              </footer>
-            </div>
+              </GitFormActions>
+            </GitFormFields>
           ) : selected ? (
             <>
               {preview && (
@@ -494,9 +513,9 @@ function StashDialog({
             </>
           ) : (
             <>
-              <p className="git-projects-empty">
+              <GitEmptyState>
                 Select a stash to review its changes.
-              </p>
+              </GitEmptyState>
             </>
           )}
         </div>
