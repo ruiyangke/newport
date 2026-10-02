@@ -974,6 +974,41 @@ test("interactive terminal streams input, resizes and survives navigation", asyn
   await expectTerminalFits();
 });
 
+test("terminal find highlights matches and leaves on Escape", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
+  await expect(page.locator(".terminal-status")).toHaveText("Connected");
+  await page.getByLabel("Remote terminal input").press("ControlOrMeta+f");
+  const find = page.getByRole("textbox", { name: "Find in terminal" });
+  await expect(find).toBeVisible();
+  await find.fill("dev");
+  await expect(page.locator(".terminal-find-count")).toHaveText(/\d+\/\d+/);
+  await page.screenshot({
+    path: "test-results/screenshots/terminal-find.png",
+  });
+  // Theme changes re-render the terminal, not existing decorations; search
+  // again so the highlight uses the dark palette.
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(page.locator(".xterm-viewport")).toHaveCSS(
+    "background-color",
+    "rgb(30, 31, 33)",
+  );
+  await find.press("Enter");
+  await page.screenshot({
+    path: "test-results/screenshots/terminal-find-dark.png",
+  });
+  await page.emulateMedia({ colorScheme: "light" });
+  await find.press("Enter");
+  await find.press("Shift+Enter");
+  await page.getByRole("button", { name: "Match case" }).click();
+  await find.press("Escape");
+  await expect(find).toHaveCount(0);
+  // Escape returns focus to the terminal, so typing reaches the shell again.
+  await expect(page.getByLabel("Remote terminal input")).toBeFocused();
+});
+
 test("terminal tabs take the shell title, rename, and immerse the window", async ({
   page,
 }) => {

@@ -109,6 +109,7 @@ interface Commands {
   delete_tunnel: Command<{ id: string }, void>;
   set_tunnel_connected: Command<{ id: string; connected: boolean }, void>;
   open_tunnel: Command<{ id: string }, void>;
+  open_url: Command<{ url: string }, void>;
   discover_ports: Command<{ id: string }, DiscoveredPort[]>;
   set_integration_enabled: Command<
     { id: string; feature: "clipboard" | "browser"; enabled: boolean },

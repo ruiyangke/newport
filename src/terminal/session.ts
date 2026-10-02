@@ -1,10 +1,30 @@
 import { createStore } from "@tanstack/react-store";
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type ILinkHandler } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
+import { UnicodeGraphemesAddon } from "@xterm/addon-unicode-graphemes";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { toast } from "sonner";
 import { hasOpenDialog } from "../overlays";
 import { desktop } from "../api/desktop";
 import { terminalResources } from "./registry";
+
+/** Remote output is untrusted: only a deliberate modified click opens http(s). */
+async function openExternalLink(url: string) {
+  if (!/^https?:\/\//i.test(url)) return;
+  try {
+    await desktop("open_url", { url });
+  } catch (reason) {
+    toast.error(`Could not open the link. ${String(reason)}`);
+  }
+}
+const linkHandler: ILinkHandler = {
+  activate: (event, text) => {
+    if (!event.metaKey && !event.ctrlKey) return;
+    void openExternalLink(text);
+  },
+  allowNonHttpProtocols: false,
+};
 
 type Session = {
   id: string;
@@ -29,9 +49,13 @@ export class TerminalSession {
     screenReaderMode: true,
     disableStdin: true,
     minimumContrastRatio: 4.5,
-    allowProposedApi: false,
+    // The Unicode graphemes addon reads `terminal.unicode`, which xterm gates
+    // behind this flag; nothing else in the app relies on proposed API.
+    allowProposedApi: true,
+    linkHandler,
   });
   readonly fit = new FitAddon();
+  readonly search = new SearchAddon();
   private session: Session | null = null;
   private output: Promise<void> = Promise.resolve();
   private finishWrite?: () => void;
@@ -45,6 +69,11 @@ export class TerminalSession {
   constructor(private serverId: string) {
     this.element.className = "terminal-surface";
     this.term.loadAddon(this.fit);
+    this.term.loadAddon(this.search);
+    // Unicode 15 widths with grapheme clustering: TUIs place their cursor by
+    // display width, and the default tables mis-size emoji and variation
+    // selectors, which drifts every redraw.
+    this.term.loadAddon(new UnicodeGraphemesAddon());
     this.term.onData((value) => this.send(new TextEncoder().encode(value)));
     this.term.onBinary((value) =>
       this.send(Uint8Array.from(value, (c) => c.charCodeAt(0))),
