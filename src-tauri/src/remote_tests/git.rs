@@ -729,6 +729,26 @@ async fn git_rpc_roundtrip() {
         .unwrap()
         .iter()
         .any(|entry| entry["remote"] == true));
+    // Finish this channel before the separate SSH scenario can exceed its idle timeout.
+    client.ping().await.unwrap();
+    client
+        .request(Request::Close {
+            repo_id: repo_id.clone(),
+        })
+        .await
+        .unwrap();
+    // Stateless: closing released nothing, so the id still names the
+    // repository and reading it still works.
+    client
+        .request(Request::Status {
+            filter: None,
+            repo_id,
+            page_size: 100,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    drop(client);
     // Outbound Git SSH uses an agent entirely inside the disposable server.
     // These commands create test credentials; production transfers use the Git CLI.
     let agent_dir = format!("{root}-agent");
@@ -2936,25 +2956,6 @@ async fn git_rpc_roundtrip() {
         .iter()
         .any(|remote| remote["name"] == "upstream"));
     drop(ssh_client);
-    client.ping().await.unwrap();
-    client
-        .request(Request::Close {
-            repo_id: repo_id.clone(),
-        })
-        .await
-        .unwrap();
-    // Stateless: closing released nothing, so the id still names the
-    // repository and reading it still works.
-    client
-        .request(Request::Status {
-            filter: None,
-            repo_id,
-            page_size: 100,
-            cursor: None,
-        })
-        .await
-        .unwrap();
-    drop(client);
     session.close().await;
 }
 
