@@ -9,7 +9,6 @@ const tunnelId = "4a0429c7-7092-4c9d-ae8b-b1764985fb52";
  * behavioural suite and the style-regression suite drive the same app state.
  */
 export async function installAppFixture(page: Page) {
-
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.addInitScript(
     ({ serverId, tunnelId }) => {
@@ -329,7 +328,7 @@ export async function installAppFixture(page: Page) {
                   type: "data",
                   data: Array.from(
                     new TextEncoder().encode(
-                      "Welcome to Development\r\n\x1b[33mANSI yellow\x1b[0m · \x1b[97mbright white\x1b[0m · \x1b[36mcyan\x1b[0m\r\n\uf179 \uf115 ~ \uf017 01:15:17\r\ndeveloper@dev-linux:~$ ",
+                      "\x1b]0;developer@dev-linux: ~\x07Welcome to Development\r\n\x1b[33mANSI yellow\x1b[0m · \x1b[97mbright white\x1b[0m · \x1b[36mcyan\x1b[0m\r\n\uf179 \uf115 ~ \uf017 01:15:17\r\ndeveloper@dev-linux:~$ ",
                     ),
                   ),
                 },

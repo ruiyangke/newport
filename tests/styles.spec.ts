@@ -22,9 +22,15 @@ const PANELS = [
   "Connections",
   "Services",
   "Containers",
-  "Commands",
+  "Terminal",
   "Integration",
 ] as const;
+
+// Lazy panels mount after their chunk loads; a fixed wait raced the mount and
+// silently left the terminal pane out of the Chromium baseline.
+const PANEL_READY: Partial<Record<(typeof PANELS)[number], string>> = {
+  Terminal: ".terminal-bar",
+};
 
 const PROPS = [
   "display",
@@ -126,6 +132,8 @@ test("class styles match the recorded baseline", async ({ page }) => {
   const captured: Record<string, string> = {};
   for (const panel of PANELS) {
     await page.getByRole("tab", { name: panel, exact: true }).click();
+    const ready = PANEL_READY[panel];
+    if (ready) await expect(page.locator(ready)).toBeVisible();
     await page.waitForTimeout(300);
     // A class first seen on one panel keeps that panel's computed value.
     for (const [name, value] of Object.entries(await captureByClass(page))) {
