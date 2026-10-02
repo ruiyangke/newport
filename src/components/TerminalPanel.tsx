@@ -1,6 +1,10 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createStore, useSelector } from "@tanstack/react-store";
+import type { ISearchOptions } from "@xterm/addon-search";
 import {
+  CaseSensitive,
+  ChevronDown,
+  ChevronUp,
   Maximize2,
   Minimize2,
   Plus,
@@ -383,6 +387,89 @@ function TerminalView({
     (state) => state,
   );
   useLayoutEffect(() => session.attach(host.current!), [session]);
+  const [findOpen, setFindOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [results, setResults] = useState<{
+    index: number;
+    count: number;
+  } | null>(null);
+  const findInput = useRef<HTMLInputElement>(null);
+
+  // A tab switch ends the previous session's search.
+  useEffect(() => {
+    setFindOpen(false);
+    setQuery("");
+    setResults(null);
+  }, [session]);
+
+  // Cmd/Ctrl+F belongs to the terminal, never to the remote shell.
+  useLayoutEffect(() => {
+    session.term.attachCustomKeyEventHandler((event) => {
+      if (
+        event.type === "keydown" &&
+        (event.metaKey || event.ctrlKey) &&
+        event.key.toLowerCase() === "f"
+      ) {
+        event.preventDefault();
+        setFindOpen(true);
+        return false;
+      }
+      return true;
+    });
+    return () => session.term.attachCustomKeyEventHandler(() => true);
+  }, [session]);
+
+  useEffect(() => {
+    if (!findOpen) return;
+    findInput.current?.focus();
+    findInput.current?.select();
+  }, [findOpen]);
+
+  useEffect(() => {
+    if (!findOpen) return;
+    const subscription = session.search.onDidChangeResults(
+      ({ resultIndex, resultCount }) =>
+        setResults({ index: resultIndex, count: resultCount }),
+    );
+    return () => subscription.dispose();
+  }, [findOpen, session]);
+
+  const find = (
+    direction: "next" | "previous",
+    value: { query: string; caseSensitive: boolean; incremental: boolean },
+  ) => {
+    if (!value.query) {
+      session.search.clearDecorations();
+      setResults(null);
+      return;
+    }
+    const dark = document.documentElement.classList.contains("dark");
+    const options: ISearchOptions = {
+      caseSensitive: value.caseSensitive,
+      incremental: value.incremental,
+      decorations: {
+        // Backgrounds must be solid #RRGGBB (no alpha), so pick tones that
+        // stay legible behind the terminal text on each theme.
+        matchBackground: dark ? "#8a7a2a" : "#f6e3a1",
+        matchBorder: dark ? "#c9b458" : "#d8b43a",
+        matchOverviewRuler: dark ? "#c9b458" : "#d8b43a",
+        activeMatchBackground: dark ? "#c77800" : "#ffb74d",
+        activeMatchBorder: dark ? "#ffb74d" : "#f57c00",
+        activeMatchColorOverviewRuler: dark ? "#ffb74d" : "#f57c00",
+      },
+    };
+    if (direction === "next") session.search.findNext(value.query, options);
+    else session.search.findPrevious(value.query, options);
+  };
+  const runFind = (direction: "next" | "previous", incremental = false) =>
+    find(direction, { query, caseSensitive, incremental });
+  const closeFind = () => {
+    session.search.clearDecorations();
+    setFindOpen(false);
+    setResults(null);
+    session.term.focus();
+  };
   // Steady states live on the tab dots; only transitions and failures earn
   // space in the bar. The text stays in the tree for screen readers.
   const steady = status === "Connected" || status === "Disconnected";
@@ -466,6 +553,84 @@ function TerminalView({
             <p className="terminal-endpoint">
               {server.sshUser}@{server.sshHost}
             </p>
+          </div>
+        )}
+        {findOpen && (
+          <div className="terminal-find" role="search" aria-label="Find">
+            <input
+              ref={findInput}
+              className="terminal-find-input"
+              value={query}
+              placeholder="Find"
+              aria-label="Find in terminal"
+              spellCheck={false}
+              autoComplete="off"
+              onChange={(event) => {
+                setQuery(event.target.value);
+                find("next", {
+                  query: event.target.value,
+                  caseSensitive,
+                  incremental: true,
+                });
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  runFind(event.shiftKey ? "previous" : "next");
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  closeFind();
+                }
+              }}
+            />
+            <span className="terminal-find-count" aria-live="polite">
+              {query && results
+                ? results.count
+                  ? `${results.index + 1}/${results.count}`
+                  : "No results"
+                : ""}
+            </span>
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              aria-label="Previous match"
+              onClick={() => runFind("previous")}
+            >
+              <ChevronUp />
+            </Button>
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              aria-label="Next match"
+              onClick={() => runFind("next")}
+            >
+              <ChevronDown />
+            </Button>
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              aria-pressed={caseSensitive}
+              aria-label="Match case"
+              onClick={() => {
+                const next = !caseSensitive;
+                setCaseSensitive(next);
+                find("next", {
+                  query,
+                  caseSensitive: next,
+                  incremental: false,
+                });
+              }}
+            >
+              <CaseSensitive />
+            </Button>
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              aria-label="Close find"
+              onClick={closeFind}
+            >
+              <X />
+            </Button>
           </div>
         )}
       </TabsContent>

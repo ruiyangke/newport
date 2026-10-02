@@ -17,6 +17,7 @@ export async function installAppFixture(page: Page) {
       (window as any).__terminalWrites = [];
       (window as any).__terminalClosed = [];
       (window as any).__terminalSizes = [];
+      (window as any).__openedUrls = [];
 
       let largeServiceCalls = 0;
       const fixtureAt = Date.now();
@@ -356,6 +357,10 @@ export async function installAppFixture(page: Page) {
             if (cmd === "terminal_close") {
               (window as any).__terminalClosed.push(args.session);
               terminals.delete(args.session);
+              return;
+            }
+            if (cmd === "open_url") {
+              (window as any).__openedUrls.push(args.url);
               return;
             }
             if (cmd === "snapshot") return structuredClone(data);

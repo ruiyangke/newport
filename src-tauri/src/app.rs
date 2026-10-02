@@ -202,7 +202,8 @@ pub fn run() -> anyhow::Result<()> {
             commands::discover_ports,
             commands::install_clipboard_helper,
             commands::reinstall_agent,
-            commands::open_tunnel
+            commands::open_tunnel,
+            commands::open_url
         ])
         .setup(move |app| {
             #[cfg(target_os = "windows")]

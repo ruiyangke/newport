@@ -20,6 +20,9 @@
   flex: 1;
   min-height: 0;
   min-width: 0;
+  /* .workspace-content carries a 5px top pad on non-mac shells; the terminal
+     owns its page on every platform. */
+  padding: 0;
 }
 .terminal-workspace > .detail,
 .mac-shell .terminal-workspace > .detail {
@@ -205,6 +208,45 @@
     Menlo,
     monospace;
   overflow-wrap: anywhere;
+}
+.terminal-find {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--popover, var(--background));
+  box-shadow: 0 6px 20px rgb(0 0 0 / 12%);
+}
+.terminal-find-input {
+  width: 180px;
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 12px;
+}
+.terminal-find-input::placeholder {
+  color: var(--muted-foreground);
+}
+.terminal-find-input:focus {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+.terminal-find-count {
+  min-width: 52px;
+  padding-right: 4px;
+  text-align: right;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 .terminal-error {
   flex-shrink: 0;

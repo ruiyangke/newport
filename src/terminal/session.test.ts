@@ -9,7 +9,7 @@ const xterm = vi.hoisted(() => ({
 vi.mock("../api/desktop", () => api);
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {
-    options = {};
+    options: Record<string, unknown> = {};
     cols = 80;
     rows = 24;
     open = vi.fn();
@@ -23,11 +23,31 @@ vi.mock("@xterm/xterm", () => ({
       xterm.titles.push(listener);
     };
     write = vi.fn((_data, done) => done());
+    constructor(options: Record<string, unknown>) {
+      this.options = options;
+    }
   },
 }));
 vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class {
     fit = vi.fn();
+  },
+}));
+const unicode = vi.hoisted(() => ({ instances: [] as unknown[] }));
+vi.mock("@xterm/addon-unicode-graphemes", () => ({
+  UnicodeGraphemesAddon: class {
+    constructor() {
+      unicode.instances.push(this);
+    }
+  },
+}));
+vi.mock("@xterm/addon-search", () => ({
+  SearchAddon: class {
+    findNext = vi.fn(() => true);
+    findPrevious = vi.fn(() => true);
+    clearDecorations = vi.fn();
+    clearActiveDecoration = vi.fn();
+    onDidChangeResults = vi.fn(() => ({ dispose: vi.fn() }));
   },
 }));
 const webgl = vi.hoisted(() => {
@@ -60,6 +80,7 @@ beforeEach(() => {
   webgl.instances.length = 0;
   webgl.failed = false;
   xterm.titles.length = 0;
+  unicode.instances.length = 0;
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -241,7 +262,8 @@ it("keeps the DOM renderer when WebGL2 is unavailable", () => {
   const detach = terminal.attach(host);
   expect(webgl.instances).toHaveLength(0);
   expect(terminal.term.open).toHaveBeenCalledOnce();
-  expect(terminal.term.loadAddon).toHaveBeenCalledTimes(1);
+  // Fit, search and Unicode graphemes load; WebGL is the one that stays out.
+  expect(terminal.term.loadAddon).toHaveBeenCalledTimes(3);
   detach();
   host.remove();
 });
@@ -294,4 +316,27 @@ it("keeps shell titles single-line and bounded", () => {
   expect(terminalTitle("x".repeat(200))).toHaveLength(120);
   // A title is never cut through a surrogate pair.
   expect(terminalTitle("a".repeat(119) + "\u{1F600}")).toBe("a".repeat(119));
+});
+it("loads search and Unicode graphemes, and opens only deliberate http links", async () => {
+  const terminal = getTerminalSession("links", "tab", "links");
+  expect(terminal.term.loadAddon).toHaveBeenCalledWith(terminal.search);
+  expect(unicode.instances).toHaveLength(1);
+  expect(terminal.term.loadAddon).toHaveBeenCalledWith(unicode.instances[0]);
+  const handler = terminal.term.options.linkHandler!;
+  const activate = (event: Partial<MouseEvent>, text: string) =>
+    handler.activate(event as MouseEvent, text, {
+      start: { x: 1, y: 1 },
+      end: { x: 1, y: 1 },
+    });
+  // A plain click, a non-http scheme and a non-web scheme all do nothing.
+  activate({ metaKey: false }, "https://example.com");
+  activate({ metaKey: true }, "javascript:alert(1)");
+  activate({ metaKey: true }, "ssh://host/repo");
+  expect(api.desktop).not.toHaveBeenCalledWith("open_url", expect.anything());
+  activate({ metaKey: true }, "https://example.com/x");
+  await vi.waitFor(() =>
+    expect(api.desktop).toHaveBeenCalledWith("open_url", {
+      url: "https://example.com/x",
+    }),
+  );
 });

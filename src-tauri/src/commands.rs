@@ -444,3 +444,16 @@ pub(crate) async fn open_tunnel(
         .map_err(|error| format!("Browser opening task failed: {error}"))?
         .map_err(|error| format!("Could not open the browser: {error}"))
 }
+
+#[tauri::command]
+pub(crate) async fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    // Terminal output is untrusted; only a deliberate http(s) link is opened.
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("Only http and https links can be opened.".into());
+    }
+    use tauri_plugin_opener::OpenerExt;
+    tokio::task::spawn_blocking(move || app.opener().open_url(url, None::<&str>))
+        .await
+        .map_err(|error| format!("Link opening task failed: {error}"))?
+        .map_err(|error| format!("Could not open the link: {error}"))
+}
