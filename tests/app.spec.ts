@@ -265,13 +265,10 @@ test("cockpit health, service logs, capability errors and explicit commands", as
   ).toBeFocused();
   await page.getByRole("tab", { name: "Containers", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Docker is unavailable");
-  await page.getByRole("tab", { name: "Commands", exact: true }).click();
-  await page
-    .getByRole("button", { name: "Connect terminal", exact: true })
-    .click();
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
   await expect(page.locator(".terminal-status")).toHaveText("Connected");
   await page.screenshot({
-    path: "test-results/screenshots/cockpit-commands.png",
+    path: "test-results/screenshots/cockpit-terminal.png",
   });
   await page.getByRole("tab", { name: "Overview", exact: true }).click();
   await expect(
@@ -613,7 +610,7 @@ test("native sidebar stays usable at minimum size and server picker searches", a
     "Connections",
     "Services",
     "Containers",
-    "Commands",
+    "Terminal",
   ]) {
     const tab = page.getByRole("tab", { name, exact: true });
     await expect(tab).toBeInViewport();
@@ -895,16 +892,8 @@ test("interactive terminal streams input, resizes and survives navigation", asyn
   page,
 }) => {
   await page.goto("/");
-  await page.getByRole("tab", { name: "Commands", exact: true }).click();
-  await expect(
-    page.getByRole("heading", { name: "Open a remote shell" }),
-  ).toBeVisible();
-  await page.screenshot({
-    path: "test-results/screenshots/terminal-initial.png",
-  });
-  await page
-    .getByRole("button", { name: "Connect terminal", exact: true })
-    .click();
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
+  // A new tab opens its shell without any further action.
   await expect(page.locator(".terminal-status")).toHaveText("Connected");
   await expect(page.locator(".xterm-accessibility-tree")).toContainText(
     "Welcome to Development",
@@ -958,17 +947,23 @@ test("interactive terminal streams input, resizes and survives navigation", asyn
   await expectTerminalFits();
   await page.emulateMedia({ colorScheme: "dark" });
   await page.screenshot({ path: "test-results/screenshots/terminal-dark.png" });
-  await page.getByRole("button", { name: "Disconnect terminal" }).click();
-  await expect(page.locator(".terminal-status")).toHaveText("Disconnected");
+  // The session ends from the tab menu, keeping the transcript in place.
   await page
-    .getByRole("button", { name: "Connect terminal", exact: true })
-    .click();
+    .getByRole("tab", { name: "developer@dev-linux: ~", exact: true })
+    .click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Disconnect", exact: true }).click();
+  await expect(page.locator(".terminal-status")).toHaveText("Disconnected");
+  // Nothing reconnects on its own; the tab menu does.
+  await page
+    .getByRole("tab", { name: "developer@dev-linux: ~", exact: true })
+    .click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Reconnect", exact: true }).click();
   await expect(page.locator(".terminal-status")).toHaveText("Connected");
   const before = await page.evaluate(
     () => (window as any).__terminalClosed.length,
   );
   await page.getByRole("tab", { name: "Connections", exact: true }).click();
-  await page.getByRole("tab", { name: "Commands", exact: true }).click();
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
   await expect(page.locator(".terminal-status")).toHaveText("Connected");
   expect(
     await page.evaluate(() => (window as any).__terminalClosed.length),
@@ -979,7 +974,157 @@ test("interactive terminal streams input, resizes and survives navigation", asyn
   await expectTerminalFits();
 });
 
-test("terminal setup errors allow a fresh connection", async ({ page }) => {
+test("terminal tabs take the shell title, rename, and immerse the window", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
+  // The first tab auto-connects and soon takes the shell's title.
+  await expect(page.locator(".terminal-status")).toHaveText("Connected");
+  await expect(
+    page.getByRole("tab", { name: "developer@dev-linux: ~", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("tab", { name: "developer@dev-linux: ~", exact: true })
+    .dblclick();
+  await page.getByLabel("Rename Terminal 1").fill("Main shell");
+  await page.getByLabel("Rename Terminal 1").press("Enter");
+  const firstTab = page.getByRole("tab", { name: "Main shell", exact: true });
+  await expect(firstTab).toBeVisible();
+
+  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await expect(page.locator(".terminal-status")).toHaveText("Connected");
+  // The shell names its own tab with an OSC title until the user renames it.
+  await expect(
+    page.getByRole("tab", { name: "developer@dev-linux: ~", exact: true }),
+  ).toHaveAttribute("aria-selected", "true");
+
+  // Double-click renames; the custom name wins over the shell title.
+  await page
+    .getByRole("tab", { name: "developer@dev-linux: ~", exact: true })
+    .dblclick();
+  await page.getByLabel("Rename Terminal 2").fill("Deploy logs");
+  await page.getByLabel("Rename Terminal 2").press("Enter");
+  await expect(
+    page.getByRole("tab", { name: "Deploy logs", exact: true }),
+  ).toBeVisible();
+  // Escape abandons a rename without touching the committed name.
+  await page.getByRole("tab", { name: "Deploy logs", exact: true }).dblclick();
+  await page.getByLabel("Rename Terminal 2").fill("Discarded");
+  await page.getByLabel("Rename Terminal 2").press("Escape");
+  await expect(
+    page.getByRole("tab", { name: "Deploy logs", exact: true }),
+  ).toBeVisible();
+
+  const logsTab = page.getByRole("tab", { name: "Deploy logs", exact: true });
+  // Sessions are independent: ending one leaves the other connected.
+  await firstTab.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Disconnect", exact: true }).click();
+  await firstTab.click();
+  await expect(page.locator(".terminal-status")).toHaveText("Disconnected");
+  // Pointer selection resumes typing in the shown session.
+  await logsTab.click();
+  await expect(page.locator(".terminal-status")).toHaveText("Connected");
+  await expect(
+    page.getByRole("textbox", { name: "Remote terminal input" }),
+  ).toBeFocused();
+  await logsTab.focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect(firstTab).toBeFocused();
+  await expect(firstTab).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("End");
+  await expect(logsTab).toBeFocused();
+  await expect(logsTab).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Home");
+  await expect(firstTab).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await expect(logsTab).toBeFocused();
+  await expect(logsTab).toHaveAttribute("tabindex", "0");
+  await expect(firstTab).toHaveAttribute("tabindex", "-1");
+  const panelId = await logsTab.getAttribute("aria-controls");
+  await expect(page.locator(`[id="${panelId}"]`)).toHaveAttribute(
+    "aria-labelledby",
+    (await logsTab.getAttribute("id"))!,
+  );
+  await page.screenshot({
+    path: "test-results/screenshots/terminal-tabs.png",
+  });
+
+  await page.getByRole("button", { name: "Enter immersive mode" }).click();
+  await expect(page.locator(".window-toolbar")).toHaveCount(0);
+  await expect(page.locator(".sidebar")).toBeHidden();
+  await expect(
+    page.getByRole("separator", { name: "Sidebar width" }),
+  ).toHaveCount(0);
+  await expect(page.locator(".xterm-accessibility-tree")).toContainText(
+    "Welcome to Development",
+  );
+  // The WebGL surface repaints after the layout grows; give it two frames.
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
+  await page.screenshot({
+    path: "test-results/screenshots/terminal-immersive.png",
+  });
+  await page.getByRole("button", { name: "Exit immersive mode" }).click();
+  await expect(page.locator(".window-toolbar")).toBeVisible();
+  await expect(page.locator(".sidebar")).toBeVisible();
+  await expect(page.locator(".terminal-status")).toHaveText("Connected");
+
+  // Leaving the terminal page restores the shell even in immersive mode.
+  await page.getByRole("button", { name: "Enter immersive mode" }).click();
+  await expect(page.locator(".window-toolbar")).toHaveCount(0);
+  await page.keyboard.press("ControlOrMeta+1");
+  await expect(page.locator(".window-toolbar")).toBeVisible();
+  await expect(
+    page.getByRole("tab", { name: "Deploy logs", exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
+  await expect(page.locator(".terminal-status")).toHaveText("Connected");
+  // The renamed tab survives page navigation.
+  await expect(
+    page.getByRole("tab", { name: "Deploy logs", exact: true }),
+  ).toBeVisible();
+
+  // The context menu resets a renamed tab back to the shell's title.
+  await page
+    .getByRole("tab", { name: "Deploy logs", exact: true })
+    .click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Reset name", exact: true }).click();
+  await expect(
+    page.getByRole("tab", { name: "developer@dev-linux: ~", exact: true }),
+  ).toBeVisible();
+
+  // Closing a tab disposes only that tab's session.
+  const connected = await page.evaluate(() => (window as any).__activeTerminal);
+  await page
+    .getByRole("button", {
+      name: "Close developer@dev-linux: ~",
+      exact: true,
+    })
+    .click();
+  await expect(
+    page.getByRole("tab", { name: "developer@dev-linux: ~", exact: true }),
+  ).toHaveCount(0);
+  await expect(page.locator(".terminal-status")).toHaveText("Disconnected");
+  await expect
+    .poll(() => page.evaluate(() => (window as any).__terminalClosed))
+    .toContain(connected);
+
+  // Middle-click closes a tab that is not the last one.
+  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  const tabs = page.locator('.terminal-tablist [role="tab"]');
+  await expect(tabs).toHaveCount(2);
+  await tabs.last().click({ button: "middle" });
+  await expect(tabs).toHaveCount(1);
+});
+
+test("terminal setup errors do not retry and can reconnect from the menu", async ({
+  page,
+}) => {
   await page.goto("/");
   await page.evaluate(() => {
     const bridge = (window as any).__TAURI_INTERNALS__;
@@ -988,15 +1133,26 @@ test("terminal setup errors allow a fresh connection", async ({ page }) => {
       cmd === "terminal_open"
         ? Promise.reject("Server refused the terminal PTY.")
         : original(cmd, args);
+    (window as any).__restoreInvoke = () => {
+      bridge.invoke = original;
+    };
   });
-  await page.getByRole("tab", { name: "Commands", exact: true }).click();
-  await page.getByRole("button", { name: "Connect terminal" }).click();
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
+  // The failed auto-connect surfaces once and does not loop.
   await expect(page.getByRole("alert")).toContainText(
     "refused the terminal PTY",
   );
-  await expect(
-    page.getByRole("button", { name: "Connect terminal" }),
-  ).toBeEnabled();
+  await page.waitForTimeout(400);
+  await expect(page.locator(".terminal-status")).toHaveText(
+    "Connection failed",
+  );
+  // A user-driven reconnect starts a fresh attempt.
+  await page.evaluate(() => (window as any).__restoreInvoke());
+  await page
+    .getByRole("tab", { name: "Terminal 1", exact: true })
+    .click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Reconnect", exact: true }).click();
+  await expect(page.locator(".terminal-status")).toHaveText("Connected");
 });
 
 test("table headers stick and collection refresh keeps the visible row and focus", async ({
@@ -1059,15 +1215,14 @@ test("leaving during terminal setup preserves the session", async ({
       });
     };
   });
-  await page.getByRole("tab", { name: "Commands", exact: true }).click();
-  await page.getByRole("button", { name: "Connect terminal" }).click();
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
   await expect(page.locator(".terminal-status")).toHaveText("Connecting…");
   await page.getByRole("tab", { name: "Overview", exact: true }).click();
   await page.waitForFunction(
     () => typeof (window as any).__finishTerminalOpen === "function",
   );
   await page.evaluate(() => (window as any).__finishTerminalOpen());
-  await page.getByRole("tab", { name: "Commands", exact: true }).click();
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
   await expect(page.locator(".terminal-status")).toHaveText("Connected");
   expect(await page.evaluate(() => (window as any).__terminalClosed)).toEqual(
     [],
@@ -1478,14 +1633,12 @@ test("metadata updates preserve the workspace and connected terminal", async ({
   page,
 }) => {
   await page.goto("/");
-  await page.getByRole("tab", { name: "Commands", exact: true }).click();
-  await page
-    .getByRole("button", { name: "Connect terminal", exact: true })
-    .click();
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
   await expect(page.locator(".terminal-status")).toHaveText("Connected");
   await page.evaluate(() => {
     (window as any).__workspaceBefore = document.querySelector(".cockpit");
     (window as any).__closedBefore = (window as any).__terminalClosed.length;
+    (window as any).__sessionBefore = (window as any).__activeTerminal;
   });
   await page.getByRole("button", { name: "Edit server", exact: true }).click();
   await page.getByLabel("Name (optional)", { exact: true }).fill("Renamed");
@@ -1511,7 +1664,14 @@ test("metadata updates preserve the workspace and connected terminal", async ({
   await page.getByLabel("SSH host", { exact: true }).fill("new.example.com");
   await page.getByRole("button", { name: "Save server", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await expect(page.locator(".terminal-status")).toHaveText("Disconnected");
+  const sessionBefore = await page.evaluate(
+    () => (window as any).__sessionBefore,
+  );
+  // The new connection opens its own shell; the old session is gone.
+  await expect(page.locator(".terminal-status")).toHaveText("Connected");
+  await expect
+    .poll(() => page.evaluate(() => (window as any).__activeTerminal))
+    .not.toBe(sessionBefore);
   expect(
     await page.evaluate(
       () =>
@@ -1691,7 +1851,7 @@ test("failed lazy workspace leaves navigation and recovery available", async ({
       }),
   );
   await page.goto("/");
-  await page.getByRole("tab", { name: "Commands", exact: true }).click();
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
   await expect(
     page.getByRole("alert", { name: "View unavailable" }),
   ).toBeVisible();
@@ -2325,10 +2485,7 @@ test("terminal receives output while its page is detached", async ({
   page,
 }) => {
   await page.goto("/");
-  await page.getByRole("tab", { name: "Commands", exact: true }).click();
-  await page
-    .getByRole("button", { name: "Connect terminal", exact: true })
-    .click();
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
   await expect(page.locator(".terminal-status")).toHaveText("Connected");
   await page.getByRole("tab", { name: "Overview", exact: true }).click();
   await page.evaluate(async () => {
@@ -2340,7 +2497,7 @@ test("terminal receives output while its page is detached", async ({
     });
   });
   await page.getByRole("tab", { name: "Services", exact: true }).click();
-  await page.getByRole("tab", { name: "Commands", exact: true }).click();
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
   await expect(page.locator(".xterm-accessibility-tree")).toContainText(
     "background output retained",
   );
@@ -2405,10 +2562,7 @@ test("failed cache clearing retains cached overview readings", async ({
 
 test("backend restart discards the old terminal session", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("tab", { name: "Commands", exact: true }).click();
-  await page
-    .getByRole("button", { name: "Connect terminal", exact: true })
-    .click();
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
   await expect(page.locator(".terminal-status")).toHaveText("Connected");
   const previous = await page.evaluate(() => (window as any).__activeTerminal);
   await page.evaluate(() => {
@@ -2422,13 +2576,10 @@ test("backend restart discards the old terminal session", async ({ page }) => {
     };
     window.dispatchEvent(new Event("focus"));
   });
-  await expect(page.locator(".terminal-status")).toHaveText("Disconnected");
   await expect
     .poll(() => page.evaluate(() => (window as any).__terminalClosed))
     .toContain(previous);
-  await page
-    .getByRole("button", { name: "Connect terminal", exact: true })
-    .click();
+  // The restarted backend gets a fresh auto-connected session.
   await expect(page.locator(".terminal-status")).toHaveText("Connected");
   expect(await page.evaluate(() => (window as any).__activeTerminal)).not.toBe(
     previous,

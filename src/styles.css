@@ -2966,15 +2966,6 @@ html.native-vibrancy,
 .form-section .field:last-child {
   margin-bottom: 0;
 }
-.terminal-lifecycle {
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-.terminal-transcript {
-  color: var(--muted-foreground);
-  font-size: 11px;
-  margin: 0 0 8px;
-}
 @media (max-width: 800px) {
   .workspace-masthead {
     flex-wrap: wrap;
@@ -2995,10 +2986,6 @@ html.native-vibrancy,
   }
   .connections-panel .tunnel-actions {
     margin-left: auto;
-  }
-  .terminal-lifecycle {
-    flex-basis: 100%;
-    order: 5;
   }
 }
 
@@ -3249,6 +3236,27 @@ html.native-vibrancy,
 .window-controls .window-close:hover {
   background: var(--destructive);
   color: white;
+}
+
+/*
+ * Immersive terminal: the session owns the window while native controls stay
+ * reachable (macOS traffic lights float over the terminal bar; Windows keeps
+ * its window controls in a slim toolbar).
+ */
+.app-shell.immersive,
+.mac-shell.immersive {
+  grid-template-columns: minmax(0, 1fr);
+}
+.app-shell.immersive .sidebar {
+  display: none;
+}
+.mac-shell.immersive .terminal-bar {
+  padding-left: 96px;
+}
+.windows-shell.immersive .window-toolbar {
+  min-height: 40px;
+  padding: 4px 8px;
+  justify-content: flex-end;
 }
 
 /* Repository tools sit alongside the working view instead of obscuring it. */

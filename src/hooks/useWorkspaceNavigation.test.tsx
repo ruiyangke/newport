@@ -46,15 +46,15 @@ it("selects the first server and supports Back/Forward without changing the brow
   const browserUrl = window.location.href;
   await render();
   expect(pathname).toBe("/servers/a/overview");
-  await act(async () => state.selectView("commands"));
+  await act(async () => state.selectView("terminal"));
   await act(async () => state.selectServer("b"));
-  expect(pathname).toBe("/servers/b/commands");
+  expect(pathname).toBe("/servers/b/terminal");
   await act(async () => navigate(-1));
-  expect([state.selected, state.view]).toEqual(["a", "commands"]);
+  expect([state.selected, state.view]).toEqual(["a", "terminal"]);
   await act(async () => navigate(-1));
   expect(state.view).toBe("overview");
   await act(async () => navigate(1));
-  expect(state.view).toBe("commands");
+  expect(state.view).toBe("terminal");
   expect(window.location.href).toBe(browserUrl);
 });
 
@@ -87,11 +87,16 @@ it("repairs deleted servers and handles an empty profile", async () => {
   await render();
   expect(pathname).toBe("/");
   expect(state.selected).toBe("");
-  await act(async () => state.selectView("commands"));
+  await act(async () => state.selectView("terminal"));
   expect(pathname).toBe("/");
   servers = [{ id: "new" }];
   await render();
   expect(pathname).toBe("/servers/new/overview");
+});
+
+it("canonicalizes the old commands route to the terminal workspace", async () => {
+  await render("/servers/a/commands");
+  expect([state.view, pathname]).toEqual(["terminal", "/servers/a/terminal"]);
 });
 
 it.each(["/unknown", "/servers/missing/invalid", "/servers/a"])(

@@ -5,6 +5,7 @@
   font-style: normal;
   font-display: block;
 }
+/* The terminal owns its page: fill the workspace instead of card padding. */
 .terminal-workspace {
   display: flex;
   flex-direction: column;
@@ -20,30 +21,146 @@
   min-height: 0;
   min-width: 0;
 }
-.terminal-workspace > .detail {
+.terminal-workspace > .detail,
+.mac-shell .terminal-workspace > .detail {
   width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
 }
 .remote-terminal {
   margin-top: 0;
+  gap: 0;
 }
-.terminal-toolbar {
+.terminal-bar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-bottom: 8px;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  height: 38px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+.terminal-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.terminal-tabs::-webkit-scrollbar {
+  display: none;
+}
+.terminal-tablist {
+  display: flex;
+  /* The app-shell Tabs root is vertical, and Tailwind's named group variants
+     match it from any depth; this list must stay a horizontal row. */
+  flex-direction: row;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  justify-content: flex-start;
+}
+.terminal-tab {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  max-width: 180px;
+  border-radius: 5px;
+}
+.terminal-tab[data-active] {
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+.terminal-tab:not([data-active]):hover {
+  background: color-mix(in srgb, var(--foreground) 6%, transparent);
+}
+.terminal-tab[data-editing] {
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+.terminal-tab-input {
+  width: 132px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--foreground);
+  font-size: 12px;
+  user-select: text;
+}
+.terminal-tab-input:focus {
+  outline: 2px solid var(--ring);
+  outline-offset: -1px;
+}
+.terminal-tab-select {
+  flex: initial;
+  /* Same vertical-group leak as the list: keep the tab content-sized. */
+  width: auto;
+  box-shadow: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 4px 0 8px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.terminal-tab[data-active] .terminal-tab-select {
+  color: var(--foreground);
+  font-weight: 500;
+}
+.terminal-tab .status-dot {
   flex-shrink: 0;
 }
-.terminal-identity {
-  flex: 1;
-  min-width: 80px;
+.terminal-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.terminal-identity h2 {
-  margin: 0;
-}
-.terminal-status {
-  font-size: 11px;
+.terminal-tab-close {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-right: 3px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
   color: var(--muted-foreground);
+  opacity: 0;
+}
+.terminal-tab:hover .terminal-tab-close,
+.terminal-tab[data-active] .terminal-tab-close {
+  opacity: 1;
+}
+.terminal-tab-close:hover {
+  background: color-mix(in srgb, var(--foreground) 12%, transparent);
+  color: var(--foreground);
+}
+.terminal-tab-select:focus-visible,
+.terminal-tab-close:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -1px;
+}
+.terminal-tab-close:focus-visible {
+  opacity: 1;
+}
+.terminal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 .terminal-frame {
   position: relative;
@@ -52,13 +169,8 @@
   flex: 1;
   min-height: 0;
   min-width: 0;
-  padding: 10px 0;
-  border-top: 1px solid var(--border);
   background: var(--background);
   overflow: hidden;
-}
-.terminal-frame:focus-within {
-  border-top-color: var(--ring);
 }
 .terminal-welcome {
   position: absolute;
@@ -67,9 +179,15 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
+  gap: 6px;
   padding: 24px;
   text-align: center;
+  background: var(--background);
+}
+.terminal-mark {
+  margin-bottom: 8px;
+  color: var(--muted-foreground);
+  opacity: 0.8;
 }
 .terminal-welcome h3,
 .terminal-welcome p {
@@ -79,13 +197,21 @@
   font-size: 15px;
   font-weight: 600;
 }
-.terminal-welcome p {
+.terminal-endpoint {
+  color: var(--muted-foreground);
+  font:
+    12px/1.6 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
   overflow-wrap: anywhere;
-  color: var(--muted-foreground);
 }
-.terminal-welcome small {
-  color: var(--muted-foreground);
-  font-size: 11px;
+.terminal-error {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--red) 6%, transparent);
 }
 .terminal-mount {
   display: flex;
@@ -100,12 +226,10 @@
   min-width: 0;
   overflow: hidden;
 }
-.remote-terminal .cockpit-footnote {
-  flex-shrink: 0;
-  margin: 8px 0 0;
-}
 .terminal-surface .xterm {
   height: 100%;
+  /* FitAddon measures this element, so padding here keeps the grid aligned. */
+  padding: 8px 10px;
 }
 .terminal-surface .xterm-viewport {
   /* xterm's default black shows below the last whole character row. */

@@ -6,12 +6,15 @@ export const workspaceViews = [
   "connections",
   "services",
   "containers",
-  "commands",
+  "terminal",
   "files",
   "projects",
   "integration",
 ] as const;
 export type WorkspaceView = (typeof workspaceViews)[number];
+
+// "commands" was this workspace's name before the terminal page redesign.
+const renamedViews = new Map<string, WorkspaceView>([["commands", "terminal"]]);
 
 function isWorkspaceView(value: string | undefined): value is WorkspaceView {
   return workspaceViews.some((view) => view === value);
@@ -33,7 +36,10 @@ export function useWorkspaceNavigation(
     match?.params.serverId ?? (settings ? location.state?.serverId : undefined);
   const requestedView =
     match?.params.view ?? (settings ? location.state?.view : undefined);
-  const view = isWorkspaceView(requestedView) ? requestedView : "overview";
+  const requested = requestedView
+    ? (renamedViews.get(requestedView) ?? requestedView)
+    : undefined;
+  const view = isWorkspaceView(requested) ? requested : "overview";
   const selected = servers.some((server) => server.id === requestedServer)
     ? requestedServer!
     : (servers[0]?.id ?? "");

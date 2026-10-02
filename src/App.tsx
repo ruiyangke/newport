@@ -20,6 +20,7 @@ import { ProjectsPanel } from "./components/ProjectsPanel";
 import { useSnapshot } from "./hooks/useSnapshot";
 import { desktop } from "./api/desktop";
 import { useSidebar } from "./useSidebar";
+import { immersiveStore, setImmersive } from "./immersive";
 import { listen } from "@tauri-apps/api/event";
 import {
   DropdownMenu,
@@ -55,6 +56,7 @@ import {
   type CSSProperties,
 } from "react";
 import { isTauri } from "@tauri-apps/api/core";
+import { useSelector } from "@tanstack/react-store";
 import {
   FolderGit2,
   FolderOpen,
@@ -155,6 +157,12 @@ export default function App() {
       data.config.servers,
       loaded && !snapshotError && !data.loadError,
     );
+  const windows = navigator.platform.startsWith("Win");
+  const immersive = useSelector(immersiveStore, (state) => state.active);
+  // Immersive mode belongs to the terminal page; leaving it restores the shell.
+  useEffect(() => {
+    if (immersive && (settings || view !== "terminal")) setImmersive(false);
+  }, [immersive, settings, view]);
   useEffect(() => {
     if (!loaded || snapshotError || data.loadError) return;
     const valid = new Set(
@@ -276,7 +284,7 @@ export default function App() {
       value={settings ? "settings" : view}
       onValueChange={selectView}
       orientation="vertical"
-      className={`app-shell native-shell mac-shell ${navigator.platform.startsWith("Win") ? "windows-shell" : ""} ${sidebar.hidden ? "sidebar-hidden" : ""}`}
+      className={`app-shell native-shell mac-shell ${windows ? "windows-shell" : ""} ${sidebar.hidden ? "sidebar-hidden" : ""} ${immersive ? "immersive" : ""}`}
       style={{ "--source-width": `${sidebar.width}px` } as CSSProperties}
     >
       <aside
@@ -310,7 +318,7 @@ export default function App() {
             { value: "connections", label: "Connections", icon: Cable },
             { value: "services", label: "Services", icon: Layers },
             { value: "containers", label: "Containers", icon: Boxes },
-            { value: "commands", label: "Commands", icon: Terminal },
+            { value: "terminal", label: "Terminal", icon: Terminal },
             { value: "files", label: "Files", icon: FolderOpen },
             { value: "projects", label: "Projects", icon: FolderGit2 },
             { value: "integration", label: "Integration", icon: Plug },
@@ -359,7 +367,7 @@ export default function App() {
           </span>
         </div>
       </aside>
-      {!sidebar.hidden && (
+      {!sidebar.hidden && !immersive && (
         <div
           className="sidebar-resizer"
           role="separator"
@@ -399,129 +407,142 @@ export default function App() {
         />
       )}
       <main>
-        <header className="window-toolbar" data-tauri-drag-region>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="icon sidebar-toggle"
-            data-workspace-focus
-            aria-label={sidebar.hidden ? "Show sidebar" : "Hide sidebar"}
-            title={sidebar.hidden ? "Show sidebar" : "Hide sidebar"}
-            onClick={sidebar.toggle}
-          >
-            <PanelLeft size={18} />
-          </Button>
-          <div className="toolbar-title" data-tauri-drag-region>
-            <div className="toolbar-heading">
-              <h1>
-                {settings
-                  ? "Settings"
-                  : server
-                    ? view[0].toUpperCase() + view.slice(1)
-                    : "Servers"}
-              </h1>
-              {server && !settings && (
-                <span
-                  title={
-                    data.runtime.connectivity?.[server.id]?.error ?? undefined
-                  }
-                  className={`status toolbar-health ${health === "reachable" ? "connected" : health === "unreachable" || health === "error" ? "error" : ""}`}
+        {(!immersive || windows) && (
+          <header className="window-toolbar" data-tauri-drag-region>
+            {!immersive && (
+              <>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="icon sidebar-toggle"
+                  data-workspace-focus
+                  aria-label={sidebar.hidden ? "Show sidebar" : "Hide sidebar"}
+                  title={sidebar.hidden ? "Show sidebar" : "Hide sidebar"}
+                  onClick={sidebar.toggle}
                 >
-                  <span className="status-dot" />
-                  {health === "unknown"
-                    ? "Connection unknown"
-                    : health === "error"
-                      ? "Connection failed"
-                      : health[0].toUpperCase() + health.slice(1)}
-                </span>
-              )}
-            </div>
+                  <PanelLeft size={18} />
+                </Button>
+                <div className="toolbar-title" data-tauri-drag-region>
+                  <div className="toolbar-heading">
+                    <h1>
+                      {settings
+                        ? "Settings"
+                        : server
+                          ? view[0].toUpperCase() + view.slice(1)
+                          : "Servers"}
+                    </h1>
+                    {server && !settings && (
+                      <span
+                        title={
+                          data.runtime.connectivity?.[server.id]?.error ??
+                          undefined
+                        }
+                        className={`status toolbar-health ${health === "reachable" ? "connected" : health === "unreachable" || health === "error" ? "error" : ""}`}
+                      >
+                        <span className="status-dot" />
+                        {health === "unknown"
+                          ? "Connection unknown"
+                          : health === "error"
+                            ? "Connection failed"
+                            : health[0].toUpperCase() + health.slice(1)}
+                      </span>
+                    )}
+                  </div>
 
-            <span>
-              {settings
-                ? "Newport"
-                : server
-                  ? `${displayName(server)} · ${server.sshUser}@${server.sshHost}`
-                  : "Your SSH workspace"}
-            </span>
-          </div>
-          {server && !settings && (
-            <div className="toolbar-actions">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="icon"
-                title="Test connection"
-                aria-label="Test connection"
-                loading={pending.has(`test-${selected}`)}
-                onClick={() =>
-                  void act(
-                    `test-${selected}`,
-                    () => desktop("test_connection", { id: selected }),
-                    "SSH connection verified.",
-                  )
-                }
-              >
-                <Cable size={16} />
-              </Button>
-              <span className="toolbar-divider" />
-              <Button
-                variant="ghost"
-                size="icon"
-                className="icon"
-                title="Edit server"
-                aria-label="Edit server"
-                onClick={() =>
-                  setEditor({ kind: "server", value: server, existing: true })
-                }
-              >
-                <Settings2 size={17} />
-              </Button>
-              <DropdownMenu
-                open={serverMenuOpen}
-                onOpenChange={setServerMenuOpen}
-              >
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="icon"
-                    aria-label="Server actions"
-                  >
-                    <Ellipsis size={18} />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem
-                    onSelect={() => desktopAction.current("server-test")}
-                  >
-                    Test connection
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onSelect={() => desktopAction.current("server-edit")}
-                  >
-                    Edit server…
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    onSelect={() => desktopAction.current("server-new")}
-                  >
-                    Add server…
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    variant="destructive"
-                    onSelect={() => desktopAction.current("server-delete")}
-                  >
-                    Delete server
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          )}
-          <WindowControls />
-        </header>
+                  <span>
+                    {settings
+                      ? "Newport"
+                      : server
+                        ? `${displayName(server)} · ${server.sshUser}@${server.sshHost}`
+                        : "Your SSH workspace"}
+                  </span>
+                </div>
+                {server && !settings && (
+                  <div className="toolbar-actions">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="icon"
+                      title="Test connection"
+                      aria-label="Test connection"
+                      loading={pending.has(`test-${selected}`)}
+                      onClick={() =>
+                        void act(
+                          `test-${selected}`,
+                          () => desktop("test_connection", { id: selected }),
+                          "SSH connection verified.",
+                        )
+                      }
+                    >
+                      <Cable size={16} />
+                    </Button>
+                    <span className="toolbar-divider" />
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="icon"
+                      title="Edit server"
+                      aria-label="Edit server"
+                      onClick={() =>
+                        setEditor({
+                          kind: "server",
+                          value: server,
+                          existing: true,
+                        })
+                      }
+                    >
+                      <Settings2 size={17} />
+                    </Button>
+                    <DropdownMenu
+                      open={serverMenuOpen}
+                      onOpenChange={setServerMenuOpen}
+                    >
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="icon"
+                          aria-label="Server actions"
+                        >
+                          <Ellipsis size={18} />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          onSelect={() => desktopAction.current("server-test")}
+                        >
+                          Test connection
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onSelect={() => desktopAction.current("server-edit")}
+                        >
+                          Edit server…
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          onSelect={() => desktopAction.current("server-new")}
+                        >
+                          Add server…
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          variant="destructive"
+                          onSelect={() =>
+                            desktopAction.current("server-delete")
+                          }
+                        >
+                          Delete server
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                )}
+              </>
+            )}
+            <WindowControls />
+          </header>
+        )}
         <div
-          className={`workspace-scroll${!settings && view === "commands" ? " terminal-workspace" : !settings && view === "files" ? " files-pane" : !settings && view === "projects" ? " projects-pane" : ""}`}
+          className={`workspace-scroll${!settings && view === "terminal" ? " terminal-workspace" : !settings && view === "files" ? " files-pane" : !settings && view === "projects" ? " projects-pane" : ""}`}
           key={selected}
         >
           {!live && (
@@ -753,7 +774,7 @@ export default function App() {
             setEditor(null);
             toast.success("Server saved", {
               description:
-                "Choose Commands to open a shell, or Connections to forward a port.",
+                "Choose Terminal to open a shell, or Connections to forward a port.",
             });
           }}
         />

@@ -1,6 +1,7 @@
 import { createStore } from "@tanstack/react-store";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { hasOpenDialog } from "../overlays";
 import { desktop } from "../api/desktop";
 import { terminalResources } from "./registry";
@@ -17,6 +18,7 @@ export class TerminalSession {
     error: "",
     active: false,
     started: false,
+    title: "",
   });
   readonly element = document.createElement("div");
   readonly term = new Terminal({
@@ -37,6 +39,7 @@ export class TerminalSession {
   private disposed = false;
   private frame = 0;
   private lastSize = "";
+  private gpu?: WebglAddon;
   private appearance: MutationObserver;
   private observer: ResizeObserver;
   constructor(private serverId: string) {
@@ -45,6 +48,10 @@ export class TerminalSession {
     this.term.onData((value) => this.send(new TextEncoder().encode(value)));
     this.term.onBinary((value) =>
       this.send(Uint8Array.from(value, (c) => c.charCodeAt(0))),
+    );
+    // Shells and full-screen programs name their tab with OSC 0/2.
+    this.term.onTitleChange((value) =>
+      this.patch({ title: terminalTitle(value) }),
     );
     this.appearance = new MutationObserver(() => this.theme());
     this.appearance.observe(document.documentElement, {
@@ -82,12 +89,44 @@ export class TerminalSession {
       this.term.textarea?.setAttribute("aria-label", "Remote terminal input");
       this.opened = true;
     }
+    this.enableGpu();
     this.observer.observe(host);
     this.resize();
     return () => {
       this.observer.unobserve(host);
+      this.disableGpu();
       if (this.element.parentElement === host) this.element.remove();
     };
+  }
+  /** Hardware rendering exists only while the view is mounted. */
+  private enableGpu() {
+    if (this.gpu || this.disposed) return;
+    try {
+      const addon = new WebglAddon();
+      // A lost context falls back to the DOM renderer instead of a dead canvas.
+      addon.onContextLoss(() => {
+        if (this.gpu === addon) this.disableGpu();
+      });
+      this.term.loadAddon(addon);
+      this.gpu = addon;
+      void this.refreshGlyphAtlas(addon);
+    } catch {
+      // WebGL2 is unavailable; xterm keeps its DOM renderer.
+    }
+  }
+  private disableGpu() {
+    const addon = this.gpu;
+    this.gpu = undefined;
+    addon?.dispose();
+  }
+  private async refreshGlyphAtlas(addon: WebglAddon) {
+    try {
+      // The atlas may be built before the Nerd Font finishes loading.
+      await document.fonts.load('12px "Newport Symbols"');
+    } catch {
+      return;
+    }
+    if (this.gpu === addon && !this.disposed) addon.clearTextureAtlas();
   }
   private resize() {
     cancelAnimationFrame(this.frame);
@@ -154,7 +193,7 @@ export class TerminalSession {
     if (this.disposed || this.session) return;
     const term = this.term;
     if (this.element.isConnected) this.fit.fit();
-    this.patch({ error: "", status: "Connecting…", active: true });
+    this.patch({ error: "", status: "Connecting…", active: true, title: "" });
     const current: Session = {
       id: crypto.randomUUID(),
       ready: false,
@@ -242,19 +281,56 @@ export class TerminalSession {
     cancelAnimationFrame(this.frame);
     this.observer.disconnect();
     this.appearance.disconnect();
+    this.disableGpu();
     this.finishWrite?.();
     this.finishWrite = undefined;
     this.term.dispose();
     this.element.remove();
   }
 }
+/** Bidi overrides could reorder a tab label; drop them with other controls. */
+function isBidiControl(code: number) {
+  return (
+    code === 0x061c ||
+    code === 0x200e ||
+    code === 0x200f ||
+    (code >= 0x202a && code <= 0x202e) ||
+    (code >= 0x2066 && code <= 0x2069)
+  );
+}
+/** OSC 0/2 titles come from the remote shell: keep them bounded and single-line. */
+export function terminalTitle(value: string): string {
+  let result = "";
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code >= 32 && !(code >= 127 && code <= 159) && !isBidiControl(code))
+      result += value[index];
+  }
+  result = result.trim();
+  if (result.length > 120) {
+    // Never split a surrogate pair at the cut.
+    const end =
+      result.charCodeAt(119) >= 0xd800 && result.charCodeAt(119) <= 0xdbff
+        ? 119
+        : 120;
+    result = result.slice(0, end);
+  }
+  return result;
+}
 export function getTerminalSession(
-  key: string,
+  connection: string,
+  tabId: string,
   serverId: string,
 ): TerminalSession {
-  const existing = terminalResources.get(key);
-  if (existing) return existing;
-  const session = new TerminalSession(serverId);
-  terminalResources.set(key, session);
+  let sessions = terminalResources.get(connection);
+  if (!sessions) {
+    sessions = new Map();
+    terminalResources.set(connection, sessions);
+  }
+  let session = sessions.get(tabId);
+  if (!session) {
+    session = new TerminalSession(serverId);
+    sessions.set(tabId, session);
+  }
   return session;
 }
