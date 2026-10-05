@@ -19,8 +19,15 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { ArrowRight, X } from "lucide-react";
-import { parseRange, range, type Server, type Tunnel } from "../types";
+import { ArrowLeft, ArrowRight, X } from "lucide-react";
+import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
+import {
+  direction,
+  parseRange,
+  range,
+  type Server,
+  type Tunnel,
+} from "../types";
 
 export function Modal({
   title,
@@ -369,18 +376,27 @@ export function ServerForm({
     </Modal>
   );
 }
+const NO_PROJECT = "__none__";
 export function TunnelForm({
   value,
   existing,
+  projects = [],
   onSave,
   onClose,
 }: {
   value: Tunnel;
   existing: boolean;
+  projects?: { key: string; name: string }[];
   onSave: (t: Tunnel) => Promise<void>;
   onClose: () => void;
 }) {
   const [t, set] = useState(value);
+  const reverse = direction(t) === "remote";
+  // A forward filed under a project discovery no longer sees keeps its place.
+  const choices =
+    t.project && !projects.some((p) => p.key === t.project)
+      ? [...projects, { key: t.project, name: t.project }]
+      : projects;
   const [local, setLocal] = useState(
     range(t.localPort, t.localPortEnd).replace("–", "-"),
   );
@@ -421,7 +437,7 @@ export function TunnelForm({
   };
   return (
     <Modal
-      title={existing ? "Edit tunnel" : "Add tunnel"}
+      title={existing ? "Edit forward" : "New forward"}
       busy={busy}
       onClose={onClose}
     >
@@ -435,6 +451,36 @@ export function TunnelForm({
               placeholder="Web application"
             />
           </Field>
+          <div className="flex flex-col gap-[7px]">
+            <span className="text-[12px] font-medium">Direction</span>
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              spacing={0}
+              aria-label="Direction"
+              className="grid w-full grid-cols-2"
+              value={direction(t)}
+              onValueChange={(next) =>
+                next &&
+                set({
+                  ...t,
+                  direction: next as Tunnel["direction"],
+                })
+              }
+            >
+              <ToggleGroupItem value="local" className="h-[34px] text-[12px]">
+                Server port → this Mac
+              </ToggleGroupItem>
+              <ToggleGroupItem value="remote" className="h-[34px] text-[12px]">
+                This Mac → server port
+              </ToggleGroupItem>
+            </ToggleGroup>
+            <small className="text-[11px]">
+              {reverse
+                ? "Reverse forward (ssh -R): the server can reach a service running on this Mac."
+                : "Local forward (ssh -L): reach a service on the server from this Mac."}
+            </small>
+          </div>
           <div className="grid grid-cols-[minmax(0,1fr)_18px_minmax(0,1fr)] items-center gap-[12px] [&>svg]:mt-[20px] [&>svg]:text-muted-foreground">
             <Field label="Local port or range">
               <Input
@@ -444,7 +490,7 @@ export function TunnelForm({
                 placeholder="8000 or 8000-8010"
               />
             </Field>
-            <ArrowRight size={18} />
+            {reverse ? <ArrowLeft size={18} /> : <ArrowRight size={18} />}
             <Field label="Remote port or range">
               <Input
                 required
@@ -455,8 +501,12 @@ export function TunnelForm({
             </Field>
           </div>
           <Field
-            label="Remote host"
-            hint="Relative to the SSH server. Local ports are accessible only on this computer."
+            label={reverse ? "Listen address on the server" : "Remote host"}
+            hint={
+              reverse
+                ? "127.0.0.1 keeps the port private to the server. Other addresses need GatewayPorts in the server's sshd_config."
+                : "Relative to the SSH server. Local ports are accessible only on this computer."
+            }
           >
             <Input
               required
@@ -465,6 +515,24 @@ export function TunnelForm({
               spellCheck={false}
             />
           </Field>
+          {choices.length > 0 && (
+            <Field label="Project">
+              <Select
+                aria-label="Project"
+                value={t.project ?? NO_PROJECT}
+                onValueChange={(next) =>
+                  set({ ...t, project: next === NO_PROJECT ? null : next })
+                }
+              >
+                <SelectItem value={NO_PROJECT}>None</SelectItem>
+                {choices.map((p) => (
+                  <SelectItem key={p.key} value={p.key}>
+                    {p.name}
+                  </SelectItem>
+                ))}
+              </Select>
+            </Field>
+          )}
           <EditorCheckboxField>
             <Checkbox
               checked={t.autoConnect}
@@ -497,7 +565,7 @@ export function TunnelForm({
             Cancel
           </Button>
           <Button type="submit" variant="default" loading={busy}>
-            {busy ? "Saving…" : "Save tunnel"}
+            {busy ? "Saving…" : "Save forward"}
           </Button>
         </EditorFooter>
       </form>

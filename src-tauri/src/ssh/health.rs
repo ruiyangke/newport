@@ -55,21 +55,39 @@ pub(super) async fn monitor(
                 (status, Some(message))
             }
         };
-        if let Some(entry) = health
-            .lock()
-            .unwrap()
-            .iter_mut()
-            .find(|h| h.remote_port == remote)
-        {
-            entry.status = status;
-            entry.message = message;
-            entry.checked_at = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_secs());
-        }
+        record(&health, remote, status, message);
         drop(permit);
         tokio::time::sleep(Duration::from_secs(30)).await;
+    }
+}
+/// A remote forward's destination is a port on this Mac's loopback.
+pub(super) async fn monitor_local(local: u16, remote: u16, health: Health) {
+    loop {
+        let connect = tokio::net::TcpStream::connect(("127.0.0.1", local));
+        let (status, message) = match tokio::time::timeout(Duration::from_secs(1), connect).await {
+            Ok(Ok(_)) => (DestinationStatus::Reachable, None),
+            _ => (
+                DestinationStatus::Unavailable,
+                Some(format!("Nothing is listening on this Mac at port {local}.")),
+            ),
+        };
+        record(&health, remote, status, message);
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+}
+fn record(health: &Health, remote: u16, status: DestinationStatus, message: Option<String>) {
+    if let Some(entry) = health
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .find(|h| h.remote_port == remote)
+    {
+        entry.status = status;
+        entry.message = message;
+        entry.checked_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs());
     }
 }
 #[cfg(test)]

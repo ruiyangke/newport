@@ -64,8 +64,27 @@ export const keys = {
   history: (scope: ServerScope) =>
     ["history", scope.id, scope.destination] as const,
   ports: (scope: ServerScope) => [...keys.server(scope), "ports"] as const,
-  logs: (scope: ServerScope, source: string, target: string) =>
-    [...keys.server(scope), "logs", source, target] as const,
+  services: (scope: ServerScope) =>
+    [...keys.server(scope), "services"] as const,
+  serviceLogs: (scope: ServerScope, unit: string, priority: string) =>
+    [...keys.server(scope), "service-logs", unit, priority] as const,
+  unitFile: (scope: ServerScope, unit: string) =>
+    [...keys.server(scope), "unit-file", unit] as const,
+  containers: (scope: ServerScope) =>
+    [...keys.server(scope), "containers"] as const,
+  containerInspect: (scope: ServerScope, container: string) =>
+    [...keys.server(scope), "container-inspect", container] as const,
+  /** `target` is `c:<id>` for a container or `p:<project>` for a project. */
+  containerLogs: (scope: ServerScope, target: string) =>
+    [...keys.server(scope), "container-logs", target] as const,
+  dockerDisk: (scope: ServerScope) =>
+    [...keys.server(scope), "docker-disk"] as const,
+  composeProject: (scope: ServerScope, project: string) =>
+    [...keys.server(scope), "compose-project", project] as const,
+  composeJobs: (scope: ServerScope) =>
+    [...keys.server(scope), "compose-jobs"] as const,
+  composeJob: (scope: ServerScope, job: string) =>
+    [...keys.server(scope), "compose-job", job] as const,
   files: (scope: ServerScope, path: string) =>
     [...keys.server(scope), "files", path] as const,
 };

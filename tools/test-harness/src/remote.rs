@@ -157,13 +157,25 @@ pub fn run(args: &[String]) -> Result<()> {
                 .and_then(|s| s.strip_suffix('"'))
         })
         .context("Missing Rust channel")?;
-    process::run(command(docker).args([
+    process::run(command(&docker).args([
         "build",
         "--build-arg",
         &format!("RUST_VERSION={channel}"),
         "-t",
         "newport-test-remote:local",
         "tests/remote",
+    ]))?;
+    process::run(command(&docker).args([
+        "build",
+        "-t",
+        "newport-test-systemd:local",
+        "tests/remote/systemd",
+    ]))?;
+    process::run(command(docker).args([
+        "build",
+        "-t",
+        "newport-test-docker:local",
+        "tests/remote/docker",
     ]))?;
     let mut run = command("cargo");
     run.args([

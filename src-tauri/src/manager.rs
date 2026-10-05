@@ -198,10 +198,13 @@ impl Manager {
             .ok_or("Tunnel no longer exists.")?;
         tunnel.pairs()?;
         let server = self.server(tunnel.server_id)?;
-        // Check overlaps against active tunnels before binding listeners.
+        // Check overlaps against active tunnels before binding listeners. Only
+        // local forwards bind ports on this Mac.
         let requested = tunnel.pairs()?;
         for t in &self.config.tunnels {
             if t.id != id
+                && tunnel.direction == Direction::Local
+                && t.direction == Direction::Local
                 && self
                     .tunnels
                     .get(&t.id)
@@ -598,6 +601,8 @@ mod integration_tests {
             remote_port_end: None,
             auto_connect: false,
             auto_reconnect: true,
+            direction: Default::default(),
+            project: None,
         };
         let mut m = Manager::new(Store::for_test(dir.path().into()));
         m.save(Config {

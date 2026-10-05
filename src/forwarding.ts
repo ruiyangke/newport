@@ -1,4 +1,4 @@
-import type { DiscoveredPort, Tunnel } from "./types";
+import { direction, type DiscoveredPort, type Tunnel } from "./types";
 
 export function forwardingHost(address: string): string {
   const host = address.toLowerCase().replace(/\.$/, "");
@@ -22,8 +22,14 @@ export function forwardsForPort(
   return tunnels.filter(
     (t) =>
       t.serverId === serverId &&
+      direction(t) === "local" &&
       forwardingHost(t.remoteHost) === forwardingHost(port.address) &&
       port.port >= t.remotePort &&
       port.port <= (t.remotePortEnd ?? t.remotePort),
   );
+}
+
+/** The local port a forward maps a discovered remote port to. */
+export function localPortFor(tunnel: Tunnel, remotePort: number): number {
+  return tunnel.localPort + remotePort - tunnel.remotePort;
 }

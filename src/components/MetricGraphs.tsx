@@ -1,6 +1,5 @@
 import { Disclosure } from "./Disclosure";
 import { MetricReading } from "./MetricReading";
-import { SectionHeader } from "./SectionHeader";
 import { useWorkspaceState } from "../state/workspace";
 import {
   Table,
@@ -11,11 +10,14 @@ import {
   TableCell,
 } from "./MonitoringTable";
 import { Select, SelectItem } from "./controls";
+import { SelectLabel, SelectSeparator } from "./ui/select";
 import {
   Area,
+  AreaChart,
   CartesianGrid,
   ComposedChart,
   Line,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -24,50 +26,135 @@ import {
 import {
   chartPoints,
   averageChartPoints,
-  historyStart,
   hasHistoryGap,
   withHistoryGaps,
   type MetricSample,
 } from "../metricHistory";
+import { rate, type Metric, type Window } from "../hooks/useMetricWindow";
+
 const percent = (n: number) => `${n.toFixed(1)}%`;
-const rate = (n: number) =>
-  n >= 1048576
-    ? `${(n / 1048576).toFixed(1)} MiB/s`
-    : n >= 1024
-      ? `${(n / 1024).toFixed(1)} KiB/s`
-      : `${n.toFixed(0)} B/s`;
-const time = (n: number, includeDate = false) =>
-  new Date(n).toLocaleString([], {
-    ...(includeDate ? ({ month: "short", day: "numeric" } as const) : {}),
+const time = (n: number) =>
+  new Date(n).toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
   });
+// Long windows are averaged into buckets so a week stays readable.
+const bucket = (minutes: number) =>
+  minutes === 10080 ? 30 * 60000 : minutes === 1440 ? 5 * 60000 : 0;
+
 type Series = {
   name: string;
   read: (p: MetricSample) => number | null;
-  dashed?: boolean;
+  /** Categorical slot; slot 2 is also dashed so identity is not color alone. */
+  slot: 1 | 2;
 };
-function Chart({
-  title,
-  samples,
-  series,
+const stroke = (slot: 1 | 2) => `var(--series-${slot})`;
+
+function seriesFor(metric: Metric, window: Window): Series[] {
+  switch (metric) {
+    case "cpu":
+      return [{ name: "CPU", read: (p) => p.cpu, slot: 1 }];
+    case "memory":
+      return [{ name: "Memory", read: (p) => p.memory, slot: 1 }];
+    case "load":
+      return [{ name: "Load, 1 minute", read: (p) => p.load, slot: 1 }];
+    case "network":
+      return [
+        { name: "Receive", read: window.net("rx"), slot: 1 },
+        { name: "Send", read: window.net("tx"), slot: 2 },
+      ];
+  }
+}
+
+/**
+ * A tile's trend: the window's shape at a glance, without axes. The large
+ * chart below carries the scale, the hover readout and the table view.
+ */
+export function Sparkline({
+  metric,
+  window,
   max,
-  format,
-  start,
-  end,
-  intervalMs,
 }: {
-  title: string;
-  samples: MetricSample[];
-  series: Series[];
-  max?: number;
-  format: (n: number) => string;
-  start: number;
-  end: number;
-  intervalMs: number;
+  metric: Metric;
+  window: Window;
+  /** A fixed top, or a floor the data may exceed (load's core count). */
+  max?: number | { atLeast: number };
 }) {
-  const selected = samples.at(-1);
+  const series = seriesFor(metric, window);
+  const data = chartPoints(
+    withHistoryGaps(
+      window.samples.map((p) => ({
+        at: p.at,
+        resolutionMs: p.resolutionMs ?? 10000,
+        ...Object.fromEntries(series.map((s, i) => [`v${i}`, s.read(p)])),
+      })),
+    ),
+    120,
+  );
+  return (
+    <div data-slot="sparkline" className="h-[34px] w-full" aria-hidden="true">
+      {data.length > 1 && (
+        <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+          <AreaChart
+            data={data}
+            margin={{ top: 3, right: 0, bottom: 1, left: 0 }}
+          >
+            <YAxis
+              hide
+              domain={[
+                0,
+                typeof max === "number"
+                  ? max
+                  : max
+                    ? (peak: number) => Math.max(peak, max.atLeast) * 1.15
+                    : "auto",
+              ]}
+            />
+            <XAxis
+              hide
+              dataKey="at"
+              type="number"
+              domain={[window.start, window.end]}
+            />
+            {series.map((s, i) => (
+              <Area
+                key={s.name}
+                dataKey={`v${i}`}
+                type="linear"
+                stroke={stroke(s.slot)}
+                strokeWidth={1.5}
+                strokeDasharray={s.slot === 2 ? "3 2" : undefined}
+                fill={stroke(s.slot)}
+                fillOpacity={series.length === 1 ? 0.1 : 0}
+                connectNulls={false}
+                isAnimationActive={false}
+                dot={false}
+                activeDot={false}
+              />
+            ))}
+          </AreaChart>
+        </ResponsiveContainer>
+      )}
+    </div>
+  );
+}
+
+/** The selected resource's history at full size, with a crosshair readout. */
+export function HistoryChart({
+  metric,
+  window,
+  minutes,
+  cores,
+}: {
+  metric: Metric;
+  window: Window;
+  minutes: number;
+  cores: number;
+}) {
+  const { samples, start, end } = window;
+  const series = seriesFor(metric, window);
+  const intervalMs = bucket(minutes);
   const rows = samples.map((p) =>
     Object.assign(
       {
@@ -81,20 +168,42 @@ function Chart({
   const data = intervalMs
     ? averageChartPoints(rows, start, end, intervalMs)
     : chartPoints(withHistoryGaps(rows));
+  const peak = data.reduce(
+    (highest, row) =>
+      series.reduce(
+        (value, _, i) => Math.max(value, row[`v${i}`] ?? 0),
+        highest,
+      ),
+    0,
+  );
+  // Network shares one byte scale across both directions, named on the axis.
+  const scale =
+    metric !== "network"
+      ? 1
+      : peak >= 1048576
+        ? 1048576
+        : peak >= 1024
+          ? 1024
+          : 1;
   const ceiling =
-    max ??
-    data.reduce(
-      (highest, row) =>
-        series.reduce(
-          (value, _, i) => Math.max(value, row[`v${i}`] ?? 0),
-          highest,
-        ),
-      1,
-    ) * 1.15;
+    metric === "cpu" || metric === "memory"
+      ? 100
+      : metric === "load"
+        ? // Room for the core line, so a light load never looks like a full one.
+          Math.max(cores, peak) * 1.15 || 1
+        : Math.max(peak, 1) * 1.15;
+  const format =
+    metric === "network"
+      ? rate
+      : metric === "load"
+        ? (n: number) => n.toFixed(2)
+        : percent;
+  const latest = samples.at(-1);
   const dotData = intervalMs ? data : rows;
   const sampleIndices = new Map(dotData.map((p, i) => [p.at, i]));
+  // A reading with no neighbour would be invisible as a line; give it a dot.
   const isolatedDot =
-    (series: Series, seriesIndex: number) =>
+    (slot: 1 | 2, seriesIndex: number) =>
     (props: { cx?: number; cy?: number; payload?: { at?: number } }) => {
       const index = sampleIndices.get(props.payload?.at ?? -1) ?? -1;
       const sample = dotData[index];
@@ -115,47 +224,50 @@ function Chart({
           className="isolated-metric-point"
           cx={props.cx}
           cy={props.cy}
-          r={3}
-          fill={series.dashed ? "var(--green)" : "var(--chart-1)"}
+          r={4}
+          fill={stroke(slot)}
+          stroke="var(--background)"
+          strokeWidth={2}
         />
       );
     };
+  const multiDay =
+    new Date(start).toDateString() !== new Date(end).toDateString();
+  const summary = series
+    .map(
+      (s) =>
+        `${s.name}: ${latest && s.read(latest) !== null ? format(s.read(latest)!) : "unavailable"}`,
+    )
+    .join(". ");
   return (
     <figure data-slot="metric-chart" className="m-0 min-w-0">
-      <figcaption className="flex items-baseline justify-between gap-[8px]">
-        <h3 className="text-[12px] font-medium text-muted-foreground">
-          {title}
-        </h3>
-      </figcaption>
-      <div
-        data-slot="chart-readings"
-        className="mt-[8px] mb-[4px] flex flex-wrap gap-[12px] text-[11px]"
-      >
-        {series.map((s) => (
-          <MetricReading key={s.name} name={s.name} dashed={s.dashed}>
-            {selected && s.read(selected) !== null
-              ? format(s.read(selected)!)
-              : "—"}
-          </MetricReading>
-        ))}
-      </div>
+      {series.length > 1 && (
+        <figcaption
+          data-slot="chart-readings"
+          className="mb-[6px] flex flex-wrap justify-end gap-[14px] text-[11px]"
+        >
+          {series.map((s) => (
+            <MetricReading key={s.name} name={s.name} dashed={s.slot === 2}>
+              {latest && s.read(latest) !== null
+                ? format(s.read(latest)!)
+                : "—"}
+            </MetricReading>
+          ))}
+        </figcaption>
+      )}
       <div
         data-slot="recharts-plot"
-        className="mt-[6px] h-[132px] w-full min-w-0"
+        className="h-[208px] w-full min-w-0"
         role="img"
-        aria-label={`${title} history, ${samples.length} samples. ${series.map((s) => `${s.name}: ${selected && s.read(selected) !== null ? format(s.read(selected)!) : "unavailable"}`).join(". ")}`}
+        aria-label={`${series.length > 1 ? "Network" : series[0].name} history, ${samples.length} samples. ${summary}`}
       >
         <ResponsiveContainer width="100%" height="100%" minWidth={0}>
           <ComposedChart
             data={data}
-            margin={{ top: 12, right: 12, bottom: 4, left: 0 }}
+            margin={{ top: 10, right: 8, bottom: 0, left: 0 }}
             accessibilityLayer={false}
           >
-            <CartesianGrid
-              vertical={false}
-              stroke="var(--line)"
-              strokeDasharray="3 5"
-            />
+            <CartesianGrid vertical={false} stroke="var(--line)" />
             <XAxis
               dataKey="at"
               type="number"
@@ -163,7 +275,7 @@ function Chart({
               domain={[start, end]}
               ticks={[start, (start + end) / 2, end]}
               tickFormatter={(n) =>
-                new Date(start).toDateString() !== new Date(end).toDateString()
+                multiDay
                   ? new Date(n).toLocaleString([], {
                       month: "short",
                       day: "numeric",
@@ -180,43 +292,71 @@ function Chart({
               axisLine={false}
               tick={{ fill: "var(--muted-foreground)", fontSize: 10 }}
               minTickGap={20}
-              tickMargin={10}
+              tickMargin={8}
             />
             <YAxis
               domain={[0, ceiling]}
               ticks={[0, ceiling / 2, ceiling]}
-              tickFormatter={(n) =>
-                max === 100 ? `${n}%` : n.toFixed(ceiling < 10 ? 1 : 0)
+              tickFormatter={(n: number) =>
+                metric === "cpu" || metric === "memory"
+                  ? `${n}%`
+                  : metric === "network"
+                    ? `${(n / scale).toFixed(n / scale < 10 ? 1 : 0)} ${scale === 1048576 ? "MiB/s" : scale === 1024 ? "KiB/s" : "B/s"}`
+                    : n.toFixed(ceiling < 10 ? 1 : 0)
               }
               tickLine={false}
               axisLine={false}
-              width={42}
+              width={metric === "network" ? 64 : 40}
               tick={{ fill: "var(--muted-foreground)", fontSize: 10 }}
             />
+            {metric === "load" && cores > 0 && (
+              <ReferenceLine
+                y={cores}
+                stroke="var(--muted-foreground)"
+                strokeOpacity={0.5}
+                label={{
+                  value: `${cores} ${cores === 1 ? "core" : "cores"}`,
+                  position: "insideTopRight",
+                  fill: "var(--muted-foreground)",
+                  fontSize: 10,
+                }}
+              />
+            )}
             <Tooltip
               isAnimationActive={false}
-              cursor={{
-                stroke: "var(--muted-foreground)",
-                strokeDasharray: "3 3",
-              }}
+              cursor={{ stroke: "var(--muted-foreground)", strokeOpacity: 0.6 }}
               content={({ active, payload, label }) =>
                 active && payload?.length ? (
                   <div
                     data-slot="metric-tooltip"
-                    className="min-w-[150px] rounded-[8px] border border-border bg-popover p-[12px] text-[12px] text-foreground"
+                    className="min-w-[150px] rounded-[8px] border border-border bg-popover p-[10px] text-[12px] text-foreground shadow-[0_4px_16px_rgb(0_0_0/0.08)]"
                   >
-                    <time className="mb-[8px] block text-[10px] text-muted-foreground">
-                      {new Date(start).toDateString() !==
-                      new Date(end).toDateString()
+                    <time className="mb-[6px] block text-[10px] text-muted-foreground">
+                      {multiDay
                         ? new Date(Number(label)).toLocaleString()
                         : time(Number(label))}
                     </time>
-                    {payload.map((p) => (
+                    {payload.map((p, i) => (
                       <div
                         key={String(p.dataKey)}
-                        className="mt-[5px] flex justify-between gap-[20px]"
+                        className="mt-[4px] flex items-center justify-between gap-[18px]"
                       >
-                        <span>{p.name}</span>
+                        <span className="inline-flex items-center gap-[6px] text-muted-foreground">
+                          <svg width="12" height="2" aria-hidden="true">
+                            <line
+                              x1="0"
+                              y1="1"
+                              x2="12"
+                              y2="1"
+                              stroke={stroke(series[i]?.slot ?? 1)}
+                              strokeWidth="2"
+                              strokeDasharray={
+                                series[i]?.slot === 2 ? "3 2" : undefined
+                              }
+                            />
+                          </svg>
+                          {p.name}
+                        </span>
                         <strong className="font-[550] tabular-nums">
                           {typeof p.value === "number" ? format(p.value) : "—"}
                         </strong>
@@ -233,14 +373,18 @@ function Chart({
                   dataKey={`v${i}`}
                   name={s.name}
                   type="linear"
-                  stroke="var(--chart-1)"
+                  stroke={stroke(s.slot)}
                   strokeWidth={2}
-                  fill="var(--chart-1)"
-                  fillOpacity={0.09}
+                  fill={stroke(s.slot)}
+                  fillOpacity={0.1}
                   connectNulls={false}
                   isAnimationActive={false}
-                  dot={isolatedDot(s, i)}
-                  activeDot={{ r: 4, stroke: "var(--panel)", strokeWidth: 2 }}
+                  dot={isolatedDot(s.slot, i)}
+                  activeDot={{
+                    r: 4,
+                    stroke: "var(--background)",
+                    strokeWidth: 2,
+                  }}
                 />
               ) : (
                 <Line
@@ -248,13 +392,17 @@ function Chart({
                   dataKey={`v${i}`}
                   name={s.name}
                   type="linear"
-                  stroke={s.dashed ? "var(--green)" : "var(--chart-1)"}
+                  stroke={stroke(s.slot)}
                   strokeWidth={2}
-                  strokeDasharray={s.dashed ? "5 4" : undefined}
+                  strokeDasharray={s.slot === 2 ? "5 4" : undefined}
                   connectNulls={false}
                   isAnimationActive={false}
-                  dot={isolatedDot(s, i)}
-                  activeDot={{ r: 4, stroke: "var(--panel)", strokeWidth: 2 }}
+                  dot={isolatedDot(s.slot, i)}
+                  activeDot={{
+                    r: 4,
+                    stroke: "var(--background)",
+                    strokeWidth: 2,
+                  }}
                 />
               ),
             )}
@@ -264,223 +412,107 @@ function Chart({
     </figure>
   );
 }
-export function MetricGraphs({
-  id,
-  history,
-  minutes,
-  onMinutesChange,
-}: {
-  id: string;
-  history: MetricSample[];
-  minutes: number;
-  onMinutesChange: (minutes: number) => void;
-}) {
-  const [iface, setIface] = useWorkspaceState(id, "metrics.interface");
+
+/** The table view behind every chart: each reading in the window. */
+export function Readings({ id, window }: { id: string; window: Window }) {
   const [showSamples, setShowSamples] = useWorkspaceState(
     id,
     "metrics.samples",
   );
-  const latest = history.at(-1);
-  const end = latest?.at ?? Date.now();
-  const samples = history.filter((p) => p.at >= end - minutes * 60000);
-  const start = historyStart(samples, end, minutes);
-  const interfaces = Object.keys(latest?.network ?? {});
-  const selected = interfaces.includes(iface)
-    ? iface
-    : (interfaces.find((n) => n !== "lo") ?? interfaces[0] ?? "");
-  const net = (key: "rx" | "tx") => (p: MetricSample) =>
-    p.network[selected]?.[key] ?? null;
-  // Network values are scaled together; the unit remains explicit on both axis and readings.
-  const netMax = samples.reduce(
-    (highest, p) => Math.max(highest, net("rx")(p) ?? 0, net("tx")(p) ?? 0),
-    1,
-  );
-  const scale = netMax >= 1048576 ? 1048576 : netMax >= 1024 ? 1024 : 1;
-  const unit = scale === 1048576 ? "MiB/s" : scale === 1024 ? "KiB/s" : "B/s";
+  const { samples, net, iface } = window;
+  if (!samples.length) return null;
   return (
-    <section
-      data-slot="metric-history"
-      className="mt-[22px] border-t border-border pt-[20px]"
+    <Disclosure
+      title="View readings"
+      data-slot="history-data"
+      onToggle={(event) => setShowSamples(event.currentTarget.open)}
     >
-      <SectionHeader>
-        <h2>Usage history</h2>
-        <Select
-          aria-label="History time window"
-          value={String(minutes)}
-          onValueChange={(value) => onMinutesChange(Number(value))}
-        >
-          <SelectItem value="5">Last 5 minutes</SelectItem>
-          <SelectItem value="15">Last 15 minutes</SelectItem>
-          <SelectItem value="60">Last hour</SelectItem>
-          <SelectItem value="1440">Last 24 hours</SelectItem>
-          <SelectItem value="10080">Last 7 days</SelectItem>
-        </Select>
-      </SectionHeader>
-      <p
-        data-slot="history-caption"
-        className="mb-[16px] flex flex-wrap justify-between gap-x-[12px] gap-y-[5px] text-[11px] text-muted-foreground"
-      >
-        {latest ? `Last reading · ${time(latest.at)}` : "No readings yet"}
-        <span>Gaps indicate missing readings</span>
+      <p className="mt-[10px] text-[12px] leading-[1.65] text-muted-foreground">
+        Newest first · Network: {iface || "unavailable"} · — means unavailable
       </p>
       <div
-        data-slot="metric-grid"
-        className="grid grid-cols-2 [align-items:end] gap-[20px] max-[700px]:grid-cols-[minmax(0,1fr)]"
+        data-slot="history-table"
+        className="mt-[10px] max-h-[260px] overflow-auto rounded-[6px] border border-border tabular-nums focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+        tabIndex={0}
+        role="region"
+        aria-label="Recorded metric samples"
       >
-        <Chart
-          title="CPU"
-          samples={samples}
-          series={[{ name: "Usage", read: (p) => p.cpu }]}
-          max={100}
-          format={percent}
-          start={start}
-          end={end}
-          intervalMs={
-            minutes === 10080 ? 30 * 60000 : minutes === 1440 ? 5 * 60000 : 0
-          }
-        />
-        <Chart
-          title="Memory"
-          samples={samples}
-          series={[{ name: "Used", read: (p) => p.memory }]}
-          max={100}
-          format={percent}
-          start={start}
-          end={end}
-          intervalMs={
-            minutes === 10080 ? 30 * 60000 : minutes === 1440 ? 5 * 60000 : 0
-          }
-        />
-        <Chart
-          title="Load average"
-          samples={samples}
-          series={[{ name: "1 minute", read: (p) => p.load }]}
-          format={(n) => n.toFixed(2)}
-          start={start}
-          end={end}
-          intervalMs={
-            minutes === 10080 ? 30 * 60000 : minutes === 1440 ? 5 * 60000 : 0
-          }
-        />
-        <div>
-          <label
-            data-slot="network-interface"
-            className="mb-[6px] flex items-center justify-end gap-[6px] text-[10px] text-muted-foreground"
-          >
-            Interface{" "}
-            <Select
-              className="h-[26px] max-w-[140px] text-[10px]"
-              aria-label="Graph network interface"
-              value={selected}
-              onValueChange={setIface}
-            >
-              {interfaces.map((n) => (
-                <SelectItem key={n} value={n}>
-                  {n}
-                </SelectItem>
+        {showSamples && (
+          <Table kind="history" aria-label="Recorded metric samples">
+            <caption className="sr-only">
+              Recorded metric samples for the selected history window
+            </caption>
+            <TableHeader>
+              <TableRow>
+                {[
+                  "Time",
+                  "CPU",
+                  "Memory",
+                  "Load",
+                  "Received / s",
+                  "Sent / s",
+                ].map((label) => (
+                  <TableHead scope="col" key={label} numeric={label !== "Time"}>
+                    {label}
+                  </TableHead>
+                ))}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {[...samples].reverse().map((sample) => (
+                <TableRow key={sample.at}>
+                  <TableCell>{time(sample.at)}</TableCell>
+                  <TableCell>{percent(sample.cpu)}</TableCell>
+                  <TableCell>{percent(sample.memory)}</TableCell>
+                  <TableCell>{sample.load.toFixed(2)}</TableCell>
+                  <TableCell>
+                    {net("rx")(sample) === null
+                      ? "—"
+                      : rate(net("rx")(sample)!)}
+                  </TableCell>
+                  <TableCell>
+                    {net("tx")(sample) === null
+                      ? "—"
+                      : rate(net("tx")(sample)!)}
+                  </TableCell>
+                </TableRow>
               ))}
-            </Select>
-          </label>
-          <Chart
-            title={`Network · ${unit}`}
-            samples={samples}
-            series={[
-              {
-                name: "Receive",
-                read: (p) =>
-                  net("rx")(p) === null ? null : net("rx")(p)! / scale,
-              },
-              {
-                name: "Send",
-                read: (p) =>
-                  net("tx")(p) === null ? null : net("tx")(p)! / scale,
-                dashed: true,
-              },
-            ]}
-            format={(n) => rate(n * scale)}
-            start={start}
-            end={end}
-            intervalMs={
-              minutes === 10080 ? 30 * 60000 : minutes === 1440 ? 5 * 60000 : 0
-            }
-          />
-        </div>
+            </TableBody>
+          </Table>
+        )}
       </div>
-      {samples.length > 0 && (
-        <Disclosure
-          title="View readings"
-          data-slot="history-data"
-          className="border-t border-border pt-[14px]"
-          onToggle={(event) => setShowSamples(event.currentTarget.open)}
-        >
-          <p className="text-[12px] leading-[1.65] text-muted-foreground mt-[12px]">
-            Newest first · Network: {selected || "unavailable"} · — means
-            unavailable
-          </p>
-          <div
-            data-slot="history-table"
-            className="mt-[12px] max-h-[260px] overflow-auto rounded-[6px] border border-border tabular-nums focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-            tabIndex={0}
-            role="region"
-            aria-label="Recorded metric samples"
-          >
-            {showSamples && (
-              <Table kind="history" aria-label="Recorded metric samples">
-                <caption className="sr-only">
-                  Recorded metric samples for the selected history window
-                </caption>
-                <TableHeader>
-                  <TableRow>
-                    {[
-                      "Time",
-                      "CPU",
-                      "Memory",
-                      "Load",
-                      "Received / s",
-                      "Sent / s",
-                    ].map((label) => (
-                      <TableHead
-                        scope="col"
-                        key={label}
-                        numeric={label !== "Time"}
-                      >
-                        {label}
-                      </TableHead>
-                    ))}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {[...samples].reverse().map((sample) => (
-                    <TableRow key={sample.at}>
-                      <TableCell>{time(sample.at)}</TableCell>
-                      <TableCell>{percent(sample.cpu)}</TableCell>
-                      <TableCell>{percent(sample.memory)}</TableCell>
-                      <TableCell>{sample.load.toFixed(2)}</TableCell>
-                      <TableCell>
-                        {net("rx")(sample) === null
-                          ? "—"
-                          : rate(net("rx")(sample)!)}
-                      </TableCell>
-                      <TableCell>
-                        {net("tx")(sample) === null
-                          ? "—"
-                          : rate(net("tx")(sample)!)}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </div>
-        </Disclosure>
-      )}
-      {samples.length < 2 && (
-        <p className="-mt-[7px] mb-[20px] text-[11px] text-muted-foreground">
-          {samples.length === 0
-            ? "No history yet. Readings will appear here as they arrive."
-            : "Network speed needs two readings."}
-        </p>
-      )}
-    </section>
+    </Disclosure>
+  );
+}
+
+/**
+ * Picks the interface the network tile and chart follow: physical uplinks
+ * and VPNs first, then the container and loopback links under their own
+ * heading.
+ */
+export function InterfacePicker({ window }: { window: Window }) {
+  if (window.interfaces.length < 2) return null;
+  const primary = window.primaryInterfaces;
+  const rest = window.interfaces.filter((n) => !primary.includes(n));
+  return (
+    <Select
+      className="h-[26px] max-w-[160px] text-[11px]"
+      aria-label="Graph network interface"
+      value={window.iface}
+      onValueChange={window.setIface}
+    >
+      {primary.map((n) => (
+        <SelectItem key={n} value={n}>
+          {n}
+        </SelectItem>
+      ))}
+      {rest.length > 0 && primary.length > 0 && <SelectSeparator />}
+      {rest.length > 0 && <SelectLabel>Virtual and loopback</SelectLabel>}
+      {rest.map((n) => (
+        <SelectItem key={n} value={n}>
+          {n}
+        </SelectItem>
+      ))}
+    </Select>
   );
 }

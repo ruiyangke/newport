@@ -51,45 +51,192 @@ pub(crate) async fn cockpit_collect(
         let manager = state.lock().await;
         (manager.server(id)?, manager.connection_revision(id))
     };
-    if matches!(section, crate::cockpit::Section::Overview) {
-        if refresh.unwrap_or(false) {
+    match section {
+        crate::cockpit::Section::Overview if refresh.unwrap_or(false) => {
             sampler.sample(&state, &db, &server, revision).await
-        } else {
-            sampler.first_reading(&server, revision).await
         }
-    } else {
-        let started = std::time::Instant::now();
-        let result = crate::cockpit::collect(&server, section).await;
-        if result.is_ok() {
-            state
-                .lock()
-                .await
-                .observe_connection(&server, revision, started, Ok(()));
-        }
-        result
+        crate::cockpit::Section::Overview => sampler.first_reading(&server, revision).await,
     }
 }
 
 #[tauri::command]
-pub(crate) async fn cockpit_project_action(
+pub(crate) async fn services_snapshot(
+    state: State<'_, Shared>,
+    id: Uuid,
+) -> Result<serde_json::Value, String> {
+    let server = state.lock().await.server(id)?;
+    crate::services::snapshot(&server).await
+}
+#[tauri::command]
+pub(crate) async fn service_logs(
+    state: State<'_, Shared>,
+    id: Uuid,
+    unit: Option<String>,
+    scope: crate::services::Scope,
+    priority: Option<crate::services::Priority>,
+    cursor: Option<String>,
+    lines: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let server = state.lock().await.server(id)?;
+    crate::services::logs(
+        &server,
+        unit.as_deref(),
+        scope,
+        priority,
+        cursor.as_deref(),
+        lines,
+    )
+    .await
+}
+#[tauri::command]
+pub(crate) async fn service_unit_file(
+    state: State<'_, Shared>,
+    id: Uuid,
+    unit: String,
+    scope: crate::services::Scope,
+) -> Result<serde_json::Value, String> {
+    let server = state.lock().await.server(id)?;
+    crate::services::unit_file(&server, &unit, scope).await
+}
+#[tauri::command]
+pub(crate) async fn service_action(
+    state: State<'_, Shared>,
+    id: Uuid,
+    unit: String,
+    scope: crate::services::Scope,
+    verb: crate::services::Verb,
+) -> Result<serde_json::Value, String> {
+    let server = state.lock().await.server(id)?;
+    crate::services::action(&server, &unit, scope, verb).await
+}
+#[tauri::command]
+pub(crate) async fn containers_snapshot(
+    state: State<'_, Shared>,
+    id: Uuid,
+) -> Result<serde_json::Value, String> {
+    let server = state.lock().await.server(id)?;
+    crate::containers::snapshot(&server).await
+}
+#[tauri::command]
+pub(crate) async fn container_inspect(
+    state: State<'_, Shared>,
+    id: Uuid,
+    container: String,
+) -> Result<serde_json::Value, String> {
+    let server = state.lock().await.server(id)?;
+    crate::containers::inspect(&server, &container).await
+}
+#[tauri::command]
+pub(crate) async fn container_logs(
+    state: State<'_, Shared>,
+    id: Uuid,
+    container: Option<String>,
+    project: Option<String>,
+    cursor: Option<String>,
+    lines: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let server = state.lock().await.server(id)?;
+    crate::containers::logs(
+        &server,
+        container.as_deref(),
+        project.as_deref(),
+        cursor.as_deref(),
+        lines,
+    )
+    .await
+}
+#[tauri::command]
+pub(crate) async fn container_action(
+    state: State<'_, Shared>,
+    id: Uuid,
+    container: String,
+    verb: crate::containers::ContainerVerb,
+) -> Result<serde_json::Value, String> {
+    let server = state.lock().await.server(id)?;
+    crate::containers::action(&server, &container, verb).await
+}
+#[tauri::command]
+pub(crate) async fn project_action(
     state: State<'_, Shared>,
     id: Uuid,
     project: String,
-    action: crate::cockpit::ProjectAction,
+    verb: crate::containers::ProjectVerb,
     expected_ids: Vec<String>,
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     let server = state.lock().await.server(id)?;
-    crate::cockpit::project_action(&server, &project, action, expected_ids).await
+    crate::containers::project_action(&server, &project, verb, &expected_ids).await
 }
 #[tauri::command]
-pub(crate) async fn cockpit_logs(
+pub(crate) async fn containers_remove(
     state: State<'_, Shared>,
     id: Uuid,
-    source: crate::cockpit::LogSource,
-    target: String,
-) -> Result<String, String> {
+    containers: Vec<String>,
+) -> Result<serde_json::Value, String> {
     let server = state.lock().await.server(id)?;
-    crate::cockpit::logs(&server, source, &target).await
+    crate::containers::remove(&server, &containers).await
+}
+#[tauri::command]
+pub(crate) async fn docker_disk(
+    state: State<'_, Shared>,
+    id: Uuid,
+) -> Result<serde_json::Value, String> {
+    let server = state.lock().await.server(id)?;
+    crate::containers::disk(&server).await
+}
+#[tauri::command]
+pub(crate) async fn docker_prune(
+    state: State<'_, Shared>,
+    id: Uuid,
+    what: crate::containers::PruneTarget,
+) -> Result<serde_json::Value, String> {
+    let server = state.lock().await.server(id)?;
+    crate::containers::prune(&server, what).await
+}
+#[tauri::command]
+pub(crate) async fn compose_project(
+    state: State<'_, Shared>,
+    id: Uuid,
+    project: String,
+) -> Result<serde_json::Value, String> {
+    let server = state.lock().await.server(id)?;
+    crate::compose::project(&server, &project).await
+}
+#[tauri::command]
+pub(crate) async fn compose_run(
+    state: State<'_, Shared>,
+    id: Uuid,
+    project: String,
+    action: crate::compose::ComposeAction,
+) -> Result<serde_json::Value, String> {
+    let server = state.lock().await.server(id)?;
+    crate::compose::run(&server, &project, &action).await
+}
+#[tauri::command]
+pub(crate) async fn compose_job(
+    state: State<'_, Shared>,
+    id: Uuid,
+    job: String,
+    offset: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    let server = state.lock().await.server(id)?;
+    crate::compose::job(&server, &job, offset.unwrap_or(0)).await
+}
+#[tauri::command]
+pub(crate) async fn compose_cancel(
+    state: State<'_, Shared>,
+    id: Uuid,
+    job: String,
+) -> Result<serde_json::Value, String> {
+    let server = state.lock().await.server(id)?;
+    crate::compose::cancel(&server, &job).await
+}
+#[tauri::command]
+pub(crate) async fn compose_jobs(
+    state: State<'_, Shared>,
+    id: Uuid,
+) -> Result<serde_json::Value, String> {
+    let server = state.lock().await.server(id)?;
+    crate::compose::jobs(&server).await
 }
 #[tauri::command]
 pub(crate) async fn terminal_open(
@@ -426,6 +573,12 @@ pub(crate) async fn open_tunnel(
         .iter()
         .find(|t| t.id == id)
         .ok_or("Tunnel no longer exists")?;
+    if t.direction == crate::model::Direction::Remote {
+        return Err(
+            "This forward exposes a Mac port on the server; open it from the server instead."
+                .into(),
+        );
+    }
     if !m
         .runtime
         .lock()

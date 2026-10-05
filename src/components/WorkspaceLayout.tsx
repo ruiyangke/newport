@@ -4,7 +4,12 @@ import { TabsContent } from "./ui/tabs";
 
 type Layout = { mode?: string };
 const isPane = (mode?: string) => mode === "files" || mode === "projects";
-const isFull = (mode?: string) => isPane(mode) || mode === "terminal";
+// Full pages size themselves to the window and scroll inside their own panes.
+const isFull = (mode?: string) =>
+  isPane(mode) ||
+  mode === "terminal" ||
+  mode === "services" ||
+  mode === "containers";
 
 export function WorkspaceViewport({
   mode,

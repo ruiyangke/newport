@@ -37,7 +37,17 @@ export interface Tunnel {
   remotePortEnd: number | null;
   autoConnect: boolean;
   autoReconnect: boolean;
+  /**
+   * `local` (ssh -L) serves a server port on this Mac; `remote` (ssh -R) opens
+   * `remoteHost:remotePort` on the server and relays it to `127.0.0.1:localPort`
+   * here. Older saved forwards have no direction and are local.
+   */
+  direction?: Direction;
+  /** The project key a forward belongs to; see portProjects.ts. */
+  project?: string | null;
 }
+export type Direction = "local" | "remote";
+export const direction = (t: Tunnel): Direction => t.direction ?? "local";
 export type Status =
   "disconnected" | "connecting" | "connected" | "reconnecting" | "error";
 export interface DestinationHealth {
@@ -68,9 +78,29 @@ export interface Snapshot {
   };
   loadError: string | null;
 }
+export type TunnelEditor = {
+  kind: "tunnel";
+  value: Tunnel;
+  existing: boolean;
+  /** Projects the forward can be filed under, from port discovery. */
+  projects?: { key: string; name: string }[];
+};
+export type TunnelDeletion = { kind: "tunnel"; id: string; name: string };
+const unknownConnection: ConnectionState = {
+  status: "disconnected",
+  errorMessage: null,
+  reconnectAttempt: 0,
+};
+/** Runtime state for a tunnel that has not reported yet. */
+export const tunnelState = (runtime: Snapshot["runtime"], id: string) =>
+  runtime.tunnels[id] ?? unknownConnection;
 export interface DiscoveredPort {
   executable?: string | null;
   workingDirectory?: string | null;
+  /** The working directory was removed while the process kept running. */
+  workingDirectoryDeleted?: boolean;
+  /** The executable was replaced or removed since the process started. */
+  executableDeleted?: boolean;
   command?: string | null;
   arguments?: string[];
   user?: string | null;
@@ -80,6 +110,20 @@ export interface DiscoveredPort {
   processName: string | null;
   containerName?: string | null;
   pid: number | null;
+  /** Server-side project root, found the way projectile finds one. */
+  projectRoot?: string | null;
+  /** The file or directory that identified projectRoot, or "compose". */
+  projectMarker?: string | null;
+  composeProject?: string | null;
+  composeService?: string | null;
+  composeWorkingDir?: string | null;
+  image?: string | null;
+  /** The Git checkout the process runs in; projectRoot is the repository. */
+  worktreePath?: string | null;
+  /** The branch checked out there, or a short commit id when detached. */
+  worktreeBranch?: string | null;
+  /** True for the repository's main checkout, false for a linked worktree. */
+  worktreeMain?: boolean | null;
 }
 export const displayName = (s: Server) => s.name || `${s.sshUser}@${s.sshHost}`;
 export const active = (status?: Status) =>
@@ -127,4 +171,6 @@ export const newTunnel = (serverId: string, port = 8000): Tunnel => ({
   remotePortEnd: null,
   autoConnect: false,
   autoReconnect: true,
+  direction: "local",
+  project: null,
 });

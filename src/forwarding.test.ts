@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { forwardsForPort, forwardingHost } from "./forwarding";
+import { forwardsForPort, forwardingHost, localPortFor } from "./forwarding";
 import { newTunnel } from "./types";
 
 describe("forward matching", () => {
@@ -17,7 +17,8 @@ describe("forward matching", () => {
       pid: 1,
     };
     expect(forwardsForPort([tunnel], "server", port)).toEqual([tunnel]);
-    expect(tunnel.localPort + port.port - tunnel.remotePort).toBe(9001);
+    expect(localPortFor(tunnel, port.port)).toBe(9001);
+    expect(localPortFor(tunnel, 5174)).toBe(9000);
     expect(forwardsForPort([tunnel], "other", port)).toEqual([]);
     expect(
       forwardsForPort([tunnel], "server", { ...port, port: 5177 }),

@@ -8,11 +8,35 @@ export interface WorkspaceState {
   "overview.auto": boolean;
   "overview.historyMinutes": number;
   "overview.filter": string;
-  "overview.sort": string;
+  "overview.processSort": { id: string; desc: boolean }[];
+  "overview.processesAll": boolean;
+  "overview.metric": "cpu" | "memory" | "load" | "network";
+  "overview.virtualOpen": boolean;
   "containers.query": string;
+  /** Compose projects folded in the list, by name. */
   "containers.collapsed": ReadonlySet<string>;
+  /** `c:<name>`, `p:<project>`, "disk", or null for the default. */
+  "containers.selected": string | null;
+  "containers.detailTab": "logs" | "inspect";
+  "containers.projectTab": "logs" | "activity" | "file";
+  "containers.logLevel": "all" | "warning" | "err";
+  "containers.live": boolean;
+  "containers.logQuery": string;
   "services.query": string;
-  "services.filter": "all" | "failed" | "active" | "inactive";
+  /** The chosen unit (`scope:name`), "journal", or null for the default. */
+  "services.selected": string | null;
+  "services.systemOpen": boolean;
+  "services.logLevel": "all" | "warning" | "err";
+  "services.live": boolean;
+  "services.logQuery": string;
+  "services.detailTab": "logs" | "unit";
+  "ports.query": string;
+  "ports.filter": "all" | "forwarded" | "attention";
+  "ports.collapsed": ReadonlySet<string>;
+  "ports.view": "projects" | "ports";
+  "ports.sort": { id: string; desc: boolean }[];
+  /** Other services' disclosure; null follows whether projects exist. */
+  "ports.otherOpen": boolean | null;
   "metrics.interface": string;
   "metrics.samples": boolean;
   "files.path": string;
@@ -27,11 +51,31 @@ const defaults: WorkspaceState = {
   "overview.auto": true,
   "overview.historyMinutes": 5,
   "overview.filter": "",
-  "overview.sort": "cpu",
+  "overview.processSort": [{ id: "cpu", desc: true }],
+  "overview.processesAll": false,
+  "overview.metric": "cpu",
+  "overview.virtualOpen": false,
   "containers.query": "",
   "containers.collapsed": new Set(),
+  "containers.selected": null,
+  "containers.detailTab": "logs",
+  "containers.projectTab": "logs",
+  "containers.logLevel": "all",
+  "containers.live": true,
+  "containers.logQuery": "",
   "services.query": "",
-  "services.filter": "all",
+  "services.selected": null,
+  "services.systemOpen": false,
+  "services.logLevel": "all",
+  "services.live": true,
+  "services.logQuery": "",
+  "services.detailTab": "logs",
+  "ports.query": "",
+  "ports.filter": "all",
+  "ports.collapsed": new Set(),
+  "ports.otherOpen": null,
+  "ports.view": "projects",
+  "ports.sort": [{ id: "port", desc: false }],
   "metrics.interface": "",
   "metrics.samples": false,
   "files.path": ".",

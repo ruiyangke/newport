@@ -70,63 +70,19 @@ test("integration switches are independent and setup is copyable", async ({
   await expect(section.locator("[data-slot=code-block]")).toHaveCount(0);
 });
 
-test("connect, disconnect, discover and add a forwarded port", async ({
-  page,
-}) => {
-  await page.goto("/");
-  await page.getByRole("tab", { name: "Connections", exact: true }).click();
-  await expect(
-    page.getByRole("button", { name: "Choose server", exact: true }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
-  await expect(
-    page.getByRole("button", { name: "Disconnect", exact: true }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
-  await expect(
-    page.getByRole("button", { name: "Connect", exact: true }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Discover ports" }).click();
-  await page.getByRole("button", { name: "Forward", exact: true }).click();
-  await expect(page.getByLabel("Local port or range")).toHaveValue("5432");
-  await page.getByRole("button", { name: "Save tunnel" }).click();
-  await expect(
-    page.getByRole("heading", { name: "postgres", exact: true }),
-  ).toBeVisible();
-  const remote = page.getByRole("table", { name: "Remote ports" });
-  await expect(remote.getByText("Disconnected", { exact: true })).toBeVisible();
-  await expect(
-    remote.getByText("127.0.0.1:5432", { exact: true }),
-  ).toBeVisible();
-  await expect(
-    remote.getByRole("button", { name: "Forward", exact: true }),
-  ).toHaveCount(0);
-  await page
-    .getByRole("listitem")
-    .filter({
-      has: page.getByRole("heading", { name: "postgres", exact: true }),
-    })
-    .getByRole("button", { name: "Connect", exact: true })
-    .click();
-  await expect(remote.getByText("Connected", { exact: true })).toBeVisible();
-  await remote
-    .getByRole("button", { name: "Edit forward for port 5432" })
-    .click();
-  await expect(page.getByLabel("Local port or range")).toHaveValue("5432");
-});
 test("invalid ranges stay editable and server deletion cascades", async ({
   page,
 }) => {
   await page.goto("/");
   await page.getByRole("tab", { name: "Connections", exact: true }).click();
   await page
-    .getByRole("button", { name: "Actions for tunnel Web application" })
+    .getByRole("button", { name: "Actions for Web application" })
     .click();
   await page
     .getByRole("menuitem", { name: "Edit Web application", exact: true })
     .click();
   await page.getByLabel("Local port or range").fill("9000-8999");
-  await page.getByRole("button", { name: "Save tunnel" }).click();
+  await page.getByRole("button", { name: "Save forward" }).click();
   await expect(page.getByRole("alert")).toContainText("end of a range");
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await page
@@ -143,12 +99,13 @@ test("invalid ranges stay editable and server deletion cascades", async ({
     page.getByRole("heading", { name: "Your servers, one hop away." }),
   ).toBeVisible();
 });
+
 test("desktop, minimum size and dark appearance", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("tab", { name: "Connections", exact: true }).click();
   await page.getByRole("button", { name: "Discover ports" }).click();
   await expect(
-    page.getByRole("button", { name: "Forward", exact: true }),
+    page.getByRole("switch", { name: "Forward port 5432 (Postgres)" }),
   ).toBeVisible();
   await page.screenshot({ path: "test-results/screenshots/desktop.png" });
   await page.setViewportSize({ width: 640, height: 480 });
@@ -158,10 +115,9 @@ test("desktop, minimum size and dark appearance", async ({ page }) => {
     ),
   ).toBe(true);
   await page.screenshot({ path: "test-results/screenshots/compact.png" });
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
-  await expect(
-    page.getByRole("button", { name: "Disconnect", exact: true }),
-  ).toBeVisible();
+  const web = page.getByRole("switch", { name: "Forward Web application" });
+  await web.click();
+  await expect(web).toBeChecked();
   await page.emulateMedia({ colorScheme: "dark" });
   await page.setViewportSize({ width: 960, height: 680 });
   await page.screenshot({ path: "test-results/screenshots/dark.png" });
@@ -177,23 +133,29 @@ test("cockpit health, service logs, capability errors and explicit commands", as
   await page.goto("/?fixture=history");
   await page.getByRole("tab", { name: "Overview", exact: true }).click();
   await expect(
-    page.getByRole("meter", { name: "CPU usage", exact: true }),
+    page.getByRole("region", { name: "CPU", exact: true }),
   ).toBeVisible();
   await expect(page.getByRole("img", { name: /^CPU history/ })).toBeVisible();
+  await expect(
+    page.getByText("Ubuntu 24.04 LTS", { exact: false }),
+  ).toBeVisible();
+  // A tile puts its resource's history in the large chart.
+  await page.getByRole("button", { name: "Show network history" }).click();
   await expect(page.getByRole("img", { name: /^Network/ })).toHaveAttribute(
     "aria-label",
     /24.4 KiB\/s/,
   );
+  await page.getByRole("button", { name: "Show cpu history" }).click();
   await expect(
-    page.getByRole("meter", { name: "Memory usage", exact: true }),
-  ).toHaveAttribute("aria-valuenow", "36");
+    page.getByRole("region", { name: "Memory", exact: true }),
+  ).toContainText("36%");
   await page.screenshot({
     path: "test-results/screenshots/gauges-desktop.png",
   });
   await page.setViewportSize({ width: 640, height: 480 });
   await expect(
-    page.getByRole("heading", { name: "Storage · /", exact: true }),
-  ).toBeInViewport();
+    page.getByRole("meter", { name: "Storage / usage", exact: true }),
+  ).toBeVisible();
   await expect(page.getByText("Reachable", { exact: true })).toBeInViewport();
   await page.screenshot({
     path: "test-results/screenshots/gauges-compact.png",
@@ -202,17 +164,14 @@ test("cockpit health, service logs, capability errors and explicit commands", as
   await page.emulateMedia({ colorScheme: "dark" });
   await page.screenshot({ path: "test-results/screenshots/gauges-dark.png" });
   await page.emulateMedia({ colorScheme: "light" });
-  await page.getByLabel("History time window").click();
   await page
-    .getByRole("option", { name: "Last 15 minutes", exact: true })
-    .click();
-  await page.getByLabel("History time window").click();
-  await page
-    .getByRole("option", { name: "Last 5 minutes", exact: true })
+    .getByRole("radio", { name: "Last 15 minutes", exact: true })
     .click();
   await page
-    .locator(".recharts-surface")
-    .first()
+    .getByRole("radio", { name: "Last 5 minutes", exact: true })
+    .click();
+  await page
+    .locator("[data-slot=metric-chart] .recharts-surface")
     .hover({ position: { x: 180, y: 70 } });
   await page.clock.runFor(50);
   await expect(
@@ -233,40 +192,30 @@ test("cockpit health, service logs, capability errors and explicit commands", as
       .getByRole("row"),
   ).toHaveCount(32);
   await page.keyboard.press("Enter");
-  await page.getByText("System details", { exact: true }).click();
-  await expect(
-    page.getByText("Ubuntu 24.04 LTS", { exact: true }),
-  ).toBeVisible();
-  await page.getByText("System details", { exact: true }).click();
   await page.getByLabel("Filter processes").fill("postgres");
   await expect(
     page.getByRole("cell", { name: "node", exact: true }),
   ).toHaveCount(0);
+  // Search reaches command lines too, and each row shows its command.
   await expect(
     page
       .getByRole("table", { name: "Processes", exact: true })
-      .locator("tbody tr td:first-child")
-      .filter({ hasText: /^postgres$/ }),
+      .getByRole("row")
+      .filter({ hasText: "postgres: checkpointer" }),
   ).toBeVisible();
   await page.getByRole("tab", { name: "Services", exact: true }).click();
-  await expect(page.getByText("worker.service", { exact: true })).toBeVisible();
-  await page.getByLabel("Filter services").fill("worker");
+  // The failed service opens first, with its logs alongside.
+  const failed = page.getByRole("article", { name: "atlas-api.service" });
+  await expect(failed.getByRole("log")).toContainText(
+    "database connection refused",
+  );
   await page.screenshot({
     path: "test-results/screenshots/cockpit-services.png",
   });
-  await page
-    .getByRole("button", { name: "View logs for worker.service" })
-    .click();
-  await expect(page.getByLabel("Log output")).toContainText(
-    "database connection refused",
-  );
-  await page.getByRole("button", { name: "Close logs" }).click();
-  await expect(page.getByLabel("Filter services")).toHaveValue("worker");
-  await expect(
-    page.getByRole("button", { name: "View logs for worker.service" }),
-  ).toBeFocused();
   await page.getByRole("tab", { name: "Containers", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("Docker is unavailable");
+  await expect(
+    page.getByRole("navigation", { name: "Containers" }),
+  ).toBeVisible();
   await page.getByRole("tab", { name: "Terminal", exact: true }).click();
   await expect(page.locator(".terminal-status")).toHaveText("Connected");
   await page.screenshot({
@@ -274,7 +223,7 @@ test("cockpit health, service logs, capability errors and explicit commands", as
   });
   await page.getByRole("tab", { name: "Overview", exact: true }).click();
   await expect(
-    page.getByRole("meter", { name: "CPU usage", exact: true }),
+    page.getByRole("region", { name: "CPU", exact: true }),
   ).toBeVisible();
   await page.setViewportSize({ width: 640, height: 480 });
   expect(
@@ -294,7 +243,7 @@ test("cockpit health, service logs, capability errors and explicit commands", as
   await page.emulateMedia({ colorScheme: "dark" });
   await page.setViewportSize({ width: 960, height: 680 });
   await page.screenshot({ path: "test-results/screenshots/cockpit-dark.png" });
-  await page.getByLabel("Graph network interface").scrollIntoViewIfNeeded();
+  await page.getByRole("button", { name: "Show network history" }).click();
   await page.getByRole("img", { name: /^Network/ }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: "test-results/screenshots/graphs-dark.png" });
   await page.emulateMedia({ colorScheme: "light" });
@@ -342,188 +291,22 @@ test("saved metric history remains visible when the server is offline", async ({
   await expect(
     page.getByRole("img", { name: /^CPU history, 2 samples/ }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("img", { name: /^Memory history/ }),
-  ).toHaveAttribute("aria-label", /50.0%/);
+  // Without a live reading there are no tiles; a switch picks the chart.
   await expect(
     page
       .locator("[data-slot=metric-chart]")
       .first()
       .locator(".isolated-metric-point"),
   ).toHaveCount(2);
+  await page.getByRole("radio", { name: "Memory", exact: true }).click();
+  await expect(
+    page.getByRole("img", { name: /^Memory history/ }),
+  ).toHaveAttribute("aria-label", /50.0%/);
   await page
     .locator("[data-slot=metric-chart]")
     .first()
     .scrollIntoViewIfNeeded();
   await page.screenshot({ path: "test-results/screenshots/recharts-gaps.png" });
-});
-
-test("Compose projects, logs and confirmed lifecycle controls", async ({
-  page,
-}) => {
-  await page.goto("/");
-  await expect(
-    page.getByRole("button", { name: "Choose server", exact: true }),
-  ).toBeVisible();
-  await page.evaluate(() => {
-    const bridge = (window as any).__TAURI_INTERNALS__;
-    const original = bridge.invoke;
-    const containers = [
-      {
-        id: "a".repeat(64),
-        name: "shop-api-1",
-        image: "shop-api:latest",
-        state: "running",
-        status: "Up 2 hours",
-        ports: "127.0.0.1:3000->3000/tcp",
-        composeProject: "shop",
-        composeService: "api",
-        composeOneoff: "False",
-      },
-      {
-        id: "b".repeat(64),
-        name: "shop-db-1",
-        image: "postgres:16",
-        state: "running",
-        status: "Up 2 hours (healthy)",
-        ports: "5432/tcp",
-        composeProject: "shop",
-        composeService: "db",
-        composeOneoff: "False",
-      },
-      {
-        id: "c".repeat(64),
-        name: "shop-migrate-run-1",
-        image: "shop-api:latest",
-        state: "exited",
-        status: "Exited (0)",
-        ports: "",
-        composeProject: "shop",
-        composeService: "migrate",
-        composeOneoff: "True",
-      },
-      {
-        id: "d".repeat(64),
-        name: "standalone-redis",
-        image: "redis:7",
-        state: "running",
-        status: "Up 1 day",
-        ports: "6379/tcp",
-        composeProject: "",
-        composeService: "",
-        composeOneoff: "",
-      },
-    ];
-    (window as any).projectActions = [];
-    bridge.invoke = async (cmd: string, args: any) => {
-      if (cmd === "cockpit_collect" && args.section === "containers")
-        return structuredClone(containers);
-      if (cmd === "cockpit_project_action") {
-        (window as any).projectActions.push(args);
-        containers
-          .filter((c) => args.expectedIds.includes(c.id))
-          .forEach((c) => {
-            c.state = args.action === "stop" ? "exited" : "running";
-            c.status = args.action === "stop" ? "Exited (0)" : "Up 1 second";
-          });
-        return;
-      }
-      if (cmd === "cockpit_logs" && args.source === "compose")
-        return "--- shop-api-1 ---\nApplication ready\n--- shop-db-1 ---\nDatabase ready";
-      return original(cmd, args);
-    };
-  });
-  await page.getByRole("tab", { name: "Overview", exact: true }).click();
-  await page.getByRole("tab", { name: "Containers", exact: true }).click();
-  await expect(
-    page.getByRole("heading", { name: "Docker & Compose" }),
-  ).toBeVisible();
-  await expect(
-    page.getByText(
-      "2 services · 2/2 service containers running · 1 one-off job",
-    ),
-  ).toBeVisible();
-  await expect(page.locator("[data-slot=container-project-status]")).toHaveText(
-    "Running",
-  );
-  await page.getByRole("button", { name: "Actions for project shop" }).click();
-  await expect(
-    page.getByRole("menuitem", { name: "Start project shop", exact: true }),
-  ).toBeDisabled();
-  await page.keyboard.press("Escape");
-  await page.getByLabel("Filter Docker projects and containers").fill("shop");
-  await page.screenshot({
-    path: "test-results/screenshots/compose-desktop.png",
-  });
-  await page
-    .getByRole("button", { name: "View project logs for shop" })
-    .click();
-  await expect(page.getByLabel("Log output")).toContainText("Database ready");
-  await page.getByRole("button", { name: "Close logs" }).click();
-  await expect(
-    page.getByLabel("Filter Docker projects and containers"),
-  ).toHaveValue("shop");
-  await expect(
-    page.getByRole("button", { name: "View project logs for shop" }),
-  ).toBeFocused();
-  await page.getByRole("button", { name: "Clear filter" }).click();
-  await page.getByRole("button", { name: "Collapse all" }).click();
-  await expect(page.locator("[data-slot=compose-project]")).not.toHaveAttribute(
-    "open",
-    "",
-  );
-  await page.getByRole("button", { name: "Expand all" }).click();
-  await page.getByRole("button", { name: "Actions for project shop" }).click();
-  await page.getByRole("menuitem", { name: "Stop project shop" }).click();
-  await expect(page.getByRole("dialog")).toContainText(
-    "2 existing service containers",
-  );
-  await page.screenshot({
-    path: "test-results/screenshots/compose-confirmation.png",
-  });
-  await page.getByRole("button", { name: "Cancel", exact: true }).click();
-  expect(await page.evaluate(() => (window as any).projectActions.length)).toBe(
-    0,
-  );
-  await page.getByRole("button", { name: "Actions for project shop" }).click();
-  await page.getByRole("menuitem", { name: "Stop project shop" }).click();
-  await page
-    .getByRole("dialog")
-    .getByRole("button", { name: "Stop project", exact: true })
-    .click();
-  await expect(page.getByText("shop: stop completed.")).toBeVisible();
-  expect(
-    await page.evaluate(() => (window as any).projectActions[0].expectedIds),
-  ).toEqual(["a".repeat(64), "b".repeat(64)]);
-  await page.getByRole("button", { name: "Actions for project shop" }).click();
-  await page
-    .getByRole("menuitem", { name: "Start project shop", exact: true })
-    .click();
-  await page
-    .getByRole("dialog")
-    .getByRole("button", { name: "Start project", exact: true })
-    .click();
-  await expect(page.getByText("shop: start completed.")).toBeVisible();
-  await page.getByRole("button", { name: "Actions for project shop" }).click();
-  await page.getByRole("menuitem", { name: "Restart project shop" }).click();
-  await page
-    .getByRole("dialog")
-    .getByRole("button", { name: "Restart project", exact: true })
-    .click();
-  await expect(page.getByText("shop: restart completed.")).toBeVisible();
-  await page.setViewportSize({ width: 640, height: 480 });
-  await page.locator("[data-slot=compose-project]").scrollIntoViewIfNeeded();
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= innerWidth,
-    ),
-  ).toBe(true);
-  await page.screenshot({
-    path: "test-results/screenshots/compose-compact.png",
-  });
-  await page.setViewportSize({ width: 960, height: 680 });
-  await page.emulateMedia({ colorScheme: "dark" });
-  await page.screenshot({ path: "test-results/screenshots/compose-dark.png" });
 });
 
 test("agent key selection persists and can switch to a file", async ({
@@ -685,34 +468,22 @@ test("shadcn dropdowns support keyboard selection and compact long labels", asyn
   page,
 }) => {
   await page.goto("/?fixture=history");
-  const history = page.getByLabel("History time window");
-  await history.focus();
+  // The history window is a segmented control: arrows move, Space selects.
+  const range = page.getByRole("radiogroup", { name: "History time window" });
+  await range.getByRole("radio", { name: "Last 5 minutes" }).focus();
+  await page.keyboard.press("End");
+  await expect(range.getByRole("radio", { name: "Last 7 days" })).toBeFocused();
   await page.keyboard.press("Space");
   await expect(
-    page.getByRole("option", { name: "Last 5 minutes", exact: true }),
-  ).toBeFocused();
-  await page.keyboard.press("End");
-  await expect(
-    page.getByRole("option", { name: "Last 7 days", exact: true }),
-  ).toBeFocused();
-  await page.keyboard.press("Enter");
-  await expect(history).toContainText("Last 7 days");
-  await expect(history).toBeFocused();
-  await history.click();
+    range.getByRole("radio", { name: "Last 7 days" }),
+  ).toHaveAttribute("aria-checked", "true");
   await page.screenshot({
     path: "test-results/screenshots/dropdown-history.png",
   });
-  await page.keyboard.press("Escape");
-  await page.getByLabel("Sort processes").click();
-  await page
-    .getByRole("option", { name: "Highest memory", exact: true })
-    .click();
-  await expect(page.getByLabel("Sort processes")).toContainText(
-    "Highest memory",
-  );
-  await page.getByLabel("Graph network interface").click();
-  await expect(page.getByRole("listbox")).toBeVisible();
-  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Memory", exact: true }).click();
+  await expect(
+    page.getByRole("columnheader", { name: "Memory" }),
+  ).toHaveAttribute("aria-sort", "descending");
   await page
     .getByRole("button", { name: "Server actions", exact: true })
     .click();
@@ -768,45 +539,27 @@ test("lists expose context, sort state and filtered results", async ({
     page.getByText("No matches in the collected processes."),
   ).toBeVisible();
   await page.getByRole("tab", { name: "Services", exact: true }).click();
-  const services = page.getByRole("list", {
-    name: "System services",
+  const services = page.getByRole("navigation", { name: "Services" });
+  await page.getByLabel("Find a service").fill("  ssh  ");
+  // Only ssh matches, and it lives with the operating system's services.
+  await expect(services.getByRole("list")).toHaveCount(2);
+  await expect(
+    services
+      .getByRole("list", { name: "System", exact: true })
+      .getByRole("button"),
+  ).toHaveText([/^ssh/]);
+  await page.getByLabel("Find a service").fill("no-such-service");
+  await expect(page.getByText("No services or timers match.")).toBeVisible();
+  await page.getByRole("tab", { name: /Connections/ }).click();
+  const other = page.getByRole("list", {
+    name: "Other services ports",
     exact: true,
   });
-  await expect(services.getByRole("listitem")).toHaveCount(2);
-  await expect(services.getByRole("listitem").first()).toContainText(
-    "worker.service",
-  );
-  await page.getByLabel("Filter services").fill("  ssh  ");
-  await expect(services.getByRole("listitem")).toHaveCount(1);
-  await page.getByLabel("Filter services").fill("no-such-service");
-  await expect(page.getByText(/No matching services/)).toBeVisible();
-  await page.getByRole("tab", { name: /Connections/ }).click();
-  const tunnels = page.getByRole("list", { name: "Tunnels", exact: true });
-  await expect(tunnels.getByRole("listitem")).toHaveCount(1);
-  await expect(
-    tunnels.getByRole("button", { name: "Connect", exact: true }),
-  ).toHaveAccessibleDescription(/.+/);
-  await page
-    .getByRole("button", { name: "Discover ports", exact: true })
-    .click();
-  const ports = page.getByRole("table", { name: "Remote ports", exact: true });
-  await expect(ports.getByRole("columnheader")).toHaveText([
-    "Port",
-    "Application / address",
-    "PID",
-    "User",
-    "Forwarding",
-    "Actions",
-  ]);
-  await expect(
-    ports.getByRole("button", { name: "Forward", exact: true }),
-  ).toHaveAccessibleDescription(/\d+/);
-  await page
-    .getByRole("region", { name: "Remote ports scroll area", exact: true })
-    .focus();
-  await expect(
-    page.getByRole("region", { name: "Remote ports scroll area", exact: true }),
-  ).toBeFocused();
+  await expect(other.getByRole("listitem")).toHaveCount(2);
+  await page.getByLabel("Filter ports").fill("  postgres  ");
+  await expect(other.getByRole("listitem")).toHaveCount(1);
+  await page.getByLabel("Filter ports").fill("no-such-port");
+  await expect(page.getByText(/No matches/)).toBeVisible();
 });
 
 test("long list identities wrap without hiding row actions", async ({
@@ -815,12 +568,12 @@ test("long list identities wrap without hiding row actions", async ({
   await page.setViewportSize({ width: 640, height: 480 });
   await page.goto("/?fixture=long-lists");
   await page.getByRole("tab", { name: "Services", exact: true }).click();
-  const first = page
-    .getByRole("list", { name: "System services", exact: true })
-    .getByRole("listitem")
+  const action = page
+    .getByRole("list", { name: "Problems", exact: true })
+    .getByRole("button")
     .first();
-  await expect(first).toContainText("long-name-");
-  const action = first.getByRole("button");
+  await expect(action).toContainText("long-name-");
+  await expect(action).toContainText("exit 1");
   await action.focus();
   await expect(action).toBeFocused();
   const box = await action.boundingBox();
@@ -846,14 +599,12 @@ test("500-row collections render, scroll and filter responsively", async ({
   await page.goto("/?fixture=large-lists");
   const started = Date.now();
   await page.getByRole("tab", { name: "Services", exact: true }).click();
-  const services = page.getByRole("list", {
-    name: "System services",
-    exact: true,
-  });
-  await expect(services.getByRole("listitem")).toHaveCount(500);
+  const services = page.getByRole("list", { name: "Services", exact: true });
+  await expect(services.getByRole("listitem")).toHaveCount(504);
   const readyMs = Date.now() - started;
   const frames = await page.evaluate(async () => {
-    const pane = document.querySelector("[data-slot=workspace-scroll]")!;
+    // Services scroll in their own list pane, not the page.
+    const pane = document.querySelector("[data-slot=services-list-scroll]")!;
     const intervals: number[] = [];
     let previous = performance.now();
     for (let i = 0; i < 60; i++) {
@@ -869,23 +620,17 @@ test("500-row collections render, scroll and filter responsively", async ({
     return intervals.sort((a, b) => a - b);
   });
   const filterStart = Date.now();
-  await page.getByLabel("Filter services").fill("worker-0499");
+  await page.getByLabel("Find a service").fill("worker-0499");
   await expect(services.getByRole("listitem")).toHaveCount(1);
   const filterMs = Date.now() - filterStart;
   await page.getByRole("tab", { name: "Containers", exact: true }).click();
-  await expect(
-    page
-      .getByRole("list", { name: "Standalone containers", exact: true })
-      .getByRole("listitem"),
-  ).toHaveCount(500);
-  await page
-    .getByLabel("Filter Docker projects and containers")
-    .fill("worker-0499");
-  await expect(
-    page
-      .getByRole("list", { name: "Standalone containers", exact: true })
-      .getByRole("listitem"),
-  ).toHaveCount(1);
+  const standalone = page.getByRole("list", {
+    name: "Standalone",
+    exact: true,
+  });
+  await expect(standalone.getByRole("listitem")).toHaveCount(500);
+  await page.getByLabel("Find a container").fill("worker-0499");
+  await expect(standalone.getByRole("listitem")).toHaveCount(1);
   console.log(
     JSON.stringify({
       browserName,
@@ -1211,41 +956,46 @@ test("table headers stick and collection refresh keeps the visible row and focus
   browserName,
 }) => {
   await page.goto("/?fixture=large-lists");
-  const region = page.getByRole("region", {
-    name: "Processes scroll area",
-    exact: true,
+  const table = page.getByRole("table", { name: "Processes", exact: true });
+  // The busiest rows first; the rest are one click away.
+  await expect(table.getByRole("row")).toHaveCount(21);
+  await page.getByRole("button", { name: "Show all 50", exact: true }).click();
+  await expect(table.getByRole("row")).toHaveCount(51);
+  // Scrolled past, the header stays pinned to the top of the page.
+  const scrollerTop = await table.evaluate((el) => {
+    let scroller = el.parentElement;
+    while (
+      scroller &&
+      !(
+        scroller.scrollHeight > scroller.clientHeight &&
+        getComputedStyle(scroller).overflowY !== "visible"
+      )
+    )
+      scroller = scroller.parentElement;
+    el.querySelectorAll("tbody tr")[30].scrollIntoView({ block: "start" });
+    return scroller!.getBoundingClientRect().top;
   });
-  await expect(region.getByRole("row")).toHaveCount(51);
-  await region.scrollIntoViewIfNeeded();
-  await region.evaluate((el) => {
-    el.scrollTop = 700;
-  });
-  const regionBox = await region.boundingBox();
-  const headerBox = await region
+  const headerBox = await table
     .getByRole("columnheader", { name: "Process", exact: true })
     .boundingBox();
-  expect(Math.abs(headerBox!.y - regionBox!.y)).toBeLessThan(2);
+  expect(Math.abs(headerBox!.y - scrollerTop)).toBeLessThan(2);
   await page.screenshot({
     path: `test-results/screenshots/sticky-processes-${browserName}.png`,
   });
   await page.getByRole("tab", { name: "Services", exact: true }).click();
-  const anchor = page
-    .getByRole("listitem")
-    .filter({ has: page.getByText("worker-0250.service", { exact: true }) });
+  const anchor = page.getByRole("button", { name: /^worker-0250\.service:/ });
   await anchor.evaluate((el) => el.scrollIntoView({ block: "start" }));
-  await anchor
-    .getByRole("button")
-    .evaluate((el) => el.focus({ preventScroll: true }));
+  await anchor.evaluate((el) => el.focus({ preventScroll: true }));
   const before = await anchor.boundingBox();
   await page
     .getByRole("button", { name: "Refresh", exact: true })
     .evaluate((el) => el.click());
   await expect(
-    page.getByText("worker-0000.service", { exact: true }),
+    page.getByRole("button", { name: /^worker-0000\.service:/ }),
   ).toBeAttached();
   const after = await anchor.boundingBox();
   expect(Math.abs(before!.y - after!.y)).toBeLessThan(2);
-  await expect(anchor.getByRole("button")).toBeFocused();
+  await expect(anchor).toBeFocused();
 });
 
 test("leaving during terminal setup preserves the session", async ({
@@ -1280,23 +1030,6 @@ test("leaving during terminal setup preserves the session", async ({
   );
 });
 
-test("port discovery identifies containers and explains unavailable ownership", async ({
-  page,
-}) => {
-  await page.goto("/?fixture=docker-ports");
-  await page.getByRole("tab", { name: /Connections/ }).click();
-  await page
-    .getByRole("button", { name: "Discover ports", exact: true })
-    .click();
-  const row = page.getByRole("row").filter({ hasText: "api · Docker" });
-  await expect(row).toBeVisible();
-  await expect(
-    page.getByRole("cell", { name: /Owner not reported/ }),
-  ).toBeVisible();
-  await row.getByRole("button", { name: "Forward", exact: true }).click();
-  await expect(page.getByLabel(/^Remote host/)).toHaveValue("::1");
-});
-
 test("container inventory distinguishes loading, empty, and filtered states", async ({
   page,
 }) => {
@@ -1305,7 +1038,7 @@ test("container inventory distinguishes loading, empty, and filtered states", as
     const bridge = (window as any).__TAURI_INTERNALS__;
     const original = bridge.invoke;
     bridge.invoke = (cmd: string, args: any) =>
-      cmd === "cockpit_collect" && args.section === "containers"
+      cmd === "containers_snapshot"
         ? new Promise((resolve) => {
             (window as any).__resolveContainers = resolve;
           })
@@ -1313,49 +1046,51 @@ test("container inventory distinguishes loading, empty, and filtered states", as
   });
   await page.getByRole("tab", { name: "Containers", exact: true }).click();
   await expect(
-    page.getByText("Reading containers…", { exact: true }),
+    page.getByRole("list", { name: "Reading containers" }),
   ).toBeVisible();
+  await expect(page.getByText("Reading containers…")).toBeVisible();
+  await page.evaluate(() =>
+    (window as any).__resolveContainers({
+      engine: {
+        version: "27.3.1",
+        apiVersion: "1.47",
+        os: "linux",
+        rootless: false,
+        podman: false,
+      },
+      containers: [],
+      truncated: false,
+    }),
+  );
   await expect(
-    page.getByText("0 projects · 0 containers", { exact: true }),
-  ).toHaveCount(0);
-  await page.evaluate(() => (window as any).__resolveContainers([]));
-  await expect(
-    page.getByText("No Docker containers on this server."),
+    page.getByText("No containers on this server yet."),
   ).toBeVisible();
-  await page
-    .getByLabel("Filter Docker projects and containers")
-    .fill("missing");
+  await expect(page.getByText("0 running")).toBeVisible();
+  await page.getByLabel("Find a container").fill("missing");
   await expect(
-    page.getByText("No matches. Try another name or clear the filter."),
+    page.getByText("No projects or containers match."),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Clear filter" }).click();
-  await expect(
-    page.getByLabel("Filter Docker projects and containers"),
-  ).toHaveValue("");
 });
 
-test("service state filters and log return keep the working context", async ({
+test("the chosen service and log filters survive leaving the page", async ({
   page,
 }) => {
   await page.goto("/");
   await page.getByRole("tab", { name: "Services", exact: true }).click();
-  await page.getByRole("combobox", { name: "Filter by service state" }).click();
-  await page.getByRole("option", { name: "Failed", exact: true }).click();
-  const list = page.getByRole("list", { name: "System services", exact: true });
-  await expect(list.getByRole("listitem")).toHaveCount(1);
-  await page
-    .getByRole("button", { name: "View logs for worker.service" })
-    .click();
-  await expect(page.getByRole("button", { name: "Close logs" })).toBeFocused();
-  await page.getByRole("button", { name: "Close logs" }).click();
+  await page.getByRole("button", { name: /^redis-server\.service:/ }).click();
+  const redis = page.getByRole("article", { name: "redis-server.service" });
+  await redis.getByRole("radio", { name: "Errors" }).click();
+  await redis.getByLabel("Search logs").fill("refused");
+  await page.getByRole("tab", { name: "Overview", exact: true }).click();
+  await page.getByRole("tab", { name: "Services", exact: true }).click();
+  await expect(redis.getByRole("radio", { name: "Errors" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expect(redis.getByLabel("Search logs")).toHaveValue("refused");
   await expect(
-    page.getByRole("combobox", { name: "Filter by service state" }),
-  ).toContainText("Failed");
-  await expect(
-    page.getByRole("button", { name: "View logs for worker.service" }),
-  ).toBeFocused();
-  await page.getByRole("button", { name: "Clear filters" }).click();
-  await expect(list.getByRole("listitem")).toHaveCount(2);
+    page.getByRole("button", { name: /^redis-server\.service:/ }),
+  ).toHaveAttribute("aria-current", "true");
   await page.setViewportSize({ width: 640, height: 480 });
   await page.screenshot({
     path: "test-results/screenshots/services-compact.png",
@@ -1748,7 +1483,7 @@ test("changing a host clears its old metrics and discovered ports", async ({
     .getByRole("button", { name: "Discover ports", exact: true })
     .click();
   await expect(
-    page.getByRole("table", { name: "Remote ports", exact: true }),
+    page.getByRole("listitem", { name: "port 5432 (Postgres)" }),
   ).toBeVisible();
   await page.evaluate(() => {
     const bridge = (window as any).__TAURI_INTERNALS__;
@@ -1779,16 +1514,14 @@ test("changing a host clears its old metrics and discovered ports", async ({
   await page.getByRole("button", { name: "Save server", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(
-    page.getByRole("table", { name: "Remote ports", exact: true }),
+    page.getByRole("listitem", { name: "port 5432 (Postgres)" }),
   ).toHaveCount(0);
   await page.getByRole("tab", { name: "Overview", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText(
     "New endpoint is offline",
   );
   await expect(page.locator("[data-slot=metric-history]")).toHaveCount(0);
-  await expect(
-    page.getByRole("meter", { name: "CPU usage", exact: true }),
-  ).toHaveCount(0);
+  await expect(page.locator("[data-slot=resource-tile]")).toHaveCount(0);
 });
 
 test("command palette distinguishes accounts sharing the same display name and host", async ({
@@ -1835,40 +1568,21 @@ test("confirmation dialogs block workspace shortcuts and command search", async 
     };
   });
   await page.goto("/");
-  await page.evaluate(() => {
-    const bridge = (window as any).__TAURI_INTERNALS__;
-    const original = bridge.invoke;
-    bridge.invoke = (cmd: string, args: any) =>
-      cmd === "cockpit_collect" && args.section === "containers"
-        ? Promise.resolve([
-            {
-              id: "a".repeat(64),
-              name: "shop-api-1",
-              image: "shop:latest",
-              state: "running",
-              status: "Up",
-              ports: "",
-              composeProject: "shop",
-              composeService: "api",
-              composeOneoff: "False",
-            },
-          ])
-        : original(cmd, args);
-  });
   await page.getByRole("tab", { name: "Containers", exact: true }).click();
-  await page.getByRole("button", { name: "Actions for project shop" }).click();
-  await page.getByRole("menuitem", { name: "Stop project shop" }).click();
+  await page.getByRole("button", { name: /^atlas: Compose project/ }).click();
+  await page.getByRole("button", { name: "Stop all", exact: true }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await page.evaluate(() =>
     (window as any).__workspaceAction({ payload: "view-overview" }),
   );
   await page.keyboard.press("Meta+1");
   await page.keyboard.press("Meta+k");
-  await expect(page.locator('[role="tab"][data-state="active"]')).toContainText(
-    "Containers",
-  );
+  // The dialog hides the page from the accessibility tree; read the DOM.
+  await expect(
+    page.locator('[data-slot="sidebar-tab"][data-state="active"]'),
+  ).toHaveAttribute("aria-label", "Containers");
   await expect(page.getByRole("dialog")).toHaveCount(1);
-  await expect(page.getByRole("dialog")).toContainText("Stop project");
+  await expect(page.getByRole("dialog")).toContainText("Stop atlas?");
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.keyboard.press("Meta+1");
@@ -1919,7 +1633,7 @@ test("failed lazy workspace leaves navigation and recovery available", async ({
   await expect(
     page.getByRole("alert", { name: "View unavailable" }),
   ).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Add tunnel" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "New forward" })).toBeVisible();
 });
 
 test("Files and its icon catalog load only when the workspace is opened", async ({
@@ -1961,11 +1675,11 @@ test("modal forms keep actions visible at minimum window size", async ({
   });
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await page.getByRole("tab", { name: "Connections", exact: true }).click();
-  await page.getByRole("button", { name: "Add tunnel", exact: true }).click();
+  await page.getByRole("button", { name: "New forward", exact: true }).click();
   await expect(
     page
       .getByRole("dialog")
-      .getByRole("button", { name: "Save tunnel", exact: true }),
+      .getByRole("button", { name: "Save forward", exact: true }),
   ).toBeInViewport();
   await page.screenshot({
     path: "test-results/screenshots/modal-tunnel-compact.png",
@@ -2073,291 +1787,6 @@ test("Updates recover from a failed check", async ({ page }) => {
   await check.click();
   await expect(page.getByText("You’re up to date.")).toBeVisible();
   await expect(page.getByRole("alert")).toHaveCount(0);
-});
-
-test("discovered Node applications show useful project context without system details", async ({
-  page,
-}) => {
-  await page.goto("/?fixture=node-ports");
-  await page.getByRole("tab", { name: "Connections", exact: true }).click();
-  await page
-    .getByRole("button", { name: "Discover ports", exact: true })
-    .click();
-  const table = page.getByRole("table", { name: "Remote ports" });
-  await expect(
-    table.getByText("Vite · webcontainers-demo", { exact: true }),
-  ).toBeVisible();
-  await expect(
-    table.getByRole("cell", { name: "126945", exact: true }),
-  ).toBeVisible();
-  await expect(
-    table.getByRole("cell", { name: "ruiyang", exact: true }),
-  ).toBeVisible();
-  await expect(
-    table.getByText("Project directory", { exact: true }),
-  ).toBeVisible();
-  await expect(
-    table.getByText("/home/ruiyang/Projects/webcontainers-demo", {
-      exact: true,
-    }),
-  ).toBeVisible();
-  await expect(
-    table.getByText("/nix/store/node/bin/node", { exact: true }),
-  ).toHaveCount(0);
-  await expect(table.locator("summary")).toHaveCount(0);
-  for (const width of [960, 640]) {
-    await page.setViewportSize({ width, height: 680 });
-    await table.scrollIntoViewIfNeeded();
-    await page.screenshot({ path: `/tmp/newport-ports-${width}.png` });
-  }
-  await table.getByRole("button", { name: "Forward", exact: true }).click();
-  await expect(
-    page
-      .getByRole("dialog")
-      .locator('input[value="Vite · webcontainers-demo"]'),
-  ).toBeVisible();
-});
-
-test("ports discover automatically and refresh while Connections is open", async ({
-  page,
-}) => {
-  await page.clock.install();
-  await page.goto("/?fixture=node-ports");
-  await page.getByRole("tab", { name: "Connections", exact: true }).click();
-  await expect(page.getByRole("table", { name: "Remote ports" })).toContainText(
-    "Vite · webcontainers-demo",
-  );
-  await page.evaluate(() => {
-    const bridge = (window as any).__TAURI_INTERNALS__;
-    const original = bridge.invoke;
-    (window as any).__portPolls = 0;
-    bridge.invoke = (cmd: string, args: any) => {
-      if (cmd === "discover_ports") (window as any).__portPolls++;
-      return original(cmd, args);
-    };
-  });
-  await page.clock.fastForward(31_000);
-  await expect
-    .poll(() => page.evaluate(() => (window as any).__portPolls))
-    .toBe(1);
-  await page.getByRole("tab", { name: "Overview", exact: true }).click();
-  await page.clock.fastForward(31_000);
-  expect(await page.evaluate(() => (window as any).__portPolls)).toBe(1);
-});
-test("automatic discovery failure keeps a retry available", async ({
-  page,
-}) => {
-  await page.goto("/");
-  await page.evaluate(() => {
-    const bridge = (window as any).__TAURI_INTERNALS__;
-    const original = bridge.invoke;
-    (window as any).__portDiscoveryFail = true;
-    bridge.invoke = (cmd: string, args: any) => {
-      if (cmd === "discover_ports" && (window as any).__portDiscoveryFail) {
-        return Promise.reject(new Error("SSH unavailable"));
-      }
-      return original(cmd, args);
-    };
-  });
-  await page.getByRole("tab", { name: "Connections", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText(
-    "Could not refresh ports",
-  );
-  await page.evaluate(() => {
-    (window as any).__portDiscoveryFail = false;
-  });
-  await page
-    .getByRole("button", { name: "Discover ports", exact: true })
-    .click();
-  await expect(page.getByRole("table", { name: "Remote ports" })).toContainText(
-    "postgres",
-  );
-  await expect(page.getByRole("alert")).toHaveCount(0);
-});
-
-test("system listeners remain visible without verbose process details", async ({
-  page,
-}) => {
-  await page.goto("/");
-  await page.getByRole("tab", { name: "Connections", exact: true }).click();
-  const table = page.getByRole("table", { name: "Remote ports" });
-  await expect(table).toContainText("postgres");
-  await expect(
-    table.getByText("Project directory", { exact: true }),
-  ).toHaveCount(0);
-  await expect(table).not.toContainText("/var/lib/postgresql");
-  await expect(table).not.toContainText("/usr/lib/postgresql/bin/postgres");
-  await expect(
-    table.getByRole("button", { name: "Forward", exact: true }),
-  ).toBeVisible();
-});
-
-test("process context highlights application and service details across runtimes", async ({
-  page,
-}) => {
-  await page.goto("/");
-  await page.evaluate(() => {
-    const bridge = (window as any).__TAURI_INTERNALS__;
-    const original = bridge.invoke;
-    bridge.invoke = (cmd: string, args: any) =>
-      cmd === "discover_ports"
-        ? Promise.resolve([
-            {
-              port: 8000,
-              address: "0.0.0.0",
-              pid: 101,
-              user: "deploy",
-              processName: "python3",
-              executable: "/usr/bin/python3",
-              workingDirectory: "/srv/orders",
-              arguments: ["python3", "-m", "uvicorn", "orders:app"],
-            },
-            {
-              port: 8080,
-              address: "0.0.0.0",
-              pid: 102,
-              user: "deploy",
-              processName: "java",
-              executable: "/usr/bin/java",
-              workingDirectory: "/",
-              arguments: ["java", "-jar", "/opt/orders app.jar"],
-            },
-            {
-              port: 5432,
-              address: "127.0.0.1",
-              pid: 103,
-              user: "postgres",
-              processName: "postgres",
-              executable: "/usr/bin/postgres",
-              workingDirectory: "/",
-              arguments: ["postgres", "-D", "/var/lib/postgresql/orders"],
-            },
-            {
-              port: 22,
-              address: "0.0.0.0",
-              pid: 104,
-              user: "root",
-              processName: "sshd",
-              executable: "/usr/sbin/sshd",
-              workingDirectory: "/",
-              arguments: ["sshd", "-D"],
-            },
-          ])
-        : original(cmd, args);
-  });
-  await page.getByRole("tab", { name: "Connections", exact: true }).click();
-  const table = page.getByRole("table", { name: "Remote ports" });
-  await expect(table).toContainText("Module");
-  await expect(table).toContainText("uvicorn");
-  await expect(table).toContainText("/srv/orders");
-  await expect(table).toContainText("/opt/orders app.jar");
-  await expect(table).toContainText("/var/lib/postgresql/orders");
-  const ssh = table.getByRole("row").filter({ hasText: "sshd" });
-  await expect(ssh.locator("[data-slot=port-project-directory]")).toHaveCount(
-    0,
-  );
-  for (const width of [960, 640]) {
-    await page.setViewportSize({ width, height: 680 });
-    await table.scrollIntoViewIfNeeded();
-    await page.screenshot({ path: `/tmp/newport-context-${width}.png` });
-  }
-});
-
-test("connected tunnels show destination failure and recovery independently", async ({
-  page,
-}) => {
-  await page.addInitScript(() => {
-    const bridge = (window as any).__TAURI_INTERNALS__;
-    const original = bridge.invoke;
-    const callbacks = new Map<number, (event: any) => void>();
-    bridge.transformCallback = (callback: (event: any) => void) => {
-      const id = callbacks.size + 1;
-      callbacks.set(id, callback);
-      return id;
-    };
-    bridge.invoke = (cmd: string, args: any) => {
-      if (cmd === "plugin:event|listen") {
-        if (args.event === "state-changed")
-          (window as any).__stateChanged = callbacks.get(args.handler);
-        return Promise.resolve(args.handler);
-      }
-      if (cmd === "plugin:event|unlisten") return Promise.resolve();
-      return original(cmd, args);
-    };
-  });
-  await page.goto("/");
-  await page.evaluate(() => {
-    const bridge = (window as any).__TAURI_INTERNALS__;
-    const original = bridge.invoke;
-    (window as any).__destination = "unavailable";
-    bridge.invoke = async (cmd: string, args: any) => {
-      const result = await original(cmd, args);
-      if (cmd === "snapshot") {
-        const tunnel = result.config.tunnels[0];
-        result.runtime.tunnels[tunnel.id] = {
-          status: "connected",
-          errorMessage: null,
-          reconnectAttempt: 0,
-        };
-        result.runtime.tunnelHealth = {
-          [tunnel.id]: [
-            {
-              localPort: 3000,
-              remotePort: 3000,
-              status: (window as any).__destination,
-              message:
-                (window as any).__destination === "unavailable"
-                  ? "The server could not connect to this destination."
-                  : null,
-              checkedAt: 1700000000,
-            },
-          ],
-        };
-      }
-      if (cmd === "discover_ports")
-        return [
-          { port: 3000, address: "0.0.0.0", pid: null, processName: null },
-        ];
-      return result;
-    };
-  });
-  await page.waitForFunction(() => !!(window as any).__stateChanged);
-  await page.evaluate(() =>
-    (window as any).__stateChanged({
-      payload: { instanceId: "fixture", revision: 1 },
-    }),
-  );
-  await page.getByRole("tab", { name: "Connections", exact: true }).click();
-  const tunnels = page.getByRole("list", { name: "Tunnels" });
-  const table = page.getByRole("table", { name: "Remote ports" });
-  await expect(tunnels.getByText("Connected", { exact: true })).toBeVisible();
-  await expect(
-    tunnels.getByText("Destination unavailable", { exact: true }),
-  ).toBeVisible();
-  await expect(
-    table.getByText("Destination unavailable", { exact: true }),
-  ).toBeVisible();
-  await tunnels.locator("summary").click();
-  await expect(tunnels).toContainText("The server could not connect");
-  for (const width of [960, 640]) {
-    await page.setViewportSize({ width, height: 680 });
-    await page.screenshot({ path: `/tmp/newport-health-${width}.png` });
-  }
-  await page.evaluate(() => {
-    (window as any).__destination = "reachable";
-    (window as any).__stateChanged({
-      payload: { instanceId: "fixture", revision: 2 },
-    });
-  });
-  await expect(
-    tunnels.getByText("Destination reachable", { exact: true }),
-  ).toBeVisible();
-  await expect(
-    table.getByText("Destination reachable", { exact: true }),
-  ).toBeVisible();
-  await expect(
-    tunnels.getByText("Destination unavailable", { exact: true }),
-  ).toHaveCount(0);
 });
 
 test("Overview Refresh retries SSH after a cached timeout and remains retryable", async ({
@@ -2470,7 +1899,9 @@ test("runtime notifications update health and focus reconciles a missed event", 
     };
   });
   await page.goto("/");
-  await expect(page.locator("[data-slot=toolbar-health]")).toHaveText("Reachable");
+  await expect(page.locator("[data-slot=toolbar-health]")).toHaveText(
+    "Reachable",
+  );
   await page.waitForFunction(() => !!(window as any).__stateChanged);
   await page.evaluate(() => {
     (window as any).__health = "error";
@@ -2479,13 +1910,17 @@ test("runtime notifications update health and focus reconciles a missed event", 
       payload: { instanceId: "test-instance", revision: 2 },
     });
   });
-  await expect(page.locator("[data-slot=toolbar-health]")).toHaveText("Connection failed");
+  await expect(page.locator("[data-slot=toolbar-health]")).toHaveText(
+    "Connection failed",
+  );
   await page.evaluate(() => {
     (window as any).__health = "reachable";
     (window as any).__revision = 3;
     window.dispatchEvent(new Event("focus"));
   });
-  await expect(page.locator("[data-slot=toolbar-health]")).toHaveText("Reachable");
+  await expect(page.locator("[data-slot=toolbar-health]")).toHaveText(
+    "Reachable",
+  );
 });
 
 test("Overview retains an old reading with its refresh error and clears it on recovery", async ({
@@ -2532,16 +1967,16 @@ test("workspace filters survive page navigation", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("tab", { name: "Services", exact: true }).click();
   const search = page.getByRole("textbox", {
-    name: "Filter services",
+    name: "Find a service",
     exact: true,
   });
-  await search.fill("worker");
+  await search.fill("atlas");
   await page.getByRole("tab", { name: "Overview", exact: true }).click();
   await page.getByRole("tab", { name: "Services", exact: true }).click();
-  await expect(search).toHaveValue("worker");
+  await expect(search).toHaveValue("atlas");
   await expect(
-    page.getByText("ssh.service", { exact: true }),
-  ).not.toBeVisible();
+    page.getByRole("button", { name: /^nginx\.service:/ }),
+  ).toHaveCount(0);
 });
 
 test("terminal receives output while its page is detached", async ({
@@ -2602,7 +2037,7 @@ test("failed cache clearing retains cached overview readings", async ({
   page,
 }) => {
   await page.goto("/");
-  await expect(page.locator("[data-slot=usage-gauge]")).not.toHaveCount(0);
+  await expect(page.locator("[data-slot=resource-tile]")).not.toHaveCount(0);
   await page.evaluate(() => {
     const bridge = (window as any).__TAURI_INTERNALS__;
     const original = bridge.invoke;
@@ -2620,7 +2055,7 @@ test("failed cache clearing retains cached overview readings", async ({
   await page.getByRole("button", { name: "Clear cache", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Cannot clear cache");
   await page.getByRole("tab", { name: "Overview", exact: true }).click();
-  await expect(page.locator("[data-slot=usage-gauge]")).not.toHaveCount(0);
+  await expect(page.locator("[data-slot=resource-tile]")).not.toHaveCount(0);
 });
 
 test("backend restart discards the old terminal session", async ({ page }) => {

@@ -2,8 +2,6 @@
 use anyhow::{bail, Result};
 use std::{path::PathBuf, process::Command};
 mod benchmark;
-#[cfg(unix)]
-mod cockpit;
 mod contract;
 mod https;
 #[cfg(unix)]
@@ -42,11 +40,9 @@ fn main() -> Result<()> {
         "git-cli-contract" => contract::run(true, &args),
         "benchmark" => benchmark::run(&args),
         #[cfg(unix)]
-        "cockpit" => cockpit::run(),
-        #[cfg(unix)]
         "native" => native::run(),
         "help" => {
-            println!("newport-tests <build-agents|ssh|remote|https|runtime|git-contract|git-cli-contract|benchmark|cockpit|native>\nContract checks accept --frontend to additionally run the TypeScript decoder.\nRemote checks accept --filter TEST. Benchmark options match git_benchmark.");
+            println!("newport-tests <build-agents|ssh|remote|https|runtime|git-contract|git-cli-contract|benchmark|native>\nContract checks accept --frontend to additionally run the TypeScript decoder.\nRemote checks accept --filter TEST. Benchmark options match git_benchmark.");
             Ok(())
         }
         _ => bail!("Unknown harness command: {action}"),

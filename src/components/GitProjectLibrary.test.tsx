@@ -21,9 +21,11 @@ afterEach(async () => {
 function project(name: string, path: string): GitProject {
   return { id: name, serverId: "server", name, path: gitPath(path) };
 }
+// Invented bookmarks, deliberately out of name order and in different kinds
+// of location: one in a home directory, one in a shared server directory.
 const projects = [
-  project("webcontainers-demo", "/home/ruiyang/Projects/webcontainers-demo"),
-  project("vivari-demo", "/home/ruiyang/Projects/vivari-demo"),
+  project("orbit-api", "/srv/git/orbit-api"),
+  project("harbor-web", "/home/ci/src/harbor-web"),
 ];
 function button(label: string) {
   return [...host.querySelectorAll("button")].find(
@@ -86,8 +88,8 @@ function render(
 it("lists each project by name and path, sorted and counted", async () => {
   const { node } = render();
   await act(async () => root.render(node));
-  expect(names()).toEqual(["vivari-demo", "webcontainers-demo"]);
-  expect(host.textContent).toContain("/home/ruiyang/Projects/vivari-demo");
+  expect(names()).toEqual(["harbor-web", "orbit-api"]);
+  expect(host.textContent).toContain("/home/ci/src/harbor-web");
   expect(host.textContent).toContain("2 projects");
   // The server is named once, by the app's header; the page says what it holds.
   expect(host.textContent).toContain(
@@ -96,9 +98,9 @@ it("lists each project by name and path, sorted and counted", async () => {
 });
 
 it("filters the rows by the search text and reports typing", async () => {
-  const { onSearch, node } = render({ search: "vivari" });
+  const { onSearch, node } = render({ search: "harbor" });
   await act(async () => root.render(node));
-  expect(names()).toEqual(["vivari-demo"]);
+  expect(names()).toEqual(["harbor-web"]);
   expect(host.textContent).toContain("1 project");
   const input = host.querySelector("input")!;
   // The field is labelled for assistive technology, not only by placeholder.
@@ -115,7 +117,7 @@ it("filters the rows by the search text and reports typing", async () => {
 });
 
 it("switches the visible set when a filter tab is chosen", async () => {
-  const favourites = new Set(["vivari-demo"]);
+  const favourites = new Set(["harbor-web"]);
   const { onFilter, node } = render({ favourites });
   await act(async () => root.render(node));
   expect(names()).toHaveLength(2);
@@ -124,7 +126,7 @@ it("switches the visible set when a filter tab is chosen", async () => {
   await act(async () =>
     root.render(render({ favourites, filter: "favorites" }).node),
   );
-  expect(names()).toEqual(["vivari-demo"]);
+  expect(names()).toEqual(["harbor-web"]);
   await act(async () => root.render(render({ filter: "archived" }).node));
   expect(names()).toEqual([]);
   expect(host.textContent).toContain("No archived projects.");
@@ -164,33 +166,33 @@ it("announces the active filter as a pressed button in a labelled group", async 
 
 it("reports the pressed state of the star and toggles it by id", async () => {
   const { onToggleFavourite, node } = render({
-    favourites: new Set(["vivari-demo"]),
+    favourites: new Set(["harbor-web"]),
   });
   await act(async () => root.render(node));
-  const on = button("Remove vivari-demo from favorites");
+  const on = button("Remove harbor-web from favorites");
   expect(on.getAttribute("aria-pressed")).toBe("true");
-  const off = button("Add webcontainers-demo to favorites");
+  const off = button("Add orbit-api to favorites");
   expect(off.getAttribute("aria-pressed")).toBe("false");
   await act(async () => off.click());
-  expect(onToggleFavourite).toHaveBeenCalledWith("webcontainers-demo");
+  expect(onToggleFavourite).toHaveBeenCalledWith("orbit-api");
 });
 
 it("keeps open, edit and remove reachable for a row", async () => {
   const { onOpen, onEdit, onRemove, node } = render();
   await act(async () => root.render(node));
-  await act(async () => button("vivari-demo").click());
+  await act(async () => button("harbor-web").click());
   expect(onOpen).toHaveBeenCalledWith(
-    expect.objectContaining({ id: "vivari-demo" }),
+    expect.objectContaining({ id: "harbor-web" }),
   );
-  await openMenu("Actions for vivari-demo");
+  await openMenu("Actions for harbor-web");
   await act(async () => menuItem("Rename…").click());
   expect(onEdit).toHaveBeenCalledWith(
-    expect.objectContaining({ id: "vivari-demo" }),
+    expect.objectContaining({ id: "harbor-web" }),
   );
-  await openMenu("Actions for vivari-demo");
+  await openMenu("Actions for harbor-web");
   await act(async () => menuItem("Remove from projects…").click());
   expect(onRemove).toHaveBeenCalledWith(
-    expect.objectContaining({ id: "vivari-demo" }),
+    expect.objectContaining({ id: "harbor-web" }),
   );
 });
 
@@ -223,7 +225,7 @@ it("changes the sort through the labelled sort control", async () => {
 it("shows observed Git state and invents none for a project without it", async () => {
   const { node } = render({
     status: {
-      "vivari-demo": {
+      "harbor-web": {
         branch: "feat/session-recovery",
         changes: 3,
         outgoing: 1,
@@ -245,7 +247,7 @@ it("shows observed Git state and invents none for a project without it", async (
 
 it("shows commits ahead of the upstream only when they were read", async () => {
   const { node } = render({
-    status: { "vivari-demo": { branch: "main", changes: 0, outgoing: 2 } },
+    status: { "harbor-web": { branch: "main", changes: 0, outgoing: 2 } },
   });
   await act(async () => root.render(node));
   const [known, unknown] = [...host.querySelectorAll(".git-library-row")];
@@ -259,8 +261,8 @@ it("shows commits ahead of the upstream only when they were read", async () => {
 it("distinguishes a clean tree from an unreported one", async () => {
   const { node } = render({
     status: {
-      "vivari-demo": { branch: "main", clean: true },
-      "webcontainers-demo": { branch: "main" },
+      "harbor-web": { branch: "main", clean: true },
+      "orbit-api": { branch: "main" },
     },
   });
   await act(async () => root.render(node));
@@ -274,8 +276,8 @@ it("disables the actions that mutate bookmarks while busy", async () => {
   const { onOpen, node } = render({ busy: true });
   await act(async () => root.render(node));
   expect(button("Add project").disabled).toBe(true);
-  expect(button("vivari-demo").disabled).toBe(true);
-  await act(async () => button("vivari-demo").click());
+  expect(button("harbor-web").disabled).toBe(true);
+  await act(async () => button("harbor-web").click());
   expect(onOpen).not.toHaveBeenCalled();
 });
 
@@ -283,42 +285,37 @@ it("offers a read per row instead of reading every bookmark on sight", async () 
   const onCheck = vi.fn();
   const { node } = render({
     onCheck,
-    checking: new Set(["vivari-demo"]),
+    checking: new Set(["harbor-web"]),
     status: {},
   });
   await act(async () => root.render(node));
-  // Rows are sorted by name, so vivari-demo leads.
-  const [vivari, webcontainers] = [
-    ...host.querySelectorAll(".git-library-row"),
-  ];
+  // Rows are sorted by name, so harbor-web leads.
+  const [harbor, orbit] = [...host.querySelectorAll(".git-library-row")];
   // Nothing was read, so no row claims a branch or a working-tree state.
-  expect(webcontainers.textContent).not.toMatch(/clean|change|main/i);
-  const offer =
-    webcontainers.querySelector<HTMLButtonElement>(".git-library-check")!;
+  expect(orbit.textContent).not.toMatch(/clean|change|main/i);
+  const offer = orbit.querySelector<HTMLButtonElement>(".git-library-check")!;
   expect(offer.textContent).toBe("Check");
-  expect(offer.getAttribute("aria-label")).toBe(
-    "Check status of webcontainers-demo",
-  );
+  expect(offer.getAttribute("aria-label")).toBe("Check status of orbit-api");
   expect(offer.disabled).toBe(false);
   await act(async () => offer.click());
   expect(onCheck).toHaveBeenCalledTimes(1);
-  expect(onCheck.mock.calls[0][0].id).toBe("webcontainers-demo");
+  expect(onCheck.mock.calls[0][0].id).toBe("orbit-api");
   // A read already in flight says so and cannot be asked for twice.
   const running =
-    vivari.querySelector<HTMLButtonElement>(".git-library-check")!;
+    harbor.querySelector<HTMLButtonElement>(".git-library-check")!;
   expect(running.textContent).toBe("Reading…");
   expect(running.disabled).toBe(true);
 });
 
 it("checks every row being shown, and only those, when asked", async () => {
   const onCheckAll = vi.fn();
-  const { node } = render({ onCheckAll, search: "vivari", status: {} });
+  const { node } = render({ onCheckAll, search: "harbor", status: {} });
   await act(async () => root.render(node));
   await act(async () => button("Check status").click());
   expect(onCheckAll).toHaveBeenCalledTimes(1);
   expect(
     onCheckAll.mock.calls[0][0].map((project: GitProject) => project.id),
-  ).toEqual(["vivari-demo"]);
+  ).toEqual(["harbor-web"]);
 });
 
 it("states that status was not loaded when no read can be offered", async () => {
@@ -332,8 +329,8 @@ it("states that status was not loaded when no read can be offered", async () => 
 it("separates a branch that was not read from one that is absent", async () => {
   const { node } = render({
     status: {
-      "vivari-demo": { branch: null, clean: true },
-      "webcontainers-demo": { clean: true },
+      "harbor-web": { branch: null, clean: true },
+      "orbit-api": { clean: true },
     },
   });
   await act(async () => root.render(node));

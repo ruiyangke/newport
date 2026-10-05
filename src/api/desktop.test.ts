@@ -9,11 +9,25 @@ it("preserves the backend wire names and argument shapes", async () => {
     cols: 80,
     rows: 24,
   });
-  await collect("server", "services");
+  await collect("server", "overview");
   expect(invoke).toHaveBeenLastCalledWith("cockpit_collect", {
     id: "server",
-    section: "services",
+    section: "overview",
     refresh: false,
+  });
+  await desktop("container_logs", {
+    id: "server",
+    container: null,
+    project: "atlas",
+    cursor: null,
+    lines: 300,
+  });
+  expect(invoke).toHaveBeenLastCalledWith("container_logs", {
+    id: "server",
+    container: null,
+    project: "atlas",
+    cursor: null,
+    lines: 300,
   });
   await collect("server", "overview", true);
   expect(invoke).toHaveBeenLastCalledWith("cockpit_collect", {
@@ -28,12 +42,10 @@ function invalidRequests() {
   void desktop("terminal_resize", { session: "s", cols: "80", rows: 24 });
   // @ts-expect-error command names are closed
   void desktop("unknown_command");
-  // @ts-expect-error services returns service rows, not an Overview
-  const overview: Promise<import("../domain/cockpit").Overview> = collect(
-    "s",
-    "services",
-  );
-  return overview;
+  // @ts-expect-error containers moved to their own commands
+  void collect("s", "containers");
+  // @ts-expect-error a container action takes a verb, not a project action
+  void desktop("container_action", { id: "s", container: "c", verb: "up" });
 }
 void invalidRequests;
 

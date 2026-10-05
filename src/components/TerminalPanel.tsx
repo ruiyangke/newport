@@ -26,6 +26,10 @@ import {
   type TerminalTab,
 } from "../terminal/registry";
 import { getTerminalSession, type TerminalSession } from "../terminal/session";
+import {
+  pendingTerminalCommands,
+  takeTerminalCommand,
+} from "../terminal/pending";
 import { immersiveStore, setImmersive } from "../immersive";
 import { Button } from "./controls";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
@@ -108,6 +112,31 @@ function TerminalWorkspace({
   const selectTab = (id: string) => {
     if (id !== layout.active) update({ ...layout, active: id });
   };
+  // Another page handed over a command: open it in a fresh tab, typed, and
+  // run only when that page asked (never for a password prompt).
+  const pending = useSelector(
+    pendingTerminalCommands,
+    (state) => state[server.id],
+  );
+  useEffect(() => {
+    if (pending === undefined) return;
+    const handed = takeTerminalCommand(server.id);
+    if (handed === undefined) return;
+    const id = crypto.randomUUID();
+    const session = getTerminalSession(connection, id, server.id);
+    session.type(handed.run ? `${handed.command}\r` : handed.command);
+    void session.connect();
+    update({
+      tabs: [
+        ...layout.tabs,
+        { id, name: handed.title ?? `Terminal ${layout.next}` },
+      ],
+      active: id,
+      next: layout.next + 1,
+    });
+    // `layout`/`update` are read at hand-over time only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending, connection, server.id]);
   const addTab = () => {
     const id = crypto.randomUUID();
     update({
@@ -161,10 +190,10 @@ function TerminalWorkspace({
   );
 }
 
-function statusTone(status: string, error: string) {
+function statusTone(status: string, error: string, reconnecting: boolean) {
   if (error) return "danger";
+  if (reconnecting || status === "Connecting…") return "warning";
   if (status === "Connected") return "success";
-  if (status === "Connecting…") return "warning";
   return "muted";
 }
 
@@ -389,7 +418,7 @@ function TerminalView({
   onImmersive: () => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
-  const { status, error, active, started } = useSelector(
+  const { status, error, active, started, reconnecting } = useSelector(
     session.state,
     (state) => state,
   );
@@ -502,9 +531,14 @@ function TerminalView({
         >
           <StatusIndicator
             data-slot="terminal-state"
-            tone={statusTone(status, error)}
+            tone={statusTone(status, error, reconnecting)}
             className={steady ? "sr-only" : "whitespace-nowrap"}
             role="status"
+            title={
+              reconnecting
+                ? "The SSH connection dropped. Reconnecting automatically."
+                : undefined
+            }
           >
             <span className="terminal-status">{status}</span>
           </StatusIndicator>
@@ -523,13 +557,13 @@ function TerminalView({
           >
             {immersive ? <Minimize2 /> : <Maximize2 />}
           </Button>
-          {status === "Connecting…" && (
+          {(status === "Connecting…" || reconnecting) && (
             <Button
               size="xs"
               variant="outline"
               onClick={() => session.disconnect()}
             >
-              Cancel connection
+              {reconnecting ? "Stop reconnecting" : "Cancel connection"}
             </Button>
           )}
         </div>

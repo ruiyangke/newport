@@ -25,10 +25,23 @@ const linkHandler: ILinkHandler = {
   },
   allowNonHttpProtocols: false,
 };
+// A dropped full-screen program leaves modes behind; clear them so the
+// replacement shell and its notice start on the normal screen.
+const reconnectReset =
+  "\x1b[?1049l\x1b[r\x1b[0m\x1b[?25h\x1b[?2004l" +
+  "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" +
+  "\x1b[?1l\x1b[4l\x1b[?6l\x1b[?7h";
+function reconnectNotice() {
+  return `${reconnectReset}\r\n\x1b[33m[SSH connection lost. Reconnecting…]\x1b[0m\r\n`;
+}
+function reconnectedNotice() {
+  return "\x1b[32m[Reconnected · new shell]\x1b[0m\r\n";
+}
 
 type Session = {
   id: string;
   ready: boolean;
+  lost: boolean;
   queued: number;
   writes: Promise<void>;
 };
@@ -39,6 +52,8 @@ export class TerminalSession {
     active: false,
     started: false,
     title: "",
+    /** True while an interrupted transport is being retried. */
+    reconnecting: false,
   });
   readonly element = document.createElement("div");
   readonly term = new Terminal({
@@ -187,12 +202,32 @@ export class TerminalSession {
     this.term.options.disableStdin = true;
     if (current)
       void desktop("terminal_close", { session: current.id }).catch(() => {});
-    this.patch({ active: false, status: "Disconnected" });
+    this.patch({ active: false, status: "Disconnected", reconnecting: false });
   }
   private failed(current: Session, reason: unknown) {
     if (this.session !== current) return;
     this.disconnect();
     this.patch({ error: String(reason), status: "Connection failed" });
+  }
+  /** Queue terminal output and wait for parsing, even while detached. */
+  private async render(data: string | Uint8Array) {
+    this.output = new Promise<void>((resolve) => {
+      this.finishWrite = resolve;
+      this.term.write(data, () => {
+        this.finishWrite = undefined;
+        resolve();
+      });
+    });
+    await this.output;
+  }
+  private pendingInput = "";
+  /**
+   * Types text into the shell, without pressing Enter, as soon as it is
+   * ready: the reader reviews a handed-over command before running it.
+   */
+  type(text: string) {
+    if (this.session?.ready) this.send(new TextEncoder().encode(text));
+    else this.pendingInput += text;
   }
   private send(bytes: Uint8Array) {
     const current = this.session;
@@ -208,14 +243,19 @@ export class TerminalSession {
     current.writes = current.writes
       .then(async () => {
         for (let offset = 0; offset < bytes.length; offset += 4096) {
-          if (this.session !== current) return;
+          // A reconnect invalidates input aimed at the dropped shell.
+          if (this.session !== current || !current.ready) return;
           await desktop("terminal_write", {
             session: current.id,
             data: Array.from(bytes.subarray(offset, offset + 4096)),
           });
         }
       })
-      .catch((reason) => this.failed(current, reason))
+      .catch((reason) => {
+        // A write that raced a reconnect is not fatal; the read loop reports
+        // a session that is really gone.
+        if (current.ready) this.failed(current, reason);
+      })
       .finally(() => {
         current.queued -= bytes.length;
       });
@@ -224,10 +264,17 @@ export class TerminalSession {
     if (this.disposed || this.session) return;
     const term = this.term;
     if (this.element.isConnected) this.fit.fit();
-    this.patch({ error: "", status: "Connecting…", active: true, title: "" });
+    this.patch({
+      error: "",
+      status: "Connecting…",
+      active: true,
+      title: "",
+      reconnecting: false,
+    });
     const current: Session = {
       id: crypto.randomUUID(),
       ready: false,
+      lost: false,
       queued: 0,
       writes: Promise.resolve(),
     };
@@ -256,9 +303,16 @@ export class TerminalSession {
         if (this.session !== current) return;
         if (!event) continue;
         if (event.type === "ready") {
-          this.patch({ started: true, status: "Connected" });
+          const resumed = current.lost;
+          current.lost = false;
+          this.patch({
+            started: true,
+            status: "Connected",
+            reconnecting: false,
+          });
           current.ready = true;
           term.options.disableStdin = false;
+          if (resumed) await this.render(reconnectedNotice());
           if (this.element.isConnected) this.fit.fit();
           await desktop("terminal_resize", {
             session: current.id,
@@ -266,17 +320,26 @@ export class TerminalSession {
             rows: term.rows,
           });
           if (this.session !== current) return;
+          if (this.pendingInput) {
+            const text = this.pendingInput;
+            this.pendingInput = "";
+            this.send(new TextEncoder().encode(text));
+          }
           if (this.element.isConnected && !hasOpenDialog()) term.focus();
         } else if (event.type === "data") {
-          // Wait for parsing before pulling more bytes, even while detached.
-          this.output = new Promise<void>((resolve) => {
-            this.finishWrite = resolve;
-            term.write(new Uint8Array(event.data), () => {
-              this.finishWrite = undefined;
-              resolve();
-            });
+          await this.render(new Uint8Array(event.data));
+        } else if (event.type === "reconnecting") {
+          current.ready = false;
+          term.options.disableStdin = true;
+          this.patch({
+            error: "",
+            status: `Reconnecting · ${event.data.attempt}`,
+            reconnecting: true,
           });
-          await this.output;
+          if (!current.lost) {
+            current.lost = true;
+            await this.render(reconnectNotice());
+          }
         } else if (event.type === "error") {
           throw new Error(event.data);
         } else {
@@ -285,13 +348,14 @@ export class TerminalSession {
               event.data === null
                 ? "Shell closed"
                 : `Shell exited · ${event.data}`,
+            reconnecting: false,
           });
           break;
         }
       }
     } catch (reason) {
       if (this.session === current) {
-        this.patch({ error: String(reason) });
+        this.patch({ error: String(reason), reconnecting: false });
         this.patch({ status: "Connection failed" });
       }
     } finally {

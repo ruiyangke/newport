@@ -22,6 +22,8 @@ static AGENT_AARCH64: [u8; include_bytes!("../agents/newport-agent-aarch64").len
 /// Recheck every new channel so removal or an external replacement is repaired.
 pub enum Service {
     Git,
+    /// Overview metrics, sampled on the server; see crate::monitor.
+    Monitor,
     Integration {
         client: uuid::Uuid,
         clipboard: bool,
@@ -29,9 +31,16 @@ pub enum Service {
     },
 }
 impl Service {
+    /// Monitoring needs only the binary. The command shims and shell-profile
+    /// setup belong to the clipboard and browser integration, so sampling a
+    /// server never rewrites its dotfiles or shadows its xdg-open.
+    fn integrates(&self) -> bool {
+        !matches!(self, Self::Monitor)
+    }
     fn command(&self) -> String {
         match self {
             Self::Git => "exec env NEWPORT_GIT_BACKEND=cli \"$HOME/.local/bin/newport-agent\" git-rpc --stdio".into(),
+            Self::Monitor => "exec \"$HOME/.local/bin/newport-agent\" monitor --stdio".into(),
             Self::Integration { client, clipboard, browser } => format!(
                 "exec \"$HOME/.local/bin/newport-agent\" serve {client} {} {}",
                 if *clipboard { "--clipboard" } else { "" },
@@ -44,16 +53,16 @@ pub async fn launch(
     session: &ExecSession,
     service: Service,
 ) -> Result<(russh::ChannelStream<russh::client::Msg>, String), String> {
-    let installed = install(session).await?;
+    let installed = deploy(session, false, service.integrates()).await?;
     let stream = session.stream(&service.command()).await?;
     Ok((stream, installed))
 }
 
 pub async fn install(session: &ExecSession) -> Result<String, String> {
-    deploy(session, false).await
+    deploy(session, false, true).await
 }
 pub async fn reinstall(session: &ExecSession) -> Result<String, String> {
-    deploy(session, true).await
+    deploy(session, true, true).await
 }
 // Installation and explicit reinstalls share the same per-profile lock. Weak
 // entries avoid retaining every server ever visited; failures are never cached.
@@ -71,7 +80,7 @@ fn installation_lock(server: uuid::Uuid) -> std::sync::Arc<tokio::sync::Mutex<()
     locks.insert(server, Arc::downgrade(&lock));
     lock
 }
-async fn deploy(session: &ExecSession, force: bool) -> Result<String, String> {
+async fn deploy(session: &ExecSession, force: bool, integrate: bool) -> Result<String, String> {
     let lock = installation_lock(session.server_id());
     let _installing = lock.lock().await;
     let platform = session.execute("uname -s; uname -m", None).await?;
@@ -96,14 +105,18 @@ async fn deploy(session: &ExecSession, force: bool) -> Result<String, String> {
             )
             .await?;
         if installed.split_whitespace().next() == Some(hash.as_str()) {
+            if !integrate {
+                return Ok(String::new());
+            }
             return session
                 .execute("\"$HOME/.local/bin/newport-agent\" install", None)
                 .await;
         }
     }
     let command = format!(
-        "sh -c '{}' newport-install {hash}",
-        include_str!("agent-install.sh").replace('\'', "'\"'\"'")
+        "sh -c '{}' newport-install {hash} {}",
+        include_str!("agent-install.sh").replace('\'', "'\"'\"'"),
+        u8::from(integrate),
     );
     session.execute(&command, Some(binary)).await
 }

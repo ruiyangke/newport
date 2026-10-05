@@ -5,6 +5,7 @@ import { retainTerminals } from "./registry";
 const api = vi.hoisted(() => ({ desktop: vi.fn() }));
 const xterm = vi.hoisted(() => ({
   titles: [] as Array<(value: string) => void>,
+  data: [] as Array<(value: string) => void>,
 }));
 vi.mock("../api/desktop", () => api);
 vi.mock("@xterm/xterm", () => ({
@@ -17,7 +18,9 @@ vi.mock("@xterm/xterm", () => ({
     reset = vi.fn();
     focus = vi.fn();
     loadAddon = vi.fn();
-    onData = vi.fn();
+    onData = vi.fn((listener: (value: string) => void) => {
+      xterm.data.push(listener);
+    });
     onBinary = vi.fn();
     onTitleChange = (listener: (value: string) => void) => {
       xterm.titles.push(listener);
@@ -80,6 +83,7 @@ beforeEach(() => {
   webgl.instances.length = 0;
   webgl.failed = false;
   xterm.titles.length = 0;
+  xterm.data.length = 0;
   unicode.instances.length = 0;
   vi.stubGlobal(
     "ResizeObserver",
@@ -233,6 +237,112 @@ it("drains queued output before resetting for a new connection", async () => {
   parsed();
   await Promise.all([first, second]);
   expect(terminal.term.reset).toHaveBeenCalledTimes(2);
+});
+it("recovers a dropped transport in place without resetting the buffer", async () => {
+  const reads: Array<ReturnType<typeof deferred<unknown>>> = [];
+  api.desktop.mockImplementation((command) => {
+    if (command === "terminal_read") {
+      const pending = deferred<unknown>();
+      reads.push(pending);
+      return pending.promise;
+    }
+    return Promise.resolve();
+  });
+  const terminal = getTerminalSession("drop", "tab", "drop");
+  const connecting = terminal.connect();
+  await vi.waitFor(() => expect(reads).toHaveLength(1));
+  reads[0].resolve({ type: "ready" });
+  await vi.waitFor(() => expect(terminal.state.state.status).toBe("Connected"));
+
+  await vi.waitFor(() => expect(reads).toHaveLength(2));
+  reads[1].resolve({
+    type: "reconnecting",
+    data: { attempt: 1, message: "SSH connection lost." },
+  });
+  await vi.waitFor(() => expect(terminal.state.state.reconnecting).toBe(true));
+  expect(terminal.state.state.status).toBe("Reconnecting · 1");
+  expect(terminal.term.write).toHaveBeenCalledWith(
+    expect.stringContaining("connection lost"),
+    expect.any(Function),
+  );
+  // Input aimed at the dropped shell must not reach its replacement.
+  const writes = api.desktop.mock.calls.filter(
+    ([command]) => command === "terminal_write",
+  ).length;
+  xterm.data.at(-1)!("\r");
+  await Promise.resolve();
+  expect(
+    api.desktop.mock.calls.filter(([command]) => command === "terminal_write"),
+  ).toHaveLength(writes);
+
+  await vi.waitFor(() => expect(reads).toHaveLength(3));
+  reads[2].resolve({ type: "ready" });
+  await vi.waitFor(() => expect(terminal.state.state.status).toBe("Connected"));
+  expect(terminal.term.write).toHaveBeenCalledWith(
+    expect.stringContaining("new shell"),
+    expect.any(Function),
+  );
+  // Typing resumes on the replacement shell.
+  xterm.data.at(-1)!("\r");
+  await vi.waitFor(() =>
+    expect(
+      api.desktop.mock.calls.filter(
+        ([command]) => command === "terminal_write",
+      ),
+    ).toHaveLength(writes + 1),
+  );
+
+  await vi.waitFor(() => expect(reads).toHaveLength(4));
+  reads[3].resolve({ type: "exit", data: 0 });
+  await connecting;
+  expect(terminal.state.state.status).toBe("Shell exited · 0");
+  expect(terminal.term.reset).toHaveBeenCalledTimes(1);
+});
+it("tolerates a write failure that raced a reconnect", async () => {
+  const reads: Array<ReturnType<typeof deferred<unknown>>> = [];
+  let rejectWrite!: (reason: unknown) => void;
+  const pendingWrite = new Promise<void>((_, reject) => {
+    rejectWrite = reject;
+  });
+  api.desktop.mockImplementation((command) => {
+    if (command === "terminal_read") {
+      const pending = deferred<unknown>();
+      reads.push(pending);
+      return pending.promise;
+    }
+    if (command === "terminal_write") return pendingWrite;
+    return Promise.resolve();
+  });
+  const terminal = getTerminalSession("race", "tab", "race");
+  const connecting = terminal.connect();
+  await vi.waitFor(() => expect(reads).toHaveLength(1));
+  reads[0].resolve({ type: "ready" });
+  await vi.waitFor(() => expect(terminal.state.state.status).toBe("Connected"));
+  await vi.waitFor(() => expect(reads).toHaveLength(2));
+  xterm.data.at(-1)!("\r");
+  await vi.waitFor(() =>
+    expect(
+      api.desktop.mock.calls.some(([command]) => command === "terminal_write"),
+    ).toBe(true),
+  );
+  reads[1].resolve({
+    type: "reconnecting",
+    data: { attempt: 1, message: "SSH connection lost." },
+  });
+  await vi.waitFor(() => expect(terminal.state.state.reconnecting).toBe(true));
+  // The backend rejected input after the drop; that must not close the session.
+  rejectWrite("Terminal input is busy or disconnected. Reconnect if needed.");
+  // Let the rejection callbacks drain before the replacement shell is ready.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(terminal.state.state.status).toBe("Reconnecting · 1");
+  expect(terminal.state.state.error).toBe("");
+  expect(terminal.state.state.active).toBe(true);
+  await vi.waitFor(() => expect(reads).toHaveLength(3));
+  reads[2].resolve({ type: "ready" });
+  await vi.waitFor(() => expect(reads).toHaveLength(4));
+  reads[3].resolve({ type: "exit", data: 0 });
+  await connecting;
+  expect(terminal.state.state.status).toBe("Shell exited · 0");
 });
 it("renders with WebGL while attached and releases the context on detach", async () => {
   const terminal = getTerminalSession("gpu", "tab", "gpu");

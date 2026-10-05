@@ -4,6 +4,7 @@ pub mod callback;
 mod exec;
 mod health;
 mod relay;
+mod reverse;
 pub mod sftp;
 #[cfg(test)]
 use exec::execute_result;
@@ -11,7 +12,7 @@ pub use exec::{execute, ExecSession};
 
 use crate::{
     known_hosts,
-    model::{Server, Tunnel},
+    model::{Direction, Server, Tunnel},
 };
 use anyhow::{bail, Context, Result};
 use russh::{client, keys::PublicKeyOrCertificate, ChannelMsg, Disconnect};
@@ -40,6 +41,7 @@ struct Handler {
     port: u16,
     error: Arc<Mutex<Option<String>>>,
     disconnected: Arc<tokio::sync::Notify>,
+    forwards: Arc<reverse::RemoteForwards>,
 }
 impl client::Handler for Handler {
     type Error = anyhow::Error;
@@ -66,12 +68,26 @@ impl client::Handler for Handler {
         self.disconnected.notify_one();
         Ok(())
     }
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<()> {
+        self.forwards.accept(channel, connected_port, reply);
+        Ok(())
+    }
 }
 struct Connection {
     handle: client::Handle<Handler>,
     transport: Transport,
     error: Arc<Mutex<Option<String>>>,
     disconnected: Arc<tokio::sync::Notify>,
+    forwards: Arc<reverse::RemoteForwards>,
 }
 impl Drop for Connection {
     fn drop(&mut self) {
@@ -196,11 +212,13 @@ impl Connection {
         let transport = Transport(socket.try_clone()?);
         let error = Arc::new(Mutex::new(None));
         let disconnected = Arc::new(tokio::sync::Notify::new());
+        let forwards = Arc::new(reverse::RemoteForwards::default());
         let handler = Handler {
             host: server.ssh_host.clone(),
             port: server.ssh_port,
             error: error.clone(),
             disconnected: disconnected.clone(),
+            forwards: forwards.clone(),
         };
         let config = Arc::new(client::Config {
             keepalive_interval: Some(Duration::from_secs(15)),
@@ -216,6 +234,7 @@ impl Connection {
             transport,
             error,
             disconnected,
+            forwards,
         })
     }
     async fn close(&self) {
@@ -258,7 +277,27 @@ async fn terminal_request_reply(
     }
 }
 
-/// A remote PTY owns shell state; only bytes and window sizes cross IPC.
+#[derive(Debug)]
+struct ConnectionLost;
+impl std::fmt::Display for ConnectionLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SSH connection lost.")
+    }
+}
+impl std::error::Error for ConnectionLost {}
+
+enum TerminalEnd {
+    Exited(Option<u32>),
+    Closed,
+}
+
+/// Keystrokes for a dropped shell must never reach its replacement.
+async fn discard_input(input: &mut tokio::sync::mpsc::Receiver<crate::terminal::Input>) {
+    while input.recv().await.is_some() {}
+}
+
+/// A remote PTY owns shell state; only bytes and window sizes cross IPC. An
+/// interrupted transport is retried with backoff and starts a fresh shell.
 pub async fn terminal(
     server: &Server,
     cols: u32,
@@ -266,13 +305,55 @@ pub async fn terminal(
     mut input: tokio::sync::mpsc::Receiver<crate::terminal::Input>,
     output: &tokio::sync::mpsc::Sender<crate::terminal::Event>,
 ) -> Result<()> {
+    use crate::terminal::Event;
+    let mut size = (cols, rows);
+    let mut attempt: u32 = 0;
+    let mut recovery = crate::system_events::subscribe();
+    loop {
+        let started = std::time::Instant::now();
+        match terminal_session(server, &mut size, &mut input, output).await {
+            Ok(TerminalEnd::Exited(exit)) => {
+                output.send(Event::Exit(exit)).await?;
+                return Ok(());
+            }
+            // The local side closed the session; nothing to report.
+            Ok(TerminalEnd::Closed) => return Ok(()),
+            Err(error) if error.is::<ConnectionLost>() || is_transient_connection_error(&error) => {
+                // A session that stayed up is not part of this outage.
+                if started.elapsed() > Duration::from_secs(60) {
+                    attempt = 0;
+                }
+                attempt = attempt.saturating_add(1);
+                output
+                    .send(Event::Reconnecting {
+                        attempt,
+                        message: format!("{error:#}"),
+                    })
+                    .await?;
+                let delay = (2u64.pow(attempt.min(5))).min(30);
+                tokio::select! {
+                    _ = recovery.wait(Duration::from_secs(delay)) => {}
+                    _ = discard_input(&mut input) => return Ok(()),
+                }
+                while input.try_recv().is_ok() {}
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+async fn terminal_session(
+    server: &Server,
+    size: &mut (u32, u32),
+    input: &mut tokio::sync::mpsc::Receiver<crate::terminal::Input>,
+    output: &tokio::sync::mpsc::Sender<crate::terminal::Event>,
+) -> Result<TerminalEnd> {
     use crate::terminal::{Event, Input};
     let connection = Connection::connect(server).await?;
     let mut early_output = Vec::new();
     let channel = tokio::time::timeout(Duration::from_secs(10), async {
         let mut channel = connection.handle.channel_open_session().await?;
         channel
-            .request_pty(true, "xterm-256color", cols, rows, 0, 0, &[])
+            .request_pty(true, "xterm-256color", size.0, size.1, 0, 0, &[])
             .await?;
         terminal_request_reply(&mut channel, "the terminal PTY", &mut early_output).await?;
         channel.request_shell(true).await?;
@@ -281,6 +362,8 @@ pub async fn terminal(
     })
     .await
     .context("Terminal setup timed out")??;
+    // Only input for this shell is forwarded; earlier keystrokes are discarded.
+    while input.try_recv().is_ok() {}
     output.send(Event::Ready).await?;
     for bytes in early_output.chunks(32768) {
         output.send(Event::Data(bytes.to_vec())).await?;
@@ -313,20 +396,50 @@ pub async fn terminal(
                         .await
                         .context("Terminal input timed out")??;
                 }
-                Input::Resize(cols, rows) => writer.window_change(cols, rows, 0, 0).await?,
+                Input::Resize(cols, rows) => {
+                    *size = (cols, rows);
+                    writer.window_change(cols, rows, 0, 0).await?;
+                }
             }
         }
-        Ok::<_, anyhow::Error>(None)
+        Ok::<_, anyhow::Error>(())
     };
-    // Read and write independently, so echoed input cannot deadlock a large paste.
-    let exit = tokio::select! { result = receive => result?, result = send => result? };
-    let lost = connection.handle.is_closed() && exit.is_none();
-    connection.close().await;
-    if lost {
-        bail!("SSH connection lost. Reconnect to start a new shell.");
+    enum Completion {
+        Receive(Result<Option<u32>>),
+        Send(Result<()>),
     }
-    output.send(Event::Exit(exit)).await?;
-    Ok(())
+    // Read and write independently, so echoed input cannot deadlock a large paste.
+    let completion = tokio::select! {
+        result = receive => Completion::Receive(result),
+        result = send => Completion::Send(result),
+    };
+    let mut closed = connection.handle.is_closed();
+    // A disconnect closes channels just before the session task closes its
+    // handle; give the transport a moment to confirm the loss.
+    if !closed
+        && matches!(
+            &completion,
+            Completion::Receive(Ok(None)) | Completion::Send(Err(_))
+        )
+    {
+        closed = tokio::time::timeout(
+            Duration::from_millis(500),
+            connection.disconnected.notified(),
+        )
+        .await
+        .is_ok()
+            || connection.handle.is_closed();
+    }
+    connection.close().await;
+    match completion {
+        // An observed exit status is authoritative, even if the transport
+        // closed right after it. A closed transport without one is a loss.
+        Completion::Receive(Ok(Some(exit))) => Ok(TerminalEnd::Exited(Some(exit))),
+        Completion::Receive(Ok(None)) if !closed => Ok(TerminalEnd::Exited(None)),
+        Completion::Send(Ok(())) => Ok(TerminalEnd::Closed),
+        Completion::Receive(Err(error)) | Completion::Send(Err(error)) if !closed => Err(error),
+        Completion::Receive(_) | Completion::Send(_) => Err(ConnectionLost.into()),
+    }
 }
 
 pub struct Forwarding {
@@ -334,12 +447,14 @@ pub struct Forwarding {
     tasks: JoinSet<()>,
     failure: Arc<Mutex<Option<String>>>,
     health: health::Health,
+    /// Server listeners opened by a remote forward, released on shutdown.
+    exposed: Vec<(String, u32)>,
 }
 impl Forwarding {
     pub async fn start(server: &Server, tunnel: Option<&Tunnel>) -> Result<Self> {
         // Acquire the whole range before connecting; a partial bind rolls back by drop.
         let mut listeners = Vec::new();
-        if let Some(t) = tunnel {
+        if let Some(t) = tunnel.filter(|t| t.direction == Direction::Local) {
             for (local, remote) in t.pairs().map_err(anyhow::Error::msg)? {
                 let listener = TcpListener::bind(("127.0.0.1", local))
                     .await
@@ -380,11 +495,41 @@ impl Forwarding {
                 }
             });
         }
+        let mut exposed = Vec::new();
+        if let Some(t) = tunnel.filter(|t| t.direction == Direction::Remote) {
+            for (local, remote) in t.pairs().map_err(anyhow::Error::msg)? {
+                // Register first: the server may open a channel before replying.
+                connection.forwards.expose(u32::from(remote), local);
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    connection
+                        .handle
+                        .tcpip_forward(t.remote_host.clone(), u32::from(remote)),
+                )
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result.map_err(anyhow::Error::from))
+                .with_context(|| format!("Cannot open port {remote} on the server"))?;
+                exposed.push((t.remote_host.clone(), u32::from(remote)));
+                health
+                    .lock()
+                    .unwrap()
+                    .push(crate::model::DestinationHealth {
+                        local_port: local,
+                        remote_port: remote,
+                        status: crate::model::DestinationStatus::Checking,
+                        message: None,
+                        checked_at: None,
+                    });
+                tasks.spawn(health::monitor_local(local, remote, health.clone()));
+            }
+        }
         Ok(Self {
             connection,
             tasks,
             failure,
             health,
+            exposed,
         })
     }
     pub fn destination_health(&self) -> Vec<crate::model::DestinationHealth> {
@@ -407,6 +552,11 @@ impl Forwarding {
         })
     }
     pub async fn shutdown(mut self) {
+        self.connection.forwards.stop();
+        for (host, port) in std::mem::take(&mut self.exposed) {
+            let cancel = self.connection.handle.cancel_tcpip_forward(host, port);
+            let _ = tokio::time::timeout(Duration::from_secs(1), cancel).await;
+        }
         self.tasks.shutdown().await;
         self.connection.close().await;
     }
@@ -414,6 +564,7 @@ impl Forwarding {
 impl Drop for Forwarding {
     fn drop(&mut self) {
         self.tasks.abort_all();
+        self.connection.forwards.stop();
         let _ = self.connection.transport.0.shutdown(Shutdown::Both);
     }
 }
@@ -444,6 +595,72 @@ mod integration_tests {
     }
     #[tokio::test]
     #[ignore = "Run with scripts/test-ssh.sh"]
+    async fn remote_forward_relays_server_port_to_this_mac() {
+        use crate::model::DestinationStatus;
+        use tokio::io::AsyncWriteExt;
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local = target.local_addr().unwrap().port();
+        // Health probes connect here too, so echo every connection.
+        let echo = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = target.accept().await {
+                tokio::spawn(async move {
+                    let (mut read, mut write) = socket.split();
+                    let _ = tokio::io::copy(&mut read, &mut write).await;
+                });
+            }
+        });
+        let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let exposed = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let s = server();
+        let t = Tunnel {
+            id: Uuid::new_v4(),
+            name: "reverse".into(),
+            server_id: s.id,
+            local_port: local,
+            local_port_end: None,
+            remote_host: "127.0.0.1".into(),
+            remote_port: exposed,
+            remote_port_end: None,
+            auto_connect: false,
+            auto_reconnect: false,
+            direction: Direction::Remote,
+            project: None,
+        };
+        let forwarding = Forwarding::start(&s, Some(&t)).await.unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", exposed)).await.unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut reply = [0; 4];
+        tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut reply))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&reply, b"ping");
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while forwarding.destination_health()[0].status == DestinationStatus::Checking {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let health = forwarding.destination_health();
+        assert_eq!(health[0].status, DestinationStatus::Reachable);
+        assert_eq!(health[0].remote_port, exposed);
+        assert_eq!(health[0].local_port, local);
+        assert!(forwarding.error().is_none());
+        echo.abort();
+        forwarding.shutdown().await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while TcpStream::connect(("127.0.0.1", exposed)).await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("closing the SSH session releases the server listener");
+    }
+    #[tokio::test]
+    #[ignore = "Run with scripts/test-ssh.sh"]
     async fn destination_checks_preserve_transport_and_release_ports() {
         use crate::model::DestinationStatus;
         for (remote, expected) in [
@@ -466,6 +683,8 @@ mod integration_tests {
                 remote_port_end: None,
                 auto_connect: false,
                 auto_reconnect: false,
+                direction: Default::default(),
+                project: None,
             };
             let forwarding = Forwarding::start(&s, Some(&t)).await.unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -598,6 +817,8 @@ mod integration_tests {
             remote_port_end: None,
             auto_connect: false,
             auto_reconnect: false,
+            direction: Default::default(),
+            project: None,
         };
         let peer = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -614,9 +835,21 @@ mod integration_tests {
             .expect("Cancelled handshake must close SSH transport")
             .unwrap();
 
-        let _port = TcpListener::bind(("127.0.0.1", local))
-            .await
-            .expect("Cancelled handshake must release listener");
+        // The port was free when chosen, so a parallel test may briefly hold
+        // it; only a listener that never goes away fails this.
+        let released = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if TcpListener::bind(("127.0.0.1", local)).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            released.is_ok(),
+            "Cancelled handshake must release listener"
+        );
     }
 }
 

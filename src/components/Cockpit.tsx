@@ -1,18 +1,8 @@
-import {
-  lazy,
-  memo,
-  Suspense,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
+import { lazy, memo, Suspense } from "react";
 import { type Server } from "../types";
-import { type Log } from "../domain/cockpit";
 import { OverviewPanel } from "./OverviewPanel";
-import { ContainersPanel } from "./ContainersPanel";
-import { LogsPanel } from "./LogsPanel";
-import { ServicesCollectionPanel } from "./ServicesCollectionPanel";
+import { ServicesPage } from "./services/ServicesPage";
+import { ContainersPage } from "./containers/ContainersPage";
 
 const TerminalPanel = lazy(() => import("./TerminalPanel"));
 
@@ -23,63 +13,22 @@ export const Cockpit = memo(function Cockpit({
   server: Server;
   tab?: string;
 }) {
-  const [log, setLog] = useState<Log | null>(null);
-  const root = useRef<HTMLDivElement>(null);
-  const logOrigin = useRef<{
-    element: HTMLElement | null;
-    scroll: number;
-  } | null>(null);
-  const openLogs = (next: Log, origin: HTMLElement) => {
-    logOrigin.current = {
-      element: origin,
-      scroll:
-        root.current?.closest("[data-slot=workspace-scroll]")?.scrollTop ?? 0,
-    };
-    setLog(next);
-  };
-  useLayoutEffect(() => {
-    const viewport = root.current?.closest("[data-slot=workspace-scroll]");
-    if (log) {
-      root.current
-        ?.querySelector<HTMLElement>('[aria-label="Close logs"]')
-        ?.focus({ preventScroll: true });
-      if (viewport) viewport.scrollTop = 0;
-    } else if (logOrigin.current) {
-      logOrigin.current.element?.focus({ preventScroll: true });
-      if (viewport) viewport.scrollTop = logOrigin.current.scroll;
-      logOrigin.current = null;
-    }
-  }, [log]);
-  useEffect(() => setLog(null), [tab]);
+  // Overview scrolls with the workspace; the others fill the window.
   return (
     <div
       className={
-        tab === "terminal"
-          ? "cockpit flex min-h-0 min-w-0 flex-1 flex-col p-0"
-          : "cockpit"
+        tab === "overview"
+          ? "cockpit"
+          : "cockpit flex min-h-0 min-w-0 flex-1 flex-col p-0"
       }
-      ref={root}
     >
-      {tab === "services" && (
-        <div hidden={!!log}>
-          <ServicesCollectionPanel id={server.id} onLogs={openLogs} />
-        </div>
-      )}
-      {tab === "containers" && (
-        <div hidden={!!log}>
-          <ContainersPanel server={server} onLogs={openLogs} />
-        </div>
-      )}
-      {log ? (
-        <LogsPanel
-          key={`${log.source}:${log.target}`}
-          id={server.id}
-          log={log}
-          close={() => setLog(null)}
-        />
-      ) : tab === "overview" ? (
+      {tab === "overview" ? (
         <OverviewPanel id={server.id} />
-      ) : tab === "services" || tab === "containers" ? null : (
+      ) : tab === "services" ? (
+        <ServicesPage id={server.id} />
+      ) : tab === "containers" ? (
+        <ContainersPage id={server.id} />
+      ) : (
         <Suspense
           fallback={
             <p className="text-[12px] leading-[1.65] text-muted-foreground">
@@ -89,14 +38,6 @@ export const Cockpit = memo(function Cockpit({
         >
           <TerminalPanel key={server.id} server={server} />
         </Suspense>
-      )}
-      {tab === "overview" && (
-        <p
-          data-slot="cockpit-footnote"
-          className="mt-[28px] text-[11px] leading-[1.6] text-muted-foreground"
-        >
-          Monitoring is read-only. No agent is installed on the server.
-        </p>
       )}
     </div>
   );

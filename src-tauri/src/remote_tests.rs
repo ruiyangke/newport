@@ -13,8 +13,13 @@ use uuid::Uuid;
 
 mod arboard;
 mod boundaries;
+mod compose;
+mod containers;
 mod git;
+mod monitor;
+mod ports;
 mod recovery;
+mod services;
 
 fn server() -> Server {
     serde_json::from_value(serde_json::json!({
@@ -75,6 +80,13 @@ async fn authentication_exec_sftp_and_metrics() {
         .as_str()
         .is_some_and(|name| !name.is_empty()));
     assert!(metrics["cpu"].is_number());
+    // Every online core reports its own usage, keyed by the kernel's id.
+    let cores = metrics["cpus"].as_array().unwrap();
+    assert_eq!(cores.len() as u64, metrics["cores"].as_u64().unwrap());
+    assert!(cores.iter().all(|core| core["id"].is_u64()
+        && core["usage"]
+            .as_f64()
+            .is_some_and(|u| (0.0..=100.0).contains(&u))));
     session.close().await;
     server.identity_file = None;
     server.agent_source = Some("system".into());
@@ -248,6 +260,9 @@ async fn interactive_shell_resize_and_exit() {
                 }
                 Event::Error(error) => panic!("{error}"),
                 Event::Ready => panic!("Duplicate ready event"),
+                Event::Reconnecting { attempt, message } => {
+                    panic!("Unexpected reconnect {attempt}: {message}")
+                }
             }
         }
         let text = String::from_utf8_lossy(&text);

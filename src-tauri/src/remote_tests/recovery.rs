@@ -97,7 +97,7 @@ async fn every_service_automatically_installs_and_repairs_the_agent() {
     );
     session
         .execute(
-            "printf '#!/bin/sh\\necho newport-agent/4\\n' > ~/.local/bin/newport-agent",
+            "printf '#!/bin/sh\\necho newport-agent/4\\n' > ~/.local/bin/.stub && mv -f ~/.local/bin/.stub ~/.local/bin/newport-agent",
             None,
         )
         .await
@@ -326,9 +326,11 @@ async fn agent_upgrade_and_bad_upload_preserve_working_installation() {
     );
     // A managed older-version stub exercises version replacement, without
     // pretending this is compatibility testing against an actual old release.
+    // It is swapped in as the installer does: a running agent (an Overview
+    // monitor, say) keeps the old file busy for in-place writes.
     session
         .execute(
-            "printf '#!/bin/sh\necho newport-agent/4\n' > ~/.local/bin/newport-agent",
+            "printf '#!/bin/sh\necho newport-agent/4\n' > ~/.local/bin/.stub && mv -f ~/.local/bin/.stub ~/.local/bin/newport-agent",
             None,
         )
         .await
@@ -354,13 +356,15 @@ async fn discovery_and_unavailable_capabilities_report_real_server_state() {
     assert!(ports
         .iter()
         .any(|p| p.port == 8080 && p.address == "127.0.0.1"));
-    for section in [
-        crate::cockpit::Section::Services,
-        crate::cockpit::Section::Containers,
-    ] {
-        let error = crate::cockpit::collect(&server, section).await.unwrap_err();
-        assert!(error.contains("Remote command failed"), "{error}");
-    }
+    // No Docker in this fixture: the Containers tab says so in the agreed words.
+    let error = crate::containers::snapshot(&server).await.unwrap_err();
+    assert_eq!(
+        error,
+        "Docker isn't installed or isn't running on this server."
+    );
+    // No systemd in this fixture: the Services tab says so instead of an empty list.
+    let error = crate::services::snapshot(&server).await.unwrap_err();
+    assert!(error.contains("Cannot read system services"), "{error}");
 }
 
 #[tokio::test]

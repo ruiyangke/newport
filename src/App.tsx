@@ -96,7 +96,12 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { displayName, newServer, type Server, type Tunnel } from "./types";
+import {
+  displayName,
+  newServer,
+  type Server,
+  type TunnelEditor,
+} from "./types";
 
 const FilesPanel = lazy(() =>
   import("./components/FilesPanel").then((module) => ({
@@ -117,8 +122,7 @@ const viewItems: { value: WorkspaceView; label: string; icon: LucideIcon }[] = [
 ];
 
 type Editor =
-  | { kind: "server"; value: Server; existing: boolean }
-  | { kind: "tunnel"; value: Tunnel; existing: boolean };
+  { kind: "server"; value: Server; existing: boolean } | TunnelEditor;
 
 export default function App() {
   const sidebar = useSidebar();
@@ -730,17 +734,13 @@ export default function App() {
                           tab={view}
                         />
                       ) : (
-                        <>
-                          <ConnectionsPanel
-                            server={server}
-                            tunnels={tunnels}
-                            runtime={data.runtime}
-                            pending={pending}
-                            act={act}
-                            setEditor={setEditor}
-                            setDeleting={setDeleting}
-                          />
-                        </>
+                        <ConnectionsPanel
+                          server={server}
+                          tunnels={tunnels}
+                          runtime={data.runtime}
+                          setEditor={setEditor}
+                          setDeleting={setDeleting}
+                        />
                       )}
                     </WorkspaceContent>
                   </ServerScopeProvider>
@@ -848,6 +848,7 @@ export default function App() {
         <TunnelForm
           value={editor.value}
           existing={editor.existing}
+          projects={editor.projects}
           onClose={() => setEditor(null)}
           onSave={async (t) => {
             try {

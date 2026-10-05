@@ -14,14 +14,12 @@ export function Table({
   className,
   kind,
   ...props
-}: ComponentProps<typeof BaseTable> & { kind?: "ports" | "history" }) {
+}: ComponentProps<typeof BaseTable> & { kind?: "history" }) {
   return (
     <BaseTable
       data-slot="cockpit-table"
       className={cn(
         "w-full border-separate border-spacing-0 text-[12px]",
-        kind === "ports" &&
-          "[&_td]:align-top [&_td:first-child]:w-[1%] [&_td:first-child]:whitespace-nowrap [&_td:last-child]:w-[1%] [&_td:last-child]:text-right [&_td:last-child]:whitespace-nowrap [&_td:nth-child(2)]:min-w-[160px] [&_td:nth-child(2)]:max-w-[360px] [&_td:nth-child(4)]:whitespace-nowrap [&_td:nth-child(5)]:min-w-[120px]",
         kind === "history" &&
           "[&_td]:whitespace-nowrap [&_td:not(:first-child)]:text-right [&_td:not(:first-child)]:tabular-nums",
         className,

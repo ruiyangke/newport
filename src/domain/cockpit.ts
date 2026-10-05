@@ -5,6 +5,8 @@ export interface Process {
   cpu: number;
   memory: number;
   state: string;
+  /** The command line, when the process has one (kernel threads do not). */
+  command?: string;
 }
 export interface Overview {
   sampledAt?: number;
@@ -17,6 +19,11 @@ export interface Overview {
   uptime: number;
   load: number[];
   cpu: number;
+  /**
+   * Each online core's usage by the kernel's id, with the agent's last minute
+   * (one value per second, oldest first).
+   */
+  cpus?: { id: number; usage: number; history?: number[] }[];
   memoryTotal: number;
   memoryUsed: number;
   swapTotal: number;
@@ -32,16 +39,9 @@ export interface Overview {
   processes: Process[];
   processCount: number;
 }
-export interface Service {
-  name: string;
-  active: string;
-  sub: string;
-  load: string;
-  description: string;
-}
 
 export type Log = {
-  source: "journal" | "service" | "container" | "compose";
+  source: "container" | "compose";
   target: string;
   title: string;
 };

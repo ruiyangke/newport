@@ -209,6 +209,10 @@
   --warning: var(--orange);
   /* Charts, plus the two aliases the chart affordances read. */
   --chart-1: #3478d4;
+  /* Chart series slots, validated as a pair (dataviz validate_palette.js):
+     identity only; status always uses --success/--warning/--danger. */
+  --series-1: #3478d4;
+  --series-2: #eb6834;
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
@@ -258,6 +262,8 @@
   --orange: #dbbc76;
   /* Charts */
   --chart-1: #75b0ff;
+  --series-1: #3987e5;
+  --series-2: #d95926;
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
 }

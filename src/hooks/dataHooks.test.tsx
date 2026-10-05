@@ -133,10 +133,10 @@ it("clears snapshot errors on recovery and ignores late failures", async () => {
 it("retries a hidden initial load for a non-polling collection on visibility", async () => {
   hidden = true;
   api.collect.mockResolvedValue([]);
-  let state!: ReturnType<typeof useCollection<"services">>;
+  let state!: ReturnType<typeof useCollection<"overview">>;
   function Probe() {
     const scope = useRef<HTMLDivElement>(null);
-    state = useCollection("a", "services", false, scope);
+    state = useCollection("a", "overview", false, scope);
     return <div ref={scope} />;
   }
   await act(async () => render(<Probe />));
@@ -155,9 +155,9 @@ it("retries a hidden initial load for a non-polling collection on visibility", a
 it("discards collection responses from an obsolete server", async () => {
   const old = deferred<[]>();
   api.collect.mockReturnValueOnce(old.promise).mockResolvedValueOnce([]);
-  let state!: ReturnType<typeof useCollection<"services">>;
+  let state!: ReturnType<typeof useCollection<"overview">>;
   function Probe({ id }: { id: string }) {
-    state = useCollection(id, "services");
+    state = useCollection(id, "overview");
     return null;
   }
   await act(async () => render(<Probe id="old" />, "old"));
@@ -200,9 +200,9 @@ it("does not commit unchanged snapshot polls and preserves config on runtime upd
 it("supersedes an initial collection read when a mutation requests refresh", async () => {
   const old = deferred<[]>();
   api.collect.mockReturnValueOnce(old.promise).mockResolvedValueOnce([]);
-  let state!: ReturnType<typeof useCollection<"containers">>;
+  let state!: ReturnType<typeof useCollection<"overview">>;
   function Probe() {
-    state = useCollection("a", "containers");
+    state = useCollection("a", "overview");
     return null;
   }
   await act(async () => render(<Probe />));
@@ -224,9 +224,9 @@ it("retains same-endpoint data on remount but never displays it under a changed 
     sub: "running",
   };
   api.collect.mockResolvedValueOnce([service]);
-  let state!: ReturnType<typeof useCollection<"services">>;
+  let state!: ReturnType<typeof useCollection<"overview">>;
   function Probe() {
-    state = useCollection("a", "services");
+    state = useCollection("a", "overview");
     return null;
   }
   await act(async () => render(<Probe />));
@@ -266,9 +266,9 @@ it("pauses snapshot polling while hidden and refreshes on return", async () => {
 
 it("changes the collection cache when only credential revision changes", async () => {
   api.collect.mockResolvedValueOnce([{ name: "old-account.service" }]);
-  let state!: ReturnType<typeof useCollection<"services">>;
+  let state!: ReturnType<typeof useCollection<"overview">>;
   function Probe() {
-    state = useCollection("a", "services");
+    state = useCollection("a", "overview");
     return null;
   }
   await act(async () => render(<Probe />));

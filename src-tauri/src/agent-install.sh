@@ -18,4 +18,7 @@ actual="$(sha256sum "$tmp")"
 chmod 700 "$tmp"
 [ "$("$tmp" --version)" = "newport-agent/6" ] || exit 1
 mv -f "$tmp" "$dir/newport-agent"
-"$dir/newport-agent" install
+# $2=0 deploys only the binary (monitoring); integration adds shims and shell setup.
+if [ "${2:-1}" = 1 ]; then
+    "$dir/newport-agent" install
+fi

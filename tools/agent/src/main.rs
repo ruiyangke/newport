@@ -22,6 +22,11 @@ fn main() {
             {
                 newport_agent::git::serve()
             }
+            Some("monitor")
+                if args.get(2).map(String::as_str) == Some("--stdio") && args.len() == 3 =>
+            {
+                newport_agent::monitor::serve()
+            }
             Some("clipboard") => newport_agent::clipboard::read(&args[2..]),
             Some("open") => newport_agent::browser::open(&args[2..], false),
             Some("env") => newport_agent::environment::print(&args[2..]),
@@ -35,7 +40,7 @@ fn main() {
                 Ok(())
             }
             Some("--help") | None => {
-                println!("Newport agent\n\nCommands: serve, git-rpc --stdio, install, clipboard, open URL, env, display --backend x11|wayland");
+                println!("Newport agent\n\nCommands: serve, git-rpc --stdio, monitor --stdio, install, clipboard, open URL, env, display --backend x11|wayland");
                 Ok(())
             }
             _ => Err(std::io::Error::other("Unknown command; use --help")),

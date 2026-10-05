@@ -13,6 +13,7 @@ use uuid::Uuid;
 pub enum Event {
     Ready,
     Data(Vec<u8>),
+    Reconnecting { attempt: u32, message: String },
     Exit(Option<u32>),
     Error(String),
 }
@@ -231,5 +232,38 @@ mod tests {
         sessions.open(cancelled, server, 80, 24).unwrap();
         sessions.close(cancelled).await;
         assert!(sessions.0.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    #[ignore = "Run with scripts/test-ssh.sh; runs a real Bash PTY in an isolated HOME"]
+    async fn interrupted_terminal_reconnects_with_a_fresh_shell() {
+        let sessions = Sessions::default();
+        let server = fixture();
+        let id = Uuid::new_v4();
+        sessions.open(id, server.clone(), 80, 24).unwrap();
+        until(&sessions, id, "fixture> ").await;
+        // The fixture drops every SSH connection, including this PTY's transport.
+        let _ = ssh::execute(&server, "drop", None).await;
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                match sessions.read(id).await.unwrap() {
+                    Some(Event::Reconnecting { attempt, .. }) => {
+                        assert!(attempt >= 1);
+                        break;
+                    }
+                    Some(Event::Error(error)) => panic!("{error}"),
+                    Some(Event::Exit(code)) => panic!("Unexpected exit {code:?}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        // A fresh shell starts without user action.
+        until(&sessions, id, "fixture> ").await;
+        sessions
+            .send(id, Input::Data(b"printf 'new-shell\\n'\r".to_vec()))
+            .unwrap();
+        until(&sessions, id, "new-shell").await;
+        sessions.close(id).await;
     }
 }

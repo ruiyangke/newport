@@ -44,6 +44,21 @@ pub struct Tunnel {
     pub auto_connect: bool,
     #[serde(default = "yes")]
     pub auto_reconnect: bool,
+    #[serde(default)]
+    pub direction: Direction,
+    /// The project this forward was saved under; the frontend owns its meaning.
+    #[serde(default)]
+    pub project: Option<String>,
+}
+/// Local forwards a Mac port to the server (ssh -L). Remote exposes a Mac port
+/// on the server (ssh -R): `remote_host` is the server bind address and
+/// `local_port` the target on this Mac's loopback.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Direction {
+    #[default]
+    Local,
+    Remote,
 }
 fn yes() -> bool {
     true
@@ -181,10 +196,14 @@ impl Tunnel {
     /// Validate new/edited forwards without invalidating older saved profiles.
     pub fn validate_unique(&self, saved: &[Tunnel]) -> Result<(), String> {
         self.pairs()?;
-        for other in saved.iter().filter(|t| t.id != self.id) {
+        // Only the same direction competes: a remote forward binds nothing on this Mac.
+        for other in saved
+            .iter()
+            .filter(|t| t.id != self.id && t.direction == self.direction)
+        {
             let local_overlap = self.local_port <= other.local_port_end.unwrap_or(other.local_port)
                 && other.local_port <= self.local_port_end.unwrap_or(self.local_port);
-            if local_overlap {
+            if self.direction == Direction::Local && local_overlap {
                 return Err(format!("Local port range overlaps the saved tunnel '{}'. Edit that tunnel or choose another local port.", other.name));
             }
             let remote_overlap = self.remote_port
@@ -194,7 +213,10 @@ impl Tunnel {
                 && forwarding_host(&self.remote_host) == forwarding_host(&other.remote_host)
                 && remote_overlap
             {
-                return Err(format!("This remote port is already forwarded by '{}'. Edit the existing tunnel instead.", other.name));
+                return Err(match self.direction {
+                    Direction::Local => format!("This remote port is already forwarded by '{}'. Edit the existing tunnel instead.", other.name),
+                    Direction::Remote => format!("This server port is already exposed by '{}'. Edit that forward or choose another server port.", other.name),
+                });
             }
         }
         Ok(())
@@ -315,6 +337,42 @@ mod tests {
             .is_ok());
         assert_eq!(forwarding_host("0:0:0:0:0:0:0:0"), forwarding_host("::1"));
         assert_ne!(forwarding_host("::1"), forwarding_host("127.0.0.1"));
+    }
+    #[test]
+    fn legacy_tunnels_are_local_without_a_project() {
+        let t = tunnel();
+        assert_eq!(t.direction, Direction::Local);
+        assert_eq!(t.project, None);
+        let json = serde_json::to_value(&t).unwrap();
+        assert_eq!(json["direction"], "local");
+        let remote: Tunnel = serde_json::from_value(serde_json::json!({"id":Uuid::new_v4(),"serverId":t.server_id,"name":"r","localPort":3000,"remotePort":9000,"remoteHost":"127.0.0.1","direction":"remote","project":"/srv/app"})).unwrap();
+        assert_eq!(remote.direction, Direction::Remote);
+        assert_eq!(remote.project.as_deref(), Some("/srv/app"));
+    }
+    #[test]
+    fn directions_only_conflict_with_their_own_kind() {
+        let local = tunnel();
+        let mut remote = local.clone();
+        remote.id = Uuid::new_v4();
+        remote.direction = Direction::Remote;
+        // Same Mac port and same server port, opposite directions: both valid.
+        assert!(remote.validate_unique(std::slice::from_ref(&local)).is_ok());
+        assert!(local.validate_unique(std::slice::from_ref(&remote)).is_ok());
+        let mut other = remote.clone();
+        other.id = Uuid::new_v4();
+        other.local_port = 9999;
+        other.remote_host = "localhost".into();
+        assert!(other
+            .validate_unique(std::slice::from_ref(&remote))
+            .unwrap_err()
+            .contains("already exposed"));
+        // Two remote forwards may target the same Mac port.
+        other.remote_port = 81;
+        other.local_port = remote.local_port;
+        assert!(other.validate_unique(std::slice::from_ref(&remote)).is_ok());
+        other.server_id = Uuid::new_v4();
+        other.remote_port = remote.remote_port;
+        assert!(other.validate_unique(std::slice::from_ref(&remote)).is_ok());
     }
     #[test]
     fn ranges_are_equal_and_bounded() {

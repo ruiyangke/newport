@@ -1,8 +1,25 @@
 import type { FileListing, FilePreview, FileProgress } from "../domain/files";
 import { invoke } from "@tauri-apps/api/core";
 import type { Snapshot, Server, Tunnel, DiscoveredPort } from "../types";
-import type { Overview, Service, Log } from "../domain/cockpit";
-import type { Container } from "../docker";
+import type { Overview } from "../domain/cockpit";
+import type {
+  ActionResult,
+  JournalPage,
+  ServicesSnapshot,
+  ServiceVerb,
+} from "../domain/services";
+import type {
+  ComposeAction,
+  ComposeJob,
+  ComposeProject,
+  ContainerInspect,
+  ContainerLogPage,
+  ContainersSnapshot,
+  ContainerVerb,
+  DockerDisk,
+  ProjectVerb,
+  PruneTarget,
+} from "../domain/containers";
 import type { SavedSample } from "../metricHistory";
 import type {
   GitConnection,
@@ -13,13 +30,12 @@ import type {
 
 export interface CollectionData {
   overview: Overview;
-  services: Service[];
-  containers: Container[];
 }
 export type CollectionSection = keyof CollectionData;
 export type TerminalEvent =
   | { type: "ready" }
   | { type: "data"; data: number[] }
+  | { type: "reconnecting"; data: { attempt: number; message: string } }
   | { type: "exit"; data: number | null }
   | { type: "error"; data: string };
 export interface AgentKey {
@@ -118,18 +134,65 @@ interface Commands {
   reinstall_agent: Command<{ id: string }, void>;
   set_clipboard_enabled: Command<{ id: string; enabled: boolean }, void>;
   cockpit_history: Command<{ id: string; minutes?: number }, SavedSample[]>;
-  cockpit_logs: Command<
-    { id: string; source: Log["source"]; target: string },
-    string
-  >;
-  cockpit_project_action: Command<
+  services_snapshot: Command<{ id: string }, ServicesSnapshot>;
+  service_logs: Command<
     {
       id: string;
-      project: string;
-      action: "start" | "stop" | "restart";
-      expectedIds: string[];
+      unit: string | null;
+      scope: "system" | "user";
+      priority: "err" | "warning" | null;
+      cursor: string | null;
+      lines: number | null;
     },
-    void
+    JournalPage
+  >;
+  service_unit_file: Command<
+    { id: string; unit: string; scope: "system" | "user" },
+    { text: string }
+  >;
+  service_action: Command<
+    { id: string; unit: string; scope: "system" | "user"; verb: ServiceVerb },
+    ActionResult
+  >;
+  containers_snapshot: Command<{ id: string }, ContainersSnapshot>;
+  container_inspect: Command<
+    { id: string; container: string },
+    ContainerInspect
+  >;
+  container_logs: Command<
+    {
+      id: string;
+      container: string | null;
+      project: string | null;
+      cursor: string | null;
+      lines: number | null;
+    },
+    ContainerLogPage
+  >;
+  container_action: Command<
+    { id: string; container: string; verb: ContainerVerb },
+    { ok: true }
+  >;
+  project_action: Command<
+    { id: string; project: string; verb: ProjectVerb; expectedIds: string[] },
+    { ok: true }
+  >;
+  containers_remove: Command<
+    { id: string; containers: string[] },
+    { removed: number }
+  >;
+  docker_disk: Command<{ id: string }, DockerDisk>;
+  compose_project: Command<{ id: string; project: string }, ComposeProject>;
+  compose_run: Command<
+    { id: string; project: string; action: ComposeAction },
+    { job: string }
+  >;
+  compose_job: Command<{ id: string; job: string; offset: number }, ComposeJob>;
+  compose_cancel: Command<{ id: string; job: string }, { ok: true }>;
+  compose_jobs: Command<{ id: string }, { jobs: ComposeJob[] }>;
+  docker_prune: Command<
+    { id: string; what: PruneTarget },
+    { removed: number; reclaimed: number }
   >;
   ssh_agent_keys: Command<undefined, { keys: AgentKey[]; warnings: string[] }>;
   terminal_open: Command<
