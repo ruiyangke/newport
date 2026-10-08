@@ -121,7 +121,7 @@ export function PortLinks({
           running
             ? local
               ? `Connect the saved forward and open it`
-              : `Forward to this Mac and open it`
+              : `Forward to this computer and open it`
             : "Start the container to reach this port"
         }
         aria-label={`${local ? "Connect and open" : "Forward and open"} port ${label}`}

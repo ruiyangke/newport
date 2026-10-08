@@ -634,6 +634,15 @@ function BranchPanel({
                       !branch.remote && !branch.current
                         ? (worktrees?.holder?.(branch.name.display) ?? null)
                         : null;
+                    // The Remote section heading already says what remote
+                    // rows are; repeating it on every row is noise.
+                    const status = branch.current
+                      ? "Current branch"
+                      : holder
+                        ? `In worktree ${holder}`
+                        : branch.remote
+                          ? null
+                          : (branch.oid?.hex.slice(0, 8) ?? "Unavailable");
                     return (
                       <ContextMenu key={branch.reference.bytesB64}>
                         <ContextMenuTrigger asChild>
@@ -654,24 +663,34 @@ function BranchPanel({
                             className="min-h-[30px] gap-[8px] rounded-[4px] px-[10px] py-[4px]"
                           >
                             <div className="min-w-0 flex-1">
-                              <strong>{branch.name.display}</strong>
-                              <small>
-                                {branch.current
-                                  ? "Current branch"
-                                  : holder
-                                    ? `In worktree ${holder}`
-                                    : branch.remote
-                                      ? "Remote-tracking branch"
-                                      : (branch.oid?.hex.slice(0, 8) ??
-                                        "Unavailable")}
-                              </small>
-                              {branch.upstream && (
-                                <small
-                                  className="ml-[6px]"
-                                  title={branch.upstream.display}
+                              <div className="flex min-w-0 items-center gap-[6px]">
+                                <strong
+                                  className="truncate"
+                                  title={branch.name.display}
                                 >
-                                  Tracks {shortRef(branch.upstream.display)}
-                                </small>
+                                  {branch.name.display}
+                                </strong>
+                              </div>
+                              {(status || branch.upstream) && (
+                                <div className="mt-[2px] flex min-w-0 items-center gap-[5px] text-[11px] text-muted-foreground">
+                                  {status && (
+                                    <span className="min-w-0 truncate">
+                                      {status}
+                                    </span>
+                                  )}
+                                  {status && branch.upstream && (
+                                    <span aria-hidden="true">·</span>
+                                  )}
+                                  {branch.upstream && (
+                                    <span
+                                      className="flex-none truncate"
+                                      title={branch.upstream.display}
+                                    >
+                                      Tracks{" "}
+                                      {shortRef(branch.upstream.display)}
+                                    </span>
+                                  )}
+                                </div>
                               )}
                             </div>
                           </CommandItem>

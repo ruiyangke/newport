@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assess, disksByFullness, level, loadShare } from "./overviewHealth";
+import { assess, disksByFullness, duration, level, loadShare } from "./overviewHealth";
 import type { Overview } from "./domain/cockpit";
 
 const GiB = 1024 ** 3;
@@ -113,4 +113,13 @@ it("orders disks fullest first", () => {
     }),
   );
   expect(disks.map((d) => d.mount)).toEqual(["/srv", "/", "/boot"]);
+});
+
+it("formats process running times compactly", () => {
+  expect(duration(0)).toBe("0s");
+  expect(duration(45)).toBe("45s");
+  expect(duration(90)).toBe("1m 30s");
+  expect(duration(3600)).toBe("1h 0m");
+  expect(duration(90061)).toBe("1d 1h");
+  expect(duration(-5)).toBe("0s");
 });

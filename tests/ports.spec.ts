@@ -221,7 +221,7 @@ test("forward with options starts from what discovery found", async ({
   ).not.toBeChecked();
 });
 
-test("a reverse forward shares a port on this Mac with the server", async ({
+test("a reverse forward shares a port on this computer with the server", async ({
   page,
 }) => {
   await openPorts(page);
@@ -241,7 +241,7 @@ test("a reverse forward shares a port on this Mac with the server", async ({
   await dialog.getByRole("button", { name: "Save forward" }).click();
 
   const atlas = region(page, "Atlas");
-  await expect(atlas.getByText("From this Mac", { exact: true })).toBeVisible();
+  await expect(atlas.getByText("From this computer", { exact: true })).toBeVisible();
   const receiver = row(page, "Webhook receiver");
   await expect(receiver).toContainText("This Mac's port 4000");
   await expect(receiver).toContainText("server:9400");

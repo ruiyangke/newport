@@ -44,14 +44,12 @@ export function useMetricHistory(
   });
   // The display cache receives live writes; it never owns saved-read status.
   const display = useQuery<MetricSample[]>({ queryKey: key, enabled: false });
-  const destination = scope.destination;
   useEffect(() => {
     if (!live || at === undefined) return;
-    client.setQueryData<MetricSample[]>(
-      ["history", id, destination],
-      (previous = []) => addSample(previous, live, at),
+    client.setQueryData<MetricSample[]>(key, (previous = []) =>
+      addSample(previous, live, at),
     );
-  }, [client, id, destination, live, at]);
+  }, [client, key, live, at]);
   return {
     samples: display.data ?? [],
     error: query.error

@@ -917,3 +917,206 @@ test("checking many agent worktrees never blocks or fails opening the project", 
   await expect(page.getByRole("option")).toHaveCount(31);
   await expect(page.getByRole("option", { name: /agent-29/ })).toBeAttached();
 });
+
+test("a worktree deleted on the server returns the page to the main worktree", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const path = (display: string) => ({ display, bytesB64: btoa(display) });
+    const oid = { algorithm: "sha1", hex: "a".repeat(40) };
+    const head = (branch: string) => ({
+      name: path(`refs/heads/${branch}`),
+      oid,
+      unborn: false,
+      detached: false,
+    });
+    const gone = {
+      code: "REPO_NOT_FOUND",
+      message: "The repository is no longer available.",
+    };
+    // Two checkouts of one project; the test deletes the linked one.
+    const state = { deleted: false, requests: [] as string[] };
+    const checkouts: Record<
+      string,
+      { name: string | null; branch: string; file: string }
+    > = {
+      "/srv/app": { name: null, branch: "main", file: "README.md" },
+      "/srv/app-task": { name: "task", branch: "task", file: "src/task.ts" },
+    };
+    const alive = (p: string) => !(state.deleted && p === "/srv/app-task");
+    Object.assign(window, {
+      goneFixture: state,
+      isTauri: true,
+      __TAURI_INTERNALS__: {
+        metadata: { currentWindow: { label: "main" } },
+        transformCallback: () => 1,
+        invoke: async (cmd: string, args: any) => {
+          if (cmd === "snapshot")
+            return {
+              config: {
+                servers: [
+                  {
+                    id: "server",
+                    name: "Development",
+                    sshUser: "dev",
+                    sshHost: "example.test",
+                    sshPort: 22,
+                    authMethod: "publicKey",
+                  },
+                ],
+                tunnels: [],
+              },
+              runtime: { tunnels: {}, clipboard: {}, health: {} },
+              loadError: null,
+            };
+          if (cmd === "get_sidebar_width") return 200;
+          if (cmd === "git_projects_list")
+            return [
+              {
+                id: "project",
+                serverId: "server",
+                name: "Application",
+                path: path("/srv/app"),
+              },
+            ];
+          if (cmd === "git_pending_operations") return [];
+          if (cmd === "git_connect")
+            return {
+              serverId: "server",
+              info: {
+                capabilities: {
+                  methods: [
+                    "repo.open",
+                    "repo.status",
+                    "repo.history",
+                    "repo.worktrees",
+                    "repo.branches",
+                  ],
+                  actions: ["worktree.prune"],
+                  features: ["worktrees.filter", "worktrees.snapshot_filter"],
+                },
+              },
+            };
+          if (cmd !== "git_request") return;
+          const { method, params } = args.request;
+          state.requests.push(
+            `${method} ${params?.repoId ?? params?.path?.display ?? ""}`.trim(),
+          );
+          const self = (params?.repoId ?? "").replace(/^repo:/, "");
+          if (method === "repo.open") {
+            const p = params.path.display;
+            if (!checkouts[p] || !alive(p)) throw gone;
+            return {
+              repoId: `repo:${p}`,
+              commonRepoId: "common",
+              root: path(p),
+              bare: false,
+              objectFormat: "sha1",
+              head: head(checkouts[p].branch),
+              operationState: "Clean",
+              integration: null,
+              capabilities: { readOnly: false, workingTree: true },
+            };
+          }
+          if (!alive(self)) throw gone;
+          if (method === "repo.status")
+            return {
+              snapshot: `status:${self}`,
+              entries: [
+                {
+                  entryId: `${self}#0`,
+                  path: path(checkouts[self].file),
+                  oldPath: null,
+                  flags: 256,
+                  staged: false,
+                  unstaged: true,
+                  untracked: false,
+                  conflicted: false,
+                  conflict: null,
+                },
+              ],
+              nextCursor: null,
+              metadata: {
+                head: head(checkouts[self].branch),
+                operationState: "Clean",
+                integration: null,
+                ahead: null,
+                behind: null,
+                upstreamRef: null,
+                basis: "stored_refs",
+              },
+            };
+          if (method === "repo.history")
+            return {
+              snapshot: "history",
+              entries: [],
+              nextCursor: null,
+              metadata: { resolvedRevision: oid, truncated: false },
+            };
+          if (method === "repo.worktrees")
+            return {
+              snapshot: `worktrees:${state.deleted}`,
+              entries: Object.entries(checkouts).map(([p, c]) => ({
+                name: c.name ? path(c.name) : null,
+                kind: c.name ? "linked" : "main",
+                state: alive(p) ? "available" : "missing",
+                path: path(p),
+                gitDir: path(
+                  c.name
+                    ? `/srv/app/.git/worktrees/${c.name}`
+                    : "/srv/app/.git",
+                ),
+                current: p === self,
+                head: head(c.branch),
+                locked: false,
+                lockReason: null,
+                prunable: !alive(p),
+              })),
+              nextCursor: null,
+              metadata: { listToken: "token" },
+            };
+          if (method === "repo.branches")
+            return {
+              snapshot: "branches",
+              nextCursor: null,
+              metadata: {},
+              entries: [],
+            };
+          throw new Error(`Unexpected ${method}`);
+        },
+      },
+    });
+  });
+  await page.goto("/");
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.getByRole("tab", { name: "Projects", exact: true }).click();
+  await page.getByRole("button", { name: "Application", exact: true }).click();
+  const picker = (name: string) =>
+    page.getByRole("button", { name: `Worktrees: ${name}`, exact: true });
+  await picker("Main worktree").click();
+  await page.getByRole("option", { name: /task/ }).click();
+  await expect(picker("task")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "src/task.ts", exact: true }),
+  ).toBeVisible();
+
+  // Someone removes the worktree on the server; the next read finds it gone.
+  await page.evaluate(() => ((window as any).goneFixture.deleted = true));
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+
+  await expect(picker("Main worktree")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "README.md", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      /The worktree app-task was removed from the server \(\/srv\/app-task\)/,
+    ),
+  ).toBeVisible();
+  await expect(page.getByText("REPO_NOT_FOUND")).toHaveCount(0);
+  // The picker works again, and offers to clean up the missing registration.
+  await picker("Main worktree").click();
+  await expect(page.getByRole("option", { name: /task/ })).toContainText(
+    /missing/i,
+  );
+});

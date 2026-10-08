@@ -483,7 +483,7 @@ export function PortProjectSection(props: Props) {
             {reverse.length > 0 && (
               <Subheading icon={<Laptop size={12} aria-hidden="true" />}>
                 <span className="font-medium text-foreground/85">
-                  From this Mac
+                  From this computer
                 </span>
                 <span>shared with the server</span>
               </Subheading>

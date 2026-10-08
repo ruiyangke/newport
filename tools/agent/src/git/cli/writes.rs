@@ -478,6 +478,37 @@ fn apply(
             run(repo, args(&["remote", "remove", "--", n]), vec![])?;
             Ok(refresh)
         }
+        Action::ConfigSet {
+            expected_token,
+            fetch_prune,
+            user_name,
+            user_email,
+        } => {
+            if fetch_prune.is_none() && user_name.is_none() && user_email.is_none() {
+                return Err(Error::invalid("No configuration changes."));
+            }
+            refs::configuration_token(repo, expected_token)?;
+            if let Some(prune) = fetch_prune {
+                run(
+                    repo,
+                    args(&[
+                        "config",
+                        "fetch.prune",
+                        if *prune { "true" } else { "false" },
+                    ]),
+                    vec![],
+                )?;
+            }
+            for (key, value) in [("user.name", &user_name), ("user.email", &user_email)] {
+                let Some(value) = value else { continue };
+                text(value)?;
+                if value.starts_with('-') {
+                    return Err(Error::invalid("Git values cannot begin with '-'."));
+                }
+                run(repo, args(&["config", key, value.as_str()]), vec![])?;
+            }
+            Ok(refresh)
+        }
         Action::Fetch {
             remote: n,
             expected_token,

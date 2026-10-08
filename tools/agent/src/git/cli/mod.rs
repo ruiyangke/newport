@@ -99,6 +99,7 @@ pub(super) const ACTIONS: &[&str] = &[
     "remote.rename",
     "remote.set_url",
     "remote.remove",
+    "config.set",
     "fetch",
     "pull.fast_forward",
     "push",

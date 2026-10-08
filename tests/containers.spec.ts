@@ -226,7 +226,7 @@ test("a Compose project starts, stops and tidies up as a whole", async ({
   await expect(detail(page, "atlas project")).toBeVisible();
 });
 
-test("a published port forwards to this Mac and opens", async ({ page }) => {
+test("a published port forwards to this computer and opens", async ({ page }) => {
   await openContainers(page);
   await row(page, "atlas-api-1").click();
   const api = detail(page, "atlas-api-1");

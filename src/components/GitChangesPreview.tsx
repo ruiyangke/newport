@@ -8,6 +8,7 @@ import {
   lazy,
   useCallback,
   useContext,
+  useEffect,
   useRef,
   useMemo,
   useState,
@@ -21,7 +22,7 @@ import {
   type GitStatus,
 } from "../domain/gitResponses";
 import type { GitReadRequest, GitWriteAction } from "../domain/git";
-import { gitQueries } from "../query/git";
+import { gitKeys, gitQueries } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
 import { Button, Select, SelectItem } from "./controls";
 import { Modal } from "./Editors";
@@ -51,6 +52,18 @@ const COMPARISONS: Record<Side, string> = {
   index_to_worktree: "Unstaged changes: working tree compared with the index",
   head_to_worktree: "All changes: working tree compared with HEAD",
 };
+function codeOf(error: unknown) {
+  return error && typeof error === "object" && "code" in error
+    ? String(error.code)
+    : "";
+}
+// The repository moved on since its status was read: the diff belongs to a
+// newer snapshot, which a fresh status brings.
+const STALE = new Set(["STALE_SNAPSHOT", "STALE_ENTRY"]);
+// A repository that changes on every read (a build writing into it) would
+// otherwise refresh forever.
+const AUTO_REFRESHES = 3;
+
 function messageOf(error: unknown) {
   return error && typeof error === "object" && "message" in error
     ? String(error.message)
@@ -167,9 +180,46 @@ export function GitChangesPreview({
     key: string;
     message: string;
   } | null>(null);
+  // A stale diff re-reads the status by itself; the new snapshot re-keys the
+  // diff and it loads again. Only a repository that keeps changing under
+  // every read ends up asking the person.
+  const stale =
+    diff.isError && !diff.isFetching && STALE.has(codeOf(diff.error));
+  const refreshStatus = useCallback(
+    () =>
+      queryClient.invalidateQueries({
+        queryKey: [...gitKeys.repo(scope, repoId), "status"],
+      }),
+    [queryClient, scope, repoId],
+  );
+  // Each stale answer re-reads the status, then the diff: a new snapshot
+  // re-keys it, an unchanged one (the file changed back) reads it again.
+  const attempts = useRef(0);
+  const [gaveUpAt, setGaveUpAt] = useState(0);
+  useEffect(() => {
+    if (diff.isSuccess) attempts.current = 0;
+  }, [diff.isSuccess, diff.dataUpdatedAt]);
+  useEffect(() => {
+    if (!stale) return;
+    if (attempts.current >= AUTO_REFRESHES) {
+      setGaveUpAt(diff.errorUpdatedAt);
+      return;
+    }
+    attempts.current += 1;
+    void refreshStatus().then(() =>
+      queryClient.resetQueries({ queryKey: read.queryKey, exact: true }),
+    );
+    // One attempt per stale answer; the key and client are read as they are.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stale, diff.errorUpdatedAt]);
+  const gaveUp = stale && gaveUpAt === diff.errorUpdatedAt;
   const error =
     (writeError?.key === queryKey ? writeError.message : "") ||
-    (diff.isError && !diff.isFetching ? messageOf(diff.error) : "");
+    (gaveUp
+      ? "This repository keeps changing while its diff is read."
+      : diff.isError && !diff.isFetching && !stale
+        ? messageOf(diff.error)
+        : "");
   async function applySelection(ids: string[], lines?: string[]) {
     if (
       !onAction ||
@@ -322,22 +372,40 @@ export function GitChangesPreview({
       {entry.conflicted ? null : error ? (
         <GitNotice tone="error">
           {error}
-          <Button
-            onClick={() => {
-              setWriteError(null);
-              // Read again from scratch, so the answer that failed to apply
-              // is not on screen while it is reread.
-              void queryClient.resetQueries({
-                queryKey: read.queryKey,
-                exact: true,
-              });
-            }}
-          >
-            Retry diff
-          </Button>
+          {gaveUp ? (
+            <Button
+              onClick={() => {
+                attempts.current = 0;
+                void refreshStatus().then(() =>
+                  queryClient.resetQueries({
+                    queryKey: read.queryKey,
+                    exact: true,
+                  }),
+                );
+              }}
+            >
+              Refresh status
+            </Button>
+          ) : (
+            <Button
+              onClick={() => {
+                setWriteError(null);
+                // Read again from scratch, so the answer that failed to apply
+                // is not on screen while it is reread.
+                void queryClient.resetQueries({
+                  queryKey: read.queryKey,
+                  exact: true,
+                });
+              }}
+            >
+              Retry diff
+            </Button>
+          )}
         </GitNotice>
       ) : !currentDiff ? (
-        <GitEmptyState role="status">Loading diff…</GitEmptyState>
+        <GitEmptyState role="status">
+          {stale ? "The file changed. Reading it again…" : "Loading diff…"}
+        </GitEmptyState>
       ) : (
         <GitDiffView
           key={queryKey}

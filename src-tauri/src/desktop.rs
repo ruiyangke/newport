@@ -27,7 +27,7 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
         ("connections", "Connections"),
         ("services", "Services"),
         ("containers", "Containers"),
-        ("commands", "Commands"),
+        ("terminal", "Terminal"),
         ("files", "Files"),
     ]
     .iter()

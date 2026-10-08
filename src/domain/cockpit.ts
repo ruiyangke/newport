@@ -7,6 +7,8 @@ export interface Process {
   state: string;
   /** The command line, when the process has one (kernel threads do not). */
   command?: string;
+  /** Seconds since the process started; older agents omit it. */
+  elapsed?: number;
 }
 export interface Overview {
   sampledAt?: number;

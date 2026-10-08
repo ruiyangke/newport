@@ -145,7 +145,14 @@ fn hash_file(path: &Path, hash: &mut Sha256, budget: &mut u64) -> Result<(), Err
             hash.update(b"missing");
             return Ok(());
         }
-        Err(e) => return Err(io_error(e)),
+        // One unreadable entry must not fail the whole status: git itself
+        // reports it and moves on. The marker keeps the fingerprint
+        // deterministic, and a permission flap still changes it -- writes
+        // then conflict until refreshed, which is the safe direction.
+        Err(_) => {
+            hash.update(b"unreadable");
+            return Ok(());
+        }
     };
     for value in [u64::from(meta.mode()), meta.len(), meta.dev(), meta.ino()] {
         hash.update(value.to_be_bytes());
@@ -159,17 +166,38 @@ fn hash_file(path: &Path, hash: &mut Sha256, budget: &mut u64) -> Result<(), Err
         hash.update(value.to_be_bytes());
     }
     if meta.file_type().is_symlink() {
-        hash.update(
-            fs::read_link(path)
-                .map_err(io_error)?
-                .as_os_str()
-                .as_bytes(),
-        );
+        match fs::read_link(path) {
+            Ok(target) => hash.update(target.as_os_str().as_bytes()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => hash.update(b"missing"),
+            Err(_) => hash.update(b"unreadable"),
+        }
     } else if meta.is_dir() {
-        let mut children = fs::read_dir(path)
-            .map_err(io_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(io_error)?;
+        let read_dir = match fs::read_dir(path) {
+            Ok(read) => read,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                hash.update(b"missing");
+                return Ok(());
+            }
+            Err(_) => {
+                hash.update(b"unreadable");
+                return Ok(());
+            }
+        };
+        // Collect-then-sort keeps the walk deterministic; entries that
+        // vanish or deny listing mid-scan hash one fixed marker instead of
+        // failing, so their order cannot flap the fingerprint.
+        let mut unreadable = false;
+        let mut children = Vec::new();
+        for entry in read_dir {
+            match entry {
+                Ok(entry) => children.push(entry),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => hash.update(b"missing"),
+                Err(_) => unreadable = true,
+            }
+        }
+        if unreadable {
+            hash.update(b"unreadable");
+        }
         children.sort_by_key(|e| e.file_name());
         for child in children {
             let name = child.file_name();
@@ -194,14 +222,33 @@ fn hash_file(path: &Path, hash: &mut Sha256, budget: &mut u64) -> Result<(), Err
             return Ok(());
         }
         *budget -= meta.len();
-        let mut file = fs::File::open(path).map_err(io_error)?.take(meta.len() + 1);
+        // The file can vanish or lose permission between listing and reading
+        // on a live tree; hash what happened instead of failing the status.
+        let mut file = match fs::File::open(path).map(|file| file.take(meta.len() + 1)) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                hash.update(b"missing");
+                return Ok(());
+            }
+            Err(_) => {
+                hash.update(b"unreadable");
+                return Ok(());
+            }
+        };
         let mut buffer = [0; 8192];
         loop {
-            let n = file.read(&mut buffer).map_err(io_error)?;
-            if n == 0 {
-                break;
+            match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => hash.update(&buffer[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    hash.update(b"missing");
+                    return Ok(());
+                }
+                Err(_) => {
+                    hash.update(b"unreadable");
+                    return Ok(());
+                }
             }
-            hash.update(&buffer[..n]);
         }
     } else {
         return Err(Error::new(

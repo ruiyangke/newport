@@ -18,7 +18,9 @@ export function GitInspectorSection({
   fill?: boolean;
 }) {
   const section = useRef<HTMLElement>(null);
-  const overview = ["Stashes", "Tags", "Worktrees", "Remotes"].includes(title);
+  const overview = ["Stashes", "Tags", "Worktrees", "Remotes", "Repository settings"].includes(
+    title,
+  );
   useEffect(() => {
     section.current?.focus({ preventScroll: true });
   }, []);

@@ -19,7 +19,8 @@ import {
   TableRow,
 } from "./MonitoringTable";
 import { useWorkspaceState } from "../state/workspace";
-import { bytes } from "../overviewHealth";
+import { bytes, duration } from "../overviewHealth";
+import { useScrollGuard } from "../hooks/useScrollGuard";
 import type { Overview, Process } from "../domain/cockpit";
 
 /** Rows shown before "Show all"; the agent sends up to a hundred. */
@@ -121,6 +122,24 @@ function columnsFor(memoryTotal: number) {
         );
       },
     }),
+    column.accessor((p) => p.elapsed ?? -1, {
+      id: "time",
+      header: "Time",
+      sortDescFirst: true,
+      cell: ({ row }) => {
+        const elapsed = row.original.elapsed;
+        return elapsed === undefined ? (
+          <span className="text-muted-foreground">—</span>
+        ) : (
+          <span
+            className="w-[9ch] text-right"
+            title={`${elapsed.toLocaleString()} seconds running`}
+          >
+            {duration(elapsed)}
+          </span>
+        );
+      },
+    }),
   ];
 }
 
@@ -130,6 +149,7 @@ const widths: Record<string, string> = {
   user: "w-[120px] @max-[560px]/overview:hidden",
   cpu: "w-[140px] @max-[560px]/overview:w-[80px]",
   memory: "w-[160px] @max-[560px]/overview:w-[96px]",
+  time: "w-[110px] @max-[560px]/overview:hidden",
 };
 
 /**
@@ -140,6 +160,10 @@ const widths: Record<string, string> = {
 export function ProcessTable({ id, d }: { id: string; d: Overview }) {
   const [filter, setFilter] = useWorkspaceState(id, "overview.filter");
   const [sorting, setSorting] = useWorkspaceState(id, "overview.processSort");
+  // WebKit adjusts the workspace scroller on row replacement with no JS
+  // scroll call involved; capture the offset around the toggle and repair
+  // it right after the commit.
+  const captureScroll = useScrollGuard(sorting);
   const [all, setAll] = useWorkspaceState(id, "overview.processesAll");
   const needle = filter.trim().toLowerCase();
   const data = needle
@@ -200,7 +224,7 @@ export function ProcessTable({ id, d }: { id: string; d: Overview }) {
                       : sorted === "desc"
                         ? ArrowDown
                         : ArrowUpDown;
-                  const numeric = ["cpu", "memory"].includes(header.id);
+                  const numeric = ["cpu", "memory", "time"].includes(header.id);
                   return (
                     <TableHead
                       key={header.id}
@@ -217,7 +241,17 @@ export function ProcessTable({ id, d }: { id: string; d: Overview }) {
                     >
                       <button
                         type="button"
-                        onClick={header.column.getToggleSortingHandler()}
+                        onClick={(event) => {
+                          captureScroll(event.currentTarget);
+                          header.column.getToggleSortingHandler()?.(event);
+                        }}
+                        onMouseDown={(event) => {
+                          // A mouse click must not move focus to the table's
+                          // scroll region: on WebKit the ensuing commit
+                          // scrolls the newly focused region into view.
+                          // Keyboard focus is unaffected.
+                          event.preventDefault();
+                        }}
                         className={cn(
                           "group/sort -mx-[4px] inline-flex items-center gap-[4px] rounded-[4px] px-[4px] outline-none hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring",
                           numeric && "flex-row-reverse",
@@ -248,7 +282,7 @@ export function ProcessTable({ id, d }: { id: string; d: Overview }) {
                 {row.getVisibleCells().map((cell) => (
                   <TableCell
                     key={cell.id}
-                    numeric={["cpu", "memory"].includes(cell.column.id)}
+                    numeric={["cpu", "memory", "time"].includes(cell.column.id)}
                     className={cn(
                       "max-w-none py-[6px] align-middle",
                       widths[cell.column.id],

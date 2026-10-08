@@ -53,6 +53,9 @@ struct Process {
     memory: u64,
     state: String,
     name: String,
+    /// Seconds since the process started; older agents omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    elapsed: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     command: Option<String>,
 }

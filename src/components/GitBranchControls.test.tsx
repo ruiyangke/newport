@@ -416,6 +416,41 @@ const key = (target: Element, init: KeyboardEventInit) =>
     );
   });
 
+it("lays rows out as a truncated name over a muted detail line", async () => {
+  const long = "rewritten/design/egress-ingress-ip-allowlists";
+  const ui = await mountBranches([
+    {
+      ...localBranch("main", "a", true),
+      upstream: gitPath("refs/remotes/origin/main"),
+    } as unknown as BranchEntry,
+    {
+      name: gitPath(long),
+      reference: gitPath(`refs/remotes/origin/${long}`),
+      oid: { algorithm: "sha1", hex: "c".repeat(40) },
+      current: false,
+      remote: true,
+      upstream: null,
+      tracking: null,
+    },
+  ]);
+  try {
+    await ui.openPopover();
+    const main = row("main");
+    expect(main.querySelector("strong")?.textContent).toBe("main");
+    expect(main.textContent).toContain("Current branch");
+    expect(main.textContent).toContain("Tracks origin/main");
+    const remote = row(long);
+    const strong = remote.querySelector("strong")!;
+    expect(strong.textContent).toBe(long);
+    expect(strong.classList.contains("truncate")).toBe(true);
+    expect(strong.getAttribute("title")).toBe(long);
+    // The Remote section heading already says what these rows are.
+    expect(remote.textContent).not.toContain("Remote-tracking branch");
+  } finally {
+    await ui.done();
+  }
+});
+
 it("keeps filter and toolbar keys from checking out the highlighted branch", async () => {
   const ui = await mountBranches();
   try {

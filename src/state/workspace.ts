@@ -1,6 +1,4 @@
-import { createStore, useSelector } from "@tanstack/react-store";
-import { useCallback, type SetStateAction } from "react";
-import { useServerScope } from "../query/keys";
+import { createScopedStore, registerRetain } from "./scoped";
 
 // UI preferences survive navigation, but never enter persistent storage.
 // Query owns remote data; terminal resources have a separate lifecycle.
@@ -47,81 +45,60 @@ export interface WorkspaceState {
   "files.page": number;
   "files.tree": boolean;
 }
-const defaults: WorkspaceState = {
-  "overview.auto": true,
-  "overview.historyMinutes": 5,
-  "overview.filter": "",
-  "overview.processSort": [{ id: "cpu", desc: true }],
-  "overview.processesAll": false,
-  "overview.metric": "cpu",
-  "overview.virtualOpen": false,
-  "containers.query": "",
-  "containers.collapsed": new Set(),
-  "containers.selected": null,
-  "containers.detailTab": "logs",
-  "containers.projectTab": "logs",
-  "containers.logLevel": "all",
-  "containers.live": true,
-  "containers.logQuery": "",
-  "services.query": "",
-  "services.selected": null,
-  "services.systemOpen": false,
-  "services.logLevel": "all",
-  "services.live": true,
-  "services.logQuery": "",
-  "services.detailTab": "logs",
-  "ports.query": "",
-  "ports.filter": "all",
-  "ports.collapsed": new Set(),
-  "ports.otherOpen": null,
-  "ports.view": "projects",
-  "ports.sort": [{ id: "port", desc: false }],
-  "metrics.interface": "",
-  "metrics.samples": false,
-  "files.path": ".",
-  "files.input": "",
-  "files.home": "",
-  "files.query": "",
-  "files.hidden": false,
-  "files.page": 0,
-  "files.tree": true,
-};
-export const workspaceStore = createStore<Record<string, WorkspaceState>>({});
-export function setWorkspaceValue<K extends keyof WorkspaceState>(
-  scope: string,
-  key: K,
-  next: SetStateAction<WorkspaceState[K]>,
-) {
-  workspaceStore.setState((state) => {
-    const page = state[scope] ?? defaults;
-    const previous = page[key];
-    const value = typeof next === "function" ? next(previous) : next;
-    if (Object.is(previous, value)) return state;
-    return { ...state, [scope]: { ...page, [key]: value } };
-  });
+/** Fresh objects every call: one scope's `Set`s must never reach another's. */
+export function getWorkspaceDefaults(): WorkspaceState {
+  return {
+    "overview.auto": true,
+    "overview.historyMinutes": 5,
+    "overview.filter": "",
+    "overview.processSort": [{ id: "cpu", desc: true }],
+    "overview.processesAll": false,
+    "overview.metric": "cpu",
+    "overview.virtualOpen": false,
+    "containers.query": "",
+    "containers.collapsed": new Set(),
+    "containers.selected": null,
+    "containers.detailTab": "logs",
+    "containers.projectTab": "logs",
+    "containers.logLevel": "all",
+    "containers.live": true,
+    "containers.logQuery": "",
+    "services.query": "",
+    "services.selected": null,
+    "services.systemOpen": false,
+    "services.logLevel": "all",
+    "services.live": true,
+    "services.logQuery": "",
+    "services.detailTab": "logs",
+    "ports.query": "",
+    "ports.filter": "all",
+    "ports.collapsed": new Set(),
+    "ports.otherOpen": null,
+    "ports.view": "projects",
+    "ports.sort": [{ id: "port", desc: false }],
+    "metrics.interface": "",
+    "metrics.samples": false,
+    "files.path": ".",
+    "files.input": "",
+    "files.home": "",
+    "files.query": "",
+    "files.hidden": false,
+    "files.page": 0,
+    "files.tree": true,
+  };
 }
-export function useWorkspaceState<K extends keyof WorkspaceState>(
-  id: string,
-  key: K,
-) {
-  const { connection } = useServerScope(id);
-  const value = useSelector(
-    workspaceStore,
-    (state) => (state[connection] ?? defaults)[key],
-  );
-  const set = useCallback(
-    (next: SetStateAction<WorkspaceState[K]>) => {
-      setWorkspaceValue(connection, key, next);
-    },
-    [connection, key],
-  );
-  return [value, set] as const;
-}
-export function retainWorkspaces(valid: Set<string>) {
-  workspaceStore.setState((state) => {
-    if (Object.keys(state).every((key) => valid.has(key))) return state;
-    return Object.fromEntries(
-      Object.entries(state).filter(([key]) => valid.has(key)),
-    );
-  });
-}
+const scoped = createScopedStore<WorkspaceState>({
+  getDefaults: getWorkspaceDefaults,
+  // UI choices are keyed by stable server id: filters, selections and
+  // layouts survive reconnects. Native handles keep the connection key.
+  selectScopeKey: (scope) => scope.id,
+});
+export const workspaceStore = scoped.store;
+export const setWorkspaceValue = scoped.set;
+/** Several fields that must change together, as one update. */
+export const patchWorkspaceValue = scoped.patch;
+export const useWorkspaceState = scoped.useScoped;
+export const retainWorkspaces = scoped.retain;
+
+// Unified retention participant (wired via `retainAll` in App.tsx).
+registerRetain(({ servers }) => scoped.retain(servers));

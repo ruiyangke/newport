@@ -1,6 +1,7 @@
 import { queryOptions, type QueryClient } from "@tanstack/react-query";
 import type {
   GitBranchOptions,
+  GitPath,
   GitStatusFilter,
   GitProject,
   GitWorktreeOptions,
@@ -22,8 +23,10 @@ type Params<M extends keyof GitRepositoryClient> =
  * the page re-read status by hand, and they did not always agree.
  *
  * Repository ids are stateless tokens (docs/git-protocol.md §3a): they name
- * the repository itself, not a slot in one connection, so a cached read stays
- * valid across reconnects.
+ * the repository itself, not a slot in one connection. Mutable reads stay
+ * connection-scoped and refetch on reconnect; content-addressed reads use
+ * `stableRepo` so the cache survives reconnects instead of refetching
+ * identical bytes.
  */
 export function normalizeStatusFilter(
   filter?: GitStatusFilter,
@@ -46,6 +49,22 @@ export const gitKeys = {
   repos: (scope: ServerScope) => [...gitKeys.all(scope), "repo"] as const,
   repo: (scope: ServerScope, repoId: string) =>
     [...gitKeys.repos(scope), repoId] as const,
+  /**
+   * The open checkout's descriptor, by bookmark and checkout path. The
+   * connection-scoped key refetches on reconnect; the selection (which
+   * names it) lives in git state and survives. Writes retire the
+   * repository's reads through the `repo` prefix, never this entry: its
+   * moving parts arrive through their own queries.
+   */
+  opened: (scope: ServerScope, projectId: string, path: GitPath) =>
+    [...gitKeys.all(scope), "opened", projectId, path.bytesB64] as const,
+  /**
+   * Content-addressed reads are fixed by their object id or snapshot, so
+   * they key by stable server id instead of the ephemeral connection and
+   * survive reconnects. Everything else stays connection-scoped.
+   */
+  stableRepo: (scope: ServerScope, repoId: string) =>
+    ["server", scope.id, "git", "repo", repoId] as const,
   status: (scope: ServerScope, repoId: string, filter?: GitStatusFilter) =>
     [
       ...gitKeys.repo(scope, repoId),
@@ -56,7 +75,7 @@ export const gitKeys = {
     [...gitKeys.repo(scope, repoId), "history", revision] as const,
   commit: (scope: ServerScope, repoId: string, commitOid: string) =>
     [
-      ...gitKeys.repo(scope, repoId),
+      ...gitKeys.stableRepo(scope, repoId),
       "commit",
       commitOid.toLowerCase(),
     ] as const,
@@ -88,7 +107,7 @@ export const gitKeys = {
   stashes: (scope: ServerScope, repoId: string, cursor?: string) =>
     [...gitKeys.repo(scope, repoId), "stashes", cursor ?? null] as const,
   tag: (scope: ServerScope, repoId: string, oid: string) =>
-    [...gitKeys.repo(scope, repoId), "tag", oid.toLowerCase()] as const,
+    [...gitKeys.stableRepo(scope, repoId), "tag", oid.toLowerCase()] as const,
   tags: (scope: ServerScope, repoId: string, cursor?: string) =>
     [...gitKeys.repo(scope, repoId), "tags", cursor ?? null] as const,
   worktrees: (
@@ -105,30 +124,30 @@ export const gitKeys = {
     ] as const,
   blobPage: (scope: ServerScope, params: Params<"blobPage">) =>
     [
-      ...gitKeys.repo(scope, params.repoId),
+      ...gitKeys.stableRepo(scope, params.repoId),
       "blob-page",
       { ...params, oid: params.oid.toLowerCase() },
     ] as const,
   blob: (scope: ServerScope, repoId: string, oid: string) =>
-    [...gitKeys.repo(scope, repoId), "blob", oid.toLowerCase()] as const,
+    [...gitKeys.stableRepo(scope, repoId), "blob", oid.toLowerCase()] as const,
   commitFiles: (scope: ServerScope, params: Params<"commitFiles">) =>
-    [...gitKeys.repo(scope, params.repoId), "commit-files", params] as const,
+    [...gitKeys.stableRepo(scope, params.repoId), "commit-files", params] as const,
   diff: (scope: ServerScope, params: Params<"diff">) =>
-    [...gitKeys.repo(scope, params.repoId), "diff", params] as const,
+    [...gitKeys.stableRepo(scope, params.repoId), "diff", params] as const,
   diffPage: (scope: ServerScope, params: Params<"diffPage">) =>
-    [...gitKeys.repo(scope, params.repoId), "diff-page", params] as const,
+    [...gitKeys.stableRepo(scope, params.repoId), "diff-page", params] as const,
   commitDiffPage: (scope: ServerScope, params: Params<"commitDiffPage">) =>
     [
-      ...gitKeys.repo(scope, params.repoId),
+      ...gitKeys.stableRepo(scope, params.repoId),
       "commit-diff-page",
       params,
     ] as const,
   commitDiff: (scope: ServerScope, params: Params<"commitDiff">) =>
-    [...gitKeys.repo(scope, params.repoId), "commit-diff", params] as const,
+    [...gitKeys.stableRepo(scope, params.repoId), "commit-diff", params] as const,
   remoteNames: (scope: ServerScope, params: Params<"remoteNames">) =>
     [...gitKeys.repo(scope, params.repoId), "remote-names", params] as const,
   remoteRefs: (scope: ServerScope, params: Params<"remoteRefs">) =>
-    [...gitKeys.repo(scope, params.repoId), "remote-refs", params] as const,
+    [...gitKeys.stableRepo(scope, params.repoId), "remote-refs", params] as const,
 };
 
 /** The session's repository client, resolved when the read runs. */
@@ -177,6 +196,26 @@ export const gitQueries = {
       queryKey: gitKeys.projects(scope),
       queryFn: ({ signal }) =>
         readIPC(signal, () => gitProjectsFor(scope).list()),
+    }),
+  /**
+   * The open checkout's descriptor for one selection. Opening is a read
+   * (`repo.open` resolves the checkout path to the repository root), so it
+   * rides the query cache: reopening a live selection reuses it, and the
+   * selection itself -- the project plus path in git state -- is never
+   * replaced by a background refresh. The descriptor's moving parts (head,
+   * status) arrive through their own queries; a write patches the cached
+   * head explicitly rather than re-reading this.
+   */
+  opened: (scope: ServerScope, project: GitProject, path: GitPath) =>
+    queryOptions({
+      queryKey: gitKeys.opened(scope, project.id, path),
+      queryFn: ({ signal }) =>
+        readIPC(signal, () =>
+          gitProjectsFor(scope)
+            .open({ ...project, path }, signal)
+            .then((repository) => ({ project, repository })),
+        ),
+      staleTime: Infinity,
     }),
   // Saved outcomes gate every write, so a write never trusts a cached copy:
   // mutations refresh this explicitly before and after they run.
@@ -372,13 +411,21 @@ export const gitQueries = {
  * The content-addressed ones are fixed by their key: re-asking for a diff at a
  * snapshot the write has just replaced would only be refused. And remote refs
  * contact the remote, which Newport does only when the user asks.
+ *
+ * This is the single list. Every `...IMMUTABLE` query's key segment must
+ * appear here -- including the `*-page` variants, which are fixed by the same
+ * object id or snapshot as their whole-object reads. `query/git.test.ts`
+ * locks the two together: add a kind in either place and update both.
  */
-const NEVER_INVALIDATED = new Set([
+const NEVER_INVALIDATED: ReadonlySet<string> = new Set([
   "tag",
   "commit",
   "blob",
+  "blob-page",
   "diff",
+  "diff-page",
   "commit-diff",
+  "commit-diff-page",
   "commit-files",
   "remote-refs",
 ]);

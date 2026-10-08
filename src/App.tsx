@@ -17,23 +17,20 @@ import {
   WorkspaceDetail,
   WorkspaceContent,
 } from "./components/WorkspaceLayout";
-import { retainWorkspaces } from "./state/workspace";
-import { retainGitState } from "./state/git";
-import { retainGitProjects } from "./git/registry";
-import { retainTerminals } from "./terminal/registry";
 import { serverScope } from "./query/keys";
 import { WindowControls } from "./components/WindowControls";
 import appIcon from "../src-tauri/icons/icon.png";
-import { isCancelledError } from "@tanstack/react-query";
 import { ServerScopeProvider } from "./query/keys";
 import { hasOpenDialog } from "./overlays";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { SettingsPanel } from "./components/SettingsPanel";
 import {
   useWorkspaceNavigation,
-  workspaceViews,
   type WorkspaceView,
 } from "./hooks/useWorkspaceNavigation";
+import { useDesktopShortcuts } from "./hooks/useDesktopShortcuts";
+import { useRetention } from "./hooks/useRetention";
+import { useTaskRunner } from "./hooks/useTaskRunner";
 import { IntegrationPanel } from "./components/IntegrationPanel";
 import { ConnectionsPanel } from "./components/ConnectionsPanel";
 import { ProjectsPanel } from "./components/ProjectsPanel";
@@ -67,9 +64,7 @@ import { Cockpit } from "./components/Cockpit";
 import { Modal, ServerForm, TunnelForm } from "./components/Editors";
 import {
   useEffect,
-  useLayoutEffect,
   useState,
-  useRef,
   lazy,
   Suspense,
   type CSSProperties,
@@ -136,49 +131,8 @@ export default function App() {
     };
   }, []);
   const [serverMenuOpen, setServerMenuOpen] = useState(false);
-  const desktopAction = useRef<(action: string) => void>(() => {});
   const packagedDesktop =
     location.protocol === "tauri:" && !navigator.platform.startsWith("Win");
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    if (isTauri())
-      void listen<string>("workspace-action", (event) =>
-        desktopAction.current(event.payload),
-      )
-        .then((stop) => {
-          if (disposed) stop();
-          else unlisten = stop;
-        })
-        .catch(() => {});
-    const keydown = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || packagedDesktop) return;
-      const action =
-        event.key === ","
-          ? "app-settings"
-          : event.key === "n"
-            ? "server-new"
-            : event.shiftKey && event.key.toLowerCase() === "e"
-              ? "server-edit"
-              : event.shiftKey && event.key.toLowerCase() === "t"
-                ? "server-test"
-                : event.shiftKey && event.key.toLowerCase() === "l"
-                  ? "sidebar-toggle"
-                  : /^[1-8]$/.test(event.key)
-                    ? `view-${workspaceViews[Number(event.key) - 1]}`
-                    : "";
-      if (action) {
-        event.preventDefault();
-        desktopAction.current(action);
-      }
-    };
-    window.addEventListener("keydown", keydown);
-    return () => {
-      disposed = true;
-      unlisten?.();
-      window.removeEventListener("keydown", keydown);
-    };
-  }, [packagedDesktop]);
   const live = isTauri();
   const {
     data,
@@ -198,32 +152,16 @@ export default function App() {
   useEffect(() => {
     if (immersive && (settings || view !== "terminal")) setImmersive(false);
   }, [immersive, settings, view]);
-  useEffect(() => {
-    if (!loaded || snapshotError || data.loadError) return;
-    const valid = new Set(
-      data.config.servers.map(
-        (server) =>
-          serverScope(
-            server,
-            data.runtime.connectionRevisions?.[server.id] ?? 0,
-            data.instanceId,
-          ).connection,
-      ),
-    );
-    retainWorkspaces(valid);
-    retainTerminals(valid);
-    // A Git session and the page state that names its repository handles go
-    // together: an id kept past its session would only be refused.
-    retainGitProjects(valid);
-    retainGitState(valid);
-  }, [
+  // Retention fans out through one call; see useRetention for the key
+  // spaces. UI choices survive reconnects, native handles reset with them.
+  useRetention({
     loaded,
     snapshotError,
-    data.loadError,
-    data.config.servers,
-    data.runtime.connectionRevisions,
-    data.instanceId,
-  ]);
+    loadError: data.loadError,
+    servers: data.config.servers,
+    connectionRevisions: data.runtime.connectionRevisions,
+    instanceId: data.instanceId,
+  });
   const [commandOpen, setCommandOpen] = useState(false);
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
@@ -236,44 +174,16 @@ export default function App() {
     return () => window.removeEventListener("keydown", listener);
   }, []);
 
-  const [actionError, setError] = useState("");
-  const error = actionError || snapshotError;
+  // App-level desktop actions; failures stay in this channel, separate
+  // from snapshot failures (see the banner and the delete dialog below).
+  const { act, pending, actionError, clearActionError } =
+    useTaskRunner(refresh);
   const [editor, setEditor] = useState<Editor | null>(null);
-  const inFlight = useRef(new Set<string>());
-  const [pending, setPending] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState<{
     kind: "server" | "tunnel";
     id: string;
     name: string;
   } | null>(null);
-  const act = async (
-    key: string,
-    task: () => Promise<unknown>,
-    message?: string,
-  ) => {
-    if (inFlight.current.has(key)) return;
-    inFlight.current.add(key);
-    setPending((p) => new Set(p).add(key));
-    setError("");
-    try {
-      try {
-        await task();
-      } finally {
-        await refresh();
-      }
-      if (message)
-        toast.success(message, { id: "ssh-verified", duration: 3500 });
-    } catch (e) {
-      if (!isCancelledError(e)) setError(String(e));
-    } finally {
-      inFlight.current.delete(key);
-      setPending((p) => {
-        const next = new Set(p);
-        next.delete(key);
-        return next;
-      });
-    }
-  };
   const server = data.config.servers.find((s) => s.id === selected);
   const tunnels = data.config.tunnels.filter((t) => t.serverId === selected);
   const connected = Object.values(data.runtime.tunnels).filter(
@@ -285,8 +195,9 @@ export default function App() {
   const health = server
     ? (data.runtime.health[server.id] ?? "unknown")
     : "unknown";
-  useLayoutEffect(() => {
-    desktopAction.current = (action) => {
+  const desktopAction = useDesktopShortcuts({
+    packagedDesktop,
+    dispatch: (action) => {
       if (editor || deleting || commandOpen || hasOpenDialog()) return;
       if (action === "app-settings") openSettings();
       else if (action === "sidebar-toggle") sidebar.toggle();
@@ -311,7 +222,7 @@ export default function App() {
           () => desktop("test_connection", { id: selected }),
           "SSH connection verified.",
         );
-    };
+    },
   });
   const openServerMenu = () => setServerMenuOpen(true);
   return (
@@ -353,7 +264,7 @@ export default function App() {
           blocked={blocked}
           onSelect={(id) => {
             selectServer(id);
-            setError("");
+            clearActionError();
           }}
           onAdd={addServer}
         />
@@ -620,17 +531,33 @@ export default function App() {
               {data.loadError}
             </WorkspaceBanner>
           )}
-          {error && (
+          {actionError && (
             <WorkspaceBanner error role="alert">
               <CircleAlert size={16} />
-              <span>{error}</span>
+              <span>{actionError}</span>
               <Button
                 variant="ghost"
                 size="icon"
 
                 aria-label="Dismiss error"
                 onClick={() => {
-                  setError("");
+                  clearActionError();
+                }}
+              >
+                <X size={16} />
+              </Button>
+            </WorkspaceBanner>
+          )}
+          {snapshotError && (
+            <WorkspaceBanner error role="alert">
+              <CircleAlert size={16} />
+              <span>{snapshotError}</span>
+              <Button
+                variant="ghost"
+                size="icon"
+
+                aria-label="Dismiss error"
+                onClick={() => {
                   dismissSnapshotError();
                 }}
               >
@@ -868,9 +795,9 @@ export default function App() {
           onClose={() => setDeleting(null)}
         >
           <EditorBody>
-            {error && (
+            {actionError && (
               <p role="alert" className="text-(--red)">
-                {error}
+                {actionError}
               </p>
             )}
             <p id="delete-description">

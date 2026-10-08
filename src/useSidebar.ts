@@ -11,14 +11,17 @@ export function useSidebar() {
   const [hidden, setHidden] = useState(false);
   const [viewport, setViewport] = useState(window.innerWidth);
   const [changed, setChanged] = useState(false);
-  const edited = useRef(false);
+  // A resize before storage hydration wins over it. This stays a ref --
+  // not state -- because the loader resolves once and must see the
+  // interaction even if it lands mid-flight.
+  const touched = useRef(false);
   const maximum = Math.max(176, Math.min(300, viewport - 440));
   const actual = Math.max(176, Math.min(maximum, width));
   useEffect(() => {
     let active = true;
     void loadSidebarWidth()
       .then((saved) => {
-        if (active && !edited.current) setWidth(saved);
+        if (active && !touched.current) setWidth(saved);
       })
       .catch(() => {
         if (active) toast.error("Could not load sidebar preferences.");
@@ -46,7 +49,7 @@ export function useSidebar() {
     hidden,
     toggle: () => setHidden((v) => !v),
     resize: (next: number) => {
-      edited.current = true;
+      touched.current = true;
       setChanged(true);
       setWidth(Math.max(176, Math.min(maximum, next)));
     },

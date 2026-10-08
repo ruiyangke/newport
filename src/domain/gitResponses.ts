@@ -851,6 +851,26 @@ export function decodeGitRemotes(value: unknown) {
       ssh: "server_agent" as const,
       https: authentication.https as "anonymous" | "server_helpers",
     },
+    // Older agents predate repository settings.
+    configuration:
+      v.configuration === undefined
+        ? undefined
+        : decodeGitConfiguration(v.configuration),
+  };
+}
+/** Repository settings: prune-on-fetch default and commit identity. */
+export function decodeGitConfiguration(value: unknown): {
+  fetchPrune: boolean;
+  userName: string | null;
+  userEmail: string | null;
+  token: string;
+} {
+  const configuration = object(value);
+  return {
+    fetchPrune: flag(configuration.fetchPrune),
+    userName: nullable(configuration.userName, text),
+    userEmail: nullable(configuration.userEmail, text),
+    token: text(configuration.token),
   };
 }
 export function decodeGitRemoteRefs(value: unknown) {

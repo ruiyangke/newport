@@ -228,6 +228,13 @@ export type GitWriteAction =
     }
   | { kind: "remote.set_url"; name: string; url: string; expectedToken: string }
   | { kind: "remote.remove"; name: string; expectedToken: string }
+  | {
+      kind: "config.set";
+      expectedToken: string;
+      fetchPrune?: boolean;
+      userName?: string;
+      userEmail?: string;
+    }
   | { kind: "fetch"; remote: string; expectedToken: string; prune?: boolean }
   | {
       kind: "push";

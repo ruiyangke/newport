@@ -1,11 +1,18 @@
 import { GitInspectorToolbar } from "./GitInspectorPrimitives";
-import { GitError, GitForm, GitField, GitFormActions } from "./GitForm";
+import {
+  GitError,
+  GitForm,
+  GitField,
+  GitFormActions,
+  GitCheckboxField,
+} from "./GitForm";
+import { Checkbox } from "./ui/checkbox";
 import { useEffect, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { MoreHorizontal, Plus, Download, ArrowDownUp } from "lucide-react";
 import { gitPath, type GitWriteAction } from "../domain/git";
 import type { GitRemotes, GitRepository } from "../domain/gitResponses";
-import { gitKeys } from "../query/git";
+import { gitKeys, gitQueries } from "../query/git";
 import { useCurrentServerScope } from "../query/keys";
 import { Button, Input } from "./controls";
 import { GitInspectorSection } from "./GitInspectorSection";
@@ -124,6 +131,19 @@ function RemotesDialog({
   const [url, setUrl] = useState("");
   const selection = useGitRemoteSelection(repoId, storedSelection, setSelected);
   const { selected, remote, loading, error: readError } = selection;
+  // Repository settings ride the remotes listing, which the write flow
+  // refreshes after every action.
+  const remotesQuery = useQuery(gitQueries.remotes(scope, repoId));
+  const configuration = remotesQuery.data?.configuration;
+  const configToken = configuration?.token ?? null;
+  const [authorName, setAuthorName] = useState("");
+  const [authorEmail, setAuthorEmail] = useState("");
+  // Drafts follow the server values, never the other way around: typing
+  // only resets when a refresh reports new values.
+  useEffect(() => {
+    setAuthorName(configuration?.userName ?? "");
+    setAuthorEmail(configuration?.userEmail ?? "");
+  }, [configuration]);
   const seenSnapshot = useRef(snapshot);
   useEffect(() => {
     if (seenSnapshot.current === snapshot) return;
@@ -133,6 +153,9 @@ function RemotesDialog({
     });
     void queryClient.invalidateQueries({
       queryKey: gitKeys.remote(scope, repoId, selected),
+    });
+    void queryClient.invalidateQueries({
+      queryKey: gitKeys.remotes(scope, repoId),
     });
   }, [queryClient, scope, repoId, snapshot, selected]);
   const disabled = busy || loading || !!blockedReason;
@@ -164,7 +187,7 @@ function RemotesDialog({
                 ? "Remove remote"
                 : editor?.kind === "refs"
                   ? "Remote branches and tags"
-                  : "Remotes"
+                  : "Repository settings"
       }
       busy={busy}
       onClose={onClose}
@@ -309,97 +332,139 @@ function RemotesDialog({
                     branches.
                   </p>
                 ) : (
-                  <>
-                    <label className="git-remote-selection grid gap-[6px] text-[12px]">
-                      Remote
-                      <GitRemotePicker
-                        repoId={repoId}
-                        value={selected}
-                        onChange={setSelected}
-                        disabled={busy}
-                      />
-                    </label>
-                    {remote && (
-                      <>
-                        <div className="git-remote-address flex items-center gap-[12px]">
-                          <div className="min-w-0 flex-1">
-                            <span className="text-[11px] font-normal text-muted-foreground">
-                              Fetch URL
-                            </span>
-                            <p className="mt-[4px] wrap-anywhere">
-                              {remote.url ?? "Fetch URL unavailable"}
-                            </p>
-                            {remote.pushUrl && (
-                              <p>Push URL: {remote.pushUrl}</p>
-                            )}
-                          </div>
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button
-                                size="icon"
-                                variant="ghost"
-                                aria-label={`Actions for remote ${remote.name}`}
-                                disabled={busy || loading}
-                              >
-                                <MoreHorizontal size={16} />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end">
-                              <DropdownMenuItem
-                                onSelect={() =>
-                                  setEditor({ kind: "refs", remote })
-                                }
-                              >
-                                Remote branches and tags…
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                disabled={disabled}
-                                onSelect={() => {
-                                  setName(remote.name);
-                                  setEditor({ kind: "rename", remote });
-                                }}
-                              >
-                                Rename…
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                disabled={disabled}
-                                onSelect={() => {
-                                  setUrl("");
-                                  setEditor({ kind: "url", remote });
-                                }}
-                              >
-                                Change URL…
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                disabled={disabled}
-                                onSelect={() =>
-                                  setEditor({ kind: "remove", remote })
-                                }
-                              >
-                                Remove…
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        </div>
-                        <div className="git-remote-fetch flex items-center justify-between gap-[12px]">
-                          <span className="text-[11px] font-normal text-muted-foreground">
-                            Remote references
-                          </span>
+                  <section aria-label="Remotes" className="grid gap-[12px]">
+                    <div className="flex items-end gap-[8px]">
+                      <label className="git-remote-selection grid min-w-0 flex-1 gap-[6px] text-[12px]">
+                        Remote
+                        <GitRemotePicker
+                          repoId={repoId}
+                          value={selected}
+                          onChange={setSelected}
+                          disabled={busy}
+                        />
+                      </label>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
                           <Button
-                            disabled={disabled}
-                            onClick={() =>
-                              void submit({
-                                kind: "fetch",
-                                remote: remote.name,
-                                expectedToken: remote.token,
-                                prune: false,
-                              })
+                            size="icon"
+                            variant="ghost"
+                            aria-label={`Actions for remote ${selected}`}
+                            disabled={busy || loading}
+                          >
+                            <MoreHorizontal size={16} />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem
+                            onSelect={() =>
+                              remote && setEditor({ kind: "refs", remote })
+                            }
+                            disabled={!remote}
+                          >
+                            Remote branches and tags…
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            disabled={disabled || !remote}
+                            onSelect={() => {
+                              if (!remote) return;
+                              setName(remote.name);
+                              setEditor({ kind: "rename", remote });
+                            }}
+                          >
+                            Rename…
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            disabled={disabled || !remote}
+                            onSelect={() => {
+                              if (!remote) return;
+                              setUrl("");
+                              setEditor({ kind: "url", remote });
+                            }}
+                          >
+                            Change URL…
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            disabled={disabled || !remote}
+                            onSelect={() =>
+                              remote &&
+                              setEditor({ kind: "remove", remote })
                             }
                           >
-                            <Download size={13} aria-hidden="true" /> Fetch{" "}
-                            {remote.name}
-                          </Button>
-                        </div>
+                            Remove…
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                    {remote && (
+                      <div className="git-remote-address">
+                        <span className="text-[11px] font-normal text-muted-foreground">
+                          Fetch URL
+                        </span>
+                        <p className="mt-[4px] wrap-anywhere">
+                          {remote.url ?? "Fetch URL unavailable"}
+                        </p>
+                        {remote.pushUrl && <p>Push URL: {remote.pushUrl}</p>}
+                      </div>
+                    )}
+                  </section>
+                )}
+                        {remote && (
+                          <>
+                            <section
+                              aria-label="Fetching"
+                              className="grid gap-[8px]"
+                            >
+                              <span className="text-[12px] font-medium">
+                                Fetching
+                              </span>
+                              {configuration ? (
+                                <>
+                                  <GitCheckboxField compact>
+                                    <Checkbox
+                                      checked={configuration.fetchPrune}
+                                      onCheckedChange={(value) =>
+                                        void onAction({
+                                          kind: "config.set",
+                                          expectedToken: configuration.token,
+                                          fetchPrune: value === true,
+                                        })
+                                      }
+                                      disabled={disabled}
+                                    />
+                                    Prune deleted branches on fetch
+                                  </GitCheckboxField>
+                                  <p>
+                                    Removes remote-tracking branches that no
+                                    longer exist upstream whenever fetching.
+                                  </p>
+                                </>
+                              ) : remotesQuery.isError ? (
+                                <GitError role="alert">
+                                  Repository settings unavailable.{" "}
+                                  <Button
+                                    disabled={busy}
+                                    onClick={() => void remotesQuery.refetch()}
+                                  >
+                                    Retry
+                                  </Button>
+                                </GitError>
+                              ) : null}
+                              <div>
+                                <Button
+                                  disabled={disabled}
+                                  onClick={() =>
+                                    void submit({
+                                      kind: "fetch",
+                                      remote: remote.name,
+                                      expectedToken: remote.token,
+                                    })
+                                  }
+                                >
+                                  <Download size={13} aria-hidden="true" />{" "}
+                                  Fetch {remote.name}
+                                </Button>
+                              </div>
+                            </section>
                         <details className="[&_summary::-webkit-details-marker]:hidden border-t border-border pt-3">
                           <summary className="flex cursor-pointer items-center gap-2 text-[12px] font-medium">
                             <ArrowDownUp size={13} aria-hidden="true" />{" "}
@@ -471,12 +536,85 @@ function RemotesDialog({
                         </details>
                       </>
                     )}
+                    <section
+                      aria-label="Commit identity"
+                      className="grid gap-[8px]"
+                    >
+                      <span className="text-[12px] font-medium">
+                        Commit identity
+                      </span>
+                      {configuration ? (
+                        <>
+                          <div className="grid gap-[8px]">
+                            <GitField>
+                              Name
+                              <Input
+                                value={authorName}
+                                onChange={(event) =>
+                                  setAuthorName(event.target.value)
+                                }
+                                placeholder="Your name"
+                                autoComplete="off"
+                                disabled={disabled}
+                              />
+                            </GitField>
+                            <GitField>
+                              Email
+                              <Input
+                                value={authorEmail}
+                                onChange={(event) =>
+                                  setAuthorEmail(event.target.value)
+                                }
+                                placeholder="you@example.com"
+                                autoComplete="off"
+                                disabled={disabled}
+                              />
+                            </GitField>
+                          </div>
+                          <p>
+                            Signed on commits you create in this repository.
+                          </p>
+                          <div>
+                            <Button
+                              disabled={
+                                disabled ||
+                                !authorName.trim() ||
+                                !authorEmail.trim() ||
+                                (authorName.trim() ===
+                                  (configuration.userName ?? "") &&
+                                  authorEmail.trim() ===
+                                    (configuration.userEmail ?? ""))
+                              }
+                              onClick={() => {
+                                if (!configToken) return;
+                                void onAction({
+                                  kind: "config.set",
+                                  expectedToken: configToken,
+                                  userName: authorName.trim(),
+                                  userEmail: authorEmail.trim(),
+                                });
+                              }}
+                            >
+                              Save identity
+                            </Button>
+                          </div>
+                        </>
+                      ) : remotesQuery.isError ? (
+                        <GitError role="alert">
+                          Repository settings unavailable.{" "}
+                          <Button
+                            disabled={busy}
+                            onClick={() => void remotesQuery.refetch()}
+                          >
+                            Retry
+                          </Button>
+                        </GitError>
+                      ) : null}
+                    </section>
                   </>
                 )}
               </>
             )}
-          </>
-        )}
       </div>
     </GitInspectorSection>
   );

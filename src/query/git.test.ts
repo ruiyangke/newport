@@ -3,6 +3,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { gitKeys, gitQueries, invalidateRepository } from "./git";
 import { gitPath } from "../domain/git";
 import { decodeGitStatus } from "../domain/gitResponses";
+import { gitStore, readGitState, setGitState } from "../state/git";
 
 const projects = vi.hoisted(() => ({
   open: vi.fn(),
@@ -281,4 +282,135 @@ it("separates status searches and invalidates other filters after a guarded writ
   expect(client.getQueryState(all)?.isInvalidated).toBe(true);
   expect(client.getQueryState(other)?.isInvalidated).toBe(true);
   client.clear();
+});
+
+it("never re-reads content-addressed pages after a write", async () => {
+  // Locks `NEVER_INVALIDATED` to the `...IMMUTABLE` queries: every
+  // infinite-stale query under the stable repo prefix must be exempt,
+  // including the `*-page` variants. (Summaries also never go stale but
+  // live outside any repo prefix, so invalidation never reaches them.)
+  const scope = {
+    id: "server",
+    connection: "server:0:",
+    destination: "server",
+  };
+  const oid = "a".repeat(40);
+  const immutable = [
+    gitQueries.commit(scope, "repo", oid),
+    gitQueries.tag(scope, "repo", oid),
+    gitQueries.blob(scope, "repo", oid),
+    gitQueries.blobPage(scope, { repoId: "repo", oid } as never),
+    gitQueries.commitFiles(scope, { repoId: "repo" } as never),
+    gitQueries.diff(scope, { repoId: "repo" } as never),
+    gitQueries.diffPage(scope, { repoId: "repo" } as never),
+    gitQueries.commitDiff(scope, { repoId: "repo" } as never),
+    gitQueries.commitDiffPage(scope, { repoId: "repo" } as never),
+    gitQueries.remoteRefs(scope, { repoId: "repo" } as never),
+  ];
+  const prefixLength = gitKeys.stableRepo(scope, "repo").length;
+  const kinds = new Set<string>();
+  for (const options of immutable) {
+    expect(options.staleTime).toBe(Infinity);
+    expect(options.queryKey.slice(0, prefixLength)).toEqual(
+      gitKeys.stableRepo(scope, "repo"),
+    );
+    kinds.add(String(options.queryKey[prefixLength]));
+  }
+  // A new immutable kind must be added to NEVER_INVALIDATED with the query.
+  expect([...kinds].sort()).toEqual(
+    [
+      "blob",
+      "blob-page",
+      "commit",
+      "commit-diff",
+      "commit-diff-page",
+      "commit-files",
+      "diff",
+      "diff-page",
+      "remote-refs",
+      "tag",
+    ].sort(),
+  );
+  const client = new QueryClient();
+  try {
+    for (const options of immutable)
+      client.setQueryData(options.queryKey, { fixed: true } as never);
+    const status = gitKeys.status(scope, "repo");
+    const history = gitKeys.history(scope, "repo");
+    client.setQueryData(status, { snapshot: "s" });
+    client.setQueryData(history, { entries: [] });
+    await invalidateRepository(client, scope, "repo");
+    for (const options of immutable)
+      expect(client.getQueryState(options.queryKey)?.isInvalidated).toBe(
+        false,
+      );
+    expect(client.getQueryState(status)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(history)?.isInvalidated).toBe(true);
+  } finally {
+    client.clear();
+  }
+});
+
+it("keys the open checkout by selection under the connection", () => {
+  const revision = (connection: string) => ({
+    id: "server",
+    connection,
+    destination: "server",
+  });
+  const path = gitPath("/repo");
+  // A revision bump refetches the descriptor; the selection (which names
+  // it) survives in git state.
+  expect(gitKeys.opened(revision("server:0:"), "p", path)).not.toEqual(
+    gitKeys.opened(revision("server:1:"), "p", path),
+  );
+  expect(gitKeys.opened(revision("server:0:"), "p", path)).not.toEqual(
+    gitKeys.opened(revision("server:0:"), "q", path),
+  );
+  // Outside the repo prefix: a write retires reads, never the descriptor.
+  const scope = revision("server:0:");
+  const prefix = gitKeys.repo(scope, "repo");
+  expect(gitKeys.opened(scope, "p", path).slice(0, prefix.length)).not.toEqual(
+    [...prefix],
+  );
+});
+
+it("resolves the open checkout without touching the selection", async () => {
+  const scope = {
+    id: "server",
+    connection: "server:0:",
+    destination: "server",
+  };
+  const project = {
+    id: "p",
+    serverId: "server",
+    name: "App",
+    path: gitPath("/repo"),
+  };
+  gitStore.setState(() => ({}));
+  const client = new QueryClient();
+  try {
+    setGitState("server", "opened", {
+      project,
+      path: gitPath("/repo"),
+    });
+    const opened = await client.fetchQuery(
+      gitQueries.opened(scope, project, gitPath("/repo")),
+    );
+    expect(opened.project).toBe(project);
+    expect(opened.repository).toEqual({ repoId: "repo" });
+    // A background refresh retires reads; the selection is never replaced.
+    await invalidateRepository(client, scope, "repo");
+    expect(readGitState("server").opened).toEqual({
+      project,
+      path: gitPath("/repo"),
+    });
+    expect(
+      client.getQueryState(
+        gitQueries.opened(scope, project, gitPath("/repo")).queryKey,
+      )?.isInvalidated,
+    ).toBe(false);
+  } finally {
+    client.clear();
+    gitStore.setState(() => ({}));
+  }
 });

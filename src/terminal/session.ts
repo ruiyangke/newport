@@ -45,6 +45,13 @@ type Session = {
   queued: number;
   writes: Promise<void>;
 };
+/**
+ * Poll interval (ms) while a session is backgrounded -- window hidden or
+ * view detached. Idle attached sessions already wait on the native 500 ms
+ * read timeout; backgrounded ones rest here too, so eight idle sessions
+ * cost ~4 IPC/s instead of ~16.
+ */
+export const TERMINAL_BACKGROUND_POLL_MS = 2_000;
 export class TerminalSession {
   readonly state = createStore({
     status: "Disconnected",
@@ -138,6 +145,8 @@ export class TerminalSession {
     this.enableGpu();
     this.observer.observe(host);
     this.resize();
+    // A tab switched into view resumes at full speed immediately.
+    this.wakeRest?.();
     return () => {
       this.observer.unobserve(host);
       this.disableGpu();
@@ -203,6 +212,15 @@ export class TerminalSession {
     if (current)
       void desktop("terminal_close", { session: current.id }).catch(() => {});
     this.patch({ active: false, status: "Disconnected", reconnecting: false });
+    this.wakeRest?.();
+  }
+  /**
+   * A hidden window or a detached view needs no interactive latency. The
+   * native output channel is bounded with a blocking sender, so slowing
+   * the poll only applies backpressure -- output is delayed, never lost.
+   */
+  private backgrounded() {
+    return document.hidden || !this.element.isConnected;
   }
   private failed(current: Session, reason: unknown) {
     if (this.session !== current) return;
@@ -221,6 +239,8 @@ export class TerminalSession {
     await this.output;
   }
   private pendingInput = "";
+  /** Wakes a backgrounded read loop early; attach/disconnect preempt it. */
+  private wakeRest: (() => void) | null = null;
   /**
    * Types text into the shell, without pressing Enter, as soon as it is
    * ready: the reader reviews a handed-over command before running it.
@@ -301,8 +321,9 @@ export class TerminalSession {
           session: current.id,
         });
         if (this.session !== current) return;
-        if (!event) continue;
-        if (event.type === "ready") {
+        if (!event) {
+          // An empty poll rests below when backgrounded, like any iteration.
+        } else if (event.type === "ready") {
           const resumed = current.lost;
           current.lost = false;
           this.patch({
@@ -351,6 +372,22 @@ export class TerminalSession {
             reconnecting: false,
           });
           break;
+        }
+        // A hidden or detached tab needs no interactive latency: rest here
+        // so idle background sessions stop polling at full rate. Exits and
+        // errors leave immediately above; the native output channel is
+        // bounded with a blocking sender, so a slower reader only applies
+        // backpressure -- output is delayed, never lost.
+        if (this.session === current && this.backgrounded()) {
+          await new Promise<void>((resolve) => {
+            const done = () => {
+              if (this.wakeRest === done) this.wakeRest = null;
+              resolve();
+            };
+            this.wakeRest = done;
+            setTimeout(done, TERMINAL_BACKGROUND_POLL_MS);
+          });
+          if (this.session !== current) return;
         }
       }
     } catch (reason) {

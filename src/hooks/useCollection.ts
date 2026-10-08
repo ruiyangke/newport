@@ -1,10 +1,4 @@
-import {
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type RefObject,
-} from "react";
+import { useLayoutEffect, useRef, type RefObject } from "react";
 import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import { collect, type CollectionSection } from "../api/desktop";
 import {
@@ -14,6 +8,7 @@ import {
 import { keys, useServerScope } from "../query/keys";
 import { readIPC, refreshQuery } from "../query/client";
 import { useVisible } from "../query/visibility";
+import { useNow } from "./useNow";
 
 export function useCollection<S extends CollectionSection>(
   id: string,
@@ -22,16 +17,8 @@ export function useCollection<S extends CollectionSection>(
   scope?: RefObject<HTMLElement | null>,
 ) {
   const server = useServerScope(id);
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    const tick = () => setNow(Date.now());
-    const timer = window.setInterval(tick, 5_000);
-    window.addEventListener("focus", tick);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener("focus", tick);
-    };
-  }, []);
+  // Staleness is derived at render time; the shared clock is the only ticker.
+  const now = useNow(5_000);
   const client = useQueryClient();
   const visible = useVisible();
   const scroll = useRef<ReturnType<typeof captureCollectionScroll>>([]);

@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-table";
 import { ArrowDown, ArrowUp, ArrowUpDown, GitBranch } from "lucide-react";
 import { cn } from "../lib/utils";
+import { useScrollGuard } from "../hooks/useScrollGuard";
 import {
   Table,
   TableBody,
@@ -130,7 +131,7 @@ const columns = [
                     <code className="truncate text-[11px]">{branch}</code>
                   </>
                 ) : (
-                  "From this Mac"
+                  "From this computer"
                 )}
               </span>
             )}
@@ -221,6 +222,10 @@ export function PortsTable({
       reverse: direction(tunnel) === "remote",
     })),
   ]);
+  // WebKit adjusts the workspace scroller on row replacement with no JS
+  // scroll call involved; capture the offset around the toggle and repair
+  // it right after the commit.
+  const captureScroll = useScrollGuard(sorting);
   const table = useReactTable({
     data,
     columns,
@@ -277,7 +282,17 @@ export function PortsTable({
                   {sortable ? (
                     <button
                       type="button"
-                      onClick={header.column.getToggleSortingHandler()}
+                      onClick={(event) => {
+                        captureScroll(event.currentTarget);
+                        header.column.getToggleSortingHandler()?.(event);
+                      }}
+                      onMouseDown={(event) => {
+                        // A mouse click must not move focus to the table's
+                        // scroll region: on WebKit the ensuing commit scrolls
+                        // the newly focused region into view. Keyboard focus
+                        // is unaffected.
+                        event.preventDefault();
+                      }}
                       className="group/sort -mx-[4px] inline-flex items-center gap-[4px] rounded-[4px] px-[4px] outline-none hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
                     >
                       {flexRender(

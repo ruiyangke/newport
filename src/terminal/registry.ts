@@ -1,3 +1,4 @@
+import { registerRetain } from "../state/scoped";
 import type { TerminalSession } from "./session";
 
 export type TerminalTab = { id: string; name: string; custom?: string };
@@ -9,23 +10,33 @@ export type TerminalLayout = {
 };
 
 // Keep native resources outside reactive snapshots and out of the initial bundle.
+// Sessions live under the ephemeral connection; tab layouts are UI state and
+// live under the stable server id, so tabs survive reconnects.
 export const terminalResources = new Map<
   string,
   Map<string, TerminalSession>
 >();
 const terminalLayouts = new Map<string, TerminalLayout>();
 
-export function getTerminalLayout(connection: string): TerminalLayout {
-  let layout = terminalLayouts.get(connection);
+export function getTerminalLayout(serverId: string): TerminalLayout {
+  let layout = terminalLayouts.get(serverId);
   if (!layout) {
     const id = crypto.randomUUID();
     layout = { tabs: [{ id, name: "Terminal 1" }], active: id, next: 2 };
-    terminalLayouts.set(connection, layout);
+    terminalLayouts.set(serverId, layout);
   }
-  return layout;
+  // Copy on the boundary: registry state and React state must never alias.
+  // Callers own the returned object and must save it back via
+  // `saveTerminalLayout` (which copies again); mutating a returned layout
+  // in place updates nothing. Layouts are read on mount and kept in React
+  // state afterwards -- there is no subscription.
+  return cloneLayout(layout);
 }
-export function saveTerminalLayout(connection: string, layout: TerminalLayout) {
-  terminalLayouts.set(connection, layout);
+export function saveTerminalLayout(serverId: string, layout: TerminalLayout) {
+  terminalLayouts.set(serverId, cloneLayout(layout));
+}
+function cloneLayout(layout: TerminalLayout): TerminalLayout {
+  return { ...layout, tabs: layout.tabs.map((tab) => ({ ...tab })) };
 }
 /** After closing a tab, activate its right neighbour, else the left one. */
 export function tabAfterClose(
@@ -47,15 +58,31 @@ export function dropTerminalSession(connection: string, tabId: string) {
   sessions?.delete(tabId);
   if (sessions?.size === 0) terminalResources.delete(connection);
 }
-export function retainTerminals(valid: Set<string>) {
+/** Native sessions, keyed by ephemeral connection. */
+export function retainTerminalSessions(valid: Set<string>) {
   for (const [connection, sessions] of terminalResources) {
     if (!valid.has(connection)) {
       for (const session of sessions.values()) session.dispose();
       terminalResources.delete(connection);
     }
   }
-  for (const connection of terminalLayouts.keys()) {
-    if (!valid.has(connection)) terminalLayouts.delete(connection);
+}
+/** Tab layouts, keyed by stable server id. */
+export function retainTerminalLayouts(valid: Set<string>) {
+  for (const serverId of terminalLayouts.keys()) {
+    if (!valid.has(serverId)) terminalLayouts.delete(serverId);
   }
 }
+/**
+ * Legacy single-set entry for tests and full cleanup; production retention
+ * runs through `retainAll`, which supplies each tier its own key space.
+ */
+export function retainTerminals(valid: Set<string>) {
+  retainTerminalSessions(valid);
+  retainTerminalLayouts(valid);
+}
+registerRetain(({ servers, connections }) => {
+  retainTerminalSessions(connections);
+  retainTerminalLayouts(servers);
+});
 if (import.meta.hot) import.meta.hot.dispose(() => retainTerminals(new Set()));

@@ -64,7 +64,7 @@ it("retains only the sessions of valid connections", () => {
   expect([...gitResources.values()]).toEqual([keep]);
 });
 
-it("keeps every repository read under the prefix a write invalidates", () => {
+it("keeps mutable reads under the prefix a write invalidates", () => {
   const s = scope("a");
   const prefix = gitKeys.repo(s, "r1");
   for (const key of [
@@ -75,6 +75,18 @@ it("keeps every repository read under the prefix a write invalidates", () => {
     gitKeys.stashes(s, "r1"),
     gitKeys.tags(s, "r1"),
     gitKeys.worktrees(s, "r1"),
+  ])
+    expect(key.slice(0, prefix.length)).toEqual([...prefix]);
+  // Another repository's reads are not caught by it.
+  expect(gitKeys.status(s, "r2").slice(0, prefix.length)).not.toEqual([
+    ...prefix,
+  ]);
+});
+
+it("keeps content-addressed reads under a stable prefix that survives reconnects", () => {
+  const s = scope("a");
+  const stable = gitKeys.stableRepo(s, "r1");
+  for (const key of [
     gitKeys.blob(s, "r1", "ABC"),
     gitKeys.diff(s, {
       repoId: "r1",
@@ -82,12 +94,21 @@ it("keeps every repository read under the prefix a write invalidates", () => {
       side: "head_to_index",
       path: { display: "a", bytesB64: "YQ==" },
     } as never),
+    gitKeys.remoteRefs(s, {
+      repoId: "r1",
+      remote: "origin",
+      expectedToken: "t",
+    } as never),
   ])
-    expect(key.slice(0, prefix.length)).toEqual([...prefix]);
-  // Another repository's reads are not caught by it.
-  expect(gitKeys.status(s, "r2").slice(0, prefix.length)).not.toEqual([
-    ...prefix,
-  ]);
+    expect(key.slice(0, stable.length)).toEqual([...stable]);
+  // Stable keys never embed the ephemeral connection...
+  expect(stable).not.toContain(s.connection);
+  // ...so a revision bump leaves them untouched while mutable reads move.
+  const bumped = scope("a", "a:1:");
+  expect(gitKeys.blob(bumped, "r1", "ABC")).toEqual(
+    gitKeys.blob(s, "r1", "ABC"),
+  );
+  expect(gitKeys.status(bumped, "r1")).not.toEqual(gitKeys.status(s, "r1"));
 });
 
 it("never refreshes the one read that contacts the remote on its own", () => {
@@ -110,14 +131,14 @@ it("forgets a reset session's repository reads but not its bookmarks", () => {
   expect(client.getQueryData(gitKeys.projects(s))).toEqual([]);
 });
 
-it("keeps page state per connection and prunes it with the session", () => {
+it("keeps page state per server and prunes it when the server is gone", () => {
   setGitState("a", "fileFilter", "src");
   setGitState("a", "favourites", (current) => new Set([...current, "p1"]));
   patchGitState("b", { tab: "history", selectedCommit: "c" });
   expect(readGitState("a").fileFilter).toBe("src");
   expect([...readGitState("a").favourites]).toEqual(["p1"]);
   expect(readGitState("b").tab).toBe("history");
-  // An untouched connection reads the defaults rather than nothing.
+  // An untouched server reads the defaults rather than nothing.
   expect(readGitState("z").tab).toBe("changes");
   retainGitState(new Set(["b"]));
   expect(Object.keys(gitStore.state)).toEqual(["b"]);

@@ -250,7 +250,7 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
             if prepared {
                 self.callbacks.rollback_last();
             }
-            return Err("Could not open the browser on your Mac.".into());
+            return Err("Could not open the browser on your computer.".into());
         }
         Ok(warning.map(|reason| format!("Browser opened without callback forwarding. {reason}")))
     }

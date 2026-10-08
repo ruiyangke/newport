@@ -913,6 +913,168 @@ fn cli_remote_fetch_pull_push_leases_and_tracking() {
     assert_eq!(failed["state"], "failed");
 }
 #[test]
+fn cli_fetch_prune_removes_deleted_tracking_branches() {
+    let source = setup();
+    fs::write(source.path().join("file"), "one").unwrap();
+    git(source.path(), &["add", "file"]);
+    git(source.path(), &["commit", "-qm", "initial"]);
+    let holder = tempfile::tempdir().unwrap();
+    let remote = holder.path().join("remote.git");
+    git(
+        source.path(),
+        &[
+            "clone",
+            "--bare",
+            "-q",
+            source.path().to_str().unwrap(),
+            remote.to_str().unwrap(),
+        ],
+    );
+    let checkout = holder.path().join("checkout");
+    git(
+        source.path(),
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            checkout.to_str().unwrap(),
+        ],
+    );
+    git(&checkout, &["checkout", "-qb", "doomed"]);
+    git(&checkout, &["push", "-q", "origin", "doomed"]);
+    git(&checkout, &["checkout", "-q", "main"]);
+    let home = tempfile::tempdir().unwrap();
+    let mut service = writable(home.path());
+    let id = opened(&mut service, &checkout);
+    let token = request(
+        &mut service,
+        "repo.remote",
+        json!({"repoId":id,"name":"origin"}),
+    )
+    .unwrap()["token"]
+        .clone();
+    let tracking = || {
+        String::from_utf8(git(
+            &checkout,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/remotes/origin/doomed",
+            ],
+        ))
+        .unwrap()
+        .trim()
+        .to_owned()
+    };
+    let fetch = |service: &mut Service, prune: bool| {
+        operation(
+            service,
+            &id,
+            json!({"kind":"fetch","remote":"origin","expectedToken":token,"prune":prune}),
+        )
+    };
+    fetch(&mut service, false);
+    assert_eq!(tracking(), "refs/remotes/origin/doomed");
+    // Deleted directly upstream -- a `push --delete` would also drop the
+    // local tracking ref, so bypass it to model a stale one. A plain fetch
+    // keeps it.
+    git(
+        source.path(),
+        &[
+            "--git-dir",
+            remote.to_str().unwrap(),
+            "branch",
+            "-D",
+            "doomed",
+        ],
+    );
+    fetch(&mut service, false);
+    assert_eq!(tracking(), "refs/remotes/origin/doomed");
+    // A pruning fetch removes it.
+    fetch(&mut service, true);
+    assert_eq!(tracking(), "");
+}
+#[test]
+fn cli_repository_configuration_round_trip() {
+    let dir = setup();
+    fs::write(dir.path().join("file"), "one").unwrap();
+    git(dir.path(), &["add", "file"]);
+    git(dir.path(), &["commit", "-qm", "initial"]);
+    let home = tempfile::tempdir().unwrap();
+    let mut service = writable(home.path());
+    let id = opened(&mut service, dir.path());
+    let configuration = request(&mut service, "repo.remotes", json!({"repoId":id})).unwrap()
+        ["configuration"]
+        .clone();
+    // Seed values come from the fixture repository itself.
+    assert_eq!(configuration["fetchPrune"], false);
+    assert_eq!(configuration["userName"], "Fixture");
+    assert_eq!(configuration["userEmail"], "fixture@example.test");
+    let token = configuration["token"].as_str().unwrap().to_owned();
+    let set = |service: &mut Service, token: &str, params: Value| {
+        let mut params = params;
+        params["expectedToken"] = token.into();
+        operation(service, &id, params)
+    };
+    // A stale token fails instead of racing a concurrent edit.
+    let snapshot =
+        request(&mut service, "repo.status", json!({"repoId":id})).unwrap()["snapshot"].clone();
+    let stale = request(
+        &mut service,
+        "operation.start",
+        json!({"operationId":uuid::Uuid::new_v4().to_string(),"repoId":id,
+            "expectedSnapshot":snapshot,
+            "action":{"kind":"config.set","expectedToken":"stale","fetchPrune":true}}),
+    )
+    .unwrap();
+    assert_eq!(stale["error"]["code"], "STALE_CONFIGURATION");
+    // Empty writes and invalid values are refused, not stored.
+    for params in [
+        json!({"kind":"config.set"}),
+        json!({"kind":"config.set","userName":""}),
+        json!({"kind":"config.set","userEmail":"-x"}),
+    ] {
+        let mut params = params;
+        params["expectedToken"] = token.clone().into();
+        let snapshot =
+            request(&mut service, "repo.status", json!({"repoId":id})).unwrap()["snapshot"].clone();
+        let outcome = request(
+            &mut service,
+            "operation.start",
+            json!({"operationId":uuid::Uuid::new_v4().to_string(),"repoId":id,
+                "expectedSnapshot":snapshot,
+                "action":params}),
+        )
+        .unwrap();
+        assert_eq!(outcome["state"], "failed");
+    }
+    set(
+        &mut service,
+        &token,
+        json!({"kind":"config.set","fetchPrune":true,"userName":"Repo Author","userEmail":"repo@example.test"}),
+    );
+    let configuration = request(&mut service, "repo.remotes", json!({"repoId":id})).unwrap()
+        ["configuration"]
+        .clone();
+    assert_eq!(configuration["fetchPrune"], true);
+    assert_eq!(configuration["userName"], "Repo Author");
+    assert_eq!(configuration["userEmail"], "repo@example.test");
+    assert_ne!(configuration["token"], token);
+    // The old token no longer applies after the write.
+    let token = configuration["token"].as_str().unwrap().to_owned();
+    set(
+        &mut service,
+        &token,
+        json!({"kind":"config.set","fetchPrune":false}),
+    );
+    let configuration = request(&mut service, "repo.remotes", json!({"repoId":id})).unwrap()
+        ["configuration"]
+        .clone();
+    assert_eq!(configuration["fetchPrune"], false);
+    // Untouched values survive a partial write.
+    assert_eq!(configuration["userName"], "Repo Author");
+}
+#[test]
 fn cli_merge_conflict_resolution_continue_and_abort() {
     let dir = setup();
     fs::write(dir.path().join("file"), "base\n").unwrap();
@@ -1119,7 +1281,7 @@ fn cli_capabilities_cover_every_protocol_method() {
     let mut expected = super::super::protocol::METHODS.to_vec();
     expected.sort();
     assert_eq!(methods, expected);
-    assert_eq!(ACTIONS.len(), 44);
+    assert_eq!(ACTIONS.len(), 45);
     check_runtime().unwrap();
 }
 
@@ -1257,4 +1419,35 @@ fn cli_discard_untracked_is_literal_and_preserves_other_files_and_index() {
         fs::read(dir.path().join("directory/keep")).unwrap(),
         b"keep"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_files_do_not_fail_status() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = setup();
+    fs::write(dir.path().join("tracked"), "before\n").unwrap();
+    fs::create_dir(dir.path().join("locked")).unwrap();
+    fs::write(dir.path().join("locked/child"), "x").unwrap();
+    git(dir.path(), &["add", "tracked"]);
+    git(dir.path(), &["commit", "-qm", "initial"]);
+    // Modify after committing so the status walk must open the file, then
+    // revoke everything: the open and the directory listing both fail.
+    fs::write(dir.path().join("tracked"), "after\n").unwrap();
+    let locked = dir.path().join("locked");
+    let tracked = dir.path().join("tracked");
+    fs::set_permissions(&tracked, fs::Permissions::from_mode(0o000)).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let mut cli = Service::default();
+    let path = WirePath::new(dir.path().as_os_str().as_bytes());
+    let opened = request(&mut cli, "repo.open", json!({"path":path})).unwrap();
+    let first = request(&mut cli, "repo.status", json!({"repoId":opened["repoId"]})).unwrap();
+    let second = request(&mut cli, "repo.status", json!({"repoId":opened["repoId"]})).unwrap();
+    // The page renders instead of failing with IO_ERROR, and the
+    // fingerprint is stable across scans. (As root the files stay readable;
+    // the assertions hold on that path too.)
+    assert!(first["entries"].as_array().is_some());
+    assert_eq!(first["snapshot"], second["snapshot"]);
+    fs::set_permissions(&tracked, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
 }

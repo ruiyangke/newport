@@ -24,3 +24,14 @@ export function gitErrorMessage(
   if (message) return code ? `${message} (${code})` : message;
   return code ? `${fallback} (${code})` : fallback;
 }
+
+/** A Git rejection's public code, or "" when it has none. */
+export function gitErrorCode(error: unknown): string {
+  return error &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
+    ? error.code
+    : "";
+}

@@ -6,7 +6,7 @@ struct Setting {
     level: String,
     depth: usize,
 }
-struct Config(BTreeMap<Vec<u8>, Vec<Setting>>);
+pub(super) struct Config(BTreeMap<Vec<u8>, Vec<Setting>>);
 impl Config {
     fn read(repo: &Repo) -> Result<Self, Error> {
         let bytes = repo.run(&[
@@ -125,6 +125,45 @@ pub(super) fn branches(
 pub(super) fn tracking(repo: &Repo, branch: &str) -> Result<Value, Error> {
     Config::read(repo)?.tracking(branch)
 }
+/// Repository-level settings for the settings page: the prune-on-fetch
+/// default and the commit identity, with one token over their effective
+/// values so a concurrent configuration edit fails the write instead of
+/// racing it.
+pub(super) fn configuration(config: &Config) -> Result<Value, Error> {
+    let effective = |key: &str| config.values(key).last().cloned();
+    // git-config boolean semantics; an unrecognized value reads as false.
+    let fetch_prune = effective("fetch.prune").is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_slice(),
+            b"true" | b"yes" | b"on" | b"1"
+        )
+    });
+    let text = |key: &str| {
+        effective(key).and_then(|value| std::str::from_utf8(&value).ok().map(str::to_owned))
+    };
+    let token = pages::hash(&json!({
+        "fetchPrune": config.values("fetch.prune"),
+        "userName": config.values("user.name"),
+        "userEmail": config.values("user.email"),
+    }))?;
+    Ok(json!({
+        "fetchPrune": fetch_prune,
+        "userName": text("user.name"),
+        "userEmail": text("user.email"),
+        "token": token,
+    }))
+}
+/// Re-reads the repository configuration and rejects a write whose token no
+/// longer matches, as remote writes do for their own tokens.
+pub(super) fn configuration_token(repo: &Repo, expected: &str) -> Result<(), Error> {
+    if configuration(&Config::read(repo)?)?["token"] != expected {
+        return Err(Error::new(
+            "STALE_CONFIGURATION",
+            "Repository configuration changed. Refresh before continuing.",
+        ));
+    }
+    Ok(())
+}
 fn display(value: Option<&Vec<u8>>) -> Option<String> {
     super::super::remotes::display_url(value.and_then(|v| std::str::from_utf8(v).ok()))
 }
@@ -164,7 +203,9 @@ pub(super) fn remotes(repo: &Repo) -> Result<Value, Error> {
         .iter()
         .map(|n| describe(&config, n))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(json!({"entries":rows,"authentication":{"ssh":"server_agent","https":"server_helpers"}}))
+    Ok(
+        json!({"entries":rows,"authentication":{"ssh":"server_agent","https":"server_helpers"},"configuration":configuration(&config)?}),
+    )
 }
 pub(super) fn remote_names(
     repo: &Repo,

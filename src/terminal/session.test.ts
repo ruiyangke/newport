@@ -170,6 +170,11 @@ it("a late event from a cancelled session cannot overwrite a new connection", as
       : Promise.resolve(),
   );
   const terminal = getTerminalSession("a", "tab", "a");
+  // A live session is attached in production; the read loop only rests
+  // while detached or hidden.
+  const host = document.createElement("div");
+  document.body.append(host);
+  const detach = terminal.attach(host);
   const first = terminal.connect();
   await vi.waitFor(() => expect(reads).toBe(1));
   terminal.disconnect();
@@ -184,6 +189,8 @@ it("a late event from a cancelled session cannot overwrite a new connection", as
   });
   newRead.resolve({ type: "exit", data: 0 });
   await second;
+  detach();
+  host.remove();
 });
 
 it("does not steal focus when a cancelled setup finishes its resize", async () => {
@@ -225,6 +232,9 @@ it("drains queued output before resetting for a new connection", async () => {
     return Promise.resolve();
   });
   const terminal = getTerminalSession("a", "tab", "a");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const detach = terminal.attach(host);
   vi.mocked(terminal.term.write).mockImplementation((_data, callback) => {
     parsed = callback!;
   });
@@ -237,6 +247,8 @@ it("drains queued output before resetting for a new connection", async () => {
   parsed();
   await Promise.all([first, second]);
   expect(terminal.term.reset).toHaveBeenCalledTimes(2);
+  detach();
+  host.remove();
 });
 it("recovers a dropped transport in place without resetting the buffer", async () => {
   const reads: Array<ReturnType<typeof deferred<unknown>>> = [];
@@ -249,6 +261,9 @@ it("recovers a dropped transport in place without resetting the buffer", async (
     return Promise.resolve();
   });
   const terminal = getTerminalSession("drop", "tab", "drop");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const detach = terminal.attach(host);
   const connecting = terminal.connect();
   await vi.waitFor(() => expect(reads).toHaveLength(1));
   reads[0].resolve({ type: "ready" });
@@ -297,6 +312,8 @@ it("recovers a dropped transport in place without resetting the buffer", async (
   await connecting;
   expect(terminal.state.state.status).toBe("Shell exited · 0");
   expect(terminal.term.reset).toHaveBeenCalledTimes(1);
+  detach();
+  host.remove();
 });
 it("tolerates a write failure that raced a reconnect", async () => {
   const reads: Array<ReturnType<typeof deferred<unknown>>> = [];
@@ -314,6 +331,9 @@ it("tolerates a write failure that raced a reconnect", async () => {
     return Promise.resolve();
   });
   const terminal = getTerminalSession("race", "tab", "race");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const detach = terminal.attach(host);
   const connecting = terminal.connect();
   await vi.waitFor(() => expect(reads).toHaveLength(1));
   reads[0].resolve({ type: "ready" });
@@ -343,6 +363,45 @@ it("tolerates a write failure that raced a reconnect", async () => {
   reads[3].resolve({ type: "exit", data: 0 });
   await connecting;
   expect(terminal.state.state.status).toBe("Shell exited · 0");
+  detach();
+  host.remove();
+});
+it("rests detached reads and resumes at full speed on attach", async () => {
+  vi.useFakeTimers();
+  try {
+    let reads = 0;
+    let release!: (value: unknown) => void;
+    api.desktop.mockImplementation((command) => {
+      if (command !== "terminal_read") return Promise.resolve();
+      reads += 1;
+      if (reads <= 2) return Promise.resolve(null);
+      return new Promise<unknown>((resolve) => {
+        release = resolve;
+      });
+    });
+    const terminal = getTerminalSession("idle", "tab", "idle");
+    // Never attached: empty polls wait out the background interval.
+    const running = terminal.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reads).toBe(1);
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(reads).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(reads).toBe(2);
+    // Attaching preempts the rest: the next read leaves without waiting.
+    const host = document.createElement("div");
+    document.body.append(host);
+    const detach = terminal.attach(host);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reads).toBe(3);
+    release({ type: "exit", data: 0 });
+    await running;
+    expect(terminal.state.state.status).toBe("Shell exited · 0");
+    detach();
+    host.remove();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 it("renders with WebGL while attached and releases the context on detach", async () => {
   const terminal = getTerminalSession("gpu", "tab", "gpu");

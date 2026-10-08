@@ -469,16 +469,16 @@ export function TunnelForm({
               }
             >
               <ToggleGroupItem value="local" className="h-[34px] text-[12px]">
-                Server port → this Mac
+                Server port → this computer
               </ToggleGroupItem>
               <ToggleGroupItem value="remote" className="h-[34px] text-[12px]">
-                This Mac → server port
+                This computer → server port
               </ToggleGroupItem>
             </ToggleGroup>
             <small className="text-[11px]">
               {reverse
-                ? "Reverse forward (ssh -R): the server can reach a service running on this Mac."
-                : "Local forward (ssh -L): reach a service on the server from this Mac."}
+                ? "Reverse forward (ssh -R): the server can reach a service running on this computer."
+                : "Local forward (ssh -L): reach a service on the server from this computer."}
             </small>
           </div>
           <div className="grid grid-cols-[minmax(0,1fr)_18px_minmax(0,1fr)] items-center gap-[12px] [&>svg]:mt-[20px] [&>svg]:text-muted-foreground">

@@ -42,6 +42,17 @@ export const bytes = (n: number) => {
 };
 export const ratio = (used: number, total: number) =>
   total > 0 ? (used / total) * 100 : NaN;
+/** How long a process has run, compact for the table. */
+export function duration(totalSeconds: number) {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  if (days) return `${days}d ${hours % 24}h`;
+  if (hours) return `${hours}h ${minutes % 60}m`;
+  if (minutes) return `${minutes}m ${seconds % 60}s`;
+  return `${seconds}s`;
+}
 /** The 1-minute load as a share of the cores; above 100 means queued work. */
 export const loadShare = (overview: Overview) =>
   overview.cores > 0 ? ((overview.load[0] ?? 0) / overview.cores) * 100 : NaN;

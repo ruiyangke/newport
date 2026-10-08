@@ -10,7 +10,7 @@ use std::{
     io::{self, BufRead, Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const INTERVAL: Duration = Duration::from_secs(1);
@@ -94,6 +94,8 @@ struct Times {
 #[derive(Clone, Debug)]
 struct Task {
     ticks: u64,
+    /// Start time in clock ticks since boot (`/proc/[pid]/stat` field 22).
+    started: u64,
     rss_pages: u64,
     state: String,
     name: String,
@@ -103,6 +105,8 @@ struct Sample {
     at: Instant,
     cpu: Times,
     cores: BTreeMap<u32, Times>,
+    /// Boot wall time (`/proc/stat` btime), for process ages. Zero when unread.
+    boot: u64,
     tasks: HashMap<u32, Task>,
 }
 
@@ -137,19 +141,48 @@ fn parse_task(text: &str) -> Option<Task> {
     let close = text.rfind(')')?;
     let name = text.get(open + 1..close)?.to_owned();
     let fields: Vec<&str> = text.get(close + 1..)?.split_whitespace().collect();
-    // After the name: state is field 3, utime 14, stime 15, rss 24 (1-based).
+    // After the name: state is field 3, utime 14, stime 15, starttime 22,
+    // rss 24 (1-based). A missing starttime only loses the age, never the row.
     let number = |index: usize| fields.get(index - 3)?.parse::<u64>().ok();
     Some(Task {
         state: fields.first()?.to_string(),
         ticks: number(14)? + number(15)?,
+        started: number(22).unwrap_or(0),
         rss_pages: number(24).unwrap_or(0),
         name,
     })
 }
 
+/// Boot wall time (`/proc/stat` btime), so process start ticks resolve to an
+/// age without trusting the client's clock. Zero when unread.
+fn parse_btime(text: &str) -> u64 {
+    text.lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            if fields.next()? != "btime" {
+                return None;
+            }
+            fields.next()?.parse().ok()
+        })
+        .unwrap_or(0)
+}
+
+/// Seconds since the process started, from its start tick and the boot time.
+/// `None` when the age is unknowable (no boot time, no start tick); a
+/// just-started process is `Some(0)`, never confused with unknown.
+fn elapsed_secs(now_epoch: u64, boot_epoch: u64, started_ticks: u64, hz: f64) -> Option<u64> {
+    if boot_epoch == 0 || started_ticks == 0 || hz <= 0.0 {
+        return None;
+    }
+    let start = boot_epoch.saturating_add((started_ticks as f64 / hz) as u64);
+    Some(now_epoch.saturating_sub(start))
+}
+
 impl Source {
     fn sample(&self) -> Sample {
-        let (cpu, cores) = parse_stat(&self.read("proc/stat").unwrap_or_default());
+        let stat = self.read("proc/stat").unwrap_or_default();
+        let (cpu, cores) = parse_stat(&stat);
+        let boot = parse_btime(&stat);
         let mut tasks = HashMap::new();
         if let Ok(entries) = std::fs::read_dir(self.path("proc")) {
             for entry in entries.flatten() {
@@ -175,6 +208,7 @@ impl Source {
             at: Instant::now(),
             cpu,
             cores,
+            boot,
             tasks,
         }
     }
@@ -197,6 +231,9 @@ struct Process {
     memory: u64,
     state: String,
     name: String,
+    /// Seconds since the process started; absent when unknowable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    elapsed: Option<u64>,
     /// The command line, for the few processes sent; kernel threads have none.
     #[serde(skip_serializing_if = "Option::is_none")]
     command: Option<String>,
@@ -332,6 +369,13 @@ fn os_name(text: &str) -> String {
 impl Source {
     /// The Overview contract (see src-tauri/src/monitoring.rs), from two samples.
     fn snapshot(&self, previous: &Sample, latest: &Sample) -> Value {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|age| age.as_secs())
+            .unwrap_or(0);
+        self.snapshot_at(previous, latest, now)
+    }
+    fn snapshot_at(&self, previous: &Sample, latest: &Sample, now_epoch: u64) -> Value {
         let elapsed = latest
             .at
             .duration_since(previous.at)
@@ -384,6 +428,7 @@ impl Source {
                 memory: task.rss_pages * self.page_size,
                 state: task.state.clone(),
                 name: task.name.clone(),
+                elapsed: elapsed_secs(now_epoch, latest.boot, task.started, self.clock_ticks),
                 command: self
                     .read(&format!("proc/{pid}/cmdline"))
                     .and_then(|raw| command_line(&raw)),
@@ -626,6 +671,85 @@ mod tests {
         assert_eq!(parsed.ticks, 30);
         assert_eq!(parsed.rss_pages, 12);
         assert_eq!(parsed.state, "S");
+    }
+
+    #[test]
+    fn task_starttime_is_field_22() {
+        let parsed =
+            parse_task("10 (busy) S 0 0 0 0 0 0 0 0 0 0 40 40 0 0 0 0 0 0 100 0 10").unwrap();
+        assert_eq!(parsed.ticks, 80);
+        assert_eq!(parsed.started, 100);
+        assert_eq!(parsed.rss_pages, 10);
+    }
+
+    #[test]
+    fn btime_comes_from_proc_stat() {
+        assert_eq!(
+            parse_btime("cpu  100 0 0 900 0 0 0 0\nbtime 1700000000\nintr 1\n"),
+            1700000000
+        );
+        assert_eq!(parse_btime("cpu  100 0 0 900 0 0 0 0\n"), 0);
+        assert_eq!(parse_btime("btime not-a-number\n"), 0);
+    }
+
+    #[test]
+    fn elapsed_needs_boot_start_and_rate() {
+        assert_eq!(
+            elapsed_secs(1_700_003_601, 1_700_000_000, 100, 100.0),
+            Some(3600)
+        );
+        // A just-started process is zero, never confused with unknown.
+        assert_eq!(
+            elapsed_secs(1_700_000_001, 1_700_000_000, 100, 100.0),
+            Some(0)
+        );
+        // Clock skew the other way saturates instead of underflowing.
+        assert_eq!(elapsed_secs(100, 1000, 5000, 100.0), Some(0));
+        assert_eq!(elapsed_secs(1_700_003_601, 0, 100, 100.0), None);
+        assert_eq!(elapsed_secs(1_700_003_601, 1_700_000_000, 0, 100.0), None);
+        assert_eq!(elapsed_secs(1_700_003_601, 1_700_000_000, 100, 0.0), None);
+    }
+
+    #[test]
+    fn snapshot_reports_process_ages() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let source = source(root);
+        write(
+            root,
+            "proc/stat",
+            "cpu  100 0 0 900 0 0 0 0\nbtime 1700000000\n",
+        );
+        write(
+            root,
+            "proc/10/stat",
+            "10 (old) S 0 0 0 0 0 0 0 0 0 0 40 40 0 0 0 0 0 0 100 0 10",
+        );
+        let first = source.sample();
+        let second = source.sample();
+        let snapshot = source.snapshot_at(&first, &second, 1_700_003_601);
+        let processes = snapshot["processes"].as_array().unwrap();
+        assert_eq!(processes[0]["name"], "old");
+        // Started one second after boot, read one hour later.
+        assert_eq!(processes[0]["elapsed"], 3600);
+    }
+
+    #[test]
+    fn snapshot_omits_ages_without_a_boot_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let source = source(root);
+        write(root, "proc/stat", "cpu  100 0 0 900 0 0 0 0\n");
+        write(
+            root,
+            "proc/10/stat",
+            "10 (old) S 0 0 0 0 0 0 0 0 0 0 40 40 0 0 0 0 0 0 100 0 10",
+        );
+        let first = source.sample();
+        let second = source.sample();
+        let snapshot = source.snapshot_at(&first, &second, 1_700_003_601);
+        let processes = snapshot["processes"].as_array().unwrap();
+        assert!(processes[0].get("elapsed").is_none());
     }
 
     #[test]

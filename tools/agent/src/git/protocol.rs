@@ -431,6 +431,19 @@ pub enum Action {
         #[serde(rename = "expectedToken")]
         expected_token: String,
     },
+    /// Repository settings: prune-on-fetch default and commit identity.
+    /// Only the provided fields change; at least one is required.
+    #[serde(rename = "config.set")]
+    ConfigSet {
+        #[serde(rename = "expectedToken")]
+        expected_token: String,
+        #[serde(default, rename = "fetchPrune")]
+        fetch_prune: Option<bool>,
+        #[serde(default, rename = "userName")]
+        user_name: Option<String>,
+        #[serde(default, rename = "userEmail")]
+        user_email: Option<String>,
+    },
     Fetch {
         remote: String,
         #[serde(rename = "expectedToken")]

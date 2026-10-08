@@ -61,9 +61,11 @@ export default function TerminalPanel({ server }: { server: Server }) {
     connection: string;
     layout: TerminalLayout;
   } | null>(null);
+  // Tab layouts are UI state keyed by server id, so they survive reconnects;
+  // sessions stay on the connection and remount with it.
   useLayoutEffect(() => {
-    setState({ connection, layout: getTerminalLayout(connection) });
-  }, [connection]);
+    setState({ connection, layout: getTerminalLayout(server.id) });
+  }, [connection, server.id]);
   if (state?.connection !== connection) return null;
   return (
     <TerminalWorkspace
@@ -71,7 +73,7 @@ export default function TerminalPanel({ server }: { server: Server }) {
       connection={connection}
       layout={state.layout}
       update={(layout) => {
-        saveTerminalLayout(connection, layout);
+        saveTerminalLayout(server.id, layout);
         setState({ connection, layout });
       }}
       server={server}
@@ -113,10 +115,12 @@ function TerminalWorkspace({
     if (id !== layout.active) update({ ...layout, active: id });
   };
   // Another page handed over a command: open it in a fresh tab, typed, and
-  // run only when that page asked (never for a password prompt).
+  // run only when that page asked (never for a password prompt). Handovers
+  // queue per server; each pass takes the oldest, and the store update
+  // re-runs the effect while any remain.
   const pending = useSelector(
     pendingTerminalCommands,
-    (state) => state[server.id],
+    (state) => state[server.id]?.[0],
   );
   useEffect(() => {
     if (pending === undefined) return;
@@ -513,7 +517,7 @@ function TerminalView({
     <>
       <div
         data-slot="terminal-bar"
-        className={`flex h-[38px] shrink-0 select-none items-center justify-between gap-[8px] border-b border-border pr-[8px] ${immersive ? "pl-[96px]" : "pl-[8px]"}`}
+        className={`flex h-[38px] shrink-0 select-none items-center justify-between gap-[8px] border-b border-border pr-[8px] ${immersive && !navigator.platform.startsWith("Win") ? "pl-[96px]" : "pl-[8px]"}`}
         {...(immersive ? { "data-tauri-drag-region": true } : {})}
       >
         <TerminalTabs

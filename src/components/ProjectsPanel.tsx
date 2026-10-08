@@ -10,15 +10,19 @@ import {
 } from "./GitForm";
 import { GitCommandLog } from "./GitCommandLog";
 import { useGitPageLoader } from "../hooks/useGitPageLoader";
+import { useNow } from "../hooks/useNow";
 import { GitLoadMore } from "./GitLoadMore";
 import { useEffect, useRef, useState } from "react";
 import {
   isCancelledError,
+  skipToken,
   useIsMutating,
   useMutation,
   useQueries,
   useQuery,
   useQueryClient,
+  type QueryKey,
+  type UseQueryOptions,
 } from "@tanstack/react-query";
 import { useNavigate } from "react-router";
 import {
@@ -48,15 +52,19 @@ import type {
   GitProject,
   GitBootstrapRequest,
 } from "../domain/git";
-import { type GitHistory, type GitStatus } from "../domain/gitResponses";
+import {
+  type GitHistory,
+  type GitRepository,
+  type GitStatus,
+} from "../domain/gitResponses";
 import type { ReactNode } from "react";
 import type { Server } from "../types";
-import { useWorkspaceState } from "../state/workspace";
+import { patchWorkspaceValue } from "../state/workspace";
 import {
   patchGitState,
   readGitState,
+  selectionArrivalPatch,
   useGitState,
-  type GitPageState,
 } from "../state/git";
 import { useServerScope } from "../query/keys";
 import { refreshQuery } from "../query/client";
@@ -106,7 +114,7 @@ import { GitHistoryActions } from "./GitHistoryActions";
 import { GitCommitInspector, relativeTime } from "./GitCommitInspector";
 import { GitChangeList, changeGroups, changeMark } from "./GitChangeList";
 import { GitNotice } from "./GitNotice";
-import { gitErrorMessage } from "../git/errors";
+import { gitErrorCode, gitErrorMessage } from "../git/errors";
 
 function message(error: unknown) {
   return gitErrorMessage(error);
@@ -131,7 +139,11 @@ function headBranch(status: GitStatus) {
   return head.name.display.replace(/^refs\/heads\//, "");
 }
 const EMPTY_PROJECTS: GitProject[] = [];
-type Opened = NonNullable<GitPageState["opened"]>;
+/** The open checkout's descriptor, resolved from the selection by query. */
+export interface Opened {
+  project: GitProject;
+  repository: GitRepository;
+}
 
 export function ProjectsPanel({ server }: { server: Server }) {
   const scope = useServerScope(server.id);
@@ -140,18 +152,34 @@ export function ProjectsPanel({ server }: { server: Server }) {
 
   // What the user chose lives in the Git store and survives navigation; what
   // the server said lives in Query. Dialog drafts stay local to this page.
-  const [opened, setOpened] = useGitState(server.id, "opened");
+  // `selection` names the open checkout (bookmark plus path); the resolved
+  // descriptor below is a query, so background refreshes can never replace
+  // the selection itself.
+  const [selection] = useGitState(server.id, "opened");
+  const openedQuery = useQuery(
+    (selection
+      ? {
+          ...gitQueries.opened(scope, selection.project, selection.path),
+          // A newly chosen checkout resolves behind the previous view,
+          // exactly as opening inside the action did.
+          placeholderData: (previous: Opened | undefined) => previous,
+        }
+      : {
+          queryKey: [...gitKeys.all(scope), "opened"] as const,
+          queryFn: skipToken,
+        }) as UseQueryOptions<Opened, Error, Opened, QueryKey>,
+  );
+  // A failed open keeps the previous view, as a failed action did: the page
+  // shows the last good descriptor with the new error, not an empty page.
+  const lastGood = useRef<Opened | null>(null);
+  if (openedQuery.data && !openedQuery.isPlaceholderData)
+    lastGood.current = openedQuery.data;
+  const opened = openedQuery.data ?? lastGood.current;
   const [tab, setTabState] = useGitState(server.id, "tab");
   const setTab = (next: string) =>
     setTabState(next === "history" ? "history" : "changes");
-  const [selectedEntry, setSelectedEntry] = useGitState(
-    server.id,
-    "selectedEntry",
-  );
-  const [selectedSide, setSelectedSide] = useGitState(
-    server.id,
-    "selectedSide",
-  );
+  const [selectedEntry] = useGitState(server.id, "selectedEntry");
+  const [selectedSide] = useGitState(server.id, "selectedSide");
   const [selectedCommit, setSelectedCommit] = useGitState(
     server.id,
     "selectedCommit",
@@ -173,6 +201,16 @@ export function ProjectsPanel({ server }: { server: Server }) {
     server.id,
     "operationRepositories",
   );
+  // Receipts are acknowledged and forgotten; their repository names leave
+  // with them instead of accumulating until the connection is evicted.
+  function forgetOperationRepository(operationId: string) {
+    setOperationRepositories((previous) => {
+      if (!(operationId in previous)) return previous;
+      const next = { ...previous };
+      delete next[operationId];
+      return next;
+    });
+  }
   const [search, setSearch] = useGitState(server.id, "librarySearch");
   const [libraryFilter, setLibraryFilter] = useGitState(
     server.id,
@@ -269,10 +307,88 @@ export function ProjectsPanel({ server }: { server: Server }) {
     (bare ? historyQuery.dataUpdatedAt : statusQuery.dataUpdatedAt) || null;
   const readFailure =
     projectsQuery.error ??
+    openedQuery.error ??
     (opened ? (bare ? historyQuery.error : statusQuery.error) : null);
+  // The open checkout is gone from the server: its folder was deleted. For a
+  // linked worktree that's routine (`git worktree remove`, or rm -rf), so the
+  // page moves to the project's main worktree by itself and says why; the
+  // worktree picker then lists the missing one for removal. If the project's
+  // own folder is gone, there's nothing to move to.
+  const checkoutGone =
+    !!opened &&
+    gitErrorCode(bare ? historyQuery.error : statusQuery.error) ===
+      "REPO_NOT_FOUND";
+  // Another of the project's worktrees, not the bookmarked checkout itself:
+  // the bookmark's folder is where the page can go back to.
+  const linkedWorktree =
+    !!opened &&
+    opened.repository.root.bytesB64 !== opened.project.path.bytesB64;
+  const [goneWorktree, setGoneWorktree] = useState<{
+    name: string;
+    path: string;
+  } | null>(null);
+  const movedFrom = useRef<string | null>(null);
+  const gonePath = useRef<{ name: string; path: string } | null>(null);
+  // A newly resolved descriptor applies the selection restore exactly once:
+  // coming back to the checkout the selections were made in keeps them,
+  // any other checkout clears them. Refetches keep the same repository id
+  // and must never disturb a selection made meanwhile.
+  const processedSelection = useRef<string | null>(null);
+  useEffect(() => {
+    const data = openedQuery.data;
+    if (!selection || !data || openedQuery.isPlaceholderData) return;
+    const key = `${selection.project.id}:${selection.path.bytesB64}@${data.repository.repoId}`;
+    if (processedSelection.current === key) return;
+    processedSelection.current = key;
+    const checkout = `${selection.project.id}:${data.repository.root.bytesB64}`;
+    patchGitState(server.id, {
+      ...selectionArrivalPatch(
+        readGitState(server.id).selectionProject,
+        checkout,
+        data.repository.bare,
+      ),
+    });
+    if (movedFrom.current) {
+      movedFrom.current = null;
+      const gone = gonePath.current;
+      gonePath.current = null;
+      if (gone) setGoneWorktree(gone);
+    }
+    // Runs once per newly opened checkout; refs carry the rest.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selection, openedQuery.data, openedQuery.isPlaceholderData]);
+  useEffect(() => {
+    if (!checkoutGone || !linkedWorktree || !opened || !selection) return;
+    if (movedFrom.current === repoId) return;
+    movedFrom.current = repoId;
+    const path = opened.repository.root.display;
+    gonePath.current = {
+      name: path.split("/").filter(Boolean).pop() ?? path,
+      path,
+    };
+    // Back to the bookmark; the arrival effect above announces the move
+    // once the main checkout resolves.
+    stopChecks();
+    setGoneWorktree(null);
+    setNewWorktree(false);
+    setWorktreeEdit(undefined);
+    patchGitState(server.id, {
+      opened: { project: selection.project, path: selection.project.path },
+    });
+    // Once per vanished checkout; refs carry the rest.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkoutGone, linkedWorktree, repoId]);
   // A failed read reaches the same places an action's failure does, as it did
   // when reads ran inside actions.
-  const error = actionError || (readFailure ? message(readFailure) : "");
+  const error =
+    actionError ||
+    (checkoutGone && linkedWorktree
+      ? ""
+      : checkoutGone && opened
+        ? `This project’s folder is gone from the server: ${opened.repository.root.display}`
+        : readFailure
+          ? message(readFailure)
+          : "");
 
   const inspectedCommit = history?.entries.find(
     (commit) => commit.oid.hex === selectedCommit,
@@ -310,19 +426,13 @@ export function ProjectsPanel({ server }: { server: Server }) {
   const checkRun = useRef(0);
   const navigate = useNavigate();
   // Files keeps its location in workspace state, so seeding it and navigating
-  // opens the browser exactly where the repository lives.
-  const [, setFilesPath] = useWorkspaceState(server.id, "files.path");
-  const [, setFilesInput] = useWorkspaceState(server.id, "files.input");
+  // opens the browser exactly where the repository lives. One patch: the
+  // path and its input always change together.
   function openInFiles(path: string) {
-    setFilesPath(path);
-    setFilesInput(path);
+    patchWorkspaceValue(server.id, { "files.path": path, "files.input": path });
     void navigate(`/servers/${encodeURIComponent(server.id)}/files`);
   }
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(timer);
-  }, []);
+  const now = useNow(30_000);
 
   /*
    * Every action the user starts runs through here, one at a time, as a Query
@@ -338,8 +448,12 @@ export function ProjectsPanel({ server }: { server: Server }) {
       task(gitProjectsFor(scope)),
   });
   const acting = useIsMutating({ mutationKey: actionKey }) > 0;
+  // The descriptor resolving counts as busy too: until it lands there is no
+  // repository to write to, as while the open ran inside the action.
+  const openedLoading = !!selection && openedQuery.fetchStatus !== "idle";
   const busy =
     acting ||
+    openedLoading ||
     projectsQuery.isPending ||
     (receiptsQuery.isPending && receiptsQuery.fetchStatus !== "idle");
   /** Whether a session is still the one this page's connection is using. */
@@ -408,83 +522,75 @@ export function ProjectsPanel({ server }: { server: Server }) {
     }
   }
   /**
-   * Shows a repository that has just been opened, and reads it before
-   * returning so a failed read reaches the page's error like any action's.
+   * Names the open checkout: a bookmark plus the checkout path. The
+   * descriptor resolves through the `opened` query behind the previous
+   * view, so a failed open leaves the page where it was; the arrival
+   * effect above applies the selection restore once it resolves.
    *
-   * Nothing is released on the way: the agent is stateless and holds no
-   * handle for the repository the page was showing, so there is nothing to
-   * close, and that repository's cached reads stay valid for a return.
+   * Selections belong to one checkout: a project's worktrees share its
+   * bookmark but not its files, so the restore key is the checkout's root
+   * as well (resolved in the arrival effect, which also clears a return
+   * to a file that has since gone by re-resolving its entry id).
    */
-  async function show(selection: Opened) {
+  function selectCheckout(project: GitProject, path: GitPath) {
     stopChecks();
+    setGoneWorktree(null);
     setNewWorktree(false);
     setWorktreeEdit(undefined);
-    // Selections belong to one checkout: a project's worktrees share its
-    // bookmark but not its files, so the key is the checkout's root as well.
-    const checkout = `${selection.project.id}:${selection.repository.root.bytesB64}`;
-    const returning = readGitState(connection).selectionProject === checkout;
-    patchGitState(connection, {
-      opened: selection,
-      actionsPanel: null,
-      tab: selection.repository.bare ? "history" : "changes",
-      commitSummary: "",
-      commitDescription: "",
-      selectionProject: checkout,
-      // Returning to the project keeps the file or commit that was selected,
-      // as leaving and reopening always has. Entry ids are re-resolved against
-      // the fresh status, so a file that has since gone simply shows nothing.
-      ...(returning ? {} : { selectedEntry: null, selectedCommit: null }),
-    });
-    // Opening reads fresh, whatever is cached. Repository ids outlive a visit
-    // now, so a cached status from before could otherwise be shown again --
-    // and "reopen the repository to see its changes" has to be true.
-    const id = selection.repository.repoId;
-    if (selection.repository.bare)
-      await refreshQuery(queryClient, gitQueries.history(scope, id));
-    else
-      await refreshQuery(
-        queryClient,
-        gitQueries.status(scope, id, statusFilter),
-      );
+    setError("");
+    // Force the arrival effect below to run for this choice, even when it
+    // names the checkout already showing: reopening resets the tab and the
+    // composer exactly as opening inside the action did.
+    processedSelection.current = null;
+    // A failed open stays cached as an error under an infinite stale time,
+    // so reselecting it must retire that failure or the retry reads nothing.
+    // (Unlike `show`, which re-ran the RPC on every click.)
+    if (
+      queryClient.getQueryState(gitKeys.opened(scope, project.id, path))
+        ?.status === "error"
+    ) {
+      void queryClient.invalidateQueries({
+        queryKey: gitKeys.opened(scope, project.id, path),
+      });
+    }
+    patchGitState(server.id, { opened: { project, path } });
   }
-  async function openProject(projects: GitProjects, project: GitProject) {
-    // Before the open: it queues behind whatever the connection is doing.
-    stopChecks();
-    // Open the new one before letting go of the old, so a failed open leaves
-    // the page on the repository it was already showing.
-    await show({ project, repository: await projects.open(project) });
+  function openProject(project: GitProject) {
+    // Open the new one before letting go of the old: the previous
+    // descriptor stays on screen (placeholder plus last good) until the
+    // new one resolves, so a failed open leaves the page where it was.
+    selectCheckout(project, project.path);
   }
   /**
    * Makes one of the project's worktrees the page's workspace. The bookmark
    * stays the project's; only the checkout changes, so the repository picker
    * keeps its name and the worktree picker says which checkout this is.
    */
-  async function openCheckout(projects: GitProjects, path: GitPath) {
-    if (!opened) return;
-    stopChecks();
-    const project = opened.project;
-    await show({
-      project,
-      repository: await projects.open({ ...project, path }),
-    });
+  function openCheckout(path: GitPath) {
+    if (!selection) return;
+    selectCheckout(selection.project, path);
   }
   function openWorktree(row: WorktreeRow) {
     if (!row.path) return;
-    const path = row.path;
-    void run((projects) => openCheckout(projects, path));
+    openCheckout(row.path);
   }
   /** Back to the library. Nothing is held open, so there is nothing to close. */
   function leaveRepository() {
-    patchGitState(connection, { opened: null });
+    lastGood.current = null;
+    processedSelection.current = null;
+    patchGitState(server.id, { opened: null });
   }
   /**
    * After a connection failure the user chose to reset: drop this server's
-   * connection so the next request starts on a fresh one. Repository ids and
-   * cached reads stay valid -- they never belonged to the connection.
+   * connection so the next request starts on a fresh one. Repository ids
+   * are stateless and content-addressed reads stay cached; the selection
+   * survives and its descriptor re-resolves on the new connection.
    */
   function resetConnection() {
     resetGitProjects(scope);
-    patchGitState(connection, { opened: null });
+    lastGood.current = null;
+    processedSelection.current = null;
+    patchGitState(server.id, { opened: null });
   }
   function upsertProject(project: GitProject) {
     queryClient.setQueryData(
@@ -497,19 +603,26 @@ export function ProjectsPanel({ server }: { server: Server }) {
   }
 
   async function write(action: GitWriteAction, expectedSnapshot?: string) {
-    if (!opened) return false;
+    if (!opened || !selection) return false;
+    // The descriptor's own query key, for patching its head after the
+    // write. The store selection names it; the descriptor carries the data.
+    const openedKey = gitQueries.opened(
+      scope,
+      selection.project,
+      selection.path,
+    ).queryKey;
     const snapshot = action.kind.startsWith("worktree.")
       ? expectedSnapshot
       : (expectedSnapshot ?? status?.snapshot);
     if (!snapshot) return false;
-    const selection = opened;
-    const id = selection.repository.repoId;
+    const current = opened;
+    const id = current.repository.repoId;
     return run(async (projects) => {
       try {
         const operationId = crypto.randomUUID();
         setOperationRepositories((previous) => ({
           ...previous,
-          [operationId]: `${selection.project.name} · ${selection.project.path.display}`,
+          [operationId]: `${current.project.name} · ${current.project.path.display}`,
         }));
         const outcome = await projects.mutations.start({
           operationId,
@@ -527,7 +640,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
             "The operation’s outcome is not confirmed. Check its saved outcome before repeating it.",
           );
         if (action.kind === "commit" && outcome.state === "succeeded") {
-          patchGitState(connection, {
+          patchGitState(server.id, {
             commitSummary: "",
             commitDescription: "",
           });
@@ -540,7 +653,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
            * a failed re-read leaves the outcome unacknowledged for the user to
            * check. Everything else the write made stale is invalidated after.
            */
-          const next = selection.repository.bare
+          const next = current.repository.bare
             ? null
             : await refreshQuery(
                 queryClient,
@@ -550,20 +663,35 @@ export function ProjectsPanel({ server }: { server: Server }) {
           const retainSelection =
             ("hunks" in action && !!action.hunks) ||
             action.kind === "conflict.resolve";
-          setSelectedEntry(
+          // The entry and the refreshed head change together: one update,
+          // so the page never renders the new head with the old selection.
+          const retainedEntry =
             retainSelection && previewEntry?.path
               ? (next?.entries.find(
                   (entry) =>
                     entry.path?.bytesB64 === previewEntry.path?.bytesB64,
                 )?.entryId ?? null)
-              : null,
-          );
-          if (next)
-            setOpened({
-              ...selection,
-              repository: { ...selection.repository, head: next.metadata.head },
-            });
-          const rereadHistory = tab === "history" || selection.repository.bare;
+              : null;
+          patchGitState(server.id, { selectedEntry: retainedEntry });
+          if (next) {
+            // The descriptor is query-owned now: patch its head in the
+            // cache, so a concurrent refresh cannot clobber it with the
+            // pre-write read. The selection itself is untouched.
+            queryClient.setQueryData(
+              openedKey,
+              (current: Opened | undefined) =>
+                current
+                  ? {
+                      ...current,
+                      repository: {
+                        ...current.repository,
+                        head: next.metadata.head,
+                      },
+                    }
+                  : current,
+            );
+          }
+          const rereadHistory = tab === "history" || current.repository.bare;
           if (rereadHistory)
             await refreshQuery(queryClient, gitQueries.history(scope, id));
           if (!isCurrent(projects)) return;
@@ -571,8 +699,11 @@ export function ProjectsPanel({ server }: { server: Server }) {
             gitKeys.status(scope, id, statusFilter),
             ...(rereadHistory ? ["history"] : []),
           ]);
-          if (outcome.state !== "failed")
+          if (outcome.state !== "failed") {
             await projects.mutations.acknowledge(outcome.operationId);
+            // The receipt is gone: its repository name can go with it.
+            forgetOperationRepository(outcome.operationId);
+          }
         } catch (reason) {
           throw new Error(
             `The saved operation outcome is ${outcome.state.replaceAll("_", " ")}, but refreshing or dismissing it failed: ${message(reason)}`,
@@ -683,9 +814,11 @@ export function ProjectsPanel({ server }: { server: Server }) {
             ? "Repository cloned."
             : "Repository created.",
         );
-        await show(result.selection);
-        if (isCurrent(projects))
+        selectCheckout(result.selection.project, result.selection.project.path);
+        if (isCurrent(projects)) {
           await projects.mutations.acknowledge(result.operation.operationId);
+          forgetOperationRepository(result.operation.operationId);
+        }
       } catch (reason) {
         if (reason instanceof GitProjectCreatedError && isCurrent(projects)) {
           // Recovery only adds a bookmark. The successful creation is never replayed.
@@ -817,9 +950,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
                 <DropdownMenuItem
                   key={project.id}
                   disabled={busy || project.id === opened.project.id}
-                  onSelect={() =>
-                    void run((projects) => openProject(projects, project))
-                  }
+                  onSelect={() => openProject(project)}
                 >
                   <FolderGit2 size={14} aria-hidden="true" />
                   {project.name}
@@ -1009,6 +1140,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
         onAcknowledge={(id) =>
           void run(async (projects) => {
             await projects.mutations.acknowledge(id);
+            forgetOperationRepository(id);
             await refreshReceipts();
           })
         }
@@ -1028,6 +1160,29 @@ export function ProjectsPanel({ server }: { server: Server }) {
               Reset connection
             </Button>
           )}
+          {checkoutGone && !linkedWorktree && (
+            <Button disabled={busy} onClick={leaveRepository}>
+              Back to projects
+            </Button>
+          )}
+        </GitNotice>
+      )}
+      {opened && checkoutGone && linkedWorktree && (
+        <GitNotice tone="info" className="mx-[12px] my-[8px]">
+          This worktree was removed from the server. Opening the main worktree…
+        </GitNotice>
+      )}
+      {goneWorktree && (
+        <GitNotice tone="info" className="mx-[12px] my-[8px]">
+          <span className="min-w-0 flex-1">
+            The worktree <strong>{goneWorktree.name}</strong> was removed from
+            the server ({goneWorktree.path}), so the main worktree is open. Git
+            still lists it as missing under Worktrees until its registration is
+            removed.
+          </span>
+          <Button variant="ghost" onClick={() => setGoneWorktree(null)}>
+            Dismiss
+          </Button>
         </GitNotice>
       )}
       {!opened ? (
@@ -1055,7 +1210,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
             queryClient.removeQueries({
               queryKey: gitKeys.summary(scope, project.id),
             });
-            void run((projects) => openProject(projects, project));
+            openProject(project);
           }}
           onEdit={(project) => {
             setName(project.name);
@@ -1209,8 +1364,13 @@ export function ProjectsPanel({ server }: { server: Server }) {
                             selectedEntry={selectedEntry}
                             selectedSide={selectedSide}
                             onSelect={(entryId, group) => {
-                              setSelectedEntry(entryId);
-                              setSelectedSide(group);
+                              // Entry and side change together: the group
+                              // names which comparison the entry was
+                              // chosen under. One update, never split.
+                              patchGitState(server.id, {
+                                selectedEntry: entryId,
+                                selectedSide: group,
+                              });
                             }}
                             writable={indexWritable}
                             busy={busy}
@@ -1467,7 +1627,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
                         : actionsPanel === "tags"
                           ? "Tags"
                           : actionsPanel === "remotes"
-                            ? "Remotes"
+                            ? "Repository settings"
                             : "Worktrees"}
                     </h2>
                   </div>
@@ -1576,10 +1736,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
                       void queryClient.invalidateQueries({
                         queryKey: gitKeys.repo(scope, opened.repository.repoId),
                       });
-                      if (openAfter)
-                        await run((projects) =>
-                          openCheckout(projects, action.path),
-                        );
+                      if (openAfter) openCheckout(action.path);
                       return true;
                     }}
                   />
@@ -1604,7 +1761,7 @@ export function ProjectsPanel({ server }: { server: Server }) {
                   const selection = await projects.add(path, name);
                   upsertProject(selection.project);
                   setEditor(null);
-                  await show(selection);
+                  selectCheckout(selection.project, selection.project.path);
                 } else {
                   upsertProject(await projects.rename(editor, name));
                   setEditor(null);

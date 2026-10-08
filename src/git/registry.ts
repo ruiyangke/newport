@@ -1,5 +1,6 @@
 import { GitProjects } from "../api/gitProjects";
 import type { ServerScope } from "../query/keys";
+import { registerRetain } from "../state/scoped";
 
 /*
  * One Git workspace per server connection, outside React.
@@ -47,6 +48,9 @@ export function retainGitProjects(valid: Set<string>) {
     }
   }
 }
+// Native handles stay on the ephemeral connection key; unified retention
+// reaches them through `retainAll` (wired in App.tsx).
+registerRetain(({ connections }) => retainGitProjects(connections));
 /** Replace JS adapters after hot edits without interrupting native requests.
  * Keeping old instances also keeps their old methods and protocol decoders.
  * Native connections are reused by new adapters; pending writes retain their

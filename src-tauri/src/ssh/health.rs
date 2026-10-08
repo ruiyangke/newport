@@ -68,7 +68,9 @@ pub(super) async fn monitor_local(local: u16, remote: u16, health: Health) {
             Ok(Ok(_)) => (DestinationStatus::Reachable, None),
             _ => (
                 DestinationStatus::Unavailable,
-                Some(format!("Nothing is listening on this Mac at port {local}.")),
+                Some(format!(
+                    "Nothing is listening on this computer at port {local}."
+                )),
             ),
         };
         record(&health, remote, status, message);

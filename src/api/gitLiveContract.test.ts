@@ -172,6 +172,7 @@ it.skipIf(!tracePath)(
       "remote.rename": true,
       "remote.set_url": true,
       "remote.remove": true,
+      "config.set": true,
       fetch: true,
       push: true,
       "push.with_lease": true,

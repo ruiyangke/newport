@@ -877,3 +877,73 @@ it("keeps partial content on page failure and enables staging only after retry c
     "s",
   );
 });
+
+it("re-reads the status and the diff by itself when the repository moved on", async () => {
+  const stale = {
+    code: "STALE_SNAPSHOT",
+    message: "The file changed. Refresh status.",
+  };
+  let diffs = 0;
+  const session = {
+    request: vi.fn(async (request: GitRequest) => {
+      if (request.method !== "repo.diff_page") return null;
+      diffs++;
+      if (diffs === 1) throw stale;
+      return paged(wire("fresh"), request);
+    }),
+    forget: vi.fn(async () => {}),
+  };
+  const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+  await act(async () =>
+    root.render(
+      inGit(
+        new GitRepositoryClient(session),
+        <GitChangesPreview repoId="repo" snapshot="s" entry={changedEntry} />,
+      ),
+    ),
+  );
+  await vi.waitFor(() => expect(host.textContent).toContain("fresh 1"));
+  // The status was asked for again, and no error was ever left on screen.
+  expect(
+    invalidate.mock.calls.some(([filters]) =>
+      JSON.stringify(filters?.queryKey).includes('"status"'),
+    ),
+  ).toBe(true);
+  expect(host.textContent).not.toContain("Refresh status");
+  expect(diffs).toBe(2);
+});
+
+it("asks the person only when the repository keeps changing under every read", async () => {
+  let diffs = 0;
+  const session = {
+    request: vi.fn(async (request: GitRequest) => {
+      if (request.method !== "repo.diff_page") return null;
+      diffs++;
+      throw {
+        code: "STALE_SNAPSHOT",
+        message: "The file changed. Refresh status.",
+      };
+    }),
+    forget: vi.fn(async () => {}),
+  };
+  await act(async () =>
+    root.render(
+      inGit(
+        new GitRepositoryClient(session),
+        <GitChangesPreview repoId="repo" snapshot="s" entry={changedEntry} />,
+      ),
+    ),
+  );
+  await vi.waitFor(() =>
+    expect(host.textContent).toContain(
+      "This repository keeps changing while its diff is read.",
+    ),
+  );
+  // The first read and three automatic retries, then it stops.
+  expect(diffs).toBe(4);
+  const button = [...host.querySelectorAll("button")].find(
+    (b) => b.textContent === "Refresh status",
+  )!;
+  await act(async () => button.click());
+  await vi.waitFor(() => expect(diffs).toBeGreaterThan(4));
+});

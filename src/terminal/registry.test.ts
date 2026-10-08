@@ -26,7 +26,21 @@ it("activates the right neighbour when the active tab closes", () => {
   expect(tabAfterClose(tabs, "a", "b")).toBe("b");
 });
 
-it("keeps one named tab per connection with monotonic numbering", () => {
+it("copies layouts across the registry boundary", () => {
+  const layout = getTerminalLayout("srv");
+  expect(getTerminalLayout("srv")).not.toBe(layout);
+  expect(getTerminalLayout("srv")).toEqual(layout);
+  // Mutating a handed-out copy touches the registry's copy not at all.
+  layout.tabs.push({ id: "hack", name: "hack" });
+  expect(getTerminalLayout("srv").tabs).toHaveLength(1);
+  // Saving stores a copy too: later caller mutations stay outside.
+  const draft = { ...getTerminalLayout("srv"), active: "kept" };
+  saveTerminalLayout("srv", draft);
+  draft.tabs.push({ id: "hack", name: "hack" });
+  expect(getTerminalLayout("srv").tabs).toHaveLength(1);
+});
+
+it("keeps one named tab per server with monotonic numbering", () => {
   const layout = getTerminalLayout("connection");
   expect(layout.tabs).toHaveLength(1);
   expect(layout.tabs[0].name).toBe("Terminal 1");
@@ -40,7 +54,7 @@ it("keeps one named tab per connection with monotonic numbering", () => {
   expect(reopened.next).toBe(3);
 });
 
-it("drops every session and layout for a connection that is gone", () => {
+it("drops sessions for a connection that is gone, layouts for a server that is gone", () => {
   const session = (dispose: () => void) =>
     ({ dispose }) as unknown as TerminalSession;
   const first = vi.fn();
