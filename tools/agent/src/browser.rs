@@ -18,8 +18,10 @@ pub fn open(args: &[String], desktop: bool) -> io::Result<()> {
         .as_ref()
         .is_ok_and(|s| wayland == s.root.join("wayland.sock").to_string_lossy())
         || wayland.starts_with("/tmp/newport-runtime-")
+        || crate::paths::integration_display_path(&wayland)
         || crate::migration::fake_wayland(&wayland);
     let fake_x = authority.starts_with("/tmp/newport-runtime-")
+        || crate::paths::integration_display_path(&authority)
         || selection.as_ref().is_ok_and(|s| {
             fs::read_to_string(s.root.join("display"))
                 .ok()

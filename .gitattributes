@@ -5,4 +5,8 @@
 
 # Preserve binary PDF fixtures and whitespace in patch context lines.
 *.pdf binary
-/crates/newport-terminal/patches/*.patch -whitespace
+/crates/newport-terminal/patches/*.patch text eol=lf -whitespace
+
+# Migration checksums and scripts sent to Linux must not depend on the host OS.
+*.sql text eol=lf
+*.sh text eol=lf

@@ -242,13 +242,13 @@ impl Newport {
                         .child(error.to_owned()),
                 );
             }
-            if can_retry(enabled, status) || permissions["error"].is_string() {
+            if permissions["error"].is_string() {
                 let id = server_id.clone();
                 let expected = crate::terminal_scope::connection(&server, &self.snapshot);
                 connection = connection.child(
                     div().flex().child(
-                        crate::controls::button("integration-retry")
-                            .label("Retry")
+                        crate::controls::button("integration-apply-permissions")
+                            .label("Apply permissions")
                             .loading(self.integration_pending(&server_id, false))
                             .disabled(disabled)
                             .on_click(cx.listener(move |this, _, _, cx| {

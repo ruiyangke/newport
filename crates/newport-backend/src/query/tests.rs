@@ -236,7 +236,6 @@ async fn parameter_cache_is_bounded_scoped_and_cannot_reopen_after_close() {
     drop(one);
     drop(same);
     drop(two);
-    tokio::time::advance(Duration::from_secs(61)).await;
     let three = cache
         .get_or_insert("three".into(), policy(), || async { Ok(3) })
         .unwrap();
@@ -248,6 +247,77 @@ async fn parameter_cache_is_bounded_scoped_and_cannot_reopen_after_close() {
             .get_or_insert("four".into(), policy(), || async { Ok(4) })
             .is_err()
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn rapid_page_reads_reclaim_completed_entries_before_their_leases_expire() {
+    let cache = Registry::<usize, usize>::new(8);
+    let started = Instant::now();
+    let mut retained = Vec::new();
+    for page in 0..400 {
+        let query = cache
+            .get_or_insert(page, policy(), move || async move { Ok(page) })
+            .unwrap();
+        assert_eq!(query.read().await, Ok(page));
+        // Revisiting a retained page still deduplicates and uses cached data.
+        let same = cache
+            .get_or_insert(page, policy(), || async { panic!("cache miss") })
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&query, &same));
+        assert_eq!(same.read().await, Ok(page));
+        retained.push(std::sync::Arc::downgrade(&query));
+        assert!(
+            retained
+                .iter()
+                .filter(|entry| entry.strong_count() > 0)
+                .count()
+                <= 8
+        );
+    }
+    assert_eq!(Instant::now(), started, "no lease expiry was needed");
+}
+
+#[tokio::test(start_paused = true)]
+async fn pressure_cancels_only_unowned_fetches_and_keeps_shared_readers() {
+    let cache = Registry::<usize, u32>::new(2);
+    let (calls, mut receive) = mpsc::unbounded_channel();
+    let orphan = cache
+        .get_or_insert(0, policy(), move || {
+            let calls = calls.clone();
+            async move {
+                let (send, receive) = oneshot::channel();
+                calls.send(send).unwrap();
+                receive.await.unwrap()
+            }
+        })
+        .unwrap();
+    orphan.observe(false);
+    let mut old_fetch = receive.recv().await.unwrap();
+    let shared = cache
+        .get_or_insert(1, policy(), || async { Ok(42) })
+        .unwrap();
+    let reader = shared.clone();
+    assert!(
+        cache
+            .get_or_insert(2, policy(), || async { Ok(2) })
+            .is_err()
+    );
+    drop(orphan);
+    let latest = cache
+        .get_or_insert(2, policy(), || async { Ok(2) })
+        .unwrap();
+    // Eviction drops the coordinator and its in-flight child, not another
+    // consumer's query. A normal cancellation without pressure still caches
+    // the result (covered by refresh_waiter_cancellation_does_not_own_fetch).
+    old_fetch.closed().await;
+    assert_eq!(latest.read().await, Ok(2));
+    assert_eq!(reader.read().await, Ok(42));
+    assert!(std::sync::Arc::ptr_eq(
+        &shared,
+        &cache
+            .get_or_insert(1, policy(), || async { Ok(99) })
+            .unwrap()
+    ));
 }
 
 #[tokio::test(start_paused = true)]

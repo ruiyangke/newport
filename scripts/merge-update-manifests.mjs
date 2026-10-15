@@ -1,10 +1,12 @@
 import {
   mkdtempSync,
+  existsSync,
   readFileSync,
   writeFileSync,
   statSync,
   rmSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, basename, dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -110,6 +112,24 @@ export function verifyPackages(manifest, assets, publicKey) {
     rmSync(temp, { recursive: true, force: true });
   }
 }
+// Hash only the public release assets, never arbitrary files in the staging
+// directory. Regenerate after merging so the manifest and every platform agree.
+export function writeChecksums(manifest, assets, manifestName = "latest.json") {
+  const names = new Set([manifestName]);
+  for (const entry of Object.values(manifest.platforms)) {
+    const name = filename(entry);
+    names.add(name);
+    names.add(`${name}.sig`);
+  }
+  const zip = `Newport-${manifest.version}-macos-arm64.zip`;
+  if (existsSync(join(assets, zip))) names.add(zip);
+  const sums = [...names].sort().map((name) => {
+    const hash = createHash("sha256").update(readFileSync(join(assets, name))).digest("hex");
+    return `${hash}  ${name}\n`;
+  }).join("");
+  writeFileSync(join(assets, "SHA256SUMS"), sums);
+}
+
 if (isMain(import.meta.url)) {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
@@ -125,4 +145,5 @@ if (isMain(import.meta.url)) {
     json(join(root, "resources/updater.json")).pubkey,
   );
   writeFileSync(values.output, `${JSON.stringify(manifest, null, 2)}\n`);
+  writeChecksums(manifest, assets, basename(values.output));
 }

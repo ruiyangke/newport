@@ -6,7 +6,7 @@ mod recovery_storage;
 pub mod transfer;
 use crate::{manager::Shared, ssh::sftp::Sftp};
 use anyhow::{Context, Result, bail};
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::Engine as _;
 pub use operations::Operations;
 use russh_sftp::{
     client::error::Error,
@@ -14,7 +14,7 @@ use russh_sftp::{
 };
 use serde::Serialize;
 use uuid::Uuid;
-const PREVIEW_LIMIT: usize = 16 * 1024 * 1024;
+const IMAGE_LIMIT: usize = 16 * 1024 * 1024;
 const TEXT_LIMIT: usize = 1024 * 1024;
 const DIRECTORY_LIMIT: usize = 20_000;
 
@@ -38,6 +38,7 @@ pub struct Preview {
     kind: &'static str,
     content: String,
     mime: &'static str,
+    truncated: bool,
 }
 
 pub fn child(parent: &str, name: &str) -> Result<String> {
@@ -138,81 +139,125 @@ pub async fn preview(sftp: &Sftp, path: &str) -> Result<Preview> {
     if !metadata.is_regular() {
         bail!("Only regular files can be previewed");
     }
-    if metadata
-        .size
-        .is_some_and(|size| size > PREVIEW_LIMIT as u64)
-    {
-        bail!("Preview is limited to 16 MiB. Download this file to open it.");
-    }
     let handle = sftp
         .session
         .open(path, OpenFlags::READ, FileAttributes::empty())
         .await?
         .handle;
-    let mut bytes = Vec::new();
-    loop {
-        match sftp
-            .session
-            .read(&handle, bytes.len() as u64, 32 * 1024)
-            .await
-        {
-            Ok(data) if data.data.is_empty() => break,
-            Ok(data) => {
-                if bytes.len() + data.data.len() > PREVIEW_LIMIT {
-                    bail!("File grew beyond the 16 MiB preview limit. Download it to open it.");
-                }
-                bytes.extend_from_slice(&data.data);
-            }
-            Err(e) if status(&e, StatusCode::Eof) => break,
-            Err(e) => return Err(e.into()),
-        }
-    }
-    sftp.session.close(handle).await?;
-    classify(bytes)
-}
-fn classify(bytes: Vec<u8>) -> Result<Preview> {
-    let mime = if bytes.starts_with(b"%PDF-") {
-        "application/pdf"
-    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        "image/png"
-    } else if bytes.starts_with(b"\xff\xd8\xff") {
-        "image/jpeg"
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        "image/gif"
-    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
-        "image/webp"
-    } else {
-        "text/plain"
-    };
-    if mime == "text/plain" {
-        if bytes.len() > TEXT_LIMIT {
-            bail!("Text preview is limited to 1 MiB. Download this file to open it.");
-        }
-        let content = String::from_utf8(bytes)
-            .context("This binary file cannot be previewed. Download it to open it.")?;
-        if content
-            .chars()
-            .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
-        {
-            bail!("This binary file cannot be previewed. Download it to open it.");
-        }
-        Ok(Preview {
-            kind: "text",
-            content,
-            mime,
-        })
-    } else {
-        Ok(Preview {
-            kind: if mime == "application/pdf" {
-                "pdf"
+    // Read at most one byte beyond the visible prefix to distinguish an exact
+    // limit from truncation, even if the file grows or stat omits its size.
+    let result = async {
+        let mut bytes = Vec::new();
+        loop {
+            // Sniff a bounded header before applying text validation. SFTP may
+            // return short chunks, including part of an image signature.
+            let limit = if bytes.len() < 12 {
+                12
+            } else if image_mime(&bytes).is_some() {
+                IMAGE_LIMIT + 1
             } else {
-                "image"
-            },
-            content: STANDARD.encode(bytes),
-            mime,
-        })
+                TEXT_LIMIT + 1
+            };
+            if bytes.len() >= limit {
+                break;
+            }
+            let length = (limit - bytes.len()).min(32 * 1024) as u32;
+            match sftp.session.read(&handle, bytes.len() as u64, length).await {
+                Ok(data) if data.data.is_empty() => break,
+                Ok(data) => {
+                    if data.data.len() > length as usize {
+                        bail!("SFTP server returned more preview data than requested");
+                    }
+                    bytes.extend_from_slice(&data.data);
+                    // Reject binary content before downloading the rest.
+                    if bytes.len() >= 12 && image_mime(&bytes).is_none() {
+                        validate_text_prefix(&bytes)?;
+                    }
+                }
+                Err(e) if status(&e, StatusCode::Eof) => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        classify(bytes)
+    }
+    .await;
+    // Close on validation and read errors as well as success.
+    let closed = sftp.session.close(handle).await;
+    let preview = result?;
+    closed?;
+    Ok(preview)
+}
+
+const BINARY_PREVIEW: &str = "This binary format is unsupported. Only text and supported images can be previewed. Download this file to open it.";
+
+fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else {
+        None
     }
 }
+
+fn validate_text_prefix(bytes: &[u8]) -> Result<()> {
+    // PDF headers can be valid ASCII; do not mistake them for source text.
+    if bytes.starts_with(b"%PDF-") {
+        bail!(BINARY_PREVIEW);
+    }
+    let valid = match std::str::from_utf8(bytes) {
+        Ok(text) => text,
+        // A read can end inside a UTF-8 character. Validate the complete prefix.
+        Err(error) if error.error_len().is_none() => {
+            std::str::from_utf8(&bytes[..error.valid_up_to()])?
+        }
+        Err(_) => bail!(BINARY_PREVIEW),
+    };
+    if valid
+        .chars()
+        .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+    {
+        bail!(BINARY_PREVIEW);
+    }
+    Ok(())
+}
+
+fn classify(mut bytes: Vec<u8>) -> Result<Preview> {
+    if let Some(mime) = image_mime(&bytes) {
+        if bytes.len() > IMAGE_LIMIT {
+            bail!("Image exceeds the 16 MiB preview limit. Download it to view the full image.");
+        }
+        return Ok(Preview {
+            kind: "image",
+            content: base64::engine::general_purpose::STANDARD.encode(bytes),
+            mime,
+            truncated: false,
+        });
+    }
+    validate_text_prefix(&bytes)?;
+    let truncated = bytes.len() > TEXT_LIMIT;
+    if truncated {
+        bytes.truncate(TEXT_LIMIT);
+        if let Err(error) = std::str::from_utf8(&bytes) {
+            if error.error_len().is_some() {
+                bail!(BINARY_PREVIEW);
+            }
+            bytes.truncate(error.valid_up_to());
+        }
+    }
+    let content = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!(BINARY_PREVIEW))?;
+    Ok(Preview {
+        kind: "text",
+        content,
+        mime: "text/plain",
+        truncated,
+    })
+}
+
 pub async fn files_list(
     state: &Shared,
     operations: &Operations,
@@ -396,6 +441,61 @@ mod tests {
         assert_eq!(child("/", "tmp").unwrap(), "/tmp");
     }
     #[test]
+    fn text_preview_bounds_preserve_utf8_and_mark_only_partial_content() {
+        let exact = classify(vec![b'a'; TEXT_LIMIT]).unwrap();
+        assert!(!exact.truncated);
+        assert_eq!(exact.content.len(), TEXT_LIMIT);
+        let mut split = vec![b'a'; TEXT_LIMIT - 1];
+        split.extend_from_slice("雪".as_bytes());
+        let partial = classify(split).unwrap();
+        assert!(partial.truncated);
+        assert_eq!(partial.content.len(), TEXT_LIMIT - 1);
+        assert!(classify(vec![0xe9, 0x9b]).is_err());
+        assert!(validate_text_prefix(&[0xe9, 0x9b]).is_ok());
+        let literal = "\u{feff}<script>literal</script>\n雪\t🦀";
+        assert_eq!(
+            classify(literal.as_bytes().to_vec()).unwrap().content,
+            literal
+        );
+        assert_eq!(classify(vec![]).unwrap().content, "");
+    }
+
+    #[test]
+    fn text_preview_rejects_documents_archives_and_non_utf8() {
+        for binary in [b"%PDF-1.7\n".as_slice(), b"PK\x03\x04", b"\xff\xfeh\0i\0"] {
+            assert!(classify(binary.to_vec()).is_err(), "accepted {binary:?}");
+        }
+    }
+
+    #[test]
+    fn image_preview_uses_signatures_and_never_truncates() {
+        for (header, mime) in [
+            (b"\x89PNG\r\n\x1a\n".as_slice(), "image/png"),
+            (b"\xff\xd8\xff", "image/jpeg"),
+            (b"GIF87a", "image/gif"),
+            (b"GIF89a", "image/gif"),
+            (b"RIFF\0\0\0\0WEBP", "image/webp"),
+        ] {
+            let preview = classify(header.to_vec()).unwrap();
+            assert_eq!(preview.kind, "image");
+            assert_eq!(preview.mime, mime);
+            assert!(!preview.truncated);
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(preview.content)
+                    .unwrap(),
+                header
+            );
+        }
+        assert_eq!(image_mime(b"RIFF\0\0\0\0WAVE"), None);
+        let mut image = b"GIF89a".to_vec();
+        image.resize(IMAGE_LIMIT, 0);
+        assert!(!classify(image.clone()).unwrap().truncated);
+        image.push(0);
+        assert!(classify(image).unwrap_err().to_string().contains("16 MiB"));
+    }
+
+    #[test]
     fn preview_uses_content_and_never_interprets_markup() {
         assert_eq!(
             classify(b"<script>alert(1)</script>".to_vec())
@@ -403,9 +503,9 @@ mod tests {
                 .kind,
             "text"
         );
-        assert_eq!(classify(b"%PDF-1.7\n".to_vec()).unwrap().kind, "pdf");
+        assert!(classify(b"%PDF-1.7\n".to_vec()).is_err());
         assert!(classify(vec![0, 1, 2]).is_err());
-        assert!(classify(vec![b'a'; TEXT_LIMIT + 1]).is_err());
+        assert!(classify(vec![b'a'; TEXT_LIMIT + 1]).unwrap().truncated);
     }
 }
 
@@ -457,13 +557,7 @@ mod integration_tests {
                 .to_string()
                 .contains("binary")
         );
-        assert!(
-            preview(&sftp, "/large.txt")
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("16 MiB")
-        );
+        assert!(preview(&sftp, "/large.txt").await.unwrap().truncated);
         assert!(list(&sftp, "/missing").await.is_err());
         let directory = tempfile::tempdir().unwrap();
         let local = directory.path().join("upload ' 世界.dat");
@@ -479,6 +573,27 @@ mod integration_tests {
                 .unwrap_err()
                 .to_string()
                 .contains("already exists")
+        );
+        // Exercise the image signature/size path over the real SFTP transport.
+        // A misleading extension must not turn image bytes into source text.
+        let image = directory.path().join("image.txt");
+        let png = base64::engine::general_purpose::STANDARD.decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII="
+        ).unwrap();
+        std::fs::write(&image, &png).unwrap();
+        let remote_image =
+            transfer::upload(&operations, sftp.clone(), &image, "/Documents", |_, _| {})
+                .await
+                .unwrap();
+        let image_preview = preview(&sftp, &remote_image).await.unwrap();
+        assert_eq!(image_preview.kind, "image");
+        assert_eq!(image_preview.mime, "image/png");
+        assert!(!image_preview.truncated);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(image_preview.content)
+                .unwrap(),
+            png
         );
         let saved = directory.path().join("download.dat");
         std::fs::write(&saved, b"old bytes").unwrap();

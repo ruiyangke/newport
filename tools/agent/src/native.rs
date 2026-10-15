@@ -24,7 +24,10 @@ pub fn find(name: &str) -> Option<PathBuf> {
         })
 }
 fn publish(mut command: Command, data: Vec<u8>) -> bool {
-    let Ok(mut input) = tempfile::tempfile() else {
+    let Ok(root) = crate::paths::runtime() else {
+        return false;
+    };
+    let Ok(mut input) = tempfile::tempfile_in(root) else {
         return false;
     };
     if input.write_all(&data).is_err() || input.rewind().is_err() {

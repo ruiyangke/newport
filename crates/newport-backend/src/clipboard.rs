@@ -197,7 +197,15 @@ pub fn client_identity(
     directory: &std::path::Path,
     server: uuid::Uuid,
 ) -> Result<uuid::Uuid, String> {
-    let path = directory.join(format!("clipboard-client-{server}"));
+    persisted_identity(directory, &format!("clipboard-client-{server}"))
+}
+
+pub(crate) fn routing_identity(directory: &std::path::Path) -> Result<uuid::Uuid, String> {
+    persisted_identity(directory, "integration-routing-identity")
+}
+
+fn persisted_identity(directory: &std::path::Path, name: &str) -> Result<uuid::Uuid, String> {
+    let path = directory.join(name);
     match std::fs::read_to_string(&path) {
         Ok(value) => uuid::Uuid::parse_str(value.trim()).map_err(|e| e.to_string()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -307,6 +315,9 @@ where
             && !error.starts_with("Agent error:")
             && (error == crate::agent_runtime::BUSY
                 || error.contains("Needle runtime disconnected")
+                || error.starts_with("Needle connection interrupted:")
+                || error == "Needle control request timed out"
+                || error == "Needle runtime control timed out"
                 || error.contains("Needle runtime changed before worker registration")
                 || error.contains("SSH transport interrupted:")
                 || error.starts_with("SSH agent unavailable:")
@@ -1235,6 +1246,37 @@ mod tests {
         .await
         .expect("Cancellation must interrupt in-flight work");
         result.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn needle_connection_losses_and_control_timeouts_recover_automatically() {
+        for error in [
+            "Needle connection interrupted: early eof",
+            "Needle control request timed out",
+            "Needle runtime control timed out",
+        ] {
+            let (_tx, rx) = watch::channel(false);
+            let mut attempts = 0;
+            let started = tokio::time::Instant::now();
+            recover_connection(
+                || {
+                    attempts += 1;
+                    std::future::ready(if attempts < 13 {
+                        Err(error.into())
+                    } else {
+                        Ok(())
+                    })
+                },
+                rx,
+                || {},
+                Duration::from_secs(2),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(attempts, 13);
+            assert_eq!(started.elapsed(), Duration::from_secs(270));
+        }
     }
 
     #[tokio::test]

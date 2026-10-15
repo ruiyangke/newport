@@ -17,6 +17,17 @@ pub fn run(args: &[String]) -> Result<()> {
         "tools/agent/target",
         "--locked",
     ]))?;
+    // Compilation has its own budget, separate from fixture readiness/tests.
+    process::run(command("cargo").args([
+        "test",
+        "--locked",
+        "-p",
+        "newport-backend",
+        "--lib",
+        "--no-run",
+        "--target-dir",
+        "target",
+    ]))?;
     process::run(command("cargo").args([
         "build",
         "--manifest-path",
@@ -75,12 +86,15 @@ pub fn run(args: &[String]) -> Result<()> {
                 "--",
                 "--ignored",
                 "--skip",
-                "remote_tests::",
-                "--skip",
                 "updates::",
                 "--nocapture",
                 "--test-threads=1",
             ])
+            .args(
+                crate::fixture_suites::LINUX
+                    .iter()
+                    .flat_map(|filter| ["--skip", *filter]),
+            )
             .env("SSH_AUTH_SOCK", &socket)
             .env("NEWPORT_TEST_PASSWORD", "fixture-password")
             .env("NEWPORT_TEST_OTHER_KEY", dir.join("other.pub"))

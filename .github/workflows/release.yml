@@ -87,7 +87,7 @@ jobs:
         with:
           name: linux-agents-signed
           path: resources/agents
-      - run: xcodebuild -downloadComponent MetalToolchain
+      - run: node scripts/ci/prepare-metal.mjs
       - run: rustup target add aarch64-apple-darwin
       - run: node scripts/ci/artifact.mjs verify resources/agents
       - name: Prepare pinned terminal build dependencies
@@ -254,6 +254,6 @@ jobs:
         run: |
           node scripts/test-update-manifests.mjs
           node scripts/merge-update-manifests.mjs release/latest.json release/windows-*.json --version "${RELEASE_TAG#v}" --output release/latest.json
-          rm release/windows-*.json
+          rm release/windows-*.json release/SHA256SUMS-windows-*
           test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$RELEASE_COMMIT"
           gh release create "$RELEASE_TAG" release/* --verify-tag --draft --title "Newport $RELEASE_TAG" --generate-notes

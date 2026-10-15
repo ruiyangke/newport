@@ -60,12 +60,11 @@ impl PreviewHost {
                 dismiss_owned(&handle, window, cx);
                 return dialog;
             }
-            let expanded = view.read(cx).viewport.expanded;
             let name = view.read(cx).identity.name.clone();
             let close_view = view.clone();
             let close_live = live.clone();
             let body_view = view.clone();
-            dialog_frame(dialog, window.viewport_size(), expanded, name, cx)
+            dialog_frame(dialog, window.viewport_size(), name, cx)
                 .on_close(move |_, _, cx| {
                     if close_live.get() {
                         close_view.update(cx, |view, cx| {
@@ -100,15 +99,6 @@ impl PreviewHost {
                 crate::controls::button("download")
                     .label("Download")
                     .icon(IconName::Download),
-            )
-            .child(
-                crate::controls::icon_button("expand")
-                    .icon(IconName::Maximize2)
-                    .accessibility_label("Expand preview")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.viewport.expanded = !this.viewport.expanded;
-                        cx.notify();
-                    })),
             )
             .child(
                 crate::controls::icon_button("close")
@@ -295,19 +285,12 @@ fn compact_modal_keeps_identity_and_controls_inside_window(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn expand_preserves_local_viewport_and_escape_restores_focus(cx: &mut TestAppContext) {
+fn enter_keeps_preview_open_and_escape_restores_focus(cx: &mut TestAppContext) {
     let (view, cx) = fixture(cx);
     view.update(cx, |view, cx| {
-        view.viewport.zoom = Some(150);
         view.viewport.wrap = true;
         cx.notify();
     });
-    let before = cx.debug_bounds("file-preview-panel").unwrap();
-    click(cx, "Expand preview");
-    let expanded = cx.debug_bounds("file-preview-panel").unwrap();
-    assert!(expanded.size.width > before.size.width && expanded.size.height > before.size.height);
-    assert!(view.read_with(cx, |view, _| view.viewport.wrap));
-    assert_eq!(view.read_with(cx, |view, _| view.viewport.zoom), Some(150));
     cx.simulate_keystrokes("enter");
     draw(cx);
     assert!(

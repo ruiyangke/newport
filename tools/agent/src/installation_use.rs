@@ -32,9 +32,10 @@ impl Drop for Lease {
 
 pub struct ServiceLease {
     _lease: Lease,
+    _legacy: Option<Lease>,
 }
 
-pub struct MaintenanceLease(Lease);
+pub struct MaintenanceLease(Lease, Option<Lease>);
 
 fn identity(metadata: &fs::Metadata) -> (u64, u64) {
     (metadata.dev(), metadata.ino())
@@ -43,6 +44,10 @@ fn private(metadata: &fs::Metadata) -> bool {
     metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0
 }
 fn directory(home: &Path) -> io::Result<PathBuf> {
+    crate::paths::private_home_directory(home, ".local/state/newport/usage")
+}
+
+fn legacy_directory(home: &Path) -> io::Result<PathBuf> {
     let home = home.canonicalize()?;
     if !home.is_dir() {
         return Err(io::Error::other("Needle HOME is not a directory"));
@@ -60,7 +65,11 @@ impl ServiceLease {
         let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is required"))?;
         let lease = Lease::acquire(Path::new(&home), false)?;
         crate::deployment::require_service_ready(Path::new(&home))?;
-        Ok(Self { _lease: lease })
+        let legacy = Lease::legacy(Path::new(&home), false)?;
+        Ok(Self {
+            _lease: lease,
+            _legacy: legacy,
+        })
     }
 }
 
@@ -69,17 +78,38 @@ impl MaintenanceLease {
     /// separately establish compatibility of older installed/running builds.
     /// A successful lease alone cannot account for pre-lease agent versions.
     pub fn acquire(home: &Path) -> io::Result<Self> {
-        Ok(Self(Lease::acquire(home, true)?))
+        Ok(Self(
+            Lease::acquire(home, true)?,
+            Lease::legacy(home, true)?,
+        ))
     }
 
     pub fn validate(&self) -> io::Result<()> {
-        self.0.validate()
+        self.0.validate()?;
+        if let Some(legacy) = &self.1 {
+            legacy.validate()?;
+        }
+        Ok(())
     }
 }
 
 impl Lease {
     fn acquire(home: &Path, exclusive: bool) -> io::Result<Self> {
-        let root = directory(home)?;
+        Self::at(directory(home)?, exclusive)
+    }
+
+    // Existing older processes must keep sharing their original inode. Never
+    // create a new global temporary path, delete one, or ignore an access error.
+    fn legacy(home: &Path, exclusive: bool) -> io::Result<Option<Self>> {
+        let root = legacy_directory(home)?;
+        match fs::symlink_metadata(&root) {
+            Ok(_) => Self::at(root, exclusive).map(Some),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn at(root: PathBuf, exclusive: bool) -> io::Result<Self> {
         match fs::DirBuilder::new().mode(0o700).create(&root) {
             Ok(()) => (),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
@@ -173,6 +203,39 @@ impl Lease {
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn fresh_installation_uses_home_without_creating_a_legacy_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let legacy = legacy_directory(home.path()).unwrap();
+        let lease = MaintenanceLease::acquire(home.path()).unwrap();
+        assert!(home
+            .path()
+            .join(".local/state/newport/usage/lease")
+            .is_file());
+        assert!(!legacy.exists());
+        lease.validate().unwrap();
+    }
+
+    #[test]
+    fn maintenance_honors_an_existing_legacy_service_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let legacy = legacy_directory(home.path()).unwrap();
+        let old_service = Lease::at(legacy.clone(), false).unwrap();
+        assert_eq!(
+            MaintenanceLease::acquire(home.path()).err().unwrap().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(old_service);
+        let maintenance = MaintenanceLease::acquire(home.path()).unwrap();
+        assert_eq!(
+            Lease::at(legacy.clone(), false).err().unwrap().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        maintenance.validate().unwrap();
+        drop(maintenance);
+        fs::remove_dir_all(legacy).unwrap();
+    }
 
     #[test]
     fn concurrent_first_users_share_one_lock_inode() {

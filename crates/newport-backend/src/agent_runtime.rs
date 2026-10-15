@@ -6,12 +6,13 @@ use std::{
         Arc, Mutex as StdMutex, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::{Semaphore, mpsc, oneshot, watch},
     task::JoinHandle,
+    time::Instant,
 };
 
 #[path = "agent_runtime_worker.rs"]
@@ -85,7 +86,7 @@ impl Drop for Starting {
         {
             record_failure(
                 &mut current,
-                "Needle runtime startup was interrupted. Retry when connected.".into(),
+                "Needle runtime startup was interrupted. Reconnecting…".into(),
                 true,
             );
         }
@@ -584,6 +585,7 @@ impl Slot {
         let mut changes = self.changes.subscribe();
         loop {
             changes.borrow_and_update();
+            let mut retry_at = None;
             {
                 let mut state = self.connection.lock().unwrap();
                 validate()?;
@@ -610,14 +612,13 @@ impl Slot {
                     self.clear(&mut state);
                 }
                 let previous = self.current_snapshot();
-                if previous.transport_generation == generation
-                    && previous.status == "failed"
-                    && (!previous.retryable
-                        || previous.retry_at.is_some_and(|at| at > Instant::now()))
-                {
-                    return Err(previous
-                        .error
-                        .unwrap_or_else(|| "Needle runtime unavailable".into()));
+                if previous.transport_generation == generation && previous.status == "failed" {
+                    if !previous.retryable {
+                        return Err(previous
+                            .error
+                            .unwrap_or_else(|| "Needle runtime unavailable".into()));
+                    }
+                    retry_at = previous.retry_at.filter(|at| *at > Instant::now());
                 }
                 if state
                     .startup
@@ -626,7 +627,7 @@ impl Slot {
                 {
                     state.startup = None;
                 }
-                if state.startup.is_none() {
+                if state.startup.is_none() && retry_at.is_none() {
                     let epoch = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
                     *self.snapshot.lock().unwrap() = Snapshot {
                         status: "starting",
@@ -686,10 +687,21 @@ impl Slot {
                     });
                 }
             }
-            changes
-                .changed()
-                .await
-                .map_err(|_| "Needle session closed".to_owned())?;
+            // All feature callers share the same retry deadline and startup.
+            // Never hold a lock while backing off; reset/retirement wakes us early.
+            if let Some(at) = retry_at {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(at) => {},
+                    result = changes.changed() => {
+                        result.map_err(|_| "Needle session closed".to_owned())?;
+                    }
+                }
+            } else {
+                changes
+                    .changed()
+                    .await
+                    .map_err(|_| "Needle session closed".to_owned())?;
+            }
         }
     }
 }
@@ -788,6 +800,7 @@ fn record_control_failure(
         record_failure(&mut current, error, true);
     }
 }
+#[derive(Debug)]
 struct StartupFailure {
     message: String,
     retryable: bool,
@@ -838,11 +851,7 @@ async fn start_at(
         .stream(command)
         .await
         .map_err(StartupFailure::temporary)?;
-    let hello: protocol::Hello = read(&mut stream).await.map_err(|e| {
-        StartupFailure::permanent(format!(
-            "Needle runtime handshake failed. Update or repair Needle: {e}"
-        ))
-    })?;
+    let hello: protocol::Hello = read(&mut stream).await?;
     hello
         .validate()
         .map_err(|e| StartupFailure::permanent(e.to_string()))?;
@@ -907,17 +916,23 @@ pub(crate) async fn verify_candidate(connection: &ExecSession, hash: &str) -> Re
 }
 async fn read<T: serde::de::DeserializeOwned>(
     input: &mut (impl AsyncRead + Unpin),
-) -> Result<T, String> {
-    let length = input.read_u32().await.map_err(|e| e.to_string())? as usize;
+) -> Result<T, StartupFailure> {
+    let interrupted = |error: std::io::Error| {
+        StartupFailure::temporary(format!("Needle connection interrupted: {error}"))
+    };
+    let length = input.read_u32().await.map_err(interrupted)? as usize;
     if length == 0 || length > protocol::MAX_FRAME {
-        return Err("Runtime control frame exceeds limit".into());
+        return Err(StartupFailure::permanent(
+            "Runtime control frame exceeds limit",
+        ));
     }
     let mut bytes = vec![0; length];
-    input
-        .read_exact(&mut bytes)
-        .await
-        .map_err(|e| e.to_string())?;
-    protocol::decode(&bytes).map_err(|e| e.to_string())
+    input.read_exact(&mut bytes).await.map_err(interrupted)?;
+    protocol::decode(&bytes).map_err(|error| {
+        StartupFailure::permanent(format!(
+            "Needle runtime handshake failed. Update or repair Needle: {error}"
+        ))
+    })
 }
 async fn exchange(
     stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
@@ -937,7 +952,7 @@ async fn exchange(
             .map_err(|e| e.to_string())?;
         stream.write_all(&bytes).await.map_err(|e| e.to_string())?;
         stream.flush().await.map_err(|e| e.to_string())?;
-        let reply: protocol::Reply = read(stream).await?;
+        let reply: protocol::Reply = read(stream).await.map_err(|error| error.message)?;
         if reply.id != request.id || reply.runtime_id != runtime_id {
             return Err("Obsolete or mismatched runtime response".into());
         }
@@ -1172,6 +1187,105 @@ mod tests {
         );
         slot.reset().await;
     }
+    #[tokio::test(start_paused = true)]
+    async fn temporary_startup_failure_retries_without_limit_and_shares_each_attempt() {
+        let slot = test_slot();
+        let calls = AtomicU64::new(0);
+        let began = Instant::now();
+        let create = || {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt < 12 {
+                    Err(StartupFailure::temporary("connection interrupted"))
+                } else {
+                    Ok(fake_control(1))
+                }
+            }
+        };
+        let (first, second) = tokio::join!(
+            slot.ensure_with(1, || Ok(()), &create),
+            slot.ensure_with(1, || Ok(()), &create),
+        );
+        assert_eq!(first.unwrap().instance_id, second.unwrap().instance_id);
+        assert_eq!(calls.load(Ordering::SeqCst), 13);
+        assert!(began.elapsed() > Duration::from_secs(120));
+        assert_eq!(slot.snapshot().status, "ready");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_retry_waiter_leaves_no_background_retry_loop() {
+        let slot = test_slot();
+        let calls = AtomicU64::new(0);
+        let mut changes = slot.changes.subscribe();
+        let retry = slot.ensure_with(
+            1,
+            || Ok(()),
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Err(StartupFailure::temporary("connection interrupted")) }
+            },
+        );
+        tokio::select! {
+            result = retry => panic!("transient failure must keep waiting: {result:?}"),
+            _ = changes.changed() => {},
+        }
+        assert_eq!(slot.snapshot().status, "failed");
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retirement_wakes_backoff_and_does_not_restart_old_generation() {
+        let slot = test_slot();
+        let calls = AtomicU64::new(0);
+        let valid = AtomicBool::new(true);
+        let mut changes = slot.changes.subscribe();
+        let retry = slot.ensure_with(
+            1,
+            || {
+                if valid.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err("retired".into())
+                }
+            },
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Err(StartupFailure::temporary("connection interrupted")) }
+            },
+        );
+        let retire = async {
+            changes.changed().await.unwrap();
+            valid.store(false, Ordering::SeqCst);
+            slot.reset().await;
+        };
+        let (result, ()) = tokio::join!(retry, retire);
+        assert_eq!(result.unwrap_err(), "retired");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(slot.snapshot().status, "unknown");
+    }
+
+    #[tokio::test]
+    async fn interrupted_handshake_is_retryable_but_invalid_protocol_is_not() {
+        for bytes in [vec![], vec![0, 0], vec![0, 0, 0, 4, 1, 2]] {
+            let failure = read::<protocol::Hello>(&mut bytes.as_slice())
+                .await
+                .unwrap_err();
+            assert!(failure.retryable, "{}", failure.message);
+        }
+        for bytes in [
+            vec![0, 0, 0, 0],
+            u32::MAX.to_be_bytes().to_vec(),
+            vec![0, 0, 0, 1, 0xc1],
+        ] {
+            let failure = read::<protocol::Hello>(&mut bytes.as_slice())
+                .await
+                .unwrap_err();
+            assert!(!failure.retryable, "{}", failure.message);
+        }
+    }
+
     #[tokio::test]
     async fn failed_startup_wakes_all_waiters_and_requires_explicit_retry() {
         let slot = test_slot();

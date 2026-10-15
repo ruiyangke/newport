@@ -124,9 +124,10 @@ pub fn run() -> Result<()> {
         fs::set_permissions(&rc, fs::Permissions::from_mode(0o444))?;
         let before = fs::metadata(&rc)?;
         let saved = backups(rc.parent().unwrap())?;
-        let refused = command(binary.as_os_str()).arg("install").output()?;
-        assert!(!refused.status.success());
-        assert!(String::from_utf8_lossy(&refused.stderr).contains("read-only"));
+        let setup = command(binary.as_os_str()).arg("install").output()?;
+        assert!(setup.status.success());
+        let notice = String::from_utf8_lossy(&setup.stderr);
+        assert!(notice.contains("Manual shell setup needed") && notice.contains("read-only"));
         assert_eq!(fs::read_to_string(&rc)?, original);
         let after = fs::metadata(&rc)?;
         assert_eq!(before.ino(), after.ino());
@@ -137,9 +138,10 @@ pub fn run() -> Result<()> {
         let protected = home.join("protected");
         fs::write(&protected, original)?;
         symlink(&protected, &rc)?;
-        let refused = command(binary.as_os_str()).arg("install").output()?;
-        assert!(!refused.status.success());
-        assert!(String::from_utf8_lossy(&refused.stderr).contains("symlink"));
+        let setup = command(binary.as_os_str()).arg("install").output()?;
+        assert!(setup.status.success());
+        let notice = String::from_utf8_lossy(&setup.stderr);
+        assert!(notice.contains("Manual shell setup needed") && notice.contains("symlink"));
         assert!(fs::symlink_metadata(&rc)?.is_symlink());
         assert_eq!(fs::read_to_string(protected)?, original);
         println!(

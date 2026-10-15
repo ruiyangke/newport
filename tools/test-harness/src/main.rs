@@ -3,6 +3,7 @@ use anyhow::{bail, Result};
 use std::{path::PathBuf, process::Command};
 mod benchmark;
 mod contract;
+mod fixture_suites;
 mod https;
 mod native;
 mod process;

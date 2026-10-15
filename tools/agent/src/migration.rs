@@ -37,7 +37,9 @@ pub fn shell_end(line: &str) -> bool {
     matches!(line, "# <<< Newport <<<" | "# <<< Porthop <<<")
 }
 pub fn fake_wayland(value: &str) -> bool {
-    value.starts_with("/tmp/newport-wl-") || value.starts_with("/tmp/porthop-wl-")
+    value.starts_with("/tmp/newport-wl-")
+        || value.starts_with("/tmp/porthop-wl-")
+        || crate::paths::integration_display_path(value)
 }
 pub fn native_clipboard_disabled() -> bool {
     env::var("NEWPORT_CLIPBOARD_NATIVE")

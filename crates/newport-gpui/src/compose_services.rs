@@ -32,7 +32,9 @@ pub(super) fn missing_count(
         .count()
 }
 
-// Retain owned row data because the virtual-list renderer outlives this render.
+const PAGE_SIZE: usize = 40;
+
+// Retain row data and focus handles across refreshes; mount only the current page.
 struct OwnedRow {
     service: String,
     container: Option<domain::Container>,
@@ -59,7 +61,7 @@ pub(super) struct TableCache {
     key: Value,
     rows: Rc<Vec<OwnedRow>>,
     columns: Rc<ServiceColumns>,
-    list: ListState,
+    page: usize,
     focus: Vec<FocusHandle>,
 }
 impl Default for TableCache {
@@ -68,7 +70,7 @@ impl Default for TableCache {
             key: Value::Null,
             rows: Rc::new(vec![]),
             columns: Rc::new(ServiceColumns([0.; 6])),
-            list: ListState::new(0, ListAlignment::Top, px(60.)),
+            page: 0,
             focus: vec![],
         }
     }
@@ -106,8 +108,8 @@ impl ContainersPanel {
                 .map(keys)
                 .zip(cache.focus.iter().cloned())
                 .collect();
-            let top = cache.list.logical_scroll_top();
-            let anchor = cache.rows.get(top.item_ix).map(keys);
+            let anchor = cache.rows.get(cache.page * PAGE_SIZE).map(keys);
+            let same_project = cache.key[0] == key[0];
             let rows: Vec<_> = rows
                 .into_iter()
                 .map(|row| OwnedRow {
@@ -129,23 +131,22 @@ impl ContainersPanel {
                         .unwrap_or_else(|| cx.focus_handle())
                 })
                 .collect();
-            cache
-                .list
-                .splice_focusable(0..cache.rows.len(), focus.iter().cloned().map(Some));
-            cache.list.scroll_to(ListOffset {
-                item_ix: anchor
+            cache.page = if same_project {
+                anchor
                     .as_ref()
                     .and_then(|key| rows.iter().position(|row| keys(row) == *key))
-                    .unwrap_or(0),
-                offset_in_item: top.offset_in_item,
-            });
+                    .map_or(cache.page, |index| index / PAGE_SIZE)
+                    .min(rows.len().saturating_sub(1) / PAGE_SIZE)
+            } else {
+                0
+            };
             cache.rows = Rc::new(rows);
             cache.focus = focus;
             cache.key = key;
         }
         let rows = cache.rows.clone();
         let columns = cache.columns.clone();
-        let state = cache.list.clone();
+        let page = cache.page;
         let focus = cache.focus.clone();
         drop(cache);
         let header = div()
@@ -211,50 +212,70 @@ impl ContainersPanel {
             .min_w(px(columns.total()))
             .text_size(px(12.))
             .child(header);
-        if rows.len() <= 12 {
-            for (index, row) in rows.iter().enumerate() {
-                table = table.child(self.compose_service_row(
-                    group.name,
-                    row.borrowed(),
-                    index + 2,
-                    actions,
-                    &columns,
-                    cx,
-                ));
-            }
-        } else {
-            let project = group.name.to_owned();
+        let start = page * PAGE_SIZE;
+        let end = (start + PAGE_SIZE).min(rows.len());
+        for index in start..end {
             table = table.child(
-                list(
-                    state,
-                    cx.processor(move |this, index: usize, _, cx| {
-                        div()
-                            .tab_group()
-                            .tab_index(index as isize)
-                            .tab_stop(false)
-                            .track_focus(&focus[index])
-                            .child(this.compose_service_row(
-                                &project,
-                                rows[index].borrowed(),
-                                index + 2,
-                                actions,
-                                &columns,
-                                cx,
-                            ))
-                            .into_any_element()
-                    }),
-                )
-                .h(px(300.))
-                .w_full(),
+                div()
+                    .tab_group()
+                    .tab_index(index as isize)
+                    .tab_stop(false)
+                    .track_focus(&focus[index])
+                    .child(self.compose_service_row(
+                        group.name,
+                        rows[index].borrowed(),
+                        index + 2,
+                        actions,
+                        &columns,
+                        cx,
+                    )),
             );
         }
+        let project = group.name.to_owned();
+        // The detail pane owns vertical scrolling. Keep only horizontal overflow
+        // here so wheel gestures over a service row move the entire page.
         div()
-            .id("compose-services-scroll")
-            .debug_selector(|| "compose-services-scroll".into())
             .w_full()
             .min_w_0()
-            .overflow_x_scroll()
-            .child(table)
+            .flex_shrink_0()
+            .when(rows.len() > PAGE_SIZE, |view| {
+                view.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .mb(px(8.))
+                        .child(
+                            label(format!("{}–{end} of {} services", start + 1, rows.len()))
+                                .text_size(px(11.)),
+                        )
+                        .child(
+                            crate::controls::pagination("compose-service-pages")
+                                .current_page(page + 1)
+                                .total_pages(rows.len().div_ceil(PAGE_SIZE))
+                                .on_click(cx.listener(move |this, page: &usize, _, cx| {
+                                    if this.compose_project_selected(&project) {
+                                        let mut cache = this.service_table.borrow_mut();
+                                        cache.page = page
+                                            .saturating_sub(1)
+                                            .min(cache.rows.len().saturating_sub(1) / PAGE_SIZE);
+                                        cx.notify();
+                                    }
+                                })),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .id("compose-services-scroll")
+                    .debug_selector(|| "compose-services-scroll".into())
+                    .w_full()
+                    .min_w_0()
+                    .overflow_x_scroll()
+                    .child(table),
+            )
             .into_any_element()
     }
 

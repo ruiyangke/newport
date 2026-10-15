@@ -301,8 +301,10 @@ async fn execute(channel: Channel<Msg>, command: &[u8], config: Config) -> anyho
     };
     let (mut read, write) = channel.split();
     let code = match command {
-        b"set -e; uname -s; uname -m; if test -x \"$HOME/.local/bin/newport-agent\"; then sha256sum \"$HOME/.local/bin/newport-agent\"; elif test -e \"$HOME/.local/bin/newport-agent\" || test -L \"$HOME/.local/bin/newport-agent\"; then echo 'Needle exists but is not executable.' >&2; exit 1; else printf 'missing\\n'; fi" => {
-            write.data(format!("Linux\nx86_64\n{}  newport-agent\n", "0".repeat(64)).as_bytes()).await?;
+        command if command == include_bytes!("../../src/agent-release-check.sh") => {
+            write
+                .data(format!("Linux\nx86_64\n{}\n", "0".repeat(64)).as_bytes())
+                .await?;
             0
         }
         b"test -x \"$HOME/.local/bin/newport-agent\" && printf installed || true" => {
@@ -328,6 +330,10 @@ async fn execute(channel: Channel<Msg>, command: &[u8], config: Config) -> anyho
             write.data(&b"ok"[..]).await?;
             0
         }
+        b"printf connected" | b"printf still-connected" | b"printf shared" => {
+            write.data(&command[b"printf ".len()..]).await?;
+            0
+        }
         b"fail" => {
             write.extended_data(1, &b"fixture failure"[..]).await?;
             7
@@ -348,10 +354,17 @@ async fn execute(channel: Channel<Msg>, command: &[u8], config: Config) -> anyho
             write.data(count.to_string().as_bytes()).await?;
             0
         }
-        b"fixture-agent" | b"fixture-runtime" | b"fixture-worker" | b"fixture-managed-agent" | b"fixture-clipboard" | b"fixture-open" => {
+        b"fixture-agent"
+        | b"fixture-runtime"
+        | b"fixture-worker"
+        | b"fixture-managed-agent"
+        | b"fixture-clipboard"
+        | b"fixture-open" => {
             let args: Vec<&str> = match command {
                 b"fixture-runtime" => vec!["runtime", "--stdio"],
-                b"fixture-worker" => std::iter::once("worker").chain(worker_args.as_ref().unwrap().iter().map(String::as_str)).collect(),
+                b"fixture-worker" => std::iter::once("worker")
+                    .chain(worker_args.as_ref().unwrap().iter().map(String::as_str))
+                    .collect(),
                 b"fixture-agent" => vec!["serve", "ssh-fixture", "--clipboard", "--browser"],
                 b"fixture-managed-agent" => vec!["serve", "ssh-fixture", "--managed"],
                 b"fixture-clipboard" => vec!["clipboard", "-o"],
@@ -364,7 +377,7 @@ async fn execute(channel: Channel<Msg>, command: &[u8], config: Config) -> anyho
                 .env("NEWPORT_GIT_BACKEND", "cli")
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit())
                 .kill_on_drop(true)
                 .spawn()?;
             let mut input = child.stdin.take().unwrap();

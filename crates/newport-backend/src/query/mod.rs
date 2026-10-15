@@ -181,10 +181,6 @@ impl<T: Clone + Send + Sync + 'static, E: Clone + From<String> + Send + Sync + '
         }
     }
 
-    fn active(&self) -> bool {
-        self.control.borrow().active_until > Instant::now()
-    }
-
     /// Explicit refresh for callers that need a fresh result. Cancelling this
     /// waiter does not cancel the shared request or discard its cached result.
     pub async fn refresh(&self) -> Result<T, E> {

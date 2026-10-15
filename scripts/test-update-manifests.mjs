@@ -10,7 +10,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { merge, verifyPackages } from "./merge-update-manifests.mjs";
+import { createHash } from "node:crypto";
+import { merge, verifyPackages, writeChecksums } from "./merge-update-manifests.mjs";
 import { root, json } from "./tooling.mjs";
 function fixture(fn) {
   const temp = mkdtempSync(join(tmpdir(), "newport-manifests-"));
@@ -103,3 +104,28 @@ for (const scenario of [
       else assert.throws(() => verifyPackages(manifest, temp, key));
     }),
   );
+
+test("combined checksums cover every release target and exclude staging files", () =>
+  fixture((temp) => {
+    const manifest = { version: "1.2.3", platforms: {} };
+    const contents = new Map([
+      ["latest.json", "combined manifest"],
+      ["Newport-1.2.3-macos-arm64.zip", "download archive"],
+    ]);
+    for (const target of ["darwin-aarch64", "windows-x86_64", "windows-aarch64"]) {
+      const name = `${target}.package`;
+      manifest.platforms[target] = { url: `https://github.com/ruiyangke/newport/releases/download/v1.2.3/${name}` };
+      contents.set(name, `${target} payload`);
+      contents.set(`${name}.sig`, `${target} signature`);
+    }
+    for (const [name, value] of contents) writeFileSync(join(temp, name), value);
+    for (const name of ["private.key", "windows-x86_64.json", "SHA256SUMS-windows-x86_64", "SHA256SUMS"])
+      writeFileSync(join(temp, name), "staging only");
+    writeChecksums(manifest, temp);
+    const expected = [...contents]
+      .map(([name, content]) => `${createHash("sha256").update(content).digest("hex")}  ${name}\n`);
+    assert.deepEqual(readFileSync(join(temp, "SHA256SUMS"), "utf8").trim().split("\n").sort(), expected.map(line => line.trim()).sort());
+    rmSync(join(temp, "windows-x86_64.package"));
+    assert.throws(() => writeChecksums(manifest, temp), /ENOENT/);
+  }),
+);

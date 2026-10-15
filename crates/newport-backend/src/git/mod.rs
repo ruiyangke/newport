@@ -1146,6 +1146,13 @@ mod backend_selection_tests {
 #[path = "../../../../tools/agent/src/git/backend.rs"]
 mod backend;
 
+// The shared Git contract harness runs locally; production Needle supplies its
+// private runtime directory through the same adapter in the agent's Git module.
+#[cfg(all(test, unix))]
+fn temporary_directory() -> std::io::Result<std::path::PathBuf> {
+    Ok(std::env::temp_dir())
+}
+
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 #[rustfmt::skip]

@@ -1,4 +1,4 @@
-//! Retained file preview presentation; expanding does not refetch or reset browsing.
+//! Retained file preview presentation with a responsive dialog viewport.
 use super::*;
 #[path = "file_preview_animation.rs"]
 mod animation;
@@ -51,28 +51,14 @@ impl Identity {
     }
 }
 
-fn dialog_frame(
-    dialog: Dialog,
-    viewport: Size<Pixels>,
-    expanded: bool,
-    name: String,
-    cx: &App,
-) -> Dialog {
-    let inset = px(if viewport.width <= px(800.) || expanded {
-        12.
-    } else {
-        24.
-    });
+fn dialog_frame(dialog: Dialog, viewport: Size<Pixels>, name: String, cx: &App) -> Dialog {
+    let inset = px(if viewport.width <= px(800.) { 12. } else { 24. });
     let width = (viewport.width - inset * 2.).max(px(0.));
     let height = (viewport.height - inset * 2.).max(px(0.));
     dialog
         .aria_label(name)
-        .w(if expanded {
-            width
-        } else {
-            width.min(px(1040.))
-        })
-        .h(if expanded || viewport.width <= px(800.) {
+        .w(width.min(px(1040.)))
+        .h(if viewport.width <= px(800.) {
             height
         } else {
             height.min(px(760.))
@@ -281,14 +267,12 @@ fn message(error: Option<&str>, cx: &App) -> AnyElement {
 const ZOOM_STEPS: [u16; 7] = [25, 50, 75, 100, 150, 200, 400];
 #[derive(Default)]
 pub struct Viewport {
-    pub expanded: bool,
     pub zoom: Option<u16>,
     pub wrap: bool,
     pub copied: bool,
     modal: Option<ModalLease>,
     content_focus: Option<FocusHandle>,
     text: Option<text::PreviewText>,
-    pdf: Option<Entity<file_pdf_view::PdfPageView>>,
     animation: animation::Clock,
 }
 impl Viewport {
@@ -311,20 +295,32 @@ impl Viewport {
     }
 }
 impl Newport {
-    fn file_pdf_page(
-        &mut self,
-        target: &files::PreviewTarget,
-        page: usize,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.file_preview_target_current(target) || self.file_preview_pdf.is_none() {
-            return;
+    fn retry_file_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let entry = self.file_preview_path.as_ref().and_then(|path| {
+            self.file_browsers.get(&self.server)?.reads.listing()?["entries"]
+                .as_array()?
+                .iter()
+                .find(|entry| entry["path"] == *path)
+                .cloned()
+        });
+        let Some(entry) = entry else { return };
+        // Retire this modal's identity before publishing a new read token.
+        if let Some(handle) = self
+            .file_preview_viewport
+            .modal
+            .as_ref()
+            .and_then(|modal| modal.handle.borrow().clone())
+        {
+            window.close_dialog_if(handle.focus_handle(), cx);
         }
-        self.request(
-            "preview",
-            "native.pdf_page",
-            json!({"id":self.server,"page":page}),
-        );
+        self.close_file_preview();
+        if let Some(browser) = self.file_browsers.get_mut(&self.server) {
+            let path = entry["path"].as_str().unwrap_or_default().to_owned();
+            if browser.reads.open_preview(path.clone()).is_some() {
+                self.file_preview_path = Some(path);
+                self.open_file_preview_dialog(entry, window, cx);
+            }
+        }
         cx.notify();
     }
     pub(super) fn open_file_preview_dialog(
@@ -344,8 +340,8 @@ impl Newport {
             handle: handle.clone(),
         });
         self.file_preview_viewport.content_focus = Some(cx.focus_handle().tab_stop(true));
-        self.file_preview_viewport.text = Some(text::PreviewText::new(window, cx));
-        self.file_preview_viewport.pdf = Some(cx.new(file_pdf_view::PdfPageView::new));
+        self.file_preview_viewport.text =
+            Some(text::PreviewText::for_path(&identity.path, window, cx));
         let view = cx.weak_entity();
         // A direct file-row opener stays focused until Kit captures it. The
         // context-menu caller supplies a stable fallback before entering here.
@@ -359,40 +355,31 @@ impl Newport {
                 dismiss_owned(&handle, window, cx);
                 return dialog.close_button(false).on_ok(|_, _, _| false);
             }
-            let expanded = view
-                .upgrade()
-                .is_some_and(|view| view.read(cx).file_preview_viewport.expanded);
             let viewport = window.viewport_size();
             let body_view = view.clone();
             let body_identity = identity.clone();
             let close_view = view.clone();
             let close_target = target.clone();
             let close_live = live.clone();
-            dialog_frame(
-                dialog,
-                window.viewport_size(),
-                expanded,
-                identity.name.clone(),
-                cx,
-            )
-            .on_close(move |_, _, cx| {
-                if close_live.get() {
-                    let _ = close_view.update(cx, |this, cx| {
-                        if this.file_preview_selection_current(&close_target) {
-                            this.close_file_preview();
-                            cx.notify();
-                        }
-                    });
-                }
-            })
-            .content(move |content, window, cx| {
-                let body = body_view
-                    .update(cx, |this, cx| {
-                        this.file_preview_panel(&body_identity, viewport, window, cx)
-                    })
-                    .unwrap_or_else(|_| div().into_any_element());
-                content.size_full().min_h_0().gap_0().p_0().child(body)
-            })
+            dialog_frame(dialog, window.viewport_size(), identity.name.clone(), cx)
+                .on_close(move |_, _, cx| {
+                    if close_live.get() {
+                        let _ = close_view.update(cx, |this, cx| {
+                            if this.file_preview_selection_current(&close_target) {
+                                this.close_file_preview();
+                                cx.notify();
+                            }
+                        });
+                    }
+                })
+                .content(move |content, window, cx| {
+                    let body = body_view
+                        .update(cx, |this, cx| {
+                            this.file_preview_panel(&body_identity, viewport, window, cx)
+                        })
+                        .unwrap_or_else(|_| div().into_any_element());
+                    content.size_full().min_h_0().gap_0().p_0().child(body)
+                })
         });
         if let Some(modal) = &self.file_preview_viewport.modal {
             *modal.handle.borrow_mut() = window.active_dialog_handle(cx);
@@ -409,10 +396,13 @@ impl Newport {
         let Some(target) = self.file_preview_target() else {
             return div().into_any_element();
         };
-        let data = self.value("preview");
-        let expanded = self.file_preview_viewport.expanded;
+        let data = self
+            .resources
+            .get("preview")
+            .map(|row| &row.value)
+            .unwrap_or(&Value::Null);
         let zoom = self.file_preview_viewport.zoom;
-        let name = identity.name.clone();
+        let name = &identity.name;
         let download = self.file_action_target(&identity.path).filter(|target| {
             target.supports_transfer(newport_client::file_transfer::Direction::Download)
         });
@@ -439,31 +429,6 @@ impl Newport {
                                     cx,
                                 );
                             }
-                        })
-                    }),
-            )
-            .child(
-                crate::controls::icon_button("files-expand-preview")
-                    .icon(if expanded {
-                        IconName::Minimize2
-                    } else {
-                        IconName::Maximize2
-                    })
-                    .ghost()
-                    .accessibility_label(if expanded {
-                        "Collapse preview"
-                    } else {
-                        "Expand preview"
-                    })
-                    .on_click({
-                        let target = target.clone();
-                        cx.listener(move |this, _, _, cx| {
-                            if !this.file_preview_target_current(&target) {
-                                return;
-                            }
-                            this.file_preview_viewport.expanded =
-                                !this.file_preview_viewport.expanded;
-                            cx.notify();
                         })
                     }),
             )
@@ -510,14 +475,49 @@ impl Newport {
         let error = self.file_preview_error();
         let body = content
             .when(data.is_null() || error.is_some(), |view| {
-                view.child(message(error, cx))
+                view.child(message(error, cx)).when(
+                    error.is_some_and(|error| {
+                        !error.contains("Only text and supported images can be previewed")
+                    }),
+                    |view| {
+                        view.child(
+                            div().flex().justify_center().pb_4().child(
+                                crate::controls::button("file-preview-retry")
+                                    .label("Retry preview")
+                                    .on_click({
+                                        let target = target.clone();
+                                        cx.listener(move |this, _, window, cx| {
+                                            if this.file_preview_target_current(&target) {
+                                                this.retry_file_preview(window, cx);
+                                            }
+                                        })
+                                    }),
+                            ),
+                        )
+                    },
+                )
+            })
+            .when(error.is_none() && data["truncated"] == true, |panel| {
+                panel.child(
+                    div()
+                        .id("file-preview-truncated")
+                        .role(Role::Status)
+                        .aria_label(
+                            "Showing the first 1 MiB. Search and copy apply to this preview.",
+                        )
+                        .px_4()
+                        .py_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Showing the first 1 MiB · Search and copy apply to this preview"),
+                )
             })
             .when(error.is_none() && data["kind"] == "text", |panel| {
-                let content = text(&data, "content");
+                let content = data["content"].as_str().unwrap_or_default();
                 let wrap = self.file_preview_viewport.wrap;
                 panel.when_some(
                     self.file_preview_viewport.text.as_ref(),
-                    |panel, preview| panel.child(preview.view(&content, wrap, window, cx)),
+                    |panel, preview| panel.child(preview.view(content, wrap, window, cx)),
                 )
             })
             .when_some(
@@ -529,11 +529,16 @@ impl Newport {
                         image,
                         data["animationPlays"].as_u64(),
                         self.file_preview_viewport.animation.clone(),
+                        zoom.is_none(),
                     );
                     panel
                         .child(
                             div()
-                                .id("image-preview-viewport")
+                                .id(if zoom.is_none() {
+                                    "image-preview-fit"
+                                } else {
+                                    "image-preview-viewport"
+                                })
                                 .role(Role::Region)
                                 .aria_label(format!("File preview: {name}"))
                                 .flex_1()
@@ -541,9 +546,7 @@ impl Newport {
                                 .w_full()
                                 .overflow_scroll()
                                 .bg(cx.theme().muted)
-                                .when(zoom.is_none(), |frame| {
-                                    frame.flex().items_center().justify_center().p(px(20.))
-                                })
+                                .when(zoom.is_none(), |frame| frame.relative().overflow_hidden())
                                 .child(if let Some(percent) = zoom {
                                     let scale = f32::from(percent) / 100.;
                                     let width =
@@ -566,16 +569,7 @@ impl Newport {
                                         )
                                         .into_any_element()
                                 } else {
-                                    div()
-                                        // Like the original img's max-width/max-height:
-                                        // Fit shrinks large images but never enlarges small ones.
-                                        .w(px(data["width"].as_u64().unwrap_or(1) as f32))
-                                        .h(px(data["height"].as_u64().unwrap_or(1) as f32))
-                                        .max_w_full()
-                                        .max_h_full()
-                                        .flex_shrink_0()
-                                        .child(raster)
-                                        .into_any_element()
+                                    raster
                                 }),
                         )
                         .child(
@@ -665,99 +659,6 @@ impl Newport {
                         )
                 },
             )
-            .when(error.is_none() && data["kind"] == "pdf", |panel| {
-                let page = data["page"].as_u64().unwrap_or(1) as usize;
-                let pages = data["pages"].as_u64().unwrap_or(1) as usize;
-                let pending = self
-                    .resources
-                    .get("preview")
-                    .is_some_and(|resource| resource.pending);
-                panel
-                    .child(
-                        div()
-                            .id("pdf-navigation")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .gap_3()
-                            .p(px(8.))
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .text_size(px(11.))
-                            .flex_shrink_0()
-                            .child(
-                                crate::controls::icon_button("pdf-previous")
-                                    .icon(IconName::ChevronLeft)
-                                    .accessibility_label("Previous PDF page")
-                                    .disabled(pending || page <= 1)
-                                    .on_click({
-                                        let target = target.clone();
-                                        cx.listener(move |this, _, _, cx| {
-                                            if !this.file_preview_target_current(&target) {
-                                                return;
-                                            }
-                                            this.file_pdf_page(&target, page.saturating_sub(1), cx);
-                                        })
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .id("pdf-page-number")
-                                    .role(Role::Status)
-                                    .aria_label(format!("Page {page} of {pages}"))
-                                    .child(format!("Page {page} of {pages}")),
-                            )
-                            .child(
-                                crate::controls::icon_button("pdf-next")
-                                    .icon(IconName::ChevronRight)
-                                    .accessibility_label("Next PDF page")
-                                    .disabled(pending || page >= pages)
-                                    .on_click({
-                                        let target = target.clone();
-                                        cx.listener(move |this, _, _, cx| {
-                                            if !this.file_preview_target_current(&target) {
-                                                return;
-                                            }
-                                            this.file_pdf_page(&target, page + 1, cx);
-                                        })
-                                    }),
-                            ),
-                    )
-                    .when(pending, |panel| panel.child(message(None, cx)))
-                    .when(!pending, |panel| {
-                        panel
-                            .when_some(data["textError"].as_str(), |panel, error| {
-                                panel.child(
-                                    div()
-                                        .id("pdf-text-error")
-                                        .role(Role::Status)
-                                        .aria_label(error.to_owned())
-                                        .p(px(8.))
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(error.to_owned()),
-                                )
-                            })
-                            .when_some(self.file_preview_viewport.pdf.as_ref(), |panel, viewer| {
-                                if let (Some(image), Some(text)) =
-                                    (&self.file_preview_image, &self.file_preview_pdf_text)
-                                {
-                                    viewer.update(cx, |viewer, cx| {
-                                        viewer.set_page(
-                                            image.clone(),
-                                            text.clone(),
-                                            data["naturalWidth"].as_f64().unwrap_or(1.) as f32,
-                                            data["naturalHeight"].as_f64().unwrap_or(1.) as f32,
-                                            cx,
-                                        );
-                                    });
-                                    panel.child(viewer.clone())
-                                } else {
-                                    panel.child(message(None, cx))
-                                }
-                            })
-                    })
-            })
             .into_any_element();
         let footer_actions = div()
             .flex()
@@ -765,7 +666,6 @@ impl Newport {
             .gap(px(8.))
             .flex_shrink_0()
             .when(data["kind"] == "text", |row| {
-                let content = text(&data, "content");
                 let wrap = self.file_preview_viewport.wrap;
                 row.child(
                     crate::controls::button("text-copy")
@@ -782,7 +682,13 @@ impl Newport {
                                 if !this.file_preview_target_current(&target) {
                                     return;
                                 }
-                                cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
+                                let content = this
+                                    .resources
+                                    .get("preview")
+                                    .and_then(|row| row.value["content"].as_str())
+                                    .unwrap_or_default()
+                                    .to_owned();
+                                cx.write_to_clipboard(ClipboardItem::new_string(content));
                                 this.file_preview_viewport.copied = true;
                                 cx.notify();
                             })
@@ -806,8 +712,6 @@ impl Newport {
                         }),
                 )
             })
-            .when(data["kind"] == "image", |row| row.child("Image preview"))
-            .when(data["kind"] == "pdf", |row| row.child("PDF preview"))
             .into_any_element();
         panel_frame(
             identity,

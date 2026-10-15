@@ -55,7 +55,14 @@ impl Newport {
         if head_changed {
             self.git.repo["head"] = status["metadata"]["head"].clone();
         }
-        if !self.git.observe_status_snapshot(&status)
+        let changed = self.git.observe_status_snapshot(&status);
+        let failed_listing = self
+            .resources
+            .get("git-list")
+            .is_some_and(|row| row.error.is_some());
+        // A successful status poll proves reads can run again, even when the
+        // repository is unchanged since an authentication/transport failure.
+        if !(changed || failed_listing)
             || self.git.tab != 0
             || self.git.changes.searching()
             || self.git.diff_recovery.pending()

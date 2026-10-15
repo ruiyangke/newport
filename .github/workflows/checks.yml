@@ -129,7 +129,7 @@ jobs:
       - run: rustup target add ${{ matrix.target }}
       - name: Install Metal shader compiler
         if: runner.os == 'macOS'
-        run: xcodebuild -downloadComponent MetalToolchain
+        run: node scripts/ci/prepare-metal.mjs
       - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
         if: runner.os == 'Windows' && matrix.arch == 'windows-x64'
       - name: Locate LLVM for ARM64 dependencies

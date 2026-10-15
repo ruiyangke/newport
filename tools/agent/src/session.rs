@@ -32,7 +32,7 @@ pub(crate) struct Session {
     // Fields drop in order: stop readers before deleting files and releasing ownership.
     x11: Option<x_server::Server>,
     wayland: Option<wl_server::Server>,
-    _publication: Option<crate::routing::Publication>,
+    publication: Option<crate::routing::Publication>,
     _cleanup: Cleanup,
     _lock: fs::File,
     _endpoint: Endpoint,
@@ -42,7 +42,7 @@ pub(crate) struct Session {
 }
 impl Session {
     pub(crate) fn set_clipboard(&mut self, enabled: bool) -> io::Result<()> {
-        if self.x11.is_some() == enabled {
+        if self.wayland.is_some() == enabled {
             return Ok(());
         }
         let root = self.snapshot.parent().expect("session root");
@@ -60,17 +60,19 @@ impl Session {
         }
         let source = crate::clipboard_source::Source::new(&self.snapshot);
         let wayland = wl_server::Server::start_source(source.clone(), &root.join("wayland.sock"))?;
-        let x11 = x_server::Server::start_source(source.clone(), None)?;
-        private_write(&root.join("display"), x11.display.as_bytes())?;
-        private_write(&root.join("Xauthority"), &fs::read(x11.authority())?)?;
+        let x11 = optional_x11(source.clone())?;
+        if let Some(x11) = &x11 {
+            private_write(&root.join("display"), x11.display.as_bytes())?;
+            private_write(&root.join("Xauthority"), &fs::read(x11.authority())?)?;
+        }
         self.source = source;
         self.wayland = Some(wayland);
-        self.x11 = Some(x11);
+        self.x11 = x11;
         Ok(())
     }
 
     pub(crate) fn clipboard_enabled(&self) -> bool {
-        self.x11.is_some()
+        self.wayland.is_some()
     }
 
     pub(crate) fn publish_features(&self, browser: bool) -> io::Result<()> {
@@ -183,8 +185,9 @@ impl Session {
             })
             .transpose()?;
         let x11 = clipboard
-            .then(|| x_server::Server::start_source(source.clone(), None))
-            .transpose()?;
+            .then(|| optional_x11(source.clone()))
+            .transpose()?
+            .flatten();
         private_write(&root.join("agent-client"), client.as_bytes())?;
         for name in [
             "snapshot.tar",
@@ -219,7 +222,7 @@ impl Session {
             .transpose()?;
         Ok((
             Self {
-                _publication: publication,
+                publication,
                 _directory: directory,
                 x11,
                 wayland,
@@ -232,7 +235,10 @@ impl Session {
             listener,
         ))
     }
-    pub(crate) fn check_backends(&self) -> io::Result<()> {
+    pub(crate) fn check_backends(&mut self) -> io::Result<()> {
+        if let Some(publication) = &mut self.publication {
+            publication.check_current()?;
+        }
         if self.x11.as_ref().is_some_and(|x| !x.is_running()) {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
@@ -246,5 +252,18 @@ impl Session {
             ));
         }
         Ok(())
+    }
+}
+
+// X11 clients require the standard public socket directory. If host policy
+// forbids it, preserve Wayland, CLI clipboard, and browser integration.
+fn optional_x11(source: crate::clipboard_source::Source) -> io::Result<Option<x_server::Server>> {
+    match x_server::Server::start_source(source, None) {
+        Ok(server) => Ok(Some(server)),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            eprintln!("Newport: X11 clipboard unavailable: {error}. Wayland and CLI clipboard remain available.");
+            Ok(None)
+        }
+        Err(error) => Err(error),
     }
 }

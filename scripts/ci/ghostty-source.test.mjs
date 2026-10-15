@@ -97,6 +97,18 @@ test("changing a patch rebuilds from the pinned base through a nested wrapper", 
   });
 });
 
+test("CRLF patches from a Windows checkout apply to the archived LF source", () => {
+  fixture((options) => {
+    const patch = join(options.patches, "001-test.patch");
+    const original = readFileSync(patch, "utf8");
+    writeFileSync(patch, original.replace(/\n/g, "\r\n"));
+    const prepared = prepareGhosttySource(options);
+    assert.equal(readFileSync(join(prepared, "src/terminal.zig"), "utf8"), "fixed\n");
+    writeFileSync(patch, original);
+    assert.equal(prepareGhosttySource(options), prepared);
+  });
+});
+
 test("a modified prepared source fails instead of silently compiling different code", () => {
   fixture((options) => {
     const prepared = prepareGhosttySource(options);

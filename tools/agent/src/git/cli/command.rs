@@ -70,7 +70,10 @@ pub(super) fn write_with_message(
     args: &[std::ffi::OsString],
     message: &str,
 ) -> Result<(), Error> {
-    let mut file = tempfile::NamedTempFile::new().map_err(super::io_error)?;
+    let mut file = tempfile::NamedTempFile::new_in(
+        super::super::temporary_directory().map_err(super::io_error)?,
+    )
+    .map_err(super::io_error)?;
     file.write_all(message.as_bytes())
         .map_err(super::io_error)?;
     let result = write_inner(root, args, vec![], Some(file.path()));

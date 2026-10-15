@@ -2,7 +2,6 @@
 use crate::{
     manager::Shared,
     model::{Server, Tunnel},
-    ssh,
 };
 use uuid::Uuid;
 
@@ -455,18 +454,29 @@ pub async fn set_integration_enabled(
 }
 
 pub async fn test_connection(state: &Shared, id: Uuid) -> Result<(), String> {
+    probe_connection(state, id, true).await
+}
+
+pub(crate) async fn probe_connection(state: &Shared, id: Uuid, retry: bool) -> Result<(), String> {
     let (server, owner) = state.current(id)?;
     let revision = owner.revision();
     let started = std::time::Instant::now();
-    let result = ssh::execute(&server, "printf ok", None)
-        .await
-        .and_then(|text| {
-            if text.trim() == "ok" {
-                Ok(())
-            } else {
-                Err("Unexpected connection test response".into())
-            }
-        });
+    // Verify the transport used by the pages. A separate connection could
+    // succeed while their shared transport was still awaiting agent consent.
+    // Explicit tests may release backoff; background health probes must not.
+    if retry {
+        owner.retry_transport();
+    }
+    let result = async {
+        let lease = owner.acquire(&server).await?;
+        let text = lease.execute("printf ok", None).await?;
+        if text.trim() == "ok" {
+            Ok(())
+        } else {
+            Err("Unexpected connection test response".into())
+        }
+    }
+    .await;
     state.observe_connection(&server, revision, started, result.clone());
     result
 }
@@ -866,5 +876,51 @@ mod forwarding_precondition_tests {
             )
             .is_ok()
         );
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "Run with the SSH harness and its ephemeral fixture"]
+    async fn connection_test_and_background_probe_use_the_pages_transport() {
+        use crate::{
+            manager::{Manager, share},
+            model::Config,
+            profile::Store,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": Uuid::new_v4(), "name":"Fixture", "sshHost":"127.0.0.1",
+            "sshUser":"fixture", "sshPort": std::env::var("NEWPORT_TEST_SSH_PORT").unwrap().parse::<u16>().unwrap(),
+            "identityFile":std::env::var("NEWPORT_TEST_IDENTITY").unwrap()
+        })).unwrap();
+        let mut manager = Manager::new(Store::for_test(directory.path().into()));
+        manager
+            .save(Config {
+                servers: vec![server.clone()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let state = share(manager);
+        let owner = state.owner(server.id).unwrap();
+        assert_eq!(owner.transport_snapshot().generation, 0);
+        test_connection(&state, server.id).await.unwrap();
+        assert_eq!(owner.transport_snapshot().status, "connected");
+        let generation = owner.transport_snapshot().generation;
+        assert_eq!(generation, 1);
+        let lease = owner.acquire(&server).await.unwrap();
+        assert_eq!(lease.execute("printf ok", None).await.unwrap(), "ok");
+        for _ in 0..3 {
+            probe_connection(&state, server.id, false).await.unwrap();
+            test_connection(&state, server.id).await.unwrap();
+            assert_eq!(owner.transport_snapshot().generation, generation);
+        }
+        assert_eq!(state.snapshot().runtime.health[&server.id], "reachable");
+        assert!(!state.snapshot().runtime.awaiting_agent.contains(&server.id));
+        state.sessions.shutdown().await;
     }
 }

@@ -701,16 +701,14 @@ pub async fn background(state: Shared, app: crate::desktop_integration::Desktop)
             .all()
             .into_iter()
             .filter(|owner| !owner.is_revoked())
-            .map(|owner| (owner.server().clone(), owner.revision()))
+            .map(|owner| owner.server().id)
             .collect::<Vec<_>>();
         // Independent probes prevent a slow server from delaying every other server.
         let mut probes = tokio::task::JoinSet::new();
-        for (server, revision) in servers {
+        for server in servers {
             let state = state.clone();
             probes.spawn(async move {
-                let started = Instant::now();
-                let result = ssh::execute(&server, "printf ok", None).await.map(|_| ());
-                state.observe_connection(&server, revision, started, result);
+                let _ = crate::commands::probe_connection(&state, server, false).await;
             });
         }
         while probes.join_next().await.is_some() {}

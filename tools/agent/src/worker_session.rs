@@ -118,8 +118,7 @@ pub(crate) struct Broker {
 }
 impl Broker {
     pub(crate) fn new(runtime: &str, build: &str) -> io::Result<Self> {
-        let directory =
-            crate::owned_directory::Directory::new(Path::new("/tmp"), "newport-runtime-")?;
+        let directory = crate::owned_directory::Directory::new(&crate::paths::runtime()?, "r-")?;
         let path = directory.path().join("workers.sock");
         let (listener, endpoint) = Endpoint::fixed(&path)?;
         let registrations = Arc::new(Mutex::new(Registrations::default()));

@@ -425,10 +425,13 @@ fn valid_listing(value: Value) -> Reply {
     }
 }
 fn valid_preview(value: Value) -> Reply {
-    if matches!(value["kind"].as_str(), Some("text" | "image" | "pdf"))
-        && value["content"].is_string()
-        && value["mime"].is_string()
-    {
+    let supported = (value["kind"] == "text" && value["mime"] == "text/plain")
+        || (value["kind"] == "image"
+            && matches!(
+                value["mime"].as_str(),
+                Some("image/png" | "image/jpeg" | "image/gif" | "image/webp")
+            ));
+    if supported && value["content"].is_string() {
         Ok(value)
     } else {
         Err("Invalid file preview from the backend.".into())
@@ -532,6 +535,20 @@ mod tests {
     fn listing(path: &str) -> Value {
         json!({"path":path,"entries":[]})
     }
+    #[test]
+    fn preview_contract_accepts_text_and_supported_images() {
+        for mime in ["image/png", "image/jpeg", "image/gif", "image/webp"] {
+            assert!(
+                valid_preview(serde_json::json!({"kind":"image","content":"data","mime":mime}))
+                    .is_ok()
+            );
+        }
+        for kind in ["image", "pdf", "binary"] {
+            assert!(valid_preview(serde_json::json!({"kind":kind,"content":"data","mime":"application/octet-stream"})).is_err());
+        }
+        assert!(valid_preview(serde_json::json!({"kind":"text","content":"","mime":"text/plain","truncated":false})).is_ok());
+    }
+
     fn preview(content: &str) -> Value {
         json!({"kind":"text","content":content,"mime":"text/plain"})
     }

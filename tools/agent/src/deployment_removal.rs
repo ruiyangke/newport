@@ -99,7 +99,9 @@ pub(super) fn record_compatibility(installation: &Installation, hash: &str) -> i
     let value = Compatibility {
         version: 1,
         build: hash.into(),
-        removal_admission: 1,
+        // v2 admission uses a persistent home lock. Older removers reject this
+        // build instead of assuming their /tmp lock excludes its services.
+        removal_admission: 2,
     };
     let destination = directory.join("lifecycle.json");
     match private_file(&destination) {
@@ -153,8 +155,10 @@ fn compatible(installation: &Installation) -> io::Result<()> {
             return Err(io::Error::other("Invalid Needle lifecycle metadata"));
         }
         let value: Compatibility = serde_json::from_slice(&bytes)?;
-        if value.version != 1 || value.build != hash || value.removal_admission != 1 {
-            return Err(io::Error::other("Unsupported Needle removal admission"));
+        // A retained v1 executable could create its old /tmp lock after our
+        // legacy-path probe. Refuse removal rather than race that service.
+        if value.version != 1 || value.build != hash || value.removal_admission != 2 {
+            return Err(io::Error::other("A retained Needle build uses older installation locks. Preserve it until older-client compatibility is resolved."));
         }
     }
     Ok(())
@@ -381,6 +385,28 @@ mod tests {
         process::{Child, Command, Stdio},
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn removal_refuses_retained_builds_with_the_old_lock_scheme() {
+        let home = tempfile::tempdir().unwrap();
+        let install = Installation::open(home.path()).unwrap();
+        let binary = std::env::current_exe().unwrap();
+        let hash = super::super::checksum(&binary).unwrap();
+        install.retain(&binary, &hash).unwrap();
+        record_compatibility(&install, &hash).unwrap();
+        compatible(&install).unwrap();
+        let metadata = install.binary(&hash).with_file_name("lifecycle.json");
+        let mut old: Compatibility = serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
+        old.removal_admission = 1;
+        fs::write(&metadata, serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(compatible(&install)
+            .unwrap_err()
+            .to_string()
+            .contains("older installation locks"));
+        assert!(install.binary(&hash).exists());
+        assert!(!install.root.join("removals.json").exists());
+    }
+
     struct ChildGuard(Child);
     impl Drop for ChildGuard {
         fn drop(&mut self) {
@@ -440,11 +466,14 @@ mod tests {
                     .env("NEWPORT_TEST_REMOVAL_ID", id.to_string())
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
-                    .stderr(Stdio::null())
+                    .stderr(Stdio::inherit())
                     .spawn()
                     .unwrap(),
             );
-            let deadline = Instant::now() + Duration::from_secs(15);
+            // A debug Linux test executable is much larger than the shipped
+            // agent. Setup copies, fsyncs and hashes it repeatedly before the
+            // durable checkpoint; allow cold shared CI disks to finish.
+            let deadline = Instant::now() + Duration::from_secs(120);
             while !home.path().join("checkpoint").exists() {
                 assert!(
                     child.0.try_wait().unwrap().is_none(),

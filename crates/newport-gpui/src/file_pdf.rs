@@ -1,6 +1,6 @@
 //! GPUI image adapter over the shared native PDF renderer.
 use gpui_kit::RenderImage;
-pub use newport_platform::pdf::{Glyph, PdfBytes, TextLayer, decode};
+pub use newport_platform::pdf::{PdfBytes, TextLayer, decode};
 use serde_json::Value;
 use std::sync::Arc;
 

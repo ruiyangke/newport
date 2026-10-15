@@ -1,4 +1,5 @@
 //! Explicit integration routing. A shell never guesses between desktop sessions.
+mod history;
 use serde::{Deserialize, Serialize};
 use std::{
     env, fs, io,
@@ -13,7 +14,7 @@ pub(crate) struct Scope {
     pub runtime: String,
     pub directory: PathBuf,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Record {
     session: String,
@@ -31,6 +32,23 @@ pub(crate) struct Publication {
     path: PathBuf,
     identity: (u64, u64),
     _lock: fs::File,
+    record: Record,
+    next_check: std::time::Instant,
+}
+impl Publication {
+    pub(crate) fn check_current(&mut self) -> io::Result<()> {
+        let now = std::time::Instant::now();
+        if now < self.next_check {
+            return Ok(());
+        }
+        self.next_check = now + std::time::Duration::from_secs(1);
+        if !history::is_current(&self.record)? {
+            return Err(io::Error::other(
+                "Integration session superseded by a newer connection",
+            ));
+        }
+        Ok(())
+    }
 }
 impl Drop for Publication {
     fn drop(&mut self) {
@@ -61,7 +79,7 @@ pub(crate) fn publish(scope: &Scope, client: &str, root: &Path) -> io::Result<Pu
         ));
     }
     // Best effort: a bad unrelated record must not prevent a new session.
-    let _ = records();
+    let previous = records().unwrap_or_default();
     let file = tempfile::Builder::new()
         .prefix("session-")
         .suffix(".json")
@@ -69,21 +87,22 @@ pub(crate) fn publish(scope: &Scope, client: &str, root: &Path) -> io::Result<Pu
     file.as_file()
         .set_permissions(fs::Permissions::from_mode(0o600))?;
     fs2::FileExt::try_lock_exclusive(file.as_file())?;
-    serde_json::to_writer(
-        file.as_file(),
-        &Record {
-            session: scope.session.clone(),
-            runtime: scope.runtime.clone(),
-            client: client.into(),
-            root: root.into(),
-        },
-    )?;
+    let record = Record {
+        session: scope.session.clone(),
+        runtime: scope.runtime.clone(),
+        client: client.into(),
+        root: root.into(),
+    };
+    serde_json::to_writer(file.as_file(), &record)?;
+    history::publish(&record, &previous)?;
     let m = file.as_file().metadata()?;
     let (file, path) = file.keep().map_err(io::Error::other)?;
     Ok(Publication {
         path,
         identity: (m.dev(), m.ino()),
         _lock: file,
+        record,
+        next_check: std::time::Instant::now(),
     })
 }
 fn active(root: &Path) -> bool {
@@ -126,15 +145,43 @@ pub(crate) fn select(capability: Option<&str>) -> io::Result<Selection> {
             "Invalid NEWPORT_SESSION; use a session ID from newport-agent sessions",
         ));
     }
-    let mut candidates = records()?
+    let records = records()?;
+    let mut candidates = history::reconcile(records.clone(), selector.as_deref())?
         .into_iter()
-        .filter(|r| selector.as_ref().is_none_or(|id| id == &r.session))
         .filter(|r| active(&r.root) && enabled(&r.root, capability))
         .map(|r| Selection {
             root: r.root,
             session: Some(r.session),
         })
         .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        if let Some(selector) = selector.as_deref() {
+            let home = PathBuf::from(
+                env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is required"))?,
+            );
+            let legacy = crate::migration::cache_root(&home)?;
+            // A legacy bridge is another possible destination, even if disabled.
+            if !active(&legacy) {
+                if let Some(record) = history::recover_unknown(&records, selector, capability)? {
+                    candidates.push(Selection {
+                        root: record.root,
+                        session: Some(record.session),
+                    });
+                } else {
+                    // Another helper may have just recorded this alias. Resolve
+                    // it once more before failing; no operation has been sent.
+                    candidates = history::reconcile(self::records()?, Some(selector))?
+                        .into_iter()
+                        .filter(|r| active(&r.root) && enabled(&r.root, capability))
+                        .map(|r| Selection {
+                            root: r.root,
+                            session: Some(r.session),
+                        })
+                        .collect();
+                }
+            }
+        }
+    }
     // Standalone/legacy bridges participate in ambiguity checks, but an explicit
     // modern selector must never fall back to another computer or old bridge.
     if selector.is_none() {
@@ -150,6 +197,10 @@ pub(crate) fn select(capability: Option<&str>) -> io::Result<Selection> {
     }
     match candidates.len() {
         1 => Ok(candidates.remove(0)),
+        0 if selector.is_some() => Err(io::Error::other(format!(
+            "Selected Newport session {} is unavailable or does not permit this integration. Run newport-agent sessions to select an active session; NEWPORT_SESSION may refer to an earlier Newport session.",
+            selector.as_deref().unwrap()
+        ))),
         0 => Err(io::Error::other("No permitted Newport integration is active for this session. Enable it in Newport.")),
         _ => Err(io::Error::other("Multiple Newport sessions are available. Set NEWPORT_SESSION using newport-agent sessions.")),
     }
@@ -213,7 +264,10 @@ fn records() -> io::Result<Vec<Record>> {
     Ok(records)
 }
 pub fn list() -> io::Result<()> {
-    for record in records()?.into_iter().filter(|r| active(&r.root)) {
+    for record in history::reconcile(records()?, None)?
+        .into_iter()
+        .filter(|r| active(&r.root))
+    {
         println!(
             "{}  client {}  {}",
             record.session,

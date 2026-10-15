@@ -5,7 +5,7 @@ use gpui_kit::{
     Window,
     component::{
         ActiveTheme,
-        input::{TabSize, Textarea, TextareaState, WrappingIndent},
+        input::{Editor, EditorState, TabSize, Textarea, TextareaState, WrappingIndent},
     },
     div,
     prelude::*,
@@ -24,6 +24,7 @@ fn preview_font(cx: &App) -> gpui_kit::SharedString {
 
 pub(super) struct PreviewText {
     editor: Entity<TextareaState>,
+    code: Option<Entity<EditorState>>,
     content: RefCell<String>,
     wrap: Cell<bool>,
 }
@@ -43,9 +44,32 @@ impl PreviewText {
                     .wrapping_indent(WrappingIndent::None)
                     .placeholder("(Empty file)")
             }),
+            code: None,
             content: RefCell::new(String::new()),
             wrap: Cell::new(false),
         }
+    }
+
+    pub(super) fn for_path(path: &str, window: &mut Window, cx: &mut App) -> Self {
+        let mut preview = Self::new(window, cx);
+        if let Some(language) = crate::git_diff_syntax::language(path) {
+            preview.code = Some(cx.new(|cx| {
+                EditorState::new(window, cx)
+                    .language(language)
+                    .line_number(true)
+                    .folding(false)
+                    .searchable(true)
+                    .replaceable(false)
+                    .soft_wrap(false)
+                    .wrapping_indent(WrappingIndent::None)
+                    .tab_size(TabSize {
+                        tab_size: 4,
+                        hard_tabs: true,
+                    })
+                    .placeholder("(Empty file)")
+            }));
+        }
+        preview
     }
 
     pub(super) fn view(
@@ -58,15 +82,24 @@ impl PreviewText {
         // Replacing the actual document invalidates old selection; changing
         // only its presentation must not call set_value and reset that state.
         if *self.content.borrow() != content {
-            self.editor.update(cx, |editor, cx| {
-                editor.set_value(content.to_owned(), window, cx);
-            });
+            if let Some(code) = &self.code {
+                code.update(cx, |editor, cx| {
+                    editor.set_value(content.to_owned(), window, cx)
+                });
+            } else {
+                self.editor.update(cx, |editor, cx| {
+                    editor.set_value(content.to_owned(), window, cx)
+                });
+            }
             content.clone_into(&mut self.content.borrow_mut());
         }
         if self.wrap.replace(wrap) != wrap {
-            self.editor.update(cx, |editor, cx| {
-                editor.set_soft_wrap(wrap, window, cx);
-            });
+            if let Some(code) = &self.code {
+                code.update(cx, |editor, cx| editor.set_soft_wrap(wrap, window, cx));
+            } else {
+                self.editor
+                    .update(cx, |editor, cx| editor.set_soft_wrap(wrap, window, cx));
+            }
         }
         div()
             .id("file-preview-text")
@@ -77,7 +110,18 @@ impl PreviewText {
             .min_w_0()
             .overflow_hidden()
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .child(
+            .child(if let Some(code) = &self.code {
+                Editor::new(code)
+                    .readonly(true)
+                    .appearance(false)
+                    .bordered(false)
+                    .aria_label("Source file preview")
+                    .h_full()
+                    .font_family(preview_font(cx))
+                    .text_size(px(12.))
+                    .line_height(relative(1.7))
+                    .into_any_element()
+            } else {
                 Textarea::new(&self.editor)
                     .readonly(true)
                     .appearance(false)
@@ -97,8 +141,9 @@ impl PreviewText {
                     .font_weight(FontWeight::NORMAL)
                     .text_size(px(12.))
                     .line_height(relative(1.7))
-                    .p_0(),
-            )
+                    .p_0()
+                    .into_any_element()
+            })
             .into_any_element()
     }
 }
@@ -142,6 +187,61 @@ mod tests {
         cx.update(|window, _| window.resize(size(px(500.), px(300.))));
         draw(cx);
         (view, cx)
+    }
+
+    #[gpui::test]
+    fn source_preview_uses_tree_sitter_and_keeps_code_read_only(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui::init(cx);
+            crate::grammars::init().unwrap();
+        });
+        let source = "fn main() {\n    let greeting = \"雪\";\n}\n";
+        let (view, cx) = cx.add_window_view(|window, cx| Harness {
+            text: PreviewText::for_path("/src/main.rs", window, cx),
+            content: source.into(),
+            wrap: false,
+            width: px(500.),
+        });
+        draw(cx);
+        let editor = view.read_with(cx, |view, _| view.text.code.clone().expect("code editor"));
+        assert_eq!(
+            editor.read_with(cx, |state, _| state.language_name().to_string()),
+            "rust"
+        );
+        // Verify the registered native grammar actually produces token styles.
+        use gpui::component::highlighter::{HighlightTheme, SyntaxHighlighter};
+        let mut syntax = SyntaxHighlighter::new("rust");
+        assert!(syntax.update(None, &gpui::base::input::Rope::from_str(source), None));
+        assert!(
+            !syntax
+                .styles(&(0..source.len()), HighlightTheme::default_light().as_ref())
+                .is_empty()
+        );
+        cx.update(|window, cx| editor.update(cx, |state, cx| state.focus(window, cx)));
+        crate::test_shortcuts(cx, "cmd-a cmd-c");
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().unwrap().text().unwrap()),
+            source
+        );
+        cx.simulate_input("must not edit");
+        crate::test_shortcuts(cx, "backspace cmd-v");
+        draw(cx);
+        assert_eq!(
+            editor.read_with(cx, |state, _| state.value().to_string()),
+            source
+        );
+        view.update(cx, |view, cx| {
+            view.wrap = true;
+            cx.notify();
+        });
+        draw(cx);
+        assert_eq!(
+            editor.read_with(cx, |state, _| state.value().to_string()),
+            source
+        );
+        crate::test_shortcuts(cx, "cmd-f");
+        draw(cx);
+        assert!(editor.read_with(cx, |state, _| state.search_session().open));
     }
 
     #[gpui::test]

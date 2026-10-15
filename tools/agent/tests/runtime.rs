@@ -25,6 +25,7 @@ impl Drop for Worker {
 }
 struct Runtime {
     session: String,
+    client: String,
     child: Child,
     input: Option<ChildStdin>,
     frames: mpsc::Receiver<serde_json::Value>,
@@ -63,6 +64,7 @@ impl Runtime {
         hello.validate().unwrap();
         Self {
             session: uuid::Uuid::new_v4().to_string(),
+            client: uuid::Uuid::new_v4().to_string(),
             child,
             input,
             frames,
@@ -123,7 +125,7 @@ impl Runtime {
             service,
         ]);
         if service == "integration" {
-            command.arg(uuid::Uuid::new_v4().to_string());
+            command.arg(&self.client);
         }
         Worker(
             command
@@ -234,7 +236,8 @@ fn negotiates_build_and_capabilities_without_installing_anything() {
         .error
         .is_none());
     runtime.stopped();
-    assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+    assert!(!home.path().join(".local/bin").exists());
+    assert!(!home.path().join(".local/share/newport/needle").exists());
 }
 
 #[test]
@@ -295,7 +298,8 @@ fn maintenance_excludes_every_cli_service_without_installing_anything() {
     assert!(probe.status.success());
     let probe: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap();
     assert_eq!(probe["usageLease"], 2);
-    assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+    assert!(!home.path().join(".local/bin").exists());
+    assert!(!home.path().join(".local/share/newport/needle").exists());
     drop(maintenance);
     let mut runtime = Runtime::start(home.path(), "");
     runtime.initialize();
@@ -672,16 +676,60 @@ fn two_desktops_route_helpers_explicitly_without_crossing_sessions() {
     first.request(id, protocol::Operation::Shutdown);
     first.stopped();
     // A dead explicit selector cannot silently switch to the remaining desktop.
-    assert!(
-        !helper(Some(&first.session), &["clipboard", "-o", "-t", "TARGETS"])
-            .status
-            .success()
-    );
+    let stale = helper(Some(&first.session), &["clipboard", "-o", "-t", "TARGETS"]);
+    assert!(!stale.status.success());
+    let error = String::from_utf8_lossy(&stale.stderr);
+    assert!(error.contains("Selected Newport session"), "{error}");
+    assert!(error.contains(&first.session), "{error}");
+    assert!(!error.contains("Enable it in Newport"), "{error}");
     assert!(
         helper(Some(&second.session), &["clipboard", "-o", "-t", "TARGETS"])
             .status
             .success()
     );
+    // Relaunching the same desktop preserves the terminal's routing selector,
+    // but the new worker must receive fresh permissions before it can serve it.
+    let mut restarted = Runtime::start(home.path(), "");
+    restarted.session = first.session.clone();
+    restarted.client = first.client.clone();
+    restarted.initialize();
+    let worker_id = restarted.register("integration", control::VERSION);
+    let mut worker = restarted.worker(&worker_id, "integration", home.path());
+    let restarted_events = events(&mut worker);
+    event(&restarted_events, b'R');
+    assert!(!helper(Some(&first.session), &["env"]).status.success());
+    let reply = restarted.request(
+        restarted.hello.instance_id.clone(),
+        protocol::Operation::Permissions {
+            worker_id,
+            permissions: control::Permissions {
+                revision: 1,
+                clipboard: true,
+                browser: true,
+            },
+        },
+    );
+    assert!(reply.applied.unwrap().error.is_none());
+    let mut opener = Worker(
+        Command::new(BIN)
+            .args(["open", "https://example.test/restarted"])
+            .env("HOME", home.path())
+            .env("NEWPORT_SESSION", &first.session)
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let (request, url): (u64, String) =
+        rmp_serde::from_slice(&event(&restarted_events, b'O')).unwrap();
+    assert_eq!(url, "https://example.test/restarted");
+    assert!(eb.try_recv().is_err());
+    wire::write(
+        worker.stdin.as_mut().unwrap(),
+        b'B',
+        &wire::browser_reply(request, true, None).unwrap(),
+    )
+    .unwrap();
+    assert!(opener.wait().unwrap().success());
 }
 #[test]
 fn workers_require_the_negotiated_build_before_serving_feature_protocols() {
@@ -978,4 +1026,201 @@ fn runtime_start_reclaims_crashed_standalone_wayland_directory() {
     assert!(socket.exists());
     let _after = Runtime::start(home.path(), "");
     assert!(!socket.parent().unwrap().exists());
+}
+
+#[test]
+fn reconnect_reconciles_old_selectors_and_retires_only_the_replaced_client() {
+    use newport_agent::integration_control as control;
+    let home = tempfile::tempdir().unwrap();
+    let mut old = Runtime::start(home.path(), "");
+    old.initialize();
+    let mut old_worker = start_integration(&mut old, home.path());
+    let mut other = Runtime::start(home.path(), "");
+    other.initialize();
+    let mut other_worker = start_integration(&mut other, home.path());
+    let mut next = Runtime::start(home.path(), "");
+    next.client = old.client.clone();
+    next.initialize();
+    let id = next.register("integration", control::VERSION);
+    let mut worker = next.worker(&id, "integration", home.path());
+    assert_eq!(
+        newport_agent::wire::read(worker.stdout.as_mut().unwrap())
+            .unwrap()
+            .0,
+        b'R'
+    );
+    let helper = |selector: &str| {
+        Command::new(BIN)
+            .args(["env", "--shell", "zsh"])
+            .env("HOME", home.path())
+            .env("NEWPORT_SESSION", selector)
+            .output()
+            .unwrap()
+    };
+    // Alias resolution must not grant permissions or use the old endpoint.
+    assert!(!helper(&old.session).status.success());
+    assert!(next
+        .request(
+            next.hello.instance_id.clone(),
+            protocol::Operation::Permissions {
+                worker_id: id.clone(),
+                permissions: control::Permissions {
+                    revision: 1,
+                    browser: true,
+                    clipboard: true
+                }
+            }
+        )
+        .applied
+        .unwrap()
+        .error
+        .is_none());
+    let result = helper(&old.session);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains(&next.session));
+    // Retiring the old worker must not remove the replacement's publication.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while old_worker.try_wait().unwrap().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "superseded worker was not retired"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(other_worker.try_wait().unwrap().is_none());
+    assert!(helper(&old.session).status.success());
+    let listed = Command::new(BIN)
+        .arg("sessions")
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    let listed = String::from_utf8(listed.stdout).unwrap();
+    assert!(!listed.contains(&old.session));
+    assert!(listed.contains(&next.session) && listed.contains(&other.session));
+    assert!(next
+        .request(
+            next.hello.instance_id.clone(),
+            protocol::Operation::Permissions {
+                worker_id: id,
+                permissions: control::Permissions {
+                    revision: 2,
+                    browser: false,
+                    clipboard: false
+                }
+            }
+        )
+        .applied
+        .unwrap()
+        .error
+        .is_none());
+    assert!(!helper(&old.session).status.success());
+}
+
+#[test]
+fn unknown_selector_recovers_only_a_single_known_client_and_remembers_the_binding() {
+    use newport_agent::integration_control as control;
+    let home = tempfile::tempdir().unwrap();
+    let mut runtime = Runtime::start(home.path(), "");
+    runtime.initialize();
+    let worker_id = runtime.register("integration", control::VERSION);
+    let mut worker = runtime.worker(&worker_id, "integration", home.path());
+    assert_eq!(
+        newport_agent::wire::read(worker.stdout.as_mut().unwrap())
+            .unwrap()
+            .0,
+        b'R'
+    );
+    let helper = |id: &str, args: &[&str]| {
+        Command::new(BIN)
+            .args(args)
+            .env("HOME", home.path())
+            .env("NEWPORT_SESSION", id)
+            .output()
+            .unwrap()
+    };
+    let old = uuid::Uuid::new_v4().to_string();
+    assert!(
+        !helper(&old, &["env"]).status.success(),
+        "must not recover disabled integrations"
+    );
+    assert!(!helper("invalid-id", &["env"]).status.success());
+    assert!(runtime
+        .request(
+            runtime.hello.instance_id.clone(),
+            protocol::Operation::Permissions {
+                worker_id: worker_id.clone(),
+                permissions: control::Permissions {
+                    revision: 1,
+                    clipboard: true,
+                    browser: false
+                }
+            }
+        )
+        .applied
+        .unwrap()
+        .error
+        .is_none());
+    assert!(!helper(&old, &["open", "https://example.test/disabled"])
+        .status
+        .success());
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let helper = &helper;
+            let old = &old;
+            scope.spawn(move || {
+                let result = helper(old, &["env"]);
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            });
+        }
+    });
+    let recovered = helper(&old, &["env", "--shell", "zsh"]);
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert!(String::from_utf8_lossy(&recovered.stdout).contains(&runtime.session));
+    // Once bound, the unchanged old shell can still resolve its own client when
+    // another desktop joins. A fresh unknown selector must remain ambiguous.
+    let mut other = Runtime::start(home.path(), "");
+    other.initialize();
+    let _other_worker = start_integration(&mut other, home.path());
+    assert!(helper(&old, &["env"]).status.success());
+    let unknown = uuid::Uuid::new_v4().to_string();
+    assert!(!helper(&unknown, &["env"]).status.success());
+    other.request(
+        other.hello.instance_id.clone(),
+        protocol::Operation::Shutdown,
+    );
+    other.stopped();
+    assert!(
+        !helper(&unknown, &["env"]).status.success(),
+        "an offline other desktop still makes guessing unsafe"
+    );
+    assert!(runtime
+        .request(
+            runtime.hello.instance_id.clone(),
+            protocol::Operation::Permissions {
+                worker_id,
+                permissions: control::Permissions {
+                    revision: 2,
+                    clipboard: false,
+                    browser: false
+                }
+            }
+        )
+        .applied
+        .unwrap()
+        .error
+        .is_none());
+    assert!(!helper(&old, &["env"]).status.success());
 }

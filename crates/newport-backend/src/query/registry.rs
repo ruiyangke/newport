@@ -54,7 +54,12 @@ impl<
         if entries.len() >= self.capacity {
             let oldest = entries
                 .iter()
-                .filter(|(_, entry)| Arc::strong_count(&entry.query) == 1 && !entry.query.active())
+                // A demand lease schedules polling; it is not a cache pin.
+                // Completed reads (and abandoned waiters) can leave a lease
+                // behind. Protect actual owners, then reclaim the least used
+                // unowned entry even if its lease has not expired. Dropping
+                // that query also aborts any orphaned fetch under pressure.
+                .filter(|(_, entry)| Arc::strong_count(&entry.query) == 1)
                 .min_by_key(|(_, entry)| entry.touched)
                 .map(|(key, _)| key.clone());
             let Some(oldest) = oldest else {

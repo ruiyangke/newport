@@ -519,7 +519,7 @@ fn already_open_service_menu_rejects_project_and_same_project_container_navigati
 }
 
 #[gpui::test]
-fn large_tables_virtualize_reuse_rows_and_refresh_without_losing_focus(cx: &mut TestAppContext) {
+fn service_pages_share_detail_scroll_and_bound_rendering_across_refreshes(cx: &mut TestAppContext) {
     let (panel, cx, backend) = fixture(cx);
     let mut source = snapshot();
     let template = source.containers[0].clone();
@@ -553,7 +553,7 @@ fn large_tables_virtualize_reuse_rows_and_refresh_without_losing_focus(cx: &mut 
                 .count()
         })
     };
-    assert!((1..25).contains(&mounted(cx)));
+    assert_eq!(mounted(cx), 40);
     let rows = panel.read_with(cx, |p, _| p.service_table.borrow().rows.clone());
     assert_eq!(rows.len(), 100);
     draw(cx);
@@ -563,20 +563,48 @@ fn large_tables_virtualize_reuse_rows_and_refresh_without_losing_focus(cx: &mut 
     )));
     let focus = panel.read_with(cx, |p, _| p.service_table.borrow().focus[0].clone());
     cx.update(|window, cx| focus.focus(window, cx));
+    // A wheel gesture on the service table must move the page, not a nested list.
+    let row = element(cx, "Open container worker-000").bounds();
+    let before = panel.read_with(cx, |p, _| p.detail_scroll.offset());
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: row.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-100.))),
+        ..Default::default()
+    });
+    draw(cx);
+    let after = panel.read_with(cx, |p, _| p.detail_scroll.offset());
+    assert!(
+        after.y < before.y,
+        "scrolling over a row must scroll the detail page"
+    );
+    let moved = element(cx, "Open container worker-000").bounds();
+    assert!((moved.top() - row.top() - (after.y - before.y)).abs() <= px(1.));
+    assert!(cx.update(|window, _| focus.is_focused(window)));
     panel.update(cx, |p, cx| {
-        p.service_table.borrow().list.scroll_to_end();
+        p.detail_scroll.set_offset(gpui::point(px(0.), px(0.)));
         cx.notify();
     });
     draw(cx);
-    assert!(cx.update(|window, _| focus.is_focused(window)));
-    assert!(mounted(cx) < 25);
+    click(cx, "3");
+    draw(cx);
+    assert_eq!(panel.read_with(cx, |p, _| p.service_table.borrow().page), 2);
+    assert_eq!(mounted(cx), 20);
     cx.update(|window, _| {
         assert!(
             snapshots(window)
                 .iter()
                 .any(|node| node.label() == Some("Open container worker-099"))
-        )
+        );
+        assert!(
+            !snapshots(window)
+                .iter()
+                .any(|node| node.label() == Some("Open container worker-000"))
+        );
     });
+    // Refreshing the selected page keeps its anchor and mounted controls.
+    panel.update(cx, |p, cx| p.refresh(cx));
+    settle(&panel, cx);
+    assert_eq!(panel.read_with(cx, |p, _| p.service_table.borrow().page), 2);
     source.containers.truncate(2);
     backend.set_snapshot(source);
     panel.update(cx, |p, cx| p.refresh(cx));

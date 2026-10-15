@@ -26,5 +26,10 @@ RUN --mount=type=cache,id=newport-registry,target=/usr/local/cargo/registry,shar
     file /out/newport-agent-$arch | grep -E 'static(ally linked|-pie linked)' && \
     /out/newport-agent-$arch --help
 
+COPY tests/agent-runtime/private-directory.sh /checks/private-directory.sh
+RUN adduser -D needle-check && chmod 0755 /tmp && \
+    su needle-check -c 'sh /checks/private-directory.sh /out/newport-agent-*' && \
+    chmod 1777 /tmp
+
 FROM scratch AS artifact
 COPY --from=build /out/ /

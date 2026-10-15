@@ -123,7 +123,7 @@ impl Cache {
     }
 }
 
-fn language(path: &str) -> Option<&'static str> {
+pub(super) fn language(path: &str) -> Option<&'static str> {
     let name = path.rsplit('/').next()?.to_ascii_lowercase();
     Some(match name.as_str() {
         "makefile" | "gnumakefile" => "make",
@@ -134,7 +134,7 @@ fn language(path: &str) -> Option<&'static str> {
             "js" | "jsx" | "mjs" | "cjs" => "javascript",
             "ts" | "mts" | "cts" => "typescript",
             "tsx" => "tsx",
-            "json" => "json",
+            "json" | "jsonc" => "json",
             "py" | "pyi" => "python",
             "sh" | "bash" | "zsh" => "bash",
             "c" | "h" => "c",

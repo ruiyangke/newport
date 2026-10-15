@@ -341,17 +341,21 @@ async fn file_listing_and_preview_enforce_types_and_size_limits() {
     assert_eq!(preview["kind"], "text");
     assert_eq!(preview["mime"], "text/plain");
     assert_eq!(preview["content"], "<script>inert 世界</script>");
-    for (name, expected) in [
-        ("binary.dat", "binary"),
-        ("large.bin", "16 MiB"),
-        ("long.txt", "1 MiB"),
-    ] {
+    for name in ["binary.dat", "large.bin"] {
         let error = files::preview(&sftp, &format!("{folder}/{name}"))
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains(expected), "{name}: {error}");
+        assert!(error.contains("binary"), "{name}: {error}");
     }
+    let partial = serde_json::to_value(
+        files::preview(&sftp, &format!("{folder}/long.txt"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(partial["truncated"], true);
+    assert_eq!(partial["content"].as_str().unwrap().len(), 1024 * 1024);
     assert!(files::preview(&sftp, &folder).await.is_err());
     assert!(
         files::preview(&sftp, &format!("{folder}/broken"))

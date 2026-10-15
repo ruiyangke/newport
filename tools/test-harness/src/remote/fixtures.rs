@@ -2,6 +2,7 @@
 //! Keeps test-only SSH credentials out of the parent process and other Rust tests.
 use anyhow::{ensure, Context, Result};
 use std::{
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
@@ -35,7 +36,61 @@ fn checked(command: &mut Command) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn run(filter: &str) -> Result<()> {
+fn backend_command() -> Command {
+    let mut command = crate::command("cargo");
+    command
+        .args(["test", "--locked", "-p", "newport-backend", "--lib"])
+        .arg("--target-dir")
+        .arg(crate::root().join("target"))
+        .env_remove("CARGO_TARGET_DIR");
+    command
+}
+
+pub(super) fn prepare(filters: &[String]) -> Result<(PathBuf, Vec<Vec<String>>)> {
+    // Cold compilation must not consume the ten-minute runtime allowance.
+    // Reuse Cargo's reported executable across isolated servers instead of
+    // recompiling or guessing a hashed name in target/debug/deps.
+    let output = tempfile::NamedTempFile::new()?;
+    let build = crate::process::run(
+        backend_command()
+            .args(["--no-run", "--message-format=json"])
+            .stdout(output.reopen()?),
+    );
+    let mut executable = None;
+    for line in std::fs::read_to_string(output.path())?.lines() {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(rendered) = message["message"]["rendered"].as_str() {
+            eprint!("{rendered}");
+        }
+        if message["reason"] == "compiler-artifact"
+            && message["target"]["name"] == "newport_backend"
+            && message["profile"]["test"] == true
+        {
+            executable = message["executable"].as_str().map(PathBuf::from);
+        }
+    }
+    build?;
+    let executable = executable.context("Cargo did not report the backend test executable")?;
+    let list = crate::process::text(
+        Command::new(&executable)
+            .args(["--ignored", "--list"])
+            .args(filters),
+    )?;
+    let names: Vec<String> = list
+        .lines()
+        .filter_map(|line| line.strip_suffix(": test"))
+        .map(str::to_owned)
+        .collect();
+    ensure!(
+        !names.is_empty(),
+        "No remote tests matched the requested filters"
+    );
+    Ok((executable, crate::fixture_suites::runs(names)))
+}
+
+pub(super) async fn run(executable: &Path, tests: &[String]) -> Result<()> {
     let root = crate::root();
     let temp = tempfile::tempdir()?;
     let key = temp.path().join("client");
@@ -121,16 +176,10 @@ pub(super) async fn run(filter: &str) -> Result<()> {
             .arg(&key)
             .env("SSH_AUTH_SOCK", &socket),
     )?;
-    let mut backend = Command::new("cargo");
-    backend.args(["test", "--locked", "-p", "newport-backend", "--lib"]);
-    // Backend tests use the workspace's normal build profile/cache.
+    let mut backend = Command::new(executable);
     backend
-        .arg("--target-dir")
-        .arg(root.join("target"))
-        .env_remove("CARGO_TARGET_DIR")
-        .env_remove("CARGO_PROFILE_DEV_DEBUG");
-    backend
-        .args([filter, "--", "--ignored", "--nocapture", "--test-threads=1"])
+        .args(["--ignored", "--exact", "--nocapture", "--test-threads=1"])
+        .args(tests)
         .current_dir(&root)
         .env("SSH_AUTH_SOCK", &socket)
         .env("NEWPORT_TEST_SSH_PORT", port.to_string())

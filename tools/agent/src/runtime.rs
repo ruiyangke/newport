@@ -165,7 +165,7 @@ pub fn serve() -> io::Result<()> {
     // Recover external display resources even if this connection never enables
     // Clipboard. Live displays retain their directory lease and are untouched.
     crate::x_endpoint::sweep();
-    crate::owned_directory::sweep(std::path::Path::new("/tmp"), "newport-wl-");
+    crate::owned_directory::sweep(&crate::paths::runtime()?, "wl-");
     let mut hello = describe()?;
     let broker = crate::worker_session::Broker::new(&hello.instance_id, &hello.build_sha256)?;
     hello.worker_socket = broker

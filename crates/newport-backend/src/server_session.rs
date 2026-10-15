@@ -16,6 +16,7 @@ const STALE: &str = "Server session changed. Reconnect before retrying.";
 
 #[derive(Default)]
 pub struct Registry {
+    routing_namespace: Option<Uuid>,
     receipts: Arc<crate::lifecycle_receipts::Store>,
     entries: StdMutex<HashMap<Uuid, Published>>,
     pub(crate) connected: Arc<tokio::sync::Notify>,
@@ -37,6 +38,17 @@ impl std::ops::Deref for Published {
 impl Registry {
     pub fn new(directory: &std::path::Path) -> Self {
         let mut registry = Self::default();
+        registry.routing_namespace = match crate::clipboard::routing_identity(directory) {
+            Ok(identity) => Some(identity),
+            Err(error) => {
+                // Keep existing connections usable if local persistence fails,
+                // but never invent an identity shared with another profile.
+                log::warn!(
+                    "Cannot persist integration routing identity; terminal selectors will last only for this application session: {error}"
+                );
+                Some(Uuid::new_v4())
+            }
+        };
         registry.receipts = Arc::new(crate::lifecycle_receipts::Store::new(
             directory.join("needle-operations.json"),
         ));
@@ -154,6 +166,7 @@ impl Registry {
         if self.stopped.load(Ordering::Acquire) {
             let stopped = Arc::new(ServerSession::new(
                 server.clone(),
+                self.routing_id(server.id),
                 revision,
                 self.connected.clone(),
                 self.receipts.clone(),
@@ -174,6 +187,7 @@ impl Registry {
         }
         let session = Arc::new(ServerSession::new(
             server.clone(),
+            self.routing_id(server.id),
             revision,
             self.connected.clone(),
             self.receipts.clone(),
@@ -188,6 +202,22 @@ impl Registry {
             self.retire(previous.owner);
         }
         session
+    }
+
+    fn routing_id(&self, server: Uuid) -> Uuid {
+        let Some(namespace) = self.routing_namespace else {
+            return Uuid::new_v4();
+        };
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        digest.update(b"Newport integration routing v1\0");
+        digest.update(namespace.as_bytes());
+        digest.update(server.as_bytes());
+        let mut bytes: [u8; 16] = digest.finalize()[..16].try_into().unwrap();
+        // UUIDv8: application-defined SHA-256 derivation, scoped to profile/server.
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes)
     }
 
     pub fn invalidate(&self, id: Uuid) {
@@ -288,6 +318,7 @@ impl ServerSession {
     }
     fn new(
         server: Server,
+        session_id: Uuid,
         revision: u64,
         connected: Arc<tokio::sync::Notify>,
         receipts: Arc<crate::lifecycle_receipts::Store>,
@@ -306,7 +337,7 @@ impl ServerSession {
             permissions.clone(),
         );
         Self {
-            session_id: Uuid::new_v4(),
+            session_id,
             connectivity: StdMutex::default(),
             created_at: std::time::Instant::now(),
             agent_runtime: crate::agent_runtime::Slot::new(permissions.clone()),
@@ -1274,6 +1305,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_routing_survives_restart_and_owner_replacement_but_isolates_profiles() {
+        let directory = tempfile::tempdir().unwrap();
+        let other_directory = tempfile::tempdir().unwrap();
+        let server = profile();
+        let first = Registry::new(directory.path());
+        let owner = first.session(&server, 0);
+        let routing = owner.integration_session_id();
+        let replaced = first.session(&server, 1);
+        assert!(owner.is_revoked());
+        assert_eq!(replaced.integration_session_id(), routing);
+        assert!(!replaced.has_transport());
+        assert_ne!(
+            first.session(&profile(), 0).integration_session_id(),
+            routing
+        );
+        first.shutdown().await;
+
+        let restarted = Registry::new(directory.path());
+        assert_eq!(
+            restarted.session(&server, 0).integration_session_id(),
+            routing
+        );
+        let other = Registry::new(other_directory.path());
+        assert_ne!(other.session(&server, 0).integration_session_id(), routing);
+        restarted.shutdown().await;
+        other.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn persisted_removal_blocks_services_without_revoking_the_server_session() {
         let directory = tempfile::tempdir().unwrap();
         let server = profile();
@@ -1557,7 +1617,12 @@ mod tests {
         let state = crate::manager::share(manager);
         let worker = tokio::spawn(crate::agent_lifecycle::run(state));
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_eq!(registry.all().len(), 2, "saved-only profile was not opened");
+        // Publishing profiles registers owners without opening SSH transports.
+        let saved_owner = registry.get(saved_only.id).unwrap();
+        assert_eq!(registry.all().len(), 3);
+        assert!(saved_owner.connected_lease().await.is_none());
+        assert_eq!(saved_owner.transport_snapshot().generation, 0);
+        assert_eq!(saved_owner.lifecycle.snapshot().checked_at, 0);
         assert!(idle_owner.connected_lease().await.is_none());
         assert_eq!(idle_owner.generation.load(Ordering::Acquire), 0);
         assert_eq!(owner.lifecycle.snapshot().checked_at, 0);
@@ -1604,7 +1669,10 @@ mod tests {
         .await
         .expect("new generation must be checked immediately");
         assert_eq!(owner.generation.load(Ordering::Acquire), 2);
-        assert_eq!(registry.all().len(), 2);
+        assert_eq!(registry.all().len(), 3);
+        assert!(saved_owner.connected_lease().await.is_none());
+        assert_eq!(saved_owner.transport_snapshot().generation, 0);
+        assert_eq!(saved_owner.lifecycle.snapshot().checked_at, 0);
         assert!(idle_owner.connected_lease().await.is_none());
         worker.abort();
         let _ = worker.await;

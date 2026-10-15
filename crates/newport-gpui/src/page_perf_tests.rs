@@ -2057,9 +2057,81 @@ fn git_status_observations_are_quiet_but_reconcile_changed_and_older_pages(
     // A stale displayed page still needs reconciliation even if the observed
     // resource itself did not change (for example after restoring a tab).
     view.update(visual, |view, _| view.resources.invalidate("git-list"));
-    observe(changed, visual);
+    observe(changed.clone(), visual);
     assert_eq!(notices.read_with(visual, |count, _| *count), 2);
     assert_eq!(requests.try_recv().unwrap().key, "git-list");
+
+    // Approval/reconnection may succeed without changing the repository.
+    // A failed list must still recover from an identical successful poll.
+    view.update(visual, |view, _| {
+        view.git.page = changed.clone();
+        view.resources.invalidate("git-list");
+        let generation = view.resources.begin("git-list").unwrap();
+        view.resources.complete(
+            "git-list",
+            generation,
+            Err("SSH agent unavailable: early eof".into()),
+        );
+    });
+    observe(changed.clone(), visual);
+    assert_eq!(requests.try_recv().unwrap().key, "git-list");
+    observe(changed, visual);
+    assert!(
+        !requests.try_iter().any(|request| request.key == "git-list"),
+        "recovery joins the pending read"
+    );
+}
+
+#[gpui::test]
+fn successful_connection_test_refreshes_only_the_selected_servers_page(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui::component::init(cx);
+        theme::install(false, cx);
+    });
+    let mut view = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let entity = cx.new(|cx| owner(window, cx));
+        view = Some(entity.clone());
+        PageHost(entity)
+    });
+    let view = view.unwrap();
+    for (server, success) in [("other", true), ("fixture", false), ("fixture", true)] {
+        let (work, requests) = std::sync::mpsc::sync_channel(64);
+        let (replies, inbox) = std::sync::mpsc::channel();
+        view.update(visual, |view, cx| {
+            view.work = work.into();
+            view.replies = inbox;
+            view.page = Page::Projects;
+            view.selection = Some(json!({"id":"project"}));
+            view.git.repo = json!({"repoId":"repo", "bare":false});
+            view.last_refresh = Instant::now();
+            let key = format!("server-test:{server}");
+            let generation = view.resources.begin(&key).unwrap();
+            replies
+                .send(super::Completion {
+                    pdf: None,
+                    pdf_text: None,
+                    image: None,
+                    server: server.into(),
+                    key,
+                    generation,
+                    result: if success {
+                        Ok(Value::Null)
+                    } else {
+                        Err("SSH agent unavailable".to_owned().into())
+                    },
+                })
+                .unwrap();
+            view.tick(cx);
+        });
+        let refresh = requests
+            .try_iter()
+            .find(|request| request.key == "git-refresh");
+        assert_eq!(refresh.is_some(), server == "fixture" && success);
+        if let Some(refresh) = refresh {
+            assert_eq!(refresh.args, json!({"serverId":"fixture", "repoId":"repo"}));
+        }
+    }
 }
 
 #[gpui::test]

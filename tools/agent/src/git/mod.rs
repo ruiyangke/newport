@@ -20,6 +20,8 @@ use std::{
 };
 use uuid::Uuid;
 
+pub(super) use crate::paths::runtime as temporary_directory;
+
 pub fn serve() -> io::Result<()> {
     serve_bound(crate::transport::Cancellation::default())
 }

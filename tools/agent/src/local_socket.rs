@@ -20,7 +20,7 @@ pub(crate) struct Endpoint {
 }
 impl Endpoint {
     pub(crate) fn temporary() -> io::Result<(UnixListener, Self)> {
-        let directory = crate::owned_directory::Directory::new(Path::new("/tmp"), "newport-wl-")?;
+        let directory = crate::owned_directory::Directory::new(&crate::paths::runtime()?, "wl-")?;
         Self::bind(directory.path().join("clipboard"), None, Some(directory))
     }
     pub(crate) fn fixed(path: &Path) -> io::Result<(UnixListener, Self)> {

@@ -31,7 +31,6 @@ mod file_icon;
 mod file_icon_assets;
 mod file_image;
 mod file_pdf;
-mod file_pdf_view;
 mod file_preview;
 mod file_transfer;
 mod file_tree;
@@ -851,6 +850,9 @@ impl Newport {
                         Some(error) => Notification::error(error.clone()),
                         None => Notification::success("SSH connection verified."),
                     });
+                    if result.error.is_none() && !self.git_write_pending() {
+                        self.refresh();
+                    }
                     self.request("snapshot", "snapshot", json!({}));
                 }
             } else if reply.key.starts_with("integration:") {

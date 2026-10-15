@@ -94,7 +94,7 @@ fn connection_label(state: &Value) -> String {
     let status = state["status"].as_str().unwrap_or("disconnected");
     match status {
         "reconnecting" if state["reconnectAttempt"].as_u64().unwrap_or(0) > 0 => {
-            format!("Retrying · {}/10", state["reconnectAttempt"])
+            format!("Reconnecting · attempt {}", state["reconnectAttempt"])
         }
         "connected" => "Connected".into(),
         "connecting" => "Connecting".into(),
@@ -102,9 +102,6 @@ fn connection_label(state: &Value) -> String {
         "error" => "Error".into(),
         _ => "Disconnected".into(),
     }
-}
-fn can_retry(enabled: bool, status: &str) -> bool {
-    enabled && !matches!(status, "connected" | "connecting" | "reconnecting")
 }
 fn feature_status<'a>(
     feature: &str,
@@ -516,7 +513,7 @@ impl Newport {
 
 #[cfg(test)]
 mod tests {
-    use super::{can_retry, connection_label, feature_status, needle_status};
+    use super::{connection_label, feature_status, needle_status};
     use serde_json::{Value, json};
     #[test]
     fn terminal_setup_distinguishes_completion_skipped_files_and_unverified_history() {
@@ -599,21 +596,11 @@ mod tests {
         );
     }
     #[test]
-    fn retry_only_when_enabled_and_not_active() {
-        for status in ["connected", "connecting", "reconnecting"] {
-            assert!(!can_retry(true, status));
-        }
-        for status in ["disconnected", "error"] {
-            assert!(can_retry(true, status));
-            assert!(!can_retry(false, status));
-        }
-    }
-    #[test]
-    fn missing_state_and_reconnect_count_match_web_labels() {
+    fn connection_labels_do_not_imply_a_retry_limit() {
         assert_eq!(connection_label(&Value::Null), "Disconnected");
         assert_eq!(
             connection_label(&json!({"status":"reconnecting","reconnectAttempt":3})),
-            "Retrying · 3/10"
+            "Reconnecting · attempt 3"
         );
         assert_eq!(
             connection_label(&json!({"status":"reconnecting","reconnectAttempt":0})),

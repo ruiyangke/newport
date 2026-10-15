@@ -37,10 +37,10 @@ export function prepareGhosttySource({
     .sort();
   const patchSet = files.map((name) => ({
     name,
-    hash: digest(readFileSync(join(patches, name))),
+    hash: digest(readFileSync(join(patches, name), "utf8").replace(/\r\n/g, "\n")),
   }));
   const fingerprint = digest(
-    JSON.stringify({ preparationVersion: 3, revision, patchSet }),
+    JSON.stringify({ preparationVersion: 4, revision, patchSet }),
   );
   const destination = join(
     cache,
@@ -92,7 +92,10 @@ export function prepareGhosttySource({
     run("tar", ["-xf", archive, "-C", staged], env);
     const modifiedFiles = {};
     for (const name of files) {
-      const path = join(patches, name);
+      // Git archive emits LF source even when the parent Windows checkout uses
+      // CRLF. Apply a canonical patch without changing the user's checkout.
+      const path = join(temporary, name);
+      writeFileSync(path, readFileSync(join(patches, name), "utf8").replace(/\r\n/g, "\n"));
       run("git", ["-C", staged, "apply", "--check", path], patchEnv);
       const before = {};
       for (const match of readFileSync(path, "utf8").matchAll(

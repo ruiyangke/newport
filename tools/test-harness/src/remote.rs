@@ -184,8 +184,24 @@ pub fn run(args: &[String]) -> Result<()> {
         "newport-test-docker:local",
         "tests/remote/docker",
     ]))?;
-    let filter = filter
+    let filters = filter
         .or_else(|| std::env::var("NEWPORT_TEST_FILTER").ok())
-        .unwrap_or_else(|| "remote_tests::".into());
-    tokio::runtime::Runtime::new()?.block_on(fixtures::run(&filter))
+        .map(|filter| vec![filter])
+        .unwrap_or_else(|| {
+            crate::fixture_suites::LINUX
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect()
+        });
+    let (executable, runs) = fixtures::prepare(&filters)?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    let mut failed = 0;
+    for tests in runs {
+        if let Err(error) = runtime.block_on(fixtures::run(&executable, &tests)) {
+            eprintln!("Remote fixture failed: {error:#}");
+            failed += 1;
+        }
+    }
+    ensure!(failed == 0, "{failed} remote fixture runs failed");
+    Ok(())
 }
