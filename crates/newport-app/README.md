@@ -223,17 +223,23 @@ Compiler tests do not prove Windows install/recovery behavior. Native runtime,
 signed upgrades and production profile acceptance remain required. CI and release
 workflows now build native artifacts; changing the build path does not close those gates.
 
-The macOS package keeps the library under
+Grammar metadata is registered at startup without opening native libraries. Each
+language library loads on its first parser request, including embedded languages,
+and stays loaded for the process lifetime. Missing or incompatible grammars fall
+back to plain text. `--check-grammars` explicitly loads and validates all languages
+for packaging.
+
+The macOS package keeps the per-language libraries and `catalog.json` under
 `Newport.app/Contents/Resources/grammars/`; Windows keeps `grammars/` beside
-`newport.exe`. The macOS development runner signs the library before signing the
+`newport.exe`. The macOS development runner signs every library before signing the
 app. Production packaging must likewise sign native libraries before the bundle
 and notarize the finished app. The packaging script's macOS signature is ad hoc;
 it does not replace provisioning or release acceptance.
 
 For a local Developer ID distribution candidate, use
 `node scripts/release-native-macos.mjs`. It builds the ARM64 release application,
-signs the grammar library before the host, submits to notarization, requires an
-`Accepted` result, staples the ticket and prepares updater artifacts. It never
+signs each language's grammar library before the host, submits to notarization,
+requires an `Accepted` result, staples the ticket and prepares updater artifacts. It never
 publishes or installs the candidate. `--skip-build` reuses release binaries, but
 still validates their version, architecture and disabled debug assertions.
 

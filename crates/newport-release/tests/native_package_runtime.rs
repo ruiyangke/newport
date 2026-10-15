@@ -25,7 +25,44 @@ const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Ne
 const CANARY: &[u8] = b"Preserve this co-located profile, including on uninstall.\n";
 const PAYLOAD: &[&str] = &[
     "newport.exe",
-    "grammars/newport_grammars.dll",
+    "grammars/catalog.json",
+    "grammars/newport_grammar_astro.dll",
+    "grammars/newport_grammar_bash.dll",
+    "grammars/newport_grammar_c.dll",
+    "grammars/newport_grammar_cmake.dll",
+    "grammars/newport_grammar_cpp.dll",
+    "grammars/newport_grammar_csharp.dll",
+    "grammars/newport_grammar_css.dll",
+    "grammars/newport_grammar_diff.dll",
+    "grammars/newport_grammar_ejs.dll",
+    "grammars/newport_grammar_elixir.dll",
+    "grammars/newport_grammar_erb.dll",
+    "grammars/newport_grammar_go.dll",
+    "grammars/newport_grammar_graphql.dll",
+    "grammars/newport_grammar_html.dll",
+    "grammars/newport_grammar_java.dll",
+    "grammars/newport_grammar_javascript.dll",
+    "grammars/newport_grammar_jsdoc.dll",
+    "grammars/newport_grammar_json.dll",
+    "grammars/newport_grammar_kotlin.dll",
+    "grammars/newport_grammar_lua.dll",
+    "grammars/newport_grammar_make.dll",
+    "grammars/newport_grammar_markdown.dll",
+    "grammars/newport_grammar_markdown_inline.dll",
+    "grammars/newport_grammar_php.dll",
+    "grammars/newport_grammar_proto.dll",
+    "grammars/newport_grammar_python.dll",
+    "grammars/newport_grammar_ruby.dll",
+    "grammars/newport_grammar_rust.dll",
+    "grammars/newport_grammar_scala.dll",
+    "grammars/newport_grammar_sql.dll",
+    "grammars/newport_grammar_svelte.dll",
+    "grammars/newport_grammar_swift.dll",
+    "grammars/newport_grammar_toml.dll",
+    "grammars/newport_grammar_tsx.dll",
+    "grammars/newport_grammar_typescript.dll",
+    "grammars/newport_grammar_yaml.dll",
+    "grammars/newport_grammar_zig.dll",
     "agents/newport-agent-x86_64.gz",
     "agents/newport-agent-aarch64.gz",
     "pdfium/pdfium.dll",
@@ -136,7 +173,7 @@ fn interrupted_upgrade(installer: &Path, destination: &Path) -> Result<()> {
     let lock = OpenOptions::new()
         .read(true)
         .share_mode(1)
-        .open(destination.join("grammars/newport_grammars.dll"))?;
+        .open(destination.join("grammars/newport_grammar_json.dll"))?;
     let mut child = install_command(installer, destination, true).spawn()?;
     let backup = destination.join(".newport-install-backup/newport.exe");
     let deadline = Instant::now() + Duration::from_secs(90);
@@ -343,7 +380,7 @@ fn exercise(installer: &Path, destination: &Path, legacy: Option<&Path>) -> Resu
     );
     // Locking the DLL fails after the old executable has already moved to the
     // backup. That case verifies actual rollback, not just refusal at entry.
-    for name in ["newport.exe", "grammars/newport_grammars.dll"] {
+    for name in ["newport.exe", "grammars/newport_grammar_json.dll"] {
         let lock = OpenOptions::new()
             .read(true)
             .share_mode(1)

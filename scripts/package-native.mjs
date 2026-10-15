@@ -16,6 +16,7 @@ import { buildWindowsInstaller } from "./package-windows-native.mjs";
 import { stagePdfium, validateLibrary } from "./stage-pdfium.mjs";
 import { ghosttyBuildEnv } from "./with-ghostty.mjs";
 import { releaseBuildEnv } from "./tooling.mjs";
+import { grammarFiles } from "./grammar-resources.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const { values } = parseArgs({
   options: {
@@ -140,9 +141,11 @@ if (mac) {
     macInfoPlist(verifyBuild(join(bin, "newport"))),
   );
   run("xcrun", ["strip", join(bin, "newport")]);
-  const library = join(resources, "grammars/libnewport_grammars.dylib");
-  run("xcrun", ["strip", "-x", library]);
-  run("codesign", ["--force", "--sign", "-", library]);
+  for (const name of grammarFiles("darwin").filter(name => name.endsWith(".dylib"))) {
+    const library = join(resources, "grammars", name);
+    run("xcrun", ["strip", "-x", library]);
+    run("codesign", ["--force", "--sign", "-", library]);
+  }
   run("codesign", ["--force", "--sign", "-", app]);
   verifyBuild(join(bin, "newport"));
   run(join(bin, "newport"), ["--check-needle"]);

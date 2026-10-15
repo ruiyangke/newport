@@ -22,11 +22,12 @@ function fixture(run) {
   try {
     for (const name of ["scripts", "bin", "resources"])
       mkdirSync(join(directory, name));
-    for (const name of ["package-native.mjs", "tooling.mjs"])
+    for (const name of ["package-native.mjs", "tooling.mjs", "grammar-resources.mjs"])
       copyFileSync(
         join(root, "scripts", name),
         join(directory, "scripts", name),
       );
+    copyFileSync(join(root, "resources/grammar-languages.json"), join(directory, "resources/grammar-languages.json"));
     writeFileSync(join(directory, "resources/app.json"), '{"version":"0.0.0"}');
     writeFileSync(
       join(directory, "scripts/native-build-info.mjs"),

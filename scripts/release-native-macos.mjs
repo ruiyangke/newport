@@ -6,6 +6,8 @@ import { root, run, capture, signerEnv, releaseBuildEnv } from "./tooling.mjs";
 import { readBuildInfo } from "./native-build-info.mjs";
 import { notarizationAuth, submitNotarization } from "./notarize.mjs";
 
+import { grammarFiles } from "./grammar-resources.mjs";
+
 const { values } = parseArgs({
   options: { "skip-build": { type: "boolean" } },
 });
@@ -64,15 +66,9 @@ readBuildInfo(join(app, "Contents/MacOS/newport"), {
 cpSync(profile, join(app, "Contents/embedded.provisionprofile"));
 // Sign nested executable code first, then the enclosing bundle. Only the host
 // receives the restricted Keychain entitlements and matching profile.
-run("codesign", [
-  "--force",
-  "--sign",
-  identity,
-  "--options",
-  "runtime",
-  "--timestamp",
-  join(app, "Contents/Resources/grammars/libnewport_grammars.dylib"),
-]);
+for (const name of grammarFiles("darwin").filter(name => name.endsWith(".dylib"))) {
+  run("codesign", ["--force", "--sign", identity, "--options", "runtime", "--timestamp", join(app, "Contents/Resources/grammars", name)]);
+}
 run("codesign", [
   "--force",
   "--sign",

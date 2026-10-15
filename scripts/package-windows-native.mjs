@@ -19,9 +19,11 @@ import { join, resolve, dirname, relative, isAbsolute, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { root, isMain } from "./tooling.mjs";
 
+import { grammarFiles } from "./grammar-resources.mjs";
+
 const files = [
   "newport.exe",
-  "grammars/newport_grammars.dll",
+  ...grammarFiles("win32").map(name => `grammars/${name}`),
   "agents/newport-agent-x86_64.gz",
   "agents/newport-agent-aarch64.gz",
   "pdfium/pdfium.dll",
@@ -127,11 +129,8 @@ export function inspectPayload(app, arch) {
   )
     throw new Error("NSIS packages require a stable numeric release version");
   verifyPe(readFileSync(join(app, "newport.exe")), arch);
-  verifyPe(
-    readFileSync(join(app, "grammars/newport_grammars.dll")),
-    arch,
-    true,
-  );
+  for (const name of grammarFiles("win32").filter(name => name.endsWith(".dll")))
+    verifyPe(readFileSync(join(app, "grammars", name)), arch, true);
   verifyPe(readFileSync(join(app, "pdfium/pdfium.dll")), arch, true);
   const entries = files.map((path) => ({
     path,

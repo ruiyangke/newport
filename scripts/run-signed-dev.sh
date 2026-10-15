@@ -18,10 +18,11 @@ if [[ "$(basename "$binary")" == newport ]]; then
   mkdir -p "$bundle/Contents/Resources/agents"
   cp "$binary_dir/agents/newport-agent-x86_64.gz" "$bundle/Contents/Resources/agents/"
   cp "$binary_dir/agents/newport-agent-aarch64.gz" "$bundle/Contents/Resources/agents/"
-  mkdir -p "$bundle/Contents/Resources/grammars"
-  cp "$binary_dir/grammars/libnewport_grammars.dylib" "$bundle/Contents/Resources/grammars/"
-  /usr/bin/codesign --force --sign "$NEWPORT_SIGNING_IDENTITY" --timestamp=none \
-    "$bundle/Contents/Resources/grammars/libnewport_grammars.dylib"
+  rm -rf "$bundle/Contents/Resources/grammars"
+  cp -R "$binary_dir/grammars" "$bundle/Contents/Resources/grammars"
+  for library in "$bundle/Contents/Resources/grammars/"*.dylib; do
+    /usr/bin/codesign --force --sign "$NEWPORT_SIGNING_IDENTITY" --timestamp=none "$library"
+  done
   cp "$NEWPORT_PROVISIONING_PROFILE" "$bundle/Contents/embedded.provisionprofile"
   cp "$script_dir/../resources/icons/icon.icns" "$bundle/Contents/Resources/icon.icns"
   cp "$script_dir/../resources/fonts/SymbolsNerdFontMono-Regular.ttf" "$bundle/Contents/Resources/Fonts/"

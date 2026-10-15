@@ -23,6 +23,8 @@ import {
 } from "../package-windows-native.mjs";
 import { root } from "../tooling.mjs";
 
+import { grammarFiles } from "../grammar-resources.mjs";
+
 function pe(arch, dll = false) {
   const bytes = Buffer.alloc(256);
   bytes.write("MZ");
@@ -52,7 +54,7 @@ function fixture(arch = "x86_64") {
   cpSync(join(root, "resources/icons/icon.ico"), join(app, "icon.ico"));
   writeFileSync(join(app, "LICENSE-GPUI-KIT"), "Fixture license");
   writeFileSync(join(app, "newport.exe"), pe(arch));
-  writeFileSync(join(app, "grammars/newport_grammars.dll"), pe(arch, true));
+  for (const name of grammarFiles("win32")) writeFileSync(join(app, "grammars", name), name.endsWith(".dll") ? pe(arch, true) : "{}");
   writeFileSync(
     join(app, "newport-package.json"),
     JSON.stringify({
@@ -72,12 +74,12 @@ test("native installer rejects mixed architecture, data files, symlinks and modi
     assert.equal(baseline.version, "1.2.3");
     assert.throws(() => inspectPayload(app, "aarch64"), /target/);
     writeFileSync(
-      join(app, "grammars/newport_grammars.dll"),
+      join(app, "grammars/newport_grammar_json.dll"),
       pe("aarch64", true),
     );
     assert.throws(() => inspectPayload(app, "x86_64"), /architecture/);
     writeFileSync(
-      join(app, "grammars/newport_grammars.dll"),
+      join(app, "grammars/newport_grammar_json.dll"),
       pe("x86_64", true),
     );
     writeFileSync(

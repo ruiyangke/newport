@@ -1719,7 +1719,9 @@ pub fn run_with_options_and_ready(
         Ok(relay) => relay,
         Err(error) => return Err(format!("Could not start native SSH agent relay: {error}")),
     };
-    grammars::init()?;
+    if let Err(error) = grammars::init() {
+        eprintln!("Syntax highlighting unavailable: {error}");
+    }
     let app = gpui_kit::application().with_assets(assets::Assets);
     app.on_reopen(|cx| {
         let _ = activate(cx);
@@ -1792,7 +1794,7 @@ pub fn run_with_options_and_ready(
     startup_error.borrow_mut().take().map_or(Ok(()), Err)
 }
 
-/// Validate the bundled grammar library without opening a window or backend.
+/// Validate all bundled grammar libraries without opening a window or backend.
 pub fn check_grammars() -> Result<(), String> {
-    grammars::init()
+    grammars::validate_all()
 }

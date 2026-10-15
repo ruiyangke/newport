@@ -1,4 +1,4 @@
-//! Versioned C boundary for Newport's bundled grammar library.
+//! Versioned C boundary for Newport's per-language grammar libraries.
 mod languages;
 use std::{
     ffi::{CString, c_char},
@@ -49,7 +49,7 @@ fn entries() -> &'static Vec<(GrammarConfig, CString)> {
     static ENTRIES: OnceLock<Vec<(GrammarConfig, CString)>> = OnceLock::new();
     ENTRIES.get_or_init(|| {
         languages::Language::all()
-            .filter(|l| *l != languages::Language::Plain)
+            .filter(|l| l.config().language.is_some())
             .map(|l| {
                 let config = l.config();
                 let aliases = match l {
@@ -116,4 +116,13 @@ pub extern "C" fn newport_grammar_function_v1(
     entries()
         .get(index as usize)
         .and_then(|e| e.0.language.map(|l| l.into_raw()))
+}
+
+/// Build-time catalog; contains queries and aliases, never native pointers.
+pub fn catalog() -> String {
+    let grammars: Vec<serde_json::Value> = entries()
+        .iter()
+        .map(|(_, json)| serde_json::from_str(json.to_str().unwrap()).unwrap())
+        .collect();
+    serde_json::json!({"schema": 1, "grammars": grammars}).to_string()
 }
