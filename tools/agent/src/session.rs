@@ -32,19 +32,77 @@ pub(crate) struct Session {
     // Fields drop in order: stop readers before deleting files and releasing ownership.
     x11: Option<x_server::Server>,
     wayland: Option<wl_server::Server>,
+    _publication: Option<crate::routing::Publication>,
     _cleanup: Cleanup,
     _lock: fs::File,
     _endpoint: Endpoint,
+    _directory: Option<crate::owned_directory::Directory>,
     pub(crate) snapshot: PathBuf,
     pub(crate) source: crate::clipboard_source::Source,
 }
 impl Session {
+    pub(crate) fn set_clipboard(&mut self, enabled: bool) -> io::Result<()> {
+        if self.x11.is_some() == enabled {
+            return Ok(());
+        }
+        let root = self.snapshot.parent().expect("session root");
+        if !enabled {
+            self.x11 = None;
+            self.wayland = None;
+            for name in ["snapshot.tar", "display", "Xauthority"] {
+                match fs::remove_file(root.join(name)) {
+                    Ok(()) => (),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+                    Err(error) => return Err(error),
+                }
+            }
+            return Ok(());
+        }
+        let source = crate::clipboard_source::Source::new(&self.snapshot);
+        let wayland = wl_server::Server::start_source(source.clone(), &root.join("wayland.sock"))?;
+        let x11 = x_server::Server::start_source(source.clone(), None)?;
+        private_write(&root.join("display"), x11.display.as_bytes())?;
+        private_write(&root.join("Xauthority"), &fs::read(x11.authority())?)?;
+        self.source = source;
+        self.wayland = Some(wayland);
+        self.x11 = Some(x11);
+        Ok(())
+    }
+
+    pub(crate) fn clipboard_enabled(&self) -> bool {
+        self.x11.is_some()
+    }
+
+    pub(crate) fn publish_features(&self, browser: bool) -> io::Result<()> {
+        private_write(
+            &self.snapshot.with_file_name("features"),
+            format!(
+                "{} {}",
+                if self.clipboard_enabled() {
+                    "clipboard"
+                } else {
+                    ""
+                },
+                if browser { "browser" } else { "" }
+            )
+            .as_bytes(),
+        )
+    }
+
     pub(crate) fn start(
         client: &str,
         clipboard: bool,
         browser: bool,
+        scope: Option<crate::routing::Scope>,
     ) -> io::Result<(Self, UnixListener)> {
-        let root = root()?;
+        let directory = scope
+            .as_ref()
+            .map(|s| crate::owned_directory::Directory::new(&s.directory, "i-"))
+            .transpose()?;
+        let root = match &directory {
+            Some(d) => d.path().to_owned(),
+            None => root()?,
+        };
         let (listener, _endpoint) = Endpoint::fixed(&root.join("agent.sock")).map_err(|e| {
             if matches!(
                 e.kind(),
@@ -155,8 +213,14 @@ impl Session {
             let _ = fs::remove_file(root.join("Xauthority"));
         }
 
+        let publication = scope
+            .as_ref()
+            .map(|scope| crate::routing::publish(scope, client, &root))
+            .transpose()?;
         Ok((
             Self {
+                _publication: publication,
+                _directory: directory,
                 x11,
                 wayland,
                 _cleanup,

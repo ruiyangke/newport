@@ -1,0 +1,77 @@
+[package]
+name = "newport-platform"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[example]]
+name = "update_check"
+required-features = ["updates"]
+
+[[example]]
+name = "update_transaction_check"
+required-features = ["updates"]
+
+[[example]]
+name = "update_startup_check"
+required-features = ["updates"]
+
+[features]
+pdf = ["dep:base64", "dep:cocoa", "dep:objc", "dep:libloading"]
+tray = ["dep:tray-icon", "dep:png"]
+updates = ["dep:ureq", "dep:minisign-verify", "dep:base64", "dep:semver", "dep:tar", "dep:flate2", "dep:tempfile", "dep:fs2", "tokio/process", "tokio/io-util"]
+
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+tray-icon = { version = "0.24.2", default-features = false, optional = true }
+png = { version = "0.18", optional = true }
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+dirs = "7"
+zeroize = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.11"
+url = "2"
+minisign-verify = { version = "0.2.5", optional = true }
+base64 = { version = "0.23.1", optional = true }
+semver = { version = "1", optional = true }
+serde_json = "1"
+tar = { version = "0.4", optional = true }
+flate2 = { version = "1", optional = true }
+tempfile = { version = "3", optional = true }
+serde = { version = "1", features = ["derive"] }
+fs2 = { version = "0.4", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(not(windows))'.dependencies]
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"], optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = { version = "0.26", optional = true }
+objc = { version = "0.2.7", optional = true }
+plist = { version = "1.10.1", default-features = false }
+block2 = "0.6"
+core-foundation = "0.9"
+system-configuration = "0.7"
+security-framework = { version = "3", features = ["OSX_10_15"] }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSImage", "NSBitmapImageRep"] }
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+libloading = { version = "0.8", optional = true }
+ureq = { version = "3.4.2", default-features = false, features = ["native-tls"], optional = true }
+winreg = "0.56"
+clipboard-win = { version = "5.4", features = ["std"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "png"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Pipes", "Win32_System_DataExchange", "Win32_System_Power", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+rmp-serde = "1.3.1"
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["io-util"] }

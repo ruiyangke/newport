@@ -13,20 +13,81 @@ import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { root } from "../tooling.mjs";
 import { validate, profileEntitlements } from "../check-signing.mjs";
+import { notarizationAuth } from "../notarize.mjs";
+
+test("native notarization supports local keychain and existing CI credentials", () => {
+  assert.deepEqual(notarizationAuth({ NEWPORT_NOTARY_PROFILE: "release" }), [
+    "--keychain-profile",
+    "release",
+  ]);
+  const ci = {
+    APPLE_ID: "release@example.invalid",
+    APPLE_PASSWORD: "fixture",
+    APPLE_TEAM_ID: "TEAM",
+  };
+  assert.deepEqual(notarizationAuth(ci), [
+    "--apple-id",
+    ci.APPLE_ID,
+    "--password",
+    ci.APPLE_PASSWORD,
+    "--team-id",
+    ci.APPLE_TEAM_ID,
+  ]);
+  for (const name of Object.keys(ci)) {
+    const missing = { ...ci };
+    delete missing[name];
+    assert.throws(
+      () => notarizationAuth(missing),
+      /Set NEWPORT_NOTARY_PROFILE/,
+    );
+  }
+});
+test("native release retains the installed product and updater identity", () => {
+  const product = JSON.parse(
+    readFileSync(join(root, "resources/app.json"), "utf8"),
+  );
+  assert.equal(product.productName, "Newport");
+  assert.equal(product.identifier, "app.newport");
+  const cargo = readFileSync(
+    join(root, "crates/newport-app/Cargo.toml"),
+    "utf8",
+  );
+  assert.equal(cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1], product.version);
+  const updater = JSON.parse(
+    readFileSync(join(root, "resources/updater.json"), "utf8"),
+  );
+  assert.equal(updater.requireSignedVersion, true);
+  assert.deepEqual(updater.endpoints, [
+    "https://github.com/ruiyangke/newport/releases/latest/download/latest.json",
+  ]);
+  // This key is already trusted by installed releases. Removing the old host
+  // must not silently rotate the update signing identity.
+  assert.equal(
+    updater.pubkey,
+    "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc3MjIzQTY2RTM2QkJERDIKUldUU3ZXdmpaam9pZDhjZjFHN1ZGWmlSZ1crL2NoRUZYd0JUU0RGbE9tc1k4OWN6dnZkOFFnOTYK",
+  );
+  for (const path of ["icon.icns", "icon.ico", "icon.png", "tray.png"])
+    assert.ok(
+      readFileSync(join(root, "resources/icons", path)).length > 0,
+      path,
+    );
+});
+
 test("release requires matching versions and an immutable tag", () => {
   const temp = mkdtempSync(join(tmpdir(), "newport-release-"));
   try {
     mkdirSync(join(temp, "scripts/ci"), { recursive: true });
-    mkdirSync(join(temp, "src-tauri"));
+    mkdirSync(join(temp, "crates/newport-app"), { recursive: true });
+    mkdirSync(join(temp, "resources"));
     for (const path of ["scripts/ci/verify-release.mjs", "scripts/tooling.mjs"])
       copyFileSync(join(root, path), join(temp, path));
     for (const path of [
       "package.json",
       "package-lock.json",
-      "src-tauri/tauri.conf.json",
+      "resources/app.json",
     ])
       writeFileSync(join(temp, path), JSON.stringify({ version: "1.2.3" }));
-    const cargo = join(temp, "src-tauri/Cargo.toml");
+    const cargo = join(temp, "crates/newport-app/Cargo.toml");
     writeFileSync(cargo, '[package]\nversion = "1.2.3"\n');
     const git = (...args) =>
       execFileSync(
@@ -64,7 +125,13 @@ test("release requires matching versions and an immutable tag", () => {
     );
     writeFileSync(cargo, '[package]\nversion = "1.2.4"\n');
     assert.match(check().stderr, /versions must match/);
-    git("checkout", "--", "src-tauri/Cargo.toml");
+    git("checkout", "--", "crates/newport-app/Cargo.toml");
+    writeFileSync(
+      join(temp, "resources/app.json"),
+      JSON.stringify({ version: "1.2.4" }),
+    );
+    assert.match(check().stderr, /versions must match/);
+    git("checkout", "--", "resources/app.json");
     git(
       "-c",
       "user.name=Test",
@@ -116,3 +183,21 @@ test(
     });
   },
 );
+
+
+test("desktop release verification does not enable private-key signing", () => {
+  for (const target of ["newport-release", "newport-backend"]) {
+    const tree = execFileSync("cargo", [
+      "tree", "--locked", "-p", target, "--no-default-features",
+      "--edges", "normal,build", "--prefix", "none",
+    ], { cwd: root, encoding: "utf8" });
+    assert.match(tree, /^minisign-verify v/m, target);
+    assert.doesNotMatch(tree, /^minisign v/m, target);
+    assert.doesNotMatch(tree, /^newport-needle-release v/m, target);
+  }
+  const manifest = readFileSync(join(root, "crates/newport-release/Cargo.toml"), "utf8");
+  assert.match(manifest, /default = \[\]/);
+  assert.match(manifest, /required-features = \["signing"\]/);
+  const wrapper = readFileSync(join(root, "scripts/sign-update.mjs"), "utf8");
+  assert.match(wrapper, /"newport-release", "--features", "signing"/);
+});

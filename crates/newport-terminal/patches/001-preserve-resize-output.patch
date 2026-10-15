@@ -1,0 +1,202 @@
+diff --git a/src/terminal/PageList.zig b/src/terminal/PageList.zig
+index bd76f6f..5062005 100644
+--- a/src/terminal/PageList.zig
++++ b/src/terminal/PageList.zig
+@@ -1246,6 +1246,11 @@ pub const Resize = struct {
+     /// rows back and would otherwise get out of sync with us.
+     pull_scrollback: bool = true,
+ 
++    /// Preserve rows containing only styling when shrinking the active area.
++    /// History-enabled screens retain these as output; screens without history
++    /// may trim them to keep their remaining text visible.
++    preserve_styled_blank_rows: bool = false,
++
+     pub const Cursor = struct {
+         x: size.CellCountInt,
+         y: size.CellCountInt,
+@@ -2876,7 +2881,7 @@ fn resizeWithoutReflow(self: *PageList, opts: Resize) Allocator.Error!void {
+                 // behavior because it seemed fine in an ocean of differing behavior
+                 // between terminal apps. I'm completely open to changing it as long
+                 // as resize behavior isn't regressed in a user-hostile way.
+-                const trimmed = self.trimTrailingBlankRows(self.rows - rows);
++                const trimmed = self.trimTrailingBlankRows(self.rows - rows, opts.preserve_styled_blank_rows);
+ 
+                 // Account for our trimmed rows in the total row cache
+                 self.total_rows -= trimmed;
+@@ -3196,8 +3201,8 @@ fn trailingBlankLines(
+ }
+ 
+ /// Trims up to max trailing blank rows from the pagelist and returns the
+-/// number of rows trimmed. A blank row is any row with no text (but may
+-/// have styling).
++/// number of rows trimmed. Without preservation, a blank row has no text
++/// but may have styling; with preservation, every cell must be empty.
+ ///
+ /// IMPORTANT: This function does NOT update `total_rows`. It returns the
+ /// number of rows trimmed, and the caller is responsible for decrementing
+@@ -3205,6 +3210,7 @@ fn trailingBlankLines(
+ fn trimTrailingBlankRows(
+     self: *PageList,
+     max: size.CellCountInt,
++    preserve_styled: bool,
+ ) size.CellCountInt {
+     var trimmed: size.CellCountInt = 0;
+     var invalidated_node: ?*List.Node = null;
+@@ -3213,8 +3219,9 @@ fn trimTrailingBlankRows(
+     while (it.next()) |row_pin| {
+         const cells = row_pin.cells(.all);
+ 
+-        // If the row has any text then we're done.
+-        if (pagepkg.Cell.hasTextAny(cells)) return trimmed;
++        if (preserve_styled) {
++            for (cells) |cell| if (!cell.isEmpty()) return trimmed;
++        } else if (pagepkg.Cell.hasTextAny(cells)) return trimmed;
+ 
+         // If our tracked pins are in this row then we cannot trim it
+         // because it implies some sort of importance. If we trimmed this
+@@ -11919,7 +11926,7 @@ test "PageList trailing row truncation renews page generation" {
+ 
+     const node = s.pages.last.?;
+     const old_serial = node.serial;
+-    const trimmed = s.trimTrailingBlankRows(1);
++    const trimmed = s.trimTrailingBlankRows(1, false);
+     s.total_rows -= trimmed;
+     try testing.expectEqual(@as(size.CellCountInt, 1), trimmed);
+     try testing.expect(!s.nodeIsValid(node, old_serial));
+@@ -20800,3 +20807,26 @@ test "PageList memory pool fast path does not allocate" {
+     try testing.expectEqual(extra.len, counting.allocations);
+     try testing.expectEqual(0, counting.deallocations);
+ }
++
++test "PageList resize styled trailing row preservation is explicit" {
++    for ([_]bool{ false, true }) |preserve| {
++        var s = try init(std.testing.allocator, .{ .cols = 5, .rows = 3 });
++        defer s.deinit();
++        const last = s.getCell(.{ .active = .{ .x = 1, .y = 2 } }).?;
++        last.cell.* = .{
++            .content_tag = .bg_color_palette,
++            .content = .{ .color_palette = .{ .data = 42 } },
++        };
++        try s.resize(.{ .rows = 2, .preserve_styled_blank_rows = preserve });
++        try std.testing.expectEqual(@as(usize, if (preserve) 3 else 2), s.total_rows);
++        if (preserve) {
++            const retained = s.getCell(.{ .active = .{ .x = 1, .y = 1 } }).?;
++            try std.testing.expectEqual(.bg_color_palette, retained.cell.content_tag);
++            try std.testing.expectEqual(@as(u8, 42), retained.cell.content.color_palette.data);
++        } else {
++            try s.resize(.{ .rows = 3 });
++            const cleared = s.getCell(.{ .active = .{ .x = 1, .y = 2 } }).?;
++            try std.testing.expect(cleared.cell.isZero());
++        }
++    }
++}
+diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
+index 1f0ac2d..18d6530 100644
+--- a/src/terminal/Screen.zig
++++ b/src/terminal/Screen.zig
+@@ -903,7 +903,7 @@ pub fn cursorReload(self: *Screen) void {
+     // Our tracked pin is ALWAYS accurate, so we derive the active
+     // point from the pin. If this returns null it means our pin
+     // points outside the active area. In that case, we update the
+-    // pin to be the top-left.
++    // pin to the top row while preserving its horizontal position.
+     const pt: point.Point = self.pages.pointFromPin(
+         .active,
+         self.cursor.page_pin.*,
+@@ -922,8 +922,9 @@ pub fn cursorReload(self: *Screen) void {
+         // is on a different page. Writing the pin directly here would
+         // leave the cursor holding IDs that are dead or alias unrelated
+         // entries on the new page.
+-        const pin = self.pages.pin(.{ .active = .{} }).?;
+-        self.cursor.x = 0; // Must be set before cursorChangePin
++        const x = @min(self.cursor.page_pin.x, self.pages.cols - 1);
++        const pin = self.pages.pin(.{ .active = .{ .x = x } }).?;
++        self.cursor.x = x; // Must be set before cursorChangePin
+         self.cursor.y = 0;
+         self.cursorChangePin(pin);
+ 
+@@ -2133,6 +2134,7 @@ pub inline fn resize(
+             .pin = self.cursor.page_pin,
+         },
+         .pull_scrollback = opts.pull_scrollback,
++        .preserve_styled_blank_rows = !self.no_scrollback,
+     });
+ 
+     // No more failures are possible after this. Enforced by compiler
+@@ -2192,14 +2194,9 @@ pub inline fn resize(
+                 sc.x += 1;
+             }
+         } else {
+-            // I think this can happen if the screen is resized to be
+-            // less rows or less cols and our saved cursor moves outside
+-            // the active area. In this case, there isn't anything really
+-            // reasonable we can do so we just move the cursor to the
+-            // top-left. It may be reasonable to also move the cursor to
+-            // match the primary cursor. Any behavior is fine since this is
+-            // totally unspecified.
+-            sc.x = 0;
++            // The saved row can move into scrollback when height shrinks.
++            // Clamp vertically without moving the saved column to the left.
++            sc.x = @min(p.x, opts.cols - 1);
+             sc.y = 0;
+             sc.pending_wrap = false;
+         }
+@@ -12666,3 +12663,58 @@ test "Screen: selectLine does not join lines across a recycled row" {
+         try testing.expectEqualStrings("world", contents);
+     }
+ }
++
++test "Screen: resize retains styled trailing output only with history" {
++    for ([_]bool{ false, true }) |history_enabled| {
++        var s = try init(std.testing.io, std.testing.allocator, .{
++            .cols = 10,
++            .rows = 3,
++            .max_scrollback_bytes = if (history_enabled) null else 0,
++        });
++        defer s.deinit();
++        try s.testWriteString("a\nb");
++        const last = s.pages.getCell(.{ .active = .{ .x = 1, .y = 2 } }).?;
++        last.cell.* = .{
++            .content_tag = .bg_color_rgb,
++            .content = .{ .color_rgb = .{ .r = 255, .g = 0, .b = 0 } },
++        };
++        s.cursorAbsolute(1, 0);
++        try s.resize(.{ .cols = 10, .rows = 2 });
++        try std.testing.expectEqual(@as(usize, if (history_enabled) 3 else 2), s.pages.total_rows);
++        if (history_enabled) {
++            const retained = s.pages.getCell(.{ .active = .{ .x = 1, .y = 1 } }).?;
++            try std.testing.expectEqual(.bg_color_rgb, retained.cell.content_tag);
++            try std.testing.expectEqual(@as(u8, 255), retained.cell.content.color_rgb.r);
++        }
++    }
++}
++
++test "Screen: resize clamps cursor rows without losing columns" {
++    for ([_]size.CellCountInt{ 10, 3 }) |cols| {
++        var s = try init(std.testing.io, std.testing.allocator, .{
++            .cols = 10,
++            .rows = 3,
++            .max_scrollback_bytes = null,
++        });
++        defer s.deinit();
++        try s.testWriteString("a\nb\nc");
++        s.cursorAbsolute(4, 0);
++        s.saved_cursor = .{
++            .x = 4,
++            .y = 0,
++            .style = .{},
++            .protected = false,
++            .pending_wrap = false,
++            .origin = false,
++            .charset = s.charset,
++        };
++        try s.resize(.{ .cols = cols, .rows = 2, .reflow = false });
++        try std.testing.expectEqual(@min(@as(size.CellCountInt, 4), cols - 1), s.cursor.x);
++        try std.testing.expectEqual(@as(size.CellCountInt, 0), s.cursor.y);
++        try std.testing.expectEqual(s.cursor.x, s.saved_cursor.?.x);
++        try std.testing.expectEqual(@as(size.CellCountInt, 0), s.saved_cursor.?.y);
++        const text = try s.dumpStringAlloc(std.testing.allocator, .{ .screen = .{} });
++        defer std.testing.allocator.free(text);
++        try std.testing.expectEqualStrings("a\nb\nc", text);
++    }
++}

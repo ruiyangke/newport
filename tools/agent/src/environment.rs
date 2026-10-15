@@ -1,5 +1,4 @@
 //! Shell exports for the currently enabled integrations.
-use crate::paths::root;
 use std::{
     env, fs,
     io::{self, Write},
@@ -21,7 +20,8 @@ pub fn print(args: &[String]) -> io::Result<()> {
             ))
         }
     };
-    let root = root()?;
+    let selection = crate::routing::select(None)?;
+    let root = selection.root;
     let home = env::var("HOME").map_err(io::Error::other)?;
     let features = match fs::read_to_string(root.join("features")) {
         Ok(value) => value,
@@ -34,7 +34,14 @@ pub fn print(args: &[String]) -> io::Result<()> {
         Err(e) => return Err(e),
     };
     // Generate everything before writing: callers must never evaluate partial output.
-    let output = render(&home, &root, &features, display.as_deref(), fish);
+    let mut output = render(&home, &root, &features, display.as_deref(), fish);
+    if let Some(id) = selection.session {
+        output.push_str(&if fish {
+            format!("set -gx NEWPORT_SESSION '{id}'\n")
+        } else {
+            format!("export NEWPORT_SESSION='{id}'\n")
+        });
+    }
     io::stdout().lock().write_all(output.as_bytes())
 }
 

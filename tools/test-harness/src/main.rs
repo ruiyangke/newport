@@ -1,10 +1,9 @@
-//! Backend test orchestration. Frontend checks are explicit opt-in subprocesses.
+//! Backend test orchestration. Native contract replay is mandatory; the independent oracle is opt-in.
 use anyhow::{bail, Result};
 use std::{path::PathBuf, process::Command};
 mod benchmark;
 mod contract;
 mod https;
-#[cfg(unix)]
 mod native;
 mod process;
 mod remote;
@@ -39,10 +38,9 @@ fn main() -> Result<()> {
         "git-contract" => contract::run(false, &args),
         "git-cli-contract" => contract::run(true, &args),
         "benchmark" => benchmark::run(&args),
-        #[cfg(unix)]
-        "native" => native::run(),
+        "native" => native::run(&args),
         "help" => {
-            println!("newport-tests <build-agents|ssh|remote|https|runtime|git-contract|git-cli-contract|benchmark|native>\nContract checks accept --frontend to additionally run the TypeScript decoder.\nRemote checks accept --filter TEST. Benchmark options match git_benchmark.");
+            println!("newport-tests <build-agents|ssh|remote|https|runtime|git-contract|git-cli-contract|benchmark|native>\nContract checks replay native validators; --reference also runs the independent TypeScript protocol oracle.\nRemote checks accept --filter TEST. Benchmark options match git_benchmark.\nNative checks accept --headless to skip the macOS GUI lifecycle test.");
             Ok(())
         }
         _ => bail!("Unknown harness command: {action}"),

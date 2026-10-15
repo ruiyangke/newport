@@ -64,6 +64,6 @@ if (isMain(import.meta.url)) {
   validate(
     plist(process.argv[2]),
     profile,
-    json(join(root, "src-tauri/tauri.conf.json")).identifier,
+    json(join(root, "resources/app.json")).identifier,
   );
 }

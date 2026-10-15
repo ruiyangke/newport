@@ -24,11 +24,13 @@ impl<R: Read> Read for TrackedReader<R> {
 pub(crate) struct DeadlineWriter<W> {
     pub(crate) inner: W,
     pub(crate) timeout: Duration,
+    pub(crate) cancellation: Cancellation,
 }
 impl<W: Write + AsRawFd> Write for DeadlineWriter<W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let deadline = Instant::now() + self.timeout;
         loop {
+            self.cancellation.check()?;
             if Instant::now() >= deadline {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -99,6 +101,7 @@ mod tests {
         let mut writer = DeadlineWriter {
             inner: output,
             timeout: Duration::from_millis(20),
+            cancellation: Cancellation::default(),
         };
         let started = Instant::now();
         assert_eq!(
@@ -106,5 +109,59 @@ mod tests {
             io::ErrorKind::TimedOut
         );
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+}
+
+/// Cooperative session cancellation; commands already executing retain their
+/// existing completion/journal rules, but no new request is admitted afterward.
+#[derive(Clone, Default)]
+pub(crate) struct Cancellation(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Cancellation {
+    pub(crate) fn cancel(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+    pub(crate) fn check(&self) -> io::Result<()> {
+        if self.0.load(std::sync::atomic::Ordering::Acquire) {
+            Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "Needle runtime session ended",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+    pub(crate) fn stdin(&self) -> io::Result<CancellableInput> {
+        use std::os::fd::AsFd;
+        Ok(CancellableInput {
+            input: std::fs::File::from(io::stdin().as_fd().try_clone_to_owned()?),
+            cancellation: self.clone(),
+        })
+    }
+}
+pub(crate) struct CancellableInput {
+    input: std::fs::File,
+    cancellation: Cancellation,
+}
+impl Read for CancellableInput {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        loop {
+            self.cancellation.check()?;
+            let mut fd = libc::pollfd {
+                fd: self.input.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let result = unsafe { libc::poll(&mut fd, 1, 50) };
+            if result > 0 {
+                self.cancellation.check()?;
+                return self.input.read(bytes);
+            }
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
     }
 }

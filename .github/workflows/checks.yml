@@ -11,9 +11,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 jobs:
-  frontend:
+  tooling:
+    name: Release tooling and Git protocol contracts
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -23,27 +24,210 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - run: npx playwright install --with-deps chromium webkit
-      - run: npm run lint
-      - run: npm test
-      - run: npm run build
-      - run: npx playwright test --config playwright.production.config.ts
-      - run: sudo apt-get update && sudo apt-get install -y minisign
-      - run: node scripts/test-update-manifests.mjs
-      - run: node --test scripts/ci/*.test.mjs
-      - run: node scripts/ci/artifact.mjs record dist
+          cache-dependency-path: tools/git-contract/package-lock.json
+      - run: npm ci --prefix tools/git-contract
+      - run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            .
+            tools/agent
+            tools/test-harness
+          key: native-contracts
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - run: sudo apt-get update && sudo apt-get install -y minisign nsis
+      - run: npm run test:tooling
+      - run: npm run check:contracts
+      - name: Replay real CLI responses through native validators and the protocol oracle
+        run: npm run test:git-cli-contract -- --output target/git-contract.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: frontend
-          path: dist
+          name: git-contract
+          path: target/git-contract.json
           if-no-files-found: error
           retention-days: 7
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: failure()
+
+  # Interactive launch/IME/clipboard/DPI acceptance remains a release gate
+  # even when native build/test jobs pass. Compare against the released app.
+  native-core:
+    name: Native contracts and IPC (${{ matrix.arch }})
+    needs: agents
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            arch: macos-arm64
+            target: aarch64-apple-darwin
+          - os: windows-2025
+            arch: windows-x64
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            arch: windows-arm64
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: browser-test-results
-          path: test-results
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - run: rustup show
+      - run: rustup target add ${{ matrix.target }}
+      - name: Check native source formatting
+        run: cargo fmt -p newport-domain -p newport-client -p newport-platform -p newport-backend -p newport-gpui -p newport-app -p newport-grammars -p newport-release -p newport-terminal --check
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: .
+          key: native-core-${{ matrix.arch }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: linux-agents
+          path: resources/agents
+      - run: node scripts/ci/artifact.mjs verify resources/agents
+      - run: cargo clippy --locked -p newport-domain -p newport-platform -p newport-backend -p newport-client -p newport-release --features newport-platform/updates,newport-release/signing --all-targets -- -D warnings
+      - run: cargo test --locked -p newport-domain -p newport-platform -p newport-backend -p newport-client -p newport-release --features newport-platform/updates,newport-release/signing
+      - name: Verify SSH transport and PTY fixture
+        if: runner.os == 'macOS'
+        run: env -u CARGO_BUILD_TARGET cargo run --locked --manifest-path tools/test-harness/Cargo.toml -- ssh
+      - name: Verify Windows credential storage and cleanup
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p newport-platform --lib secrets::windows::tests::credential_manager_preserves_legacy_key_and_isolates_profiles -- --exact --ignored
+      - name: Verify native system notification delivery
+        if: runner.os == 'macOS'
+        run: cargo run --locked -p newport-platform --example system_events_check
+
+  native-ui:
+    name: Native UI (${{ matrix.arch }})
+    needs: agents
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            arch: macos-arm64
+            target: aarch64-apple-darwin
+          - os: windows-2025
+            arch: windows-x64
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            arch: windows-arm64
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - run: rustup show
+      - run: rustup target add ${{ matrix.target }}
+      - name: Install Metal shader compiler
+        if: runner.os == 'macOS'
+        run: xcodebuild -downloadComponent MetalToolchain
+      - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
+        if: runner.os == 'Windows' && matrix.arch == 'windows-x64'
+      - name: Locate LLVM for ARM64 dependencies
+        if: runner.os == 'Windows' && matrix.arch == 'windows-arm64'
+        shell: pwsh
+        run: |
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (!(Test-Path "$llvm\clang.exe")) { throw 'LLVM is required for ARM64' }
+          $llvm >> $env:GITHUB_PATH
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: .
+          key: native-ui-${{ matrix.arch }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: linux-agents
+          path: resources/agents
+      - run: node scripts/ci/artifact.mjs verify resources/agents
+      - run: node scripts/build-grammars.mjs
+      - name: Stage Windows PDF renderer
+        if: runner.os == 'Windows'
+        run: node scripts/stage-pdfium.mjs
+      - name: Prepare pinned Ghostty build dependencies
+        run: node scripts/with-ghostty.mjs --github
+      - run: cargo clippy --locked -p newport-domain -p newport-client -p newport-gpui -p newport-app -p newport-terminal --all-targets -- -D warnings
+      - run: cargo test --locked -p newport-client -p newport-gpui -p newport-app -p newport-terminal
+      - run: cargo test --locked -p newport-platform --features pdf pdf::tests
+      - run: cargo build --locked -p newport-gpui -p newport-app
+      - name: Verify standalone startup and profile ownership
+        run: cargo test --locked -p newport-app --test standalone_lifecycle -- --ignored --skip standalone_gui --nocapture
+      - name: Build native macOS app bundle
+        if: runner.os == 'macOS'
+        run: node scripts/package-native.mjs --debug --skip-build
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: runner.os == 'macOS'
+        with:
+          name: newport-native-${{ matrix.arch }}-adhoc-app
+          path: target/${{ matrix.target }}/debug/native-package/Newport-macos.zip
+          if-no-files-found: error
+          retention-days: 7
+      - name: Verify native Windows executable identity
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $product = Get-Content resources/app.json -Raw | ConvertFrom-Json
+          $binary = Join-Path (Join-Path target $env:CARGO_BUILD_TARGET) 'debug/newport.exe'
+          $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $binary).Path)
+          if ($info.ProductName -ne $product.productName -or
+              $info.FileDescription -ne $product.productName -or
+              $info.ProductVersion -ne $product.version -or
+              $info.FileVersion -ne $product.version -or
+              $info.OriginalFilename -ne 'newport.exe') {
+            throw 'Native executable resources do not match the release identity'
+          }
+      - name: Locate native Windows installer compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $nsis = 'C:\Program Files (x86)\NSIS'
+          if (!(Test-Path "$nsis\makensis.exe")) {
+            choco install nsis --version=3.11 --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
+          }
+          if (!(Test-Path "$nsis\makensis.exe")) { throw 'NSIS compiler not found' }
+          $nsis >> $env:GITHUB_PATH
+      - name: Build native Windows installer candidate
+        if: runner.os == 'Windows'
+        run: node scripts/package-native.mjs --debug --skip-build --nsis
+      - name: Exercise native Windows install, rollback, released upgrade and uninstall
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $directory = Join-Path (Join-Path target $env:CARGO_BUILD_TARGET) 'debug/native-package'
+          $installers = @(Get-ChildItem $directory -Filter '*-setup.exe')
+          if ($installers.Count -ne 1) { throw 'Expected exactly one native installer candidate' }
+          $env:NEWPORT_TEST_INSTALLER = $installers[0].FullName
+          cargo test --locked -p newport-release --test native_package_runtime -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Native installer runtime acceptance failed' }
+          $baseline = Get-Content resources/test-fixtures/legacy-desktop-release.json -Raw | ConvertFrom-Json
+          $arch = $env:CARGO_BUILD_TARGET.Split('-')[0]
+          $assets = @($baseline.assets | Where-Object { $_.name -eq "Newport-0.3.0-windows-$arch-setup.exe" })
+          if ($assets.Count -ne 1) { throw 'Expected one pinned released installer for this architecture' }
+          $asset = $assets[0]
+          $download = Join-Path $env:RUNNER_TEMP $asset.name
+          Invoke-WebRequest -Uri $asset.url -OutFile $download -TimeoutSec 120
+          if ((Get-FileHash $download -Algorithm SHA256).Hash.ToLowerInvariant() -ne $asset.sha256) {
+            throw 'Released installer digest differs from the pinned baseline'
+          }
+          $env:NEWPORT_TEST_LEGACY_INSTALLER = $download
+          cargo test --locked -p newport-release --test native_package_runtime -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Released-to-native installer acceptance failed' }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: runner.os == 'Windows'
+        with:
+          name: newport-native-${{ matrix.arch }}-unsigned-installer
+          path: target/${{ matrix.target }}/debug/native-package/*-setup.exe
+          if-no-files-found: error
           retention-days: 7
 
   agent-tests:
@@ -93,83 +277,17 @@ jobs:
           platforms: arm64
       - run: bash scripts/build-agent.sh
       - run: cargo run --locked --manifest-path tools/test-harness/Cargo.toml -- runtime
-      - run: node scripts/ci/artifact.mjs record src-tauri/agents
+      - run: node scripts/ci/artifact.mjs record resources/agents
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: linux-agents
-          path: src-tauri/agents/
-          if-no-files-found: error
-          retention-days: 7
-
-  desktop:
-    needs: [frontend, agents]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15
-            arch: aarch64
-            bundle: app
-          - os: windows-2025
-            arch: x86_64
-            bundle: nsis
-          - os: windows-11-arm
-            arch: aarch64
-            bundle: nsis
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
-    env:
-      NEWPORT_PREBUILT: "1"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: linux-agents
-          path: src-tauri/agents
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: frontend
-          path: dist
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: npm
-      - run: rustup show
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: src-tauri
-          key: desktop-${{ matrix.arch }}
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
-        if: runner.os == 'Windows' && matrix.arch == 'x86_64'
-      - name: Locate LLVM for ARM64 dependencies
-        if: runner.os == 'Windows' && matrix.arch == 'aarch64'
-        shell: pwsh
-        run: |
-          $llvm = 'C:\Program Files\LLVM\bin'
-          if (!(Test-Path "$llvm\clang.exe")) { throw 'LLVM is required for ARM64' }
-          $llvm >> $env:GITHUB_PATH
-      - run: npm ci
-      - run: node scripts/prepare-build.mjs
-      - run: node --test scripts/ci/release.test.mjs
-      - run: npm run check:rust
-      - run: npm run test:ssh
-        if: runner.os == 'macOS'
-      - run: npm run tauri build -- --bundles ${{ matrix.bundle }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: runner.os == 'Windows'
-        with:
-          name: newport-windows-${{ matrix.arch }}-unsigned
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          path: resources/agents/
           if-no-files-found: error
           retention-days: 7
 
   remote:
     needs: agents
-    # The real desktop backend requires macOS; hosted ARM Macs cannot run Linux VMs.
+    # macOS remote transport coverage; hosted ARM Macs cannot run Linux VMs.
     runs-on: macos-15-intel
     timeout-minutes: 60
     env:
@@ -183,15 +301,17 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: linux-agents
-          path: src-tauri/agents
-      - run: chmod +x src-tauri/agents/newport-agent-*
+          path: resources/agents
+      - run: chmod +x resources/agents/newport-agent-*
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
       - run: rustup show
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            .
+            tools/test-harness
           key: remote
           save-if: ${{ github.event_name != 'pull_request' }}
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
@@ -208,7 +328,7 @@ jobs:
   passed:
     name: All checks passed
     if: always()
-    needs: [frontend, agent-tests, agents, desktop, remote]
+    needs: [tooling, native-core, native-ui, agent-tests, agents, remote]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

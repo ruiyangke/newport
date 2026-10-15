@@ -122,7 +122,7 @@ if (isMain(import.meta.url)) {
   verifyPackages(
     manifest,
     assets,
-    json(join(root, "src-tauri/tauri.conf.json")).plugins.updater.pubkey,
+    json(join(root, "resources/updater.json")).pubkey,
   );
   writeFileSync(values.output, `${JSON.stringify(manifest, null, 2)}\n`);
 }

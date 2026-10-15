@@ -1,8 +1,8 @@
 //! Bounded MessagePack decoding shared by both ends of agent connections.
-use serde::{de::DeserializeOwned, Serialize};
+use serde::de::DeserializeOwned;
 use std::io::{self, Cursor};
 
-pub fn encode(value: &impl Serialize) -> io::Result<Vec<u8>> {
+pub fn encode(value: &impl serde::Serialize) -> io::Result<Vec<u8>> {
     rmp_serde::to_vec(value).map_err(io::Error::other)
 }
 pub fn decode<T: DeserializeOwned>(bytes: &[u8], limit: usize) -> io::Result<T> {

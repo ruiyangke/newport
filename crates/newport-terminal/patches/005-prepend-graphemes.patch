@@ -1,0 +1,300 @@
+diff --git a/src/terminal/Terminal.zig b/src/terminal/Terminal.zig
+--- a/src/terminal/Terminal.zig
++++ b/src/terminal/Terminal.zig
+@@ -591,7 +591,7 @@
+     // When grapheme clustering is enabled and a left margin is set,
+     // print() consults the cell left of the margin after wrapping,
+     // which we can't reason about here. Restrict the fast path to
+-    // the [0x10, 0xFF] range in that case (those never cluster).
++    // the [0x10, 0xFF] range in that case (the Prepend gate still applies).
+     const charset = self.screens.active.charset;
+     const allow_unicode = switch (charset.charsets.get(charset.gl)) {
+         .utf8, .ascii => !grapheme_cluster or self.scrolling_region.left == 0,
+@@ -640,8 +640,8 @@
+     const screen: *Screen = self.screens.active;
+ 
+     // Codepoints in [0x10, 0xFF] are always narrow (width 1, matching
+-    // the c <= 0xFF fast path in print) and can never interact with
+-    // grapheme clustering (which requires a codepoint > 0xFF).
++    // the c <= 0xFF fast path in print), except that a preceding Prepend
++    // prefix can cause grapheme clustering.
+     //
+     // Codepoints above 0xFF are batchable if their width is 1 or 2
+     // (excluding zero-width characters such as combining marks, ZWJ,
+@@ -652,12 +652,11 @@
+ 
+     // Codepoints in [0x10, 0xFF] are always narrow: print()
+     // hardcodes width 1 for c <= 0xFF (no width table lookup).
+-    // They also can never interact with grapheme clustering,
+-    // which print() only performs for c > 0xFF, so they're
+-    // immediately eligible for the narrow fill with no further
+-    // checks.
++    // Check the only ASCII continuation case once per run, preserving bulk
++    // printing for ordinary ASCII.
+     const cp0 = cps[0];
+     if (cp0 <= 0xFF) {
++        if (grapheme_cluster and self.prependBeforeCursor()) return 0;
+         // C0 control characters (0x00-0x0F) aren't printable. The
+         // stream never sends these (they're routed to execute), but
+         // printSlice is a public API so defer to print() for safety.
+@@ -671,6 +670,8 @@
+     }
+ 
+     if (!allow_unicode) return 0;
++    // Keep Prepend out of runs so the next character takes the clustering gate.
++    if (grapheme_cluster and unicode.table.get(@intCast(cp0)).grapheme_break == .prepend) return 0;
+     if (comptime build_options.kitty_graphics) {
+         // The Kitty graphics placeholder requires row bookkeeping.
+         if (cp0 == kitty.graphics.unicode.placeholder) return 0;
+@@ -765,7 +766,10 @@
+         if (cp == kitty.graphics.unicode.placeholder) return false;
+     }
+ 
+-    return unicode.table.get(@intCast(cp)).width == comptime @as(u2, switch (width) {
++    const props = unicode.table.get(@intCast(cp));
++    // A following ASCII character may continue this prefix (GB9b).
++    if (props.grapheme_break == .prepend) return false;
++    return props.width == comptime @as(u2, switch (width) {
+         .narrow => 1,
+         .wide => 2,
+     });
+@@ -1231,6 +1235,35 @@
+     return @bitCast(e);
+ }
+ 
++/// Whether GB9b can join an ASCII character to the cell before the cursor.
++/// Resolve the actual cell rather than previous_char, which survives cursor
++/// movement and need not identify the cell that will receive a continuation.
++fn prependBeforeCursor(self: *Terminal) bool {
++    const screen = self.screens.active;
++    const cursor = &screen.cursor;
++    const right = if (cursor.x > self.scrolling_region.right)
++        self.cols
++    else
++        self.scrolling_region.right + 1;
++    var left: size.CellCountInt = if (self.modes.get(.wraparound))
++        @intFromBool(!cursor.pending_wrap)
++    else if (cursor.x != right - 1) 1 else @intFromBool(cursor.page_cell.codepoint() == 0);
++    if (left > cursor.x) return false;
++    var cell = screen.cursorCellLeft(left);
++    if (cell.wide == .spacer_tail) {
++        if (left == cursor.x) return false;
++        left += 1;
++        cell = screen.cursorCellLeft(left);
++    }
++    var cp = cell.codepoint();
++    if (cp <= 0xFF) return false;
++    if (cell.hasGrapheme()) {
++        const cps = cursor.page_pin.node.page().lookupGrapheme(cell).?;
++        cp = cps[cps.len - 1];
++    }
++    return unicode.table.get(cp).grapheme_break == .prepend;
++}
++
+ pub fn print(self: *Terminal, c: u21) !void {
+     // log.debug("print={x} y={} x={}", .{ c, self.screens.active.cursor.y, self.screens.active.cursor.x });
+ 
+@@ -1268,9 +1301,9 @@
+     // This is MUCH slower than the normal path so the conditional below is
+     // purposely ordered in least-likely to most-likely so we can drop out
+     // as quickly as possible.
+-    if (c > 255 and
+-        self.modes.get(.grapheme_cluster) and
+-        self.screens.active.cursor.x > 0)
++    if (self.modes.get(.grapheme_cluster) and
++        ((c > 255 and self.screens.active.cursor.x > 0) or
++            self.prependBeforeCursor()))
+     grapheme: {
+         @branchHint(.unlikely);
+         // We need the previous cell to determine if we're at a grapheme
+@@ -6909,52 +6942,59 @@
+     try testing.expectEqual(@as(usize, 0), page.graphemeCount());
+ }
+ 
+-test "Terminal: print breaks valid grapheme cluster with Prepend + ASCII for speed" {
+-    const alloc = testing.allocator;
+-    const io_impl = testing.io;
+-    var t = try init(io_impl, alloc, .{ .rows = 5, .cols = 5 });
+-    defer t.deinit(alloc);
+-    t.modes.set(.grapheme_cluster, true);
+-
+-    // Make sure we're not at cursor.x == 0 for the next char.
+-    try t.print('_');
++test "Terminal: Prepend joins ASCII in scalar and batched printing" {
++    const cps = [_]u32{ '_', 0x0600, '1', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j' };
++    for ([_]usize{ 1, 2, 3, cps.len }) |chunk| {
++        var t = try init(testing.io, testing.allocator, .{ .rows = 3, .cols = 20 });
++        defer t.deinit(testing.allocator);
++        t.modes.set(.grapheme_cluster, true);
++        var i: usize = 0;
++        while (i < cps.len) : (i += chunk) {
++            try t.printSlice(cps[i..@min(i + chunk, cps.len)]);
++        }
++        try testing.expectEqual(@as(usize, cps.len - 1), t.screens.active.cursor.x);
++        const list_cell = t.screens.active.pages.getCell(.{ .active = .{ .x = 1, .y = 0 } }).?;
++        try testing.expectEqual(@as(u21, 0x0600), list_cell.cell.codepoint());
++        try testing.expectEqual(Cell.Wide.narrow, list_cell.cell.wide);
++        try testing.expectEqualSlices(u21, &.{'1'}, list_cell.node.page().lookupGrapheme(list_cell.cell).?);
++        const str = try t.plainString(testing.allocator);
++        defer testing.allocator.free(str);
++        try testing.expectEqualStrings("_\u{0600}1abcdefghij", str);
++    }
++    var scalar = try init(testing.io, testing.allocator, .{ .rows = 3, .cols = 20 });
++    defer scalar.deinit(testing.allocator);
++    scalar.modes.set(.grapheme_cluster, true);
++    for (cps) |cp| try scalar.print(@intCast(cp));
++    try testing.expectEqual(@as(usize, cps.len - 1), scalar.screens.active.cursor.x);
++}
+ 
+-    // U+0600 ARABIC NUMBER SIGN (Prepend)
+-    try t.print(0x0600);
+-    try t.print('1');
++test "Terminal: Prepend prefixes adopt narrow and wide base widths" {
++    for ([_]u21{ 'a', 0x03B1, 0x754C }) |base| {
++        var t = try init(testing.io, testing.allocator, .{ .rows = 3, .cols = 20 });
++        defer t.deinit(testing.allocator);
++        t.modes.set(.grapheme_cluster, true);
++        try t.printSlice(&.{ 0x0600, 0x0601, base, '!' });
++        const width: usize = if (base == 0x754C) 2 else 1;
++        try testing.expectEqual(width + 1, t.screens.active.cursor.x);
++        const list_cell = t.screens.active.pages.getCell(.{ .active = .{ .x = 0, .y = 0 } }).?;
++        try testing.expectEqualSlices(u21, &.{ 0x0601, base }, list_cell.node.page().lookupGrapheme(list_cell.cell).?);
++        try testing.expectEqual(if (width == 2) Cell.Wide.wide else Cell.Wide.narrow, list_cell.cell.wide);
++    }
++}
+ 
+-    // We should have 3 cells taken up, each narrow. Note that this is
+-    // **incorrect** grapheme break behavior, since a Prepend code point should
+-    // not break with the one following it per UAX #29 GB9b. However, as an
+-    // optimization we assume a grapheme break when c <= 255, and note that
+-    // this deviation only affects these very uncommon scenarios (e.g. the
+-    // Arabic number sign should precede Arabic-script digits).
+-    try testing.expectEqual(@as(usize, 0), t.screens.active.cursor.y);
++test "Terminal: Prepend cursor movement and disabled clustering" {
++    var t = try init(testing.io, testing.allocator, .{ .rows = 3, .cols = 10 });
++    defer t.deinit(testing.allocator);
++    t.modes.set(.grapheme_cluster, true);
++    try t.printSlice(&.{ 0x0600, 'a', 'b' });
++    t.setCursorPos(2, 1);
++    try t.printSlice(&.{ 'X', 'Y' });
++    try testing.expectEqual(@as(usize, 2), t.screens.active.cursor.x);
++    t.setCursorPos(1, 1);
++    try t.print(0x0600);
++    t.modes.set(.grapheme_cluster, false);
++    try t.printSlice(&.{ '1', '!' });
+     try testing.expectEqual(@as(usize, 3), t.screens.active.cursor.x);
+-    // This is what we'd expect if we did break correctly:
+-    //try testing.expectEqual(@as(usize, 2), t.screens.active.cursor.x);
+-
+-    // Assert various properties about our screen to verify
+-    // we have all expected cells.
+-    {
+-        const list_cell = t.screens.active.pages.getCell(.{ .screen = .{ .x = 1, .y = 0 } }).?;
+-        const cell = list_cell.cell;
+-        try testing.expectEqual(@as(u21, 0x0600), cell.content.codepoint.data);
+-        try testing.expect(!cell.hasGrapheme());
+-        // This is what we'd expect if we did break correctly:
+-        //try testing.expect(cell.hasGrapheme());
+-        //try testing.expectEqualSlices(u21, &.{'1'}, list_cell.node.page().lookupGrapheme(cell).?);
+-        try testing.expectEqual(Cell.Wide.narrow, cell.wide);
+-    }
+-    {
+-        const list_cell = t.screens.active.pages.getCell(.{ .screen = .{ .x = 2, .y = 0 } }).?;
+-        const cell = list_cell.cell;
+-        try testing.expectEqual(@as(u21, '1'), cell.content.codepoint.data);
+-        // This is what we'd expect if we did break correctly:
+-        //try testing.expectEqual(@as(u21, 0), cell.content.codepoint.data);
+-        try testing.expect(!cell.hasGrapheme());
+-        try testing.expectEqual(Cell.Wide.narrow, cell.wide);
+-    }
+ }
+ 
+ test "Terminal: print writes to bottom if scrolled" {
+@@ -16957,3 +16997,49 @@
+         try testing.expectEqualStrings("a❤️!", str);
+     }
+ }
++
++test "Terminal: Prepend ASCII at one-column and no-wrap margins" {
++    for ([_]size.CellCountInt{ 1, 4 }) |cols| {
++        for ([_]bool{ false, true }) |wrap| {
++            var t = try init(testing.io, testing.allocator, .{ .rows = 3, .cols = cols });
++            defer t.deinit(testing.allocator);
++            t.modes.set(.grapheme_cluster, true);
++            t.modes.set(.wraparound, wrap);
++            for (0..cols - 1) |_| try t.print('x');
++            try t.printSlice(&.{ 0x0600, 'a' });
++            try testing.expectEqual(@as(usize, 0), t.screens.active.cursor.y);
++            try testing.expectEqual(@as(usize, cols - 1), t.screens.active.cursor.x);
++            const cell = t.screens.active.pages.getCell(.{ .active = .{ .x = cols - 1, .y = 0 } }).?;
++            try testing.expectEqual(Cell.Wide.narrow, cell.cell.wide);
++            try testing.expectEqualSlices(u21, &.{'a'}, cell.node.page().lookupGrapheme(cell.cell).?);
++            try t.print('!');
++            try testing.expectEqual(@as(usize, if (wrap) 1 else 0), t.screens.active.cursor.y);
++        }
++    }
++}
++
++test "Terminal: Prepend continuation resolves actual cell after cursor movement" {
++    var t = try init(testing.io, testing.allocator, .{ .rows = 3, .cols = 10 });
++    defer t.deinit(testing.allocator);
++    t.modes.set(.grapheme_cluster, true);
++    try t.print(0x0600);
++    t.setCursorPos(2, 1);
++    try t.printSlice(&.{ 'x', 'y', 'z' });
++    t.setCursorPos(1, 2);
++    try t.printSlice(&.{ 'a', '!' });
++    try testing.expectEqual(@as(usize, 2), t.screens.active.cursor.x);
++    const str = try t.plainString(testing.allocator);
++    defer testing.allocator.free(str);
++    try testing.expectEqualStrings("\u{0600}a!\nxyz", str);
++}
++
++test "Terminal: Prepend then Extend breaks before ASCII" {
++    var t = try init(testing.io, testing.allocator, .{ .rows = 3, .cols = 10 });
++    defer t.deinit(testing.allocator);
++    t.modes.set(.grapheme_cluster, true);
++    try t.printSlice(&.{ 0x0600, 0x0601, 0x0301, 'a', '!' });
++    try testing.expectEqual(@as(usize, 3), t.screens.active.cursor.x);
++    const cell = t.screens.active.pages.getCell(.{ .active = .{ .x = 0, .y = 0 } }).?;
++    try testing.expectEqualSlices(u21, &.{ 0x0601, 0x0301 }, cell.node.page().lookupGrapheme(cell.cell).?);
++    try testing.expectEqual(Cell.Wide.narrow, cell.cell.wide);
++}
+diff --git a/src/unicode/grapheme.zig b/src/unicode/grapheme.zig
+--- a/src/unicode/grapheme.zig
++++ b/src/unicode/grapheme.zig
+@@ -72,10 +72,18 @@
+         };
+     }
+ 
++    // A Prepend prefix contributes no width once its base arrives. Keep a
++    // provisional one-cell prefix visible on its own, then use the base width.
++    // Chained Prepend characters and zero-width extensions do not widen it.
++    if (table.get(prev).grapheme_break == .prepend) {
++        const props = table.get(cp);
++        if (props.grapheme_break == .prepend or props.width == 0) return .no_change;
++        return if (props.width == 2) .wide else .narrow;
++    }
++
+     // If a code point contributes to the width of a grapheme, the whole
+     // grapheme is at least width 2 because the first code point must be at
+-    // least width 1 to start. Prepend code points could effectively mean
+-    // the first code point should be width 0, but we don't handle that yet.
++    // least width 1 to start (the Prepend prefix case is handled above).
+     if (!table.get(cp).width_zero_in_grapheme) return .wide;
+ 
+     return .no_change;
+@@ -360,4 +368,13 @@
+ 
+     try testing.expectEqual(GraphemeWidth{ .len = 1, .width = 1 }, graphemeWidth(u32, &.{ 0x110000, 0x0301 }));
+     try testing.expectEqual(GraphemeWidth{ .len = 1, .width = 1 }, graphemeWidth(u32, &.{ 'a', 0x110000 }));
++}
++
++test "grapheme width: Prepend prefixes adopt their base width" {
++    const testing = std.testing;
++    for ([_]u21{ 'a', 0x03B1, 0x754C }) |base| {
++        const width: u2 = if (base == 0x754C) 2 else 1;
++        try testing.expectEqual(GraphemeWidth{ .len = 2, .width = width }, graphemeWidth(u21, &.{ 0x0600, base }));
++        try testing.expectEqual(GraphemeWidth{ .len = 3, .width = width }, graphemeWidth(u21, &.{ 0x0600, 0x0601, base }));
++    }
+ }

@@ -13,12 +13,12 @@ pub fn write_report(path: &str, value: &Value) -> Result<()> {
     Ok(())
 }
 pub fn run(local: bool, args: &[String]) -> Result<()> {
-    let mut frontend = false;
+    let mut reference = false;
     let mut output = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--frontend" => frontend = true,
+            "--reference" => reference = true,
             "--output" | "--metrics-output" => {
                 i += 1;
                 output = Some(
@@ -71,13 +71,30 @@ pub fn run(local: bool, args: &[String]) -> Result<()> {
         })
         .filter_map(|r| r["request"]["params"]["action"]["kind"].as_str())
         .collect();
-    if frontend {
+    process::run(
+        command("cargo")
+            .args([
+                "test",
+                "--locked",
+                "-p",
+                "newport-client",
+                "--test",
+                "git_contract",
+                "--",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("NEWPORT_GIT_TRACE_PATH", &trace),
+    )?;
+    if reference {
         process::run(
             command("node")
                 .args([
-                    "node_modules/vitest/vitest.mjs",
+                    "tools/git-contract/node_modules/vitest/vitest.mjs",
                     "run",
-                    "src/api/gitLiveContract.test.ts",
+                    "--root",
+                    "tools/git-contract",
+                    "api/gitLiveContract.test.ts",
                 ])
                 .env("NEWPORT_GIT_TRACE_PATH", &trace),
         )?;
@@ -86,7 +103,7 @@ pub fn run(local: bool, args: &[String]) -> Result<()> {
     if let Some(output) = output {
         write_report(
             &output,
-            &json!({"backend":"cli","transport":if local{"service-level"}else{"OpenSSH MessagePack v4"},"frontendVerified":frontend,"responses":rows.len(),"methods":methods,"actions":actions,"samples":samples}),
+            &json!({"backend":"cli","transport":if local{"service-level"}else{"OpenSSH MessagePack v4"},"nativeVerified":true,"referenceVerified":reference,"responses":rows.len(),"methods":methods,"actions":actions,"samples":samples}),
         )?;
     }
     println!(

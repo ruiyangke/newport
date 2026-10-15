@@ -1,4 +1,4 @@
-//! Overview metrics, and the channel the Services and Containers tabs share
+//! Overview metrics and the protocol used by the per-feature monitor channels
 //! (see services.rs, containers.rs and compose.rs).
 //! A long-lived sampler keeps the previous reading
 //! so CPU, per-core and per-process usage describe the last second, not a
@@ -9,7 +9,7 @@ use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     io::{self, BufRead, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex},
+    sync::{Arc, Condvar, Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -367,7 +367,7 @@ fn os_name(text: &str) -> String {
 }
 
 impl Source {
-    /// The Overview contract (see src-tauri/src/monitoring.rs), from two samples.
+    /// The Overview contract (see crates/newport-backend/src/monitoring.rs), from two samples.
     fn snapshot(&self, previous: &Sample, latest: &Sample) -> Value {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -502,6 +502,7 @@ pub struct Monitor {
     samples: Mutex<(Option<Sample>, Option<Sample>)>,
     history: Mutex<BTreeMap<u32, VecDeque<f64>>>,
     ready: Condvar,
+    started: OnceLock<()>,
 }
 impl Monitor {
     pub fn new(source: Source) -> Arc<Self> {
@@ -510,6 +511,7 @@ impl Monitor {
             samples: Mutex::new((None, None)),
             history: Mutex::new(BTreeMap::new()),
             ready: Condvar::new(),
+            started: OnceLock::new(),
         })
     }
     fn tick(&self) {
@@ -535,10 +537,16 @@ impl Monitor {
         self.ready.notify_all();
     }
     pub fn start(self: &Arc<Self>) {
-        let monitor = self.clone();
-        std::thread::spawn(move || loop {
-            monitor.tick();
-            std::thread::sleep(INTERVAL);
+        self.started.get_or_init(|| {
+            let monitor = Arc::downgrade(self);
+            std::thread::spawn(move || loop {
+                let Some(current) = monitor.upgrade() else {
+                    break;
+                };
+                current.tick();
+                drop(current);
+                std::thread::sleep(INTERVAL);
+            });
         });
     }
     /// Waits briefly for a second sample so the first reply already has rates.
@@ -572,10 +580,28 @@ pub fn handle(
     services: &crate::services::Services,
     containers: &crate::containers::Containers,
     input: impl BufRead,
+    output: impl Write,
+) -> io::Result<()> {
+    handle_bound(
+        || monitor.snapshot(),
+        services,
+        containers,
+        input,
+        output,
+        &crate::transport::Cancellation::default(),
+    )
+}
+fn handle_bound(
+    snapshot: impl Fn() -> Value,
+    services: &crate::services::Services,
+    containers: &crate::containers::Containers,
+    input: impl BufRead,
     mut output: impl Write,
+    cancellation: &crate::transport::Cancellation,
 ) -> io::Result<()> {
     let mut input = input;
     loop {
+        cancellation.check()?;
         let mut line = String::new();
         let read = (&mut input).take(MAX_REQUEST).read_line(&mut line)?;
         if read == 0 {
@@ -584,10 +610,12 @@ pub fn handle(
         if !line.ends_with('\n') && read as u64 == MAX_REQUEST {
             return Err(io::Error::other("Monitor request too long"));
         }
+        cancellation.check()?;
         let request: Value = serde_json::from_str(line.trim()).unwrap_or(Value::Null);
         let reply = match request.get("op").and_then(Value::as_str) {
-            Some("snapshot") => monitor.snapshot(),
-            // Services and containers share the channel: one agent process per server.
+            Some("snapshot") => snapshot(),
+            // The desktop gives each feature its own channel. Non-metrics
+            // channels never start the CPU/process sampling thread.
             Some(op) => services
                 .handle(&request)
                 .or_else(|| containers.handle(&request))
@@ -601,16 +629,22 @@ pub fn handle(
 }
 
 pub fn serve() -> io::Result<()> {
+    serve_bound(crate::transport::Cancellation::default())
+}
+pub(crate) fn serve_bound(cancellation: crate::transport::Cancellation) -> io::Result<()> {
     let monitor = Monitor::new(Source::system());
-    monitor.start();
     let services = crate::services::Services::system();
     let containers = crate::containers::Containers::system();
-    let result = handle(
-        &monitor,
+    let result = handle_bound(
+        || {
+            monitor.start();
+            monitor.snapshot()
+        },
         &services,
         &containers,
-        io::stdin().lock(),
+        io::BufReader::new(cancellation.stdin()?),
         io::stdout().lock(),
+        &cancellation,
     );
     // The desktop may close the channel while a Compose command runs; it
     // finishes rather than losing its output pipes half-way.
@@ -970,6 +1004,31 @@ mod tests {
     }
     fn no_containers() -> crate::containers::Containers {
         crate::containers::Containers::new(Box::new(Vec::new))
+    }
+
+    #[test]
+    fn nonmetrics_channel_does_not_start_process_sampling() {
+        let dir = tempfile::tempdir().unwrap();
+        let monitor = Monitor::new(source(dir.path()));
+        let mut output = Vec::new();
+        handle_bound(
+            || {
+                monitor.start();
+                monitor.snapshot()
+            },
+            &no_services(),
+            &no_containers(),
+            b"{\"op\":\"containers\"}\n".as_slice(),
+            &mut output,
+            &crate::transport::Cancellation::default(),
+        )
+        .unwrap();
+        assert!(monitor.started.get().is_none());
+        assert!(monitor.samples.lock().unwrap().1.is_none());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output).unwrap()["error"],
+            crate::docker::NOT_RUNNING
+        );
     }
 
     #[test]

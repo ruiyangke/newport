@@ -7,16 +7,22 @@ use anyhow::{ensure, Result};
 use std::{fs, time::Duration};
 pub fn run(args: &[String]) -> Result<()> {
     ensure!(cfg!(unix), "SSH PTY fixture requires Unix");
+    // Compatibility with earlier extraction runs; all fixture tests now live in the backend.
+    let args: Vec<_> = args.iter().filter(|arg| *arg != "--backend-only").collect();
     process::run(command("cargo").args([
         "build",
         "--manifest-path",
         "tools/agent/Cargo.toml",
+        "--target-dir",
+        "tools/agent/target",
         "--locked",
     ]))?;
     process::run(command("cargo").args([
         "build",
         "--manifest-path",
-        "src-tauri/Cargo.toml",
+        "crates/newport-backend/Cargo.toml",
+        "--target-dir",
+        "target",
         "--example",
         "ssh_fixture",
         "--locked",
@@ -52,19 +58,19 @@ pub fn run(args: &[String]) -> Result<()> {
             .arg(dir.join("client"))
             .env("SSH_AUTH_SOCK", &socket),
     )?;
-    let mut server = Process::spawn(
-        command(root().join("src-tauri/target/debug/examples/ssh_fixture")).arg(dir),
-    )?;
+    let mut server =
+        Process::spawn(command(root().join("target/debug/examples/ssh_fixture")).arg(dir))?;
     process::ready(&dir.join("port"), &mut server)?;
+    let mut test_command = command("cargo");
+    test_command.args(["test", "--target-dir", "target"]);
     let mut tests = Process::spawn(
-        command("cargo")
+        test_command
             .args([
-                "test",
                 "--manifest-path",
-                "src-tauri/Cargo.toml",
+                "crates/newport-backend/Cargo.toml",
                 "--locked",
             ])
-            .args(args)
+            .args(&args)
             .args([
                 "--",
                 "--ignored",
@@ -75,7 +81,7 @@ pub fn run(args: &[String]) -> Result<()> {
                 "--nocapture",
                 "--test-threads=1",
             ])
-            .env("SSH_AUTH_SOCK", socket)
+            .env("SSH_AUTH_SOCK", &socket)
             .env("NEWPORT_TEST_PASSWORD", "fixture-password")
             .env("NEWPORT_TEST_OTHER_KEY", dir.join("other.pub"))
             .env("NEWPORT_TEST_IDENTITY", dir.join("client"))
@@ -85,5 +91,6 @@ pub fn run(args: &[String]) -> Result<()> {
                 fs::read_to_string(dir.join("port"))?.trim(),
             ),
     )?;
-    tests.success(Duration::from_secs(300))
+    tests.success(Duration::from_secs(300))?;
+    Ok(())
 }

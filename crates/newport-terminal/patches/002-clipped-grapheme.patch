@@ -1,0 +1,128 @@
+diff --git a/src/terminal/Terminal.zig b/src/terminal/Terminal.zig
+index 78f2b43..bddc77b 100644
+--- a/src/terminal/Terminal.zig
++++ b/src/terminal/Terminal.zig
+@@ -79,6 +79,17 @@ colors: Colors,
+ /// char CSI (ESC [ <n> b).
+ previous_char: ?u21 = null,
+ 
++/// A wide base rejected at the right margin has no cell to receive its
++/// combining marks. Discard the rest of that cluster instead of appending
++/// it to the unrelated character to the left. This state survives writes.
++clipped_grapheme: ?struct {
++    previous: u21,
++    state: uucode.grapheme.BreakState = .default,
++    x: size.CellCountInt,
++    y: size.CellCountInt,
++    screen: ScreenSet.Key,
++} = null,
++
+ /// The modes that this terminal currently has active.
+ modes: modespkg.ModeState = .{},
+ 
+@@ -550,6 +561,9 @@ pub fn printSlice(self: *Terminal, cps: []const u32) !void {
+         // Only the main display is supported.
+         if (self.status_display != .main) break :fast false;
+ 
++        // Resolve a rejected cluster before entering the batched path.
++        if (self.clipped_grapheme != null) break :fast false;
++
+         // Modes that require per-codepoint handling in print().
+         // Wraparound is required (its the default) so that our
+         // row-fill logic below can assume soft-wrap semantics. Insert
+@@ -1235,6 +1249,20 @@ pub fn print(self: *Terminal, c: u21) !void {
+     else
+         self.scrolling_region.right + 1;
+ 
++    if (self.clipped_grapheme) |*clipped| {
++        const cursor = &self.screens.active.cursor;
++        if (self.modes.get(.grapheme_cluster) and
++            !self.modes.get(.wraparound) and
++            self.screens.active_key == clipped.screen and
++            cursor.x == clipped.x and cursor.y == clipped.y and
++            !unicode.graphemeBreak(clipped.previous, c, &clipped.state))
++        {
++            clipped.previous = c;
++            return;
++        }
++        self.clipped_grapheme = null;
++    }
++
+     // Perform grapheme clustering if grapheme support is enabled (mode 2027).
+     // This is MUCH slower than the normal path so the conditional below is
+     // purposely ordered in least-likely to most-likely so we can drop out
+@@ -1558,7 +1586,17 @@ pub fn print(self: *Terminal, c: u21) !void {
+                 // If we don't have wraparound enabled then we don't print
+                 // this character at all and don't move the cursor. This is
+                 // how xterm behaves.
+-                if (!self.modes.get(.wraparound)) return;
++                if (!self.modes.get(.wraparound)) {
++                    if (self.modes.get(.grapheme_cluster)) {
++                        self.clipped_grapheme = .{
++                            .previous = c,
++                            .x = self.screens.active.cursor.x,
++                            .y = self.screens.active.cursor.y,
++                            .screen = self.screens.active_key,
++                        };
++                    }
++                    return;
++                }
+ 
+                 // We only create a spacer head if we're at the real edge
+                 // of the screen. Otherwise, we clear the space with a narrow.
+@@ -4951,6 +4989,7 @@ pub fn fullReset(self: *Terminal) void {
+     self.modes.reset();
+     self.tabstops.reset(TABSTOP_INTERVAL);
+     self.previous_char = null;
++    self.clipped_grapheme = null;
+     self.pwd.clearRetainingCapacity();
+     self.title.clearRetainingCapacity();
+     self.glyph_glossary.clearAndFree(self.gpa());
+@@ -16752,3 +16791,47 @@ test "Terminal: eraseDisplay complete ignores stale prompt on recycled row" {
+ 
+     try testing.expectEqual(t.screens.active.pages.rows, t.screens.active.pages.total_rows);
+ }
++
++test "Terminal: clipped wide cluster does not modify the previous cell" {
++    for ([_][]const u8{ "123456789", "123456789X" }) |prefix| {
++        var t = try init(testing.io, testing.allocator, .{ .rows = 3, .cols = 10 });
++        defer t.deinit(testing.allocator);
++        t.modes.set(.grapheme_cluster, true);
++        t.modes.set(.wraparound, false);
++        try t.printString(prefix);
++        // Separate calls simulate a cluster arriving in distinct PTY reads.
++        try t.print(0x1F469); // Woman: cannot fit in the remaining cell.
++        try t.print(0x1F3FD); // Skin tone.
++        try t.print(0x200D); // ZWJ must not attach to '9' or 'X'.
++        try t.print(0x1F4BB); // Laptop.
++        try t.print(0x0301); // Combining mark on the rejected cluster.
++        try t.print('!');
++        const str = try t.plainString(testing.allocator);
++        defer testing.allocator.free(str);
++        try testing.expectEqualStrings("123456789!", str);
++        try testing.expect(!t.screens.active.pages.getCell(.{ .screen = .{ .x = 8, .y = 0 } }).?.cell.hasGrapheme());
++        try testing.expect(!t.screens.active.pages.getCell(.{ .screen = .{ .x = 9, .y = 0 } }).?.cell.hasGrapheme());
++        // A new printable character ends the discarded cluster normally.
++        try t.print(0x0301);
++        const marked = try t.plainString(testing.allocator);
++        defer testing.allocator.free(marked);
++        try testing.expectEqualStrings("123456789!\u{0301}", marked);
++    }
++}
++
++test "Terminal: clipped cluster state does not cross cursor movement or reset" {
++    var t = try init(testing.io, testing.allocator, .{ .rows = 3, .cols = 10 });
++    defer t.deinit(testing.allocator);
++    t.modes.set(.grapheme_cluster, true);
++    t.modes.set(.wraparound, false);
++    try t.printString("123456789");
++    try t.print(0x1F469);
++    t.setCursorPos(2, 1);
++    try t.print('e');
++    try t.print(0x0301);
++    const str = try t.plainString(testing.allocator);
++    defer testing.allocator.free(str);
++    try testing.expectEqualStrings("123456789\ne\u{0301}", str);
++    t.fullReset();
++    try testing.expect(t.clipped_grapheme == null);
++}

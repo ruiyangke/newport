@@ -2,48 +2,34 @@ import { readFileSync, mkdirSync, copyFileSync, writeFileSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { parseArgs } from "node:util";
-import { root, json, run, signerEnv } from "./tooling.mjs";
+import { root, json } from "./tooling.mjs";
+import { signUpdate } from "./sign-update.mjs";
+import { verifyPe } from "./package-windows-native.mjs";
 const { values, positionals } = parseArgs({
   allowPositionals: true,
-  options: { arch: { type: "string" }, output: { type: "string" } },
+  options: {
+    arch: { type: "string" },
+    output: { type: "string" },
+    "app-executable": { type: "string" },
+  },
 });
 if (
   positionals.length !== 1 ||
   !["x86_64", "aarch64"].includes(values.arch) ||
-  !values.output
+  !values.output ||
+  !values["app-executable"]
 )
-  throw new Error("Supply installer, --arch and --output");
-const version = json(join(root, "src-tauri/tauri.conf.json")).version;
-const data = readFileSync(join(root, "src-tauri/target/release/newport.exe"));
-const offset = data.readUInt32LE(0x3c);
-if (
-  data.subarray(offset, offset + 4).toString("hex") !== "50450000" ||
-  data.readUInt16LE(offset + 4) !==
-    { x86_64: 0x8664, aarch64: 0xaa64 }[values.arch]
-)
-  throw new Error(
-    "Application architecture does not match the requested update target",
-  );
-const env = signerEnv(),
-  output = resolve(values.output);
+  throw new Error("Supply installer, --arch, --app-executable and --output");
+const version = json(join(root, "resources/app.json")).version;
+verifyPe(readFileSync(values["app-executable"]), values.arch);
+const output = resolve(values.output);
 mkdirSync(output, { recursive: true });
 const installer = join(
   output,
   `Newport-${version}-windows-${values.arch}-setup.exe`,
 );
 copyFileSync(positionals[0], installer);
-run(
-  process.execPath,
-  [
-    join(root, "node_modules/@tauri-apps/cli/tauri.js"),
-    "signer",
-    "sign",
-    "--app-version",
-    version,
-    installer,
-  ],
-  { env },
-);
+signUpdate(installer, version);
 const manifest = {
   version,
   notes: `Newport ${version}`,

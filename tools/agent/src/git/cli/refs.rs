@@ -125,6 +125,43 @@ pub(super) fn branches(
 pub(super) fn tracking(repo: &Repo, branch: &str) -> Result<Value, Error> {
     Config::read(repo)?.tracking(branch)
 }
+/// Git resolves branch configuration and fetch refspecs. A tracking ref's path
+/// is not sufficient to recover either the remote name or its source branch.
+pub(super) fn upstream(repo: &Repo, head: &Value) -> Result<Value, Error> {
+    if head["detached"] == true || head["unborn"] == true {
+        return Ok(Value::Null);
+    }
+    let reference: WirePath =
+        serde_json::from_value(head["name"].clone()).map_err(|_| failure())?;
+    let reference = reference.decode()?;
+    let Some(reference) = std::str::from_utf8(&reference).ok() else {
+        return Ok(Value::Null);
+    };
+    let bytes = repo.run(&[
+        "for-each-ref",
+        "--format=%(refname)%00%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)",
+        "--",
+        reference,
+    ])?;
+    // for-each-ref also matches descendants. Only the exact current ref owns
+    // this configuration; never select a similarly named branch.
+    for row in bytes.split(|b| *b == b'\n').filter(|row| !row.is_empty()) {
+        let fields: Vec<_> = row.split(|b| *b == 0).collect();
+        if fields.len() != 4 {
+            return Err(failure());
+        }
+        if fields[0] != reference.as_bytes() {
+            continue;
+        }
+        if fields[1..].iter().any(|field| field.is_empty()) {
+            return Ok(Value::Null);
+        }
+        return Ok(
+            json!({"upstream":WirePath::new(fields[1]),"remote":WirePath::new(fields[2]),"reference":WirePath::new(fields[3])}),
+        );
+    }
+    Ok(Value::Null)
+}
 /// Repository-level settings for the settings page: the prune-on-fetch
 /// default and the commit identity, with one token over their effective
 /// values so a concurrent configuration edit fails the write instead of

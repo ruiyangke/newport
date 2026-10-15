@@ -1,10 +1,10 @@
 .DS_Store
+/target/
+/crates/*/target/
 node_modules/
 dist/
-src-tauri/target/
 tools/agent/target/
-src-tauri/agents/
-src-tauri/gen/
+resources/agents/
 *.log
 .impeccable/
 test-results/

@@ -1,0 +1,171 @@
+diff --git a/src/terminal/Terminal.zig b/src/terminal/Terminal.zig
+index bddc77b..eb00c15 100644
+--- a/src/terminal/Terminal.zig
++++ b/src/terminal/Terminal.zig
+@@ -79,8 +79,8 @@ colors: Colors,
+ /// char CSI (ESC [ <n> b).
+ previous_char: ?u21 = null,
+ 
+-/// A wide base rejected at the right margin has no cell to receive its
+-/// combining marks. Discard the rest of that cluster instead of appending
++/// A base rejected at the right margin or clipped during resize has no cell
++/// to receive its combining marks. Discard that cluster instead of appending
+ /// it to the unrelated character to the left. This state survives writes.
+ clipped_grapheme: ?struct {
+     previous: u21,
+@@ -88,6 +88,7 @@ clipped_grapheme: ?struct {
+     x: size.CellCountInt,
+     y: size.CellCountInt,
+     screen: ScreenSet.Key,
++    wraparound: bool = false,
+ } = null,
+ 
+ /// The modes that this terminal currently has active.
+@@ -1252,7 +1253,7 @@ pub fn print(self: *Terminal, c: u21) !void {
+     if (self.clipped_grapheme) |*clipped| {
+         const cursor = &self.screens.active.cursor;
+         if (self.modes.get(.grapheme_cluster) and
+-            !self.modes.get(.wraparound) and
++            self.modes.get(.wraparound) == clipped.wraparound and
+             self.screens.active_key == clipped.screen and
+             cursor.x == clipped.x and cursor.y == clipped.y and
+             !unicode.graphemeBreak(clipped.previous, c, &clipped.state))
+@@ -4123,6 +4124,60 @@ pub fn resize(
+     // If our cols/rows didn't change, skip grid work but still apply pixels.
+     if (self.cols == opts.cols and self.rows == opts.rows) return;
+ 
++    // A non-reflow width shrink may remove the cell that owns an unfinished
++    // grapheme. Remember that exact cluster before resizing invalidates its
++    // storage; otherwise a later mark can attach to an unrelated surviving
++    // cell (including one with identical text).
++    const old_screen_generation = self.screens.generation(self.screens.active_key);
++    const resize_clipped: @TypeOf(self.clipped_grapheme) = clipped: {
++        if (!self.modes.get(.grapheme_cluster)) break :clipped null;
++        const screen = self.screens.active;
++        const cursor = &screen.cursor;
++        if (self.clipped_grapheme) |prior| {
++            if (prior.screen == self.screens.active_key and
++                prior.x == cursor.x and prior.y == cursor.y and
++                prior.wraparound == self.modes.get(.wraparound)) break :clipped prior;
++        }
++        if (opts.cols >= self.cols or
++            (self.screens.active_key == .primary and self.modes.get(.wraparound)))
++            break :clipped null;
++
++        const right = if (cursor.x > self.scrolling_region.right)
++            self.cols
++        else
++            self.scrolling_region.right + 1;
++        var left: size.CellCountInt = if (self.modes.get(.wraparound))
++            @intFromBool(!cursor.pending_wrap)
++        else if (cursor.x != right - 1) 1 else @intFromBool(cursor.page_cell.codepoint() == 0);
++        if (left > cursor.x) break :clipped null;
++        var cell = screen.cursorCellLeft(left);
++        if (cell.wide == .spacer_tail) {
++            if (left == cursor.x) break :clipped null;
++            left += 1;
++            cell = screen.cursorCellLeft(left);
++        }
++        if (cell.codepoint() == 0 or
++            cursor.x - left + @as(size.CellCountInt, if (cell.wide == .wide) 2 else 1) <= opts.cols)
++            break :clipped null;
++
++        var previous = cell.codepoint();
++        var state: uucode.grapheme.BreakState = .default;
++        if (cell.hasGrapheme()) {
++            for (cursor.page_pin.node.page().lookupGrapheme(cell).?) |cp| {
++                _ = unicode.graphemeBreak(previous, cp, &state);
++                previous = cp;
++            }
++        }
++        break :clipped .{
++            .previous = previous,
++            .state = state,
++            .x = cursor.x,
++            .y = cursor.y,
++            .screen = self.screens.active_key,
++            .wraparound = self.modes.get(.wraparound),
++        };
++    };
++
+     // Build replacement tabstops without touching the current table. Keep
+     // ownership here until every fallible resize operation has succeeded.
+     var new_tabstops: ?Tabstops = null;
+@@ -4221,6 +4276,20 @@ pub fn resize(
+     // committed their new sizes and the remaining Terminal state must follow.
+     errdefer comptime unreachable;
+ 
++    self.clipped_grapheme = null;
++    if (resize_clipped) |clipped| {
++        // A failed alternate-screen resize may replace that screen entirely.
++        // Do not carry the discarded cluster across a new screen generation.
++        if (self.screens.active_key == clipped.screen and
++            self.screens.generation(clipped.screen) == old_screen_generation)
++        {
++            var moved = clipped;
++            moved.x = self.screens.active.cursor.x;
++            moved.y = self.screens.active.cursor.y;
++            self.clipped_grapheme = moved;
++        }
++    }
++
+     // All fallible work is complete. Replace the old tabstop table only now.
+     if (new_tabstops) |v| {
+         self.tabstops.deinit(alloc);
+@@ -16835,3 +16904,56 @@ test "Terminal: clipped cluster state does not cross cursor movement or reset" {
+     t.fullReset();
+     try testing.expect(t.clipped_grapheme == null);
+ }
++
++test "Terminal: resize clipped base does not retarget a following selector" {
++    for ([_]bool{ false, true }) |alternate| {
++        var t = try init(testing.io, testing.allocator, .{ .rows = 3, .cols = 10 });
++        defer t.deinit(testing.allocator);
++        t.modes.set(.grapheme_cluster, true);
++        if (alternate) {
++            _ = try t.switchScreen(.alternate);
++        } else {
++            t.modes.set(.wraparound, false);
++        }
++        try t.printString("❤❤❤❤❤❤❤❤❤");
++        try t.resize(testing.allocator, .{ .cols = 6, .rows = 3 });
++        try t.print(0xFE0F);
++        try t.print('!');
++        const str = try t.plainString(testing.allocator);
++        defer testing.allocator.free(str);
++        try testing.expectEqualStrings("❤❤❤❤❤!", str);
++        const cell = t.screens.active.pages.getCell(.{ .active = .{ .x = 4, .y = 0 } }).?.cell;
++        try testing.expectEqual(.narrow, cell.wide);
++        try testing.expect(!cell.hasGrapheme());
++    }
++}
++
++test "Terminal: resize clipped ZWJ cluster keeps its boundary state" {
++    var t = try init(testing.io, testing.allocator, .{ .rows = 3, .cols = 10 });
++    defer t.deinit(testing.allocator);
++    t.modes.set(.grapheme_cluster, true);
++    _ = try t.switchScreen(.alternate);
++    try t.printString("12345👩‍");
++    try t.resize(testing.allocator, .{ .cols = 6, .rows = 3 });
++    try t.print(0x1F4BB);
++    try t.print('!');
++    const str = try t.plainString(testing.allocator);
++    defer testing.allocator.free(str);
++    try testing.expectEqualStrings("12345!", str);
++}
++
++test "Terminal: resize surviving base still receives following selector" {
++    for ([_]size.CellCountInt{ 6, 14 }) |cols| {
++        var t = try init(testing.io, testing.allocator, .{ .rows = 3, .cols = 10 });
++        defer t.deinit(testing.allocator);
++        t.modes.set(.grapheme_cluster, true);
++        _ = try t.switchScreen(.alternate);
++        try t.printString("a❤");
++        try t.resize(testing.allocator, .{ .cols = cols, .rows = 3 });
++        try t.print(0xFE0F);
++        try t.print('!');
++        const str = try t.plainString(testing.allocator);
++        defer testing.allocator.free(str);
++        try testing.expectEqualStrings("a❤️!", str);
++    }
++}

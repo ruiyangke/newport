@@ -80,6 +80,73 @@ impl Adapter for Service {
         self.request(r)
     }
 }
+#[test]
+fn historical_renamed_file_diff_keeps_both_paths_and_only_the_selected_change() {
+    for edited in [false, true] {
+        let dir = setup();
+        let original = (0..20).map(|n| format!("line {n}\n")).collect::<String>();
+        fs::write(dir.path().join("old name"), &original).unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "base"]);
+        git(dir.path(), &["mv", "old name", "new name"]);
+        if edited {
+            fs::write(
+                dir.path().join("new name"),
+                original.replace("line 10\n", "changed line\n"),
+            )
+            .unwrap();
+        }
+        fs::write(dir.path().join("unrelated"), "unrelated addition\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "rename"]);
+        let head = String::from_utf8(git(dir.path(), &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+        let mut service = Service::default();
+        let id = opened(&mut service, dir.path());
+        let listing = request(
+            &mut service,
+            "repo.commit_files",
+            json!({"repoId":id,"commitOid":head}),
+        )
+        .unwrap();
+        let renamed = listing["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["status"] == "Renamed")
+            .unwrap();
+        let diff = request(
+            &mut service,
+            "repo.commit_diff",
+            json!({"repoId":id,"commitOid":head,"path":renamed["newPath"]}),
+        )
+        .unwrap();
+        let files = diff["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["status"], "Renamed");
+        assert_eq!(files[0]["oldPath"], renamed["oldPath"]);
+        assert_eq!(files[0]["newPath"], renamed["newPath"]);
+        assert_eq!(files[0]["additions"], usize::from(edited));
+        assert_eq!(files[0]["deletions"], usize::from(edited));
+        let old_path_diff = request(
+            &mut service,
+            "repo.commit_diff",
+            json!({"repoId":id,"commitOid":head,"path":renamed["oldPath"]}),
+        )
+        .unwrap();
+        assert_eq!(old_path_diff["files"], diff["files"]);
+        let page = request(
+            &mut service,
+            "repo.commit_diff_page",
+            json!({"repoId":id,"commitOid":head,"path":renamed["newPath"],"pageSize":1}),
+        )
+        .unwrap();
+        assert_eq!(page["metadata"]["selectedPath"], renamed["newPath"]);
+        assert_eq!(page["entries"][0]["oldPath"], renamed["oldPath"]);
+    }
+}
 fn compare(root: &Path) {
     let mut cli = Service::default();
     let path = WirePath::new(root.as_os_str().as_bytes());
@@ -99,6 +166,68 @@ fn compare(root: &Path) {
         status["entries"].as_array().unwrap().len()
     );
 }
+#[test]
+fn status_resolves_configured_upstream_without_parsing_tracking_ref_names() {
+    let dir = setup();
+    git(dir.path(), &["commit", "--allow-empty", "-qm", "initial"]);
+    git(
+        dir.path(),
+        &["remote", "add", "team/upstream", "/unused/local/remote"],
+    );
+    git(
+        dir.path(),
+        &[
+            "config",
+            "remote.team/upstream.fetch",
+            "+refs/heads/release/next:refs/remotes/cache/local-alias",
+        ],
+    );
+    git(
+        dir.path(),
+        &["config", "branch.main.remote", "team/upstream"],
+    );
+    git(
+        dir.path(),
+        &["config", "branch.main.merge", "refs/heads/release/next"],
+    );
+    git(
+        dir.path(),
+        &["update-ref", "refs/remotes/cache/local-alias", "HEAD"],
+    );
+    let mut cli = Service::default();
+    let opened = request(
+        &mut cli,
+        "repo.open",
+        json!({"path":WirePath::new(dir.path().as_os_str().as_bytes())}),
+    )
+    .unwrap();
+    let params = json!({"repoId":opened["repoId"],"pageSize":1});
+    let status = request(&mut cli, "repo.status", params.clone()).unwrap();
+    let metadata = &status["metadata"];
+    assert_eq!(
+        metadata["upstreamRef"]["display"],
+        "refs/remotes/cache/local-alias"
+    );
+    assert_eq!(metadata["upstream"]["remote"]["display"], "team/upstream");
+    assert_eq!(
+        metadata["upstream"]["reference"]["display"],
+        "refs/heads/release/next"
+    );
+    assert_eq!(metadata["ahead"], 0);
+    assert_eq!(metadata["behind"], 0);
+    // Configuration alone is part of the write snapshot, even if HEAD and the
+    // worktree remain unchanged. A reviewed transfer cannot survive retargeting.
+    git(
+        dir.path(),
+        &["config", "branch.main.merge", "refs/heads/different"],
+    );
+    let changed = request(&mut cli, "repo.status", params.clone()).unwrap();
+    assert_ne!(status["snapshot"], changed["snapshot"]);
+    git(dir.path(), &["checkout", "--detach", "-q"]);
+    let detached = request(&mut cli, "repo.status", params).unwrap();
+    assert!(detached["metadata"]["upstream"].is_null());
+}
+
 #[test]
 fn open_and_summary_contract_cover_repository_states() {
     let dir = setup();
@@ -411,6 +540,114 @@ fn cli_stage_unstage_commit_amend_and_stale_snapshot_guards() {
     assert_eq!(request(&mut service,"operation.start",json!({"operationId":uuid::Uuid::new_v4().to_string(),"repoId":id,"expectedSnapshot":status["snapshot"],"action":{"kind":"stage","entryIds":[entry]}})).unwrap_err().code,"STALE_SNAPSHOT");
     assert_eq!(git(dir.path(), &["show", ":file"]), b"one\n");
 }
+#[test]
+fn cli_reset_modes_preserve_the_expected_index_and_worktree() {
+    for mode in ["soft", "mixed", "hard"] {
+        let dir = setup();
+        fs::write(dir.path().join("file"), "base\n").unwrap();
+        git(dir.path(), &["add", "file"]);
+        git(dir.path(), &["commit", "-qm", "base"]);
+        let base = String::from_utf8(git(dir.path(), &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+        fs::write(dir.path().join("file"), "head\n").unwrap();
+        git(dir.path(), &["commit", "-qam", "head"]);
+        let head = String::from_utf8(git(dir.path(), &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+        fs::write(dir.path().join("file"), "staged\n").unwrap();
+        git(dir.path(), &["add", "file"]);
+        fs::write(dir.path().join("file"), "working\n").unwrap();
+        fs::write(dir.path().join("untracked"), "keep\n").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let mut service = writable(home.path());
+        let id = opened(&mut service, dir.path());
+        operation(
+            &mut service,
+            &id,
+            json!({"kind":"reset","targetOid":base,"expectedOid":head,"mode":mode}),
+        );
+        assert_eq!(
+            String::from_utf8(git(dir.path(), &["rev-parse", "HEAD"]))
+                .unwrap()
+                .trim(),
+            base
+        );
+        assert_eq!(
+            git(dir.path(), &["show", ":file"]),
+            if mode == "soft" {
+                b"staged\n".as_slice()
+            } else {
+                b"base\n".as_slice()
+            }
+        );
+        assert_eq!(
+            fs::read(dir.path().join("file")).unwrap(),
+            if mode == "hard" {
+                b"base\n".as_slice()
+            } else {
+                b"working\n".as_slice()
+            }
+        );
+        assert_eq!(fs::read(dir.path().join("untracked")).unwrap(), b"keep\n");
+    }
+}
+
+#[test]
+fn cli_detached_checkout_preserves_branch_and_local_edits() {
+    let dir = setup();
+    fs::write(dir.path().join("file"), "first\n").unwrap();
+    git(dir.path(), &["add", "file"]);
+    git(dir.path(), &["commit", "-qm", "first"]);
+    let first = String::from_utf8(git(dir.path(), &["rev-parse", "HEAD"]))
+        .unwrap()
+        .trim()
+        .to_owned();
+    fs::write(dir.path().join("file"), "second\n").unwrap();
+    git(dir.path(), &["commit", "-am", "second", "-q"]);
+    let second = String::from_utf8(git(dir.path(), &["rev-parse", "HEAD"]))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let home = tempfile::tempdir().unwrap();
+    let mut service = writable(home.path());
+    let id = opened(&mut service, dir.path());
+    fs::write(dir.path().join("file"), "local edit\n").unwrap();
+    let status = request(&mut service, "repo.status", json!({"repoId":id})).unwrap();
+    let refused = request(&mut service, "operation.start", json!({"operationId":uuid::Uuid::new_v4().to_string(),"repoId":id,"expectedSnapshot":status["snapshot"],"action":{"kind":"checkout","target":{"kind":"detached","oid":first}}})).unwrap();
+    assert_eq!(refused["state"], "failed");
+    assert_eq!(fs::read(dir.path().join("file")).unwrap(), b"local edit\n");
+    assert_eq!(
+        String::from_utf8(git(dir.path(), &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim(),
+        second
+    );
+    // Restore only this disposable test file before checking the successful path.
+    fs::write(dir.path().join("file"), "second\n").unwrap();
+    operation(
+        &mut service,
+        &id,
+        json!({"kind":"checkout","target":{"kind":"detached","oid":first}}),
+    );
+    assert_eq!(git(dir.path(), &["branch", "--show-current"]), b"");
+    assert_eq!(fs::read(dir.path().join("file")).unwrap(), b"first\n");
+    assert_eq!(
+        String::from_utf8(git(dir.path(), &["rev-parse", "main"]))
+            .unwrap()
+            .trim(),
+        second
+    );
+    operation(
+        &mut service,
+        &id,
+        json!({"kind":"checkout","target":{"kind":"branch","name":"main","expectedOid":second}}),
+    );
+    assert_eq!(git(dir.path(), &["branch", "--show-current"]), b"main\n");
+}
+
 #[test]
 fn cli_branch_tag_checkout_and_remote_controls() {
     let dir = setup();
@@ -1033,6 +1270,8 @@ fn cli_repository_configuration_round_trip() {
         json!({"kind":"config.set"}),
         json!({"kind":"config.set","userName":""}),
         json!({"kind":"config.set","userEmail":"-x"}),
+        json!({"kind":"config.set","fetchPrune":true,"userName":"Changed","userEmail":"-x"}),
+        json!({"kind":"config.set","fetchPrune":true,"userName":"Changed","userEmail":"bad\nemail"}),
     ] {
         let mut params = params;
         params["expectedToken"] = token.clone().into();
@@ -1047,6 +1286,11 @@ fn cli_repository_configuration_round_trip() {
         )
         .unwrap();
         assert_eq!(outcome["state"], "failed");
+        assert_eq!(
+            request(&mut service, "repo.remotes", json!({"repoId":id})).unwrap()["configuration"],
+            configuration,
+            "Rejected settings must not partially change earlier fields"
+        );
     }
     set(
         &mut service,
@@ -1194,6 +1438,97 @@ fn cli_cherry_pick_revert_rebase_skip_and_review() {
     )
     .unwrap();
     assert_eq!(reviewed["state"], "reviewed_unknown");
+}
+
+#[test]
+fn cli_replay_continue_uses_custom_message_once_and_preserves_authorship() {
+    for kind in ["cherry_pick", "revert", "rebase"] {
+        let dir = setup();
+        fs::write(dir.path().join("file"), "base\n").unwrap();
+        git(dir.path(), &["add", "file"]);
+        git(dir.path(), &["commit", "-qm", "base"]);
+        git(dir.path(), &["checkout", "-qb", "topic"]);
+        fs::write(dir.path().join("file"), "topic\n").unwrap();
+        git(
+            dir.path(),
+            &[
+                "commit",
+                "-qam",
+                "topic",
+                "--author=Topic Author <topic@example.test>",
+            ],
+        );
+        let topic = String::from_utf8(git(dir.path(), &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+        git(dir.path(), &["checkout", "-q", "main"]);
+        fs::write(dir.path().join("file"), "main\n").unwrap();
+        git(dir.path(), &["commit", "-qam", "main"]);
+        let main = String::from_utf8(git(dir.path(), &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+        let action = match kind {
+            "revert" => {
+                git(dir.path(), &["checkout", "-q", "topic"]);
+                json!({"kind":kind,"targetOid":main})
+            }
+            "rebase" => {
+                fs::write(dir.path().join("later"), "later\n").unwrap();
+                git(dir.path(), &["add", "later"]);
+                git(dir.path(), &["commit", "-qm", "Later unchanged"]);
+                json!({"kind":kind,"upstreamOid":topic})
+            }
+            _ => json!({"kind":kind,"targetOid":topic}),
+        };
+        let home = tempfile::tempdir().unwrap();
+        let mut service = writable(home.path());
+        let id = opened(&mut service, dir.path());
+        let result = operation(&mut service, &id, action);
+        assert_eq!(result["state"], "needs_resolution", "{kind}: {result}");
+        fs::write(dir.path().join("file"), "resolved\n").unwrap();
+        git(dir.path(), &["add", "file"]);
+        // These characters are message content, never shell source.
+        let message = "Resolution $(touch SHOULD_NOT_EXIST) `false` 'quoted'\n\nBody.";
+        let result = operation(
+            &mut service,
+            &id,
+            json!({"kind":"integration.continue","message":message}),
+        );
+        assert_eq!(result["state"], "succeeded", "{kind}: {result}");
+        let commit = if kind == "rebase" { "HEAD^" } else { "HEAD" };
+        assert_eq!(
+            String::from_utf8(git(dir.path(), &["log", "-1", "--format=%B", commit]))
+                .unwrap()
+                .trim_end(),
+            message,
+            "{kind}"
+        );
+        let author = String::from_utf8(git(
+            dir.path(),
+            &["show", "-s", "--format=%an <%ae>", commit],
+        ))
+        .unwrap();
+        assert_eq!(
+            author.trim(),
+            if kind == "cherry_pick" {
+                "Topic Author <topic@example.test>"
+            } else {
+                "Fixture <fixture@example.test>"
+            }
+        );
+        if kind == "rebase" {
+            assert_eq!(
+                String::from_utf8(git(dir.path(), &["log", "-1", "--format=%s"]))
+                    .unwrap()
+                    .trim(),
+                "Later unchanged"
+            );
+        }
+        assert!(!dir.path().join("SHOULD_NOT_EXIST").exists());
+        assert!(git(dir.path(), &["status", "--porcelain"]).is_empty());
+    }
 }
 
 #[test]
@@ -1450,4 +1785,276 @@ fn unreadable_files_do_not_fail_status() {
     assert_eq!(first["snapshot"], second["snapshot"]);
     fs::set_permissions(&tracked, fs::Permissions::from_mode(0o600)).unwrap();
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn cli_stash_pop_conflict_keeps_saved_entry() {
+    let dir = setup();
+    let home = tempfile::tempdir().unwrap();
+    let mut service = writable(home.path());
+    fs::write(dir.path().join("file"), "base\n").unwrap();
+    git(dir.path(), &["add", "file"]);
+    git(dir.path(), &["commit", "-qm", "base"]);
+    let id = opened(&mut service, dir.path());
+    fs::write(dir.path().join("file"), "stashed\n").unwrap();
+    operation(
+        &mut service,
+        &id,
+        json!({"kind":"stash.save","message":"conflict fixture"}),
+    );
+    let before = request(&mut service, "repo.stashes", json!({"repoId":id})).unwrap();
+    fs::write(dir.path().join("file"), "new committed content\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "divergent change"]);
+    let result = operation(
+        &mut service,
+        &id,
+        json!({
+            "kind":"stash.pop", "oid":before["entries"][0]["oid"], "index":0,
+            "expectedToken":before["metadata"]["listToken"], "reinstateIndex":false
+        }),
+    );
+    assert_eq!(result["state"], "needs_resolution");
+    let after = request(&mut service, "repo.stashes", json!({"repoId":id})).unwrap();
+    assert_eq!(after["entries"], before["entries"]);
+    assert_eq!(
+        after["metadata"]["listToken"],
+        before["metadata"]["listToken"]
+    );
+    assert!(!git(dir.path(), &["ls-files", "-u"]).is_empty());
+    let content = fs::read_to_string(dir.path().join("file")).unwrap();
+    assert!(content.contains("stashed") && content.contains("new committed content"));
+}
+
+#[test]
+fn cli_stash_drop_rejects_changed_list_then_drops_only_reviewed_entry() {
+    let dir = setup();
+    let home = tempfile::tempdir().unwrap();
+    let mut service = writable(home.path());
+    fs::write(dir.path().join("file"), "base\n").unwrap();
+    git(dir.path(), &["add", "file"]);
+    git(dir.path(), &["commit", "-qm", "base"]);
+    let id = opened(&mut service, dir.path());
+    fs::write(dir.path().join("file"), "first\n").unwrap();
+    operation(
+        &mut service,
+        &id,
+        json!({"kind":"stash.save","message":"first"}),
+    );
+    let first = request(&mut service, "repo.stashes", json!({"repoId":id})).unwrap();
+    fs::write(dir.path().join("file"), "second\n").unwrap();
+    operation(
+        &mut service,
+        &id,
+        json!({"kind":"stash.save","message":"second"}),
+    );
+    let before = request(&mut service, "repo.stashes", json!({"repoId":id})).unwrap();
+    let status = request(&mut service, "repo.status", json!({"repoId":id})).unwrap();
+    let rejected = request(&mut service, "operation.start", json!({
+        "operationId":uuid::Uuid::new_v4(),"repoId":id,"expectedSnapshot":status["snapshot"],
+        "action":{"kind":"stash.drop","oid":first["entries"][0]["oid"],"index":0,"expectedToken":first["metadata"]["listToken"]}
+    })).unwrap();
+    assert_eq!(rejected["state"], "failed");
+    let unchanged = request(&mut service, "repo.stashes", json!({"repoId":id})).unwrap();
+    assert_eq!(unchanged["entries"], before["entries"]);
+    operation(
+        &mut service,
+        &id,
+        json!({"kind":"stash.drop","oid":before["entries"][1]["oid"],"index":1,"expectedToken":before["metadata"]["listToken"]}),
+    );
+    let after = request(&mut service, "repo.stashes", json!({"repoId":id})).unwrap();
+    assert_eq!(after["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(after["entries"][0]["oid"], before["entries"][0]["oid"]);
+    assert_eq!(fs::read(dir.path().join("file")).unwrap(), b"base\n");
+    assert!(git(dir.path(), &["status", "--porcelain"]).is_empty());
+}
+
+#[test]
+fn cli_write_errors_explain_duplicate_names_and_missing_identity() {
+    let dir = setup();
+    fs::write(dir.path().join("file"), "base\n").unwrap();
+    git(dir.path(), &["add", "file"]);
+    git(dir.path(), &["commit", "-qm", "base"]);
+    git(dir.path(), &["tag", "existing"]);
+    git(dir.path(), &["branch", "existing"]);
+    for (args, code) in [
+        (vec!["tag", "existing", "HEAD"], "TAG_EXISTS"),
+        (vec!["branch", "existing", "HEAD"], "BRANCH_EXISTS"),
+        (
+            vec![
+                "-c",
+                "user.name=",
+                "-c",
+                "user.email=",
+                "tag",
+                "-a",
+                "identity-check",
+                "HEAD",
+                "-m",
+                "annotation",
+            ],
+            "IDENTITY_REQUIRED",
+        ),
+    ] {
+        let arguments = args
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>();
+        let error = command::write(dir.path(), &arguments, vec![]).unwrap_err();
+        assert_eq!(error.code, code, "{}", error.message);
+        assert!(
+            !error.message.contains("fatal:"),
+            "Raw stderr should not be exposed"
+        );
+    }
+    assert_eq!(git(dir.path(), &["tag", "--list"]), b"existing\n");
+    assert!(git(dir.path(), &["status", "--porcelain"]).is_empty());
+}
+
+#[test]
+fn cli_tag_delete_rejects_moved_object_and_preserves_worktree() {
+    let dir = setup();
+    let home = tempfile::tempdir().unwrap();
+    let mut service = writable(home.path());
+    fs::write(dir.path().join("file"), "first\n").unwrap();
+    git(dir.path(), &["add", "file"]);
+    git(dir.path(), &["commit", "-qm", "first"]);
+    git(dir.path(), &["tag", "reviewed"]);
+    let old = String::from_utf8(git(dir.path(), &["rev-parse", "refs/tags/reviewed"]))
+        .unwrap()
+        .trim()
+        .to_owned();
+    fs::write(dir.path().join("file"), "second\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "second"]);
+    git(dir.path(), &["tag", "-f", "reviewed"]);
+    let current = String::from_utf8(git(dir.path(), &["rev-parse", "refs/tags/reviewed"]))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let id = opened(&mut service, dir.path());
+    let status = request(&mut service, "repo.status", json!({"repoId":id})).unwrap();
+    let result = request(&mut service, "operation.start", json!({"operationId":uuid::Uuid::new_v4(),"repoId":id,"expectedSnapshot":status["snapshot"],"action":{"kind":"tag.delete","name":"reviewed","expectedOid":old}})).unwrap();
+    assert_eq!(result["state"], "failed");
+    assert_eq!(result["error"]["code"], "STALE_REFERENCE");
+    assert_eq!(
+        String::from_utf8(git(dir.path(), &["rev-parse", "refs/tags/reviewed"]))
+            .unwrap()
+            .trim(),
+        current
+    );
+    operation(
+        &mut service,
+        &id,
+        json!({"kind":"tag.delete","name":"reviewed","expectedOid":current}),
+    );
+    assert!(git(dir.path(), &["tag", "--list"]).is_empty());
+    assert_eq!(fs::read(dir.path().join("file")).unwrap(), b"second\n");
+    assert!(git(dir.path(), &["status", "--porcelain"]).is_empty());
+}
+
+#[test]
+fn cli_worktree_removal_preserves_dirty_and_locked_checkouts() {
+    let root = setup();
+    fs::write(root.path().join("tracked"), "baseline\n").unwrap();
+    git(root.path(), &["add", "tracked"]);
+    git(root.path(), &["commit", "-qm", "initial"]);
+    let parent = tempfile::tempdir().unwrap();
+    let linked = parent.path().join("protected");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "protected",
+            linked.to_str().unwrap(),
+        ],
+    );
+    let home = tempfile::tempdir().unwrap();
+    let mut service = writable(home.path());
+    let id = opened(&mut service, root.path());
+    let remove = |service: &mut Service| {
+        let page = request(service, "repo.worktrees", json!({"repoId":id})).unwrap();
+        request(service, "operation.start", json!({"operationId":uuid::Uuid::new_v4().to_string(),"repoId":id,"expectedSnapshot":page["snapshot"],"action":{"kind":"worktree.remove","name":"protected"}})).unwrap()
+    };
+    fs::write(linked.join("untracked"), "preserve me\n").unwrap();
+    assert_eq!(remove(&mut service)["state"], "failed");
+    assert_eq!(
+        fs::read(linked.join("untracked")).unwrap(),
+        b"preserve me\n"
+    );
+    fs::remove_file(linked.join("untracked")).unwrap();
+    git(root.path(), &["worktree", "lock", linked.to_str().unwrap()]);
+    assert_eq!(remove(&mut service)["state"], "failed");
+    assert!(linked.join("tracked").exists());
+    git(
+        root.path(),
+        &["worktree", "unlock", linked.to_str().unwrap()],
+    );
+    assert_eq!(remove(&mut service)["state"], "succeeded");
+    assert!(!linked.exists());
+    assert!(!git(root.path(), &["branch", "--list", "protected"]).is_empty());
+    assert!(git(root.path(), &["status", "--porcelain"]).is_empty());
+}
+
+#[test]
+fn cli_worktree_text_filter_matches_branch_and_keeps_cursor_scope() {
+    let root = setup();
+    fs::write(root.path().join("tracked"), "baseline\n").unwrap();
+    git(root.path(), &["add", "tracked"]);
+    git(root.path(), &["commit", "-qm", "initial"]);
+    let parent = tempfile::tempdir().unwrap();
+    for (path, branch) in [
+        ("checkout-a", "feature/needle-a"),
+        ("checkout-b", "feature/needle-b"),
+    ] {
+        git(
+            root.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                parent.path().join(path).to_str().unwrap(),
+            ],
+        );
+    }
+    let home = tempfile::tempdir().unwrap();
+    let mut service = writable(home.path());
+    let id = opened(&mut service, root.path());
+    let first = request(
+        &mut service,
+        "repo.worktrees",
+        json!({"repoId":id,"filter":"NEEDLE","pageSize":1}),
+    )
+    .unwrap();
+    assert_eq!(first["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(first["metadata"]["matchingEntries"], 2);
+    assert_eq!(first["metadata"]["totalEntries"], 3);
+    assert_eq!(first["metadata"]["current"]["current"], true);
+    let second = request(
+        &mut service,
+        "repo.worktrees",
+        json!({"repoId":id,"filter":"NEEDLE","pageSize":1,"cursor":first["nextCursor"]}),
+    )
+    .unwrap();
+    assert_eq!(second["entries"].as_array().unwrap().len(), 1);
+    assert_ne!(first["entries"][0]["path"], second["entries"][0]["path"]);
+    assert!(second["nextCursor"].is_null());
+    assert!(request(
+        &mut service,
+        "repo.worktrees",
+        json!({"repoId":id,"filter":"checkout-a","cursor":first["nextCursor"]})
+    )
+    .is_err());
+    let path = request(
+        &mut service,
+        "repo.worktrees",
+        json!({"repoId":id,"filter":"checkout-a"}),
+    )
+    .unwrap();
+    assert_eq!(path["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        path["entries"][0]["head"]["name"]["display"],
+        "refs/heads/feature/needle-a"
+    );
 }

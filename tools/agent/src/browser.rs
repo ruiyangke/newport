@@ -1,5 +1,5 @@
 //! Browser commands and the agent-side request broker.
-use crate::{paths::root, wire};
+use crate::wire;
 use std::{
     env, fs,
     io::{self, Write},
@@ -11,13 +11,20 @@ pub fn open(args: &[String], desktop: bool) -> io::Result<()> {
     if args.len() != 1 {
         return Err(io::Error::other("usage: newport-agent open URL"));
     }
-    let root = root()?;
+    let selection = crate::routing::select(Some("browser"));
     let wayland = env::var("WAYLAND_DISPLAY").unwrap_or_default();
-    let fake_wayland = wayland == root.join("wayland.sock").to_string_lossy()
+    let authority = env::var("XAUTHORITY").unwrap_or_default();
+    let fake_wayland = selection
+        .as_ref()
+        .is_ok_and(|s| wayland == s.root.join("wayland.sock").to_string_lossy())
+        || wayland.starts_with("/tmp/newport-runtime-")
         || crate::migration::fake_wayland(&wayland);
-    let fake_x = fs::read_to_string(root.join("display"))
-        .ok()
-        .is_some_and(|v| env::var("DISPLAY").ok().as_deref() == Some(v.trim()));
+    let fake_x = authority.starts_with("/tmp/newport-runtime-")
+        || selection.as_ref().is_ok_and(|s| {
+            fs::read_to_string(s.root.join("display"))
+                .ok()
+                .is_some_and(|v| env::var("DISPLAY").ok().as_deref() == Some(v.trim()))
+        });
     let graphical = (env::var_os("DISPLAY").is_some() && !fake_x)
         || (!wayland.is_empty() && !fake_wayland)
         || env::var_os("WAYLAND_SOCKET").is_some();
@@ -33,6 +40,7 @@ pub fn open(args: &[String], desktop: bool) -> io::Result<()> {
     if wire::web_url(&args[0]).is_none() {
         return Err(io::Error::other("only HTTP and HTTPS URLs are supported"));
     }
+    let root = selection?.root;
     let mut stream = UnixStream::connect(root.join("agent.sock"))
         .map_err(|_| io::Error::other("enable Browser in Newport’s Integration page first"))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
@@ -74,6 +82,14 @@ impl Broker {
     }
     pub(crate) fn enabled(&self) -> bool {
         self.enabled
+    }
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            if let Some((_, mut stream, _)) = self.pending.take() {
+                let _ = local_reply(&mut stream, false, Some("Browser access was disabled."));
+            }
+        }
     }
     pub(crate) fn expire(&mut self) {
         if self

@@ -1,0 +1,44 @@
+//! One shared native command router for standalone and transitional hosts.
+use super::{control, features, git, preferences};
+use serde_json::Value;
+
+pub struct Services<'a> {
+    pub integration_access: &'a crate::integration_permissions::Access,
+    pub features: features::Services<'a>,
+    pub git: git::Services<'a>,
+    pub preferences: &'a crate::preferences::Preferences,
+    pub desktop: crate::desktop_integration::Desktop,
+}
+
+impl Services<'_> {
+    /// `None` leaves desktop-only commands to the application's OS adapter.
+    pub async fn dispatch(&self, method: &str, args: &Value) -> Option<Result<Value, Value>> {
+        if let Some(command) = features::Command::parse(method) {
+            return Some(command.dispatch(&self.features, args).await);
+        }
+        if let Some(command) = git::Command::parse(method) {
+            return Some(command.dispatch(&self.git, args).await);
+        }
+        if let Some(command) = preferences::Command::parse(method) {
+            return Some(command.dispatch(self.preferences, args).await);
+        }
+        if let Some(command) = control::Command::parse(method) {
+            return Some(
+                command
+                    .dispatch(
+                        &control::Services {
+                            manager: self.features.manager,
+                            integration_access: self.integration_access,
+                            metrics: self.features.metrics,
+                            files: self.features.files,
+                            terminals: self.features.terminals,
+                            desktop: self.desktop.clone(),
+                        },
+                        args,
+                    )
+                    .await,
+            );
+        }
+        None
+    }
+}

@@ -1,0 +1,135 @@
+diff --git a/src/terminal/stream.zig b/src/terminal/stream.zig
+index 8d69287..9694e5a 100644
+--- a/src/terminal/stream.zig
++++ b/src/terminal/stream.zig
+@@ -745,19 +745,16 @@ pub fn Stream(comptime H: type) type {
+                 var i: usize = 0;
+                 while (i < cps.len) {
+                     const cp = cps[i];
+-                    // C0 and UTF-8-decoded C1 controls never enter
+-                    // printable runs. A codepoint is one of those
+-                    // exactly when it has no bit set outside 0x9F:
+-                    // bits 0-4 and bit 7 cover 0x00-0x1F and
+-                    // 0x80-0x9F and nothing else, so a single
+-                    // AND-test classifies both ranges.
+-                    if ((cp & ~@as(u32, 0x9F)) == 0) {
++                    // C0, DEL, and UTF-8-decoded C1 controls must never
++                    // enter printable runs. The mask covers C0/C1;
++                    // DEL is outside both ranges and needs its own check.
++                    if ((cp & ~@as(u32, 0x9F)) == 0 or cp == 0x7F) {
+                         @branchHint(.unlikely);
+                         if (cp <= 0x1F) {
+                             // C0 controls execute rather than print.
+                             self.execute(@intCast(cp));
+-                        } else {
+-                            // C1 controls decoded from UTF-8 are ignored.
++                        } else if (cp != 0x7F) {
++                            // DEL is ignored; decoded C1 is ignored and logged.
+                             logUnsupportedOnce(
+                                 "ignoring UTF-8-decoded C1 controls, first: 0x{x}",
+                                 .{cp},
+@@ -778,14 +775,13 @@ pub fn Stream(comptime H: type) type {
+                     scan: {
+                         if (simd.lanes(u32)) |lanes| {
+                             const V = @Vector(lanes, u32);
+-                            // Non-printable (C0 or decoded C1) is
+-                            // equivalent to "no bit outside 0x9F is
+-                            // set": one AND-test per lane.
++                            // Match the scalar classification, including DEL.
+                             const mask: V = @splat(~@as(u32, 0x9F));
+                             const zero: V = @splat(0);
+                             while (end + lanes <= cps.len) {
+                                 const v: V = cps[end..][0..lanes].*;
+-                                const stop = (v & mask) == zero;
++                                const stop = ((v & mask) == zero) |
++                                    (v == @as(V, @splat(0x7F)));
+                                 if (@reduce(.Or, stop)) {
+                                     const bits: std.meta.Int(.unsigned, lanes) = @bitCast(stop);
+                                     end += @ctz(bits);
+@@ -794,7 +790,9 @@ pub fn Stream(comptime H: type) type {
+                                 end += lanes;
+                             }
+                         }
+-                        while (end < cps.len and (cps[end] & ~@as(u32, 0x9F)) != 0) end += 1;
++                        while (end < cps.len and
++                            (cps[end] & ~@as(u32, 0x9F)) != 0 and
++                            cps[end] != 0x7F) end += 1;
+                     }
+                     self.handler.vt(.print_slice, .{ .cps = cps[i..end] });
+                     i = end;
+@@ -1192,11 +1190,11 @@ pub fn Stream(comptime H: type) type {
+             // a chain of inline functions.
+             @setEvalBranchQuota(200_000);
+ 
+-            // C0 control or a C1 control decoded from UTF-8: exactly
+-            // the codepoints with no bit set outside 0x9F (bits 0-4
+-            // and bit 7 cover 0x00-0x1F and 0x80-0x9F and nothing
+-            // else), so the printable fast path stays a single
+-            // AND-test.
++            // DEL is ignored without changing parser or grapheme state.
++            // Keep this path consistent with the batched printable-run scan.
++            if (c == 0x7F) return;
++
++            // C0 control or a C1 control decoded from UTF-8.
+             if ((c & ~@as(u21, 0x9F)) == 0) {
+                 @branchHint(.unlikely);
+ 
+@@ -3264,6 +3262,44 @@ test "stream: ground state C0 controls are executed, not printed" {
+     }
+ }
+ 
++test "stream: DEL never enters scalar or batched printable runs" {
++    const H = struct {
++        buf: [256]u21 = undefined,
++        len: usize = 0,
++        pub fn vt(self: *@This(), comptime action: Action.Tag, value: Action.Value(action)) void {
++            switch (action) {
++                .print => {
++                    self.buf[self.len] = value.cp;
++                    self.len += 1;
++                },
++                .print_slice => for (value.cps) |cp| {
++                    self.buf[self.len] = @intCast(cp);
++                    self.len += 1;
++                },
++                else => {},
++            }
++        }
++    };
++    // Every byte position exercises the initial, vector, and scalar-tail
++    // classifications. A trailing DEL must not become the next REP source.
++    for (0..129) |offset| {
++        var input: [129]u8 = @splat('A');
++        input[offset] = 0x7F;
++        var scalar: Stream(H) = .init(.{ .handler = .{} });
++        for (input) |byte| scalar.next(byte);
++        var batched: Stream(H) = .init(.{ .handler = .{} });
++        batched.nextSlice(&input);
++        try testing.expectEqual(@as(usize, 128), scalar.handler.len);
++        try testing.expectEqual(@as(usize, 128), batched.handler.len);
++        try testing.expectEqualSlices(u21, scalar.handler.buf[0..128], batched.handler.buf[0..128]);
++        for (batched.handler.buf[0..128]) |cp| try testing.expectEqual(@as(u21, 'A'), cp);
++    }
++    // A rejected UTF-8 prefix reprocesses DEL through handleCodepoint.
++    var broken: Stream(H) = .init(.{ .handler = .{} });
++    broken.nextSlice(&.{ 0xC2, 0x7F, 'B' });
++    try testing.expectEqualSlices(u21, &.{ 0xFFFD, 'B' }, broken.handler.buf[0..broken.handler.len]);
++}
++
+ test "stream: ground state UTF-8-decoded C1 controls are ignored" {
+     const H = struct {
+         buf: [128]u21 = undefined,
+diff --git a/src/terminal/parse_table.zig b/src/terminal/parse_table.zig
+index fa074fa..912ac29 100644
+--- a/src/terminal/parse_table.zig
++++ b/src/terminal/parse_table.zig
+@@ -91,7 +91,8 @@ fn genTable() Table {
+         single(&result, 0x19, .ground, .ground, .execute);
+         range(&result, 0, 0x17, .ground, .ground, .execute);
+         range(&result, 0x1C, 0x1F, .ground, .ground, .execute);
+-        range(&result, 0x20, 0x7F, .ground, .ground, .print);
++        range(&result, 0x20, 0x7E, .ground, .ground, .print);
++        single(&result, 0x7F, .ground, .ground, .ignore);
+     }
+ 
+     // escape_intermediate

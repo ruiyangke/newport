@@ -59,8 +59,35 @@ struct Completed {
     stderr: Vec<u8>,
 }
 pub(super) fn write(root: &Path, args: &[std::ffi::OsString], input: Vec<u8>) -> Result<(), Error> {
-    let output = execute(root, args, input).map_err(|e| {
-        if e.code == "GIT_UNAVAILABLE" {
+    write_inner(root, args, input, None)
+}
+
+/// Supply an editor response to Git's sequencer without changing its state
+/// files or bypassing its author, hook and multi-commit continuation behavior.
+/// Consume it once so a later commit in the same rebase retains its message.
+pub(super) fn write_with_message(
+    root: &Path,
+    args: &[std::ffi::OsString],
+    message: &str,
+) -> Result<(), Error> {
+    let mut file = tempfile::NamedTempFile::new().map_err(super::io_error)?;
+    file.write_all(message.as_bytes())
+        .map_err(super::io_error)?;
+    let result = write_inner(root, args, vec![], Some(file.path()));
+    if result.is_ok() && file.path().exists() {
+        return Err(Error::new("OUTCOME_UNKNOWN", "Git completed without accepting the edited message. Inspect the commit before continuing."));
+    }
+    result
+}
+
+fn write_inner(
+    root: &Path,
+    args: &[std::ffi::OsString],
+    input: Vec<u8>,
+    message: Option<&Path>,
+) -> Result<(), Error> {
+    let output = execute_capture(root, args, input, None, message).map_err(|e| {
+        if matches!(e.code.as_str(), "GIT_UNAVAILABLE" | "CHECKOUT_UNAVAILABLE") {
             e
         } else {
             Error::new(
@@ -123,6 +150,16 @@ pub(super) fn write(root: &Path, args: &[std::ffi::OsString], input: Vec<u8>) ->
             "LOCAL_CHANGES",
             "Local changes would be overwritten. Commit or stash them first.",
         )
+    } else if error.contains("already exists") && error.starts_with("fatal: tag '") {
+        ("TAG_EXISTS", "A tag with this name already exists. Choose another name; the existing tag was not replaced.")
+    } else if error.contains("already exists") && error.starts_with("fatal: a branch named '") {
+        ("BRANCH_EXISTS", "A branch with this name already exists. Choose another name or switch to the existing branch.")
+    } else if error.contains("Author identity unknown")
+        || error.contains("Committer identity unknown")
+        || error.contains("unable to auto-detect email address")
+        || error.contains("empty ident name")
+    {
+        ("IDENTITY_REQUIRED", "Git author identity is missing. Configure user.name and user.email in the repository on the server, then retry.")
     } else if error.contains("nothing to commit") {
         (
             "NOTHING_TO_COMMIT",
@@ -142,7 +179,7 @@ pub(super) fn write(root: &Path, args: &[std::ffi::OsString], input: Vec<u8>) ->
     Err(Error::new(code, message))
 }
 fn execute(root: &Path, args: &[std::ffi::OsString], input: Vec<u8>) -> Result<Completed, Error> {
-    execute_capture(root, args, input, None)
+    execute_capture(root, args, input, None, None)
 }
 pub(super) fn window(
     root: &Path,
@@ -154,7 +191,7 @@ pub(super) fn window(
         .iter()
         .map(std::ffi::OsString::from)
         .collect::<Vec<_>>();
-    let output = execute_capture(root, &args, vec![], Some((offset, length)))?;
+    let output = execute_capture(root, &args, vec![], Some((offset, length)), None)?;
     if output.success {
         Ok(output.stdout)
     } else {
@@ -191,6 +228,7 @@ fn execute_capture(
     args: &[std::ffi::OsString],
     input: Vec<u8>,
     window: Option<(usize, usize)>,
+    message: Option<&Path>,
 ) -> Result<Completed, Error> {
     let mut command = Command::new("git");
     command
@@ -206,6 +244,16 @@ fn execute_capture(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    if let Some(path) = message {
+        // Git invokes its editor via a shell. Only this constant script is
+        // executable text; the private path and message are never interpolated.
+        command.env("NEWPORT_GIT_CONTINUE_MESSAGE", path).env(
+            "GIT_EDITOR",
+            "sh -c 'if test -f \"$NEWPORT_GIT_CONTINUE_MESSAGE\"; then cat -- \"$NEWPORT_GIT_CONTINUE_MESSAGE\" > \"$1\" && rm -- \"$NEWPORT_GIT_CONTINUE_MESSAGE\"; fi' --",
+        );
+    } else {
+        command.env_remove("NEWPORT_GIT_CONTINUE_MESSAGE");
+    }
     // A repository is selected by the request, never by the agent's parent.
     for key in [
         "GIT_DIR",
@@ -220,7 +268,14 @@ fn execute_capture(
         command.env_remove(key);
     }
     let mut child = command.spawn().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
+        // ENOENT can identify either the executable or current_dir. Check the
+        // checkout before attributing a failed spawn to a missing Git install.
+        if !root.is_dir() {
+            Error::new(
+                "CHECKOUT_UNAVAILABLE",
+                "The checkout directory is missing or inaccessible. Locate the checkout or open the saved project.",
+            )
+        } else if e.kind() == std::io::ErrorKind::NotFound {
             Error::new(
                 "GIT_UNAVAILABLE",
                 "The CLI backend requires Git on the server.",
@@ -289,6 +344,21 @@ fn execute_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn missing_checkout_is_not_reported_as_missing_git_or_unknown_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing-checkout");
+        assert_eq!(
+            run(&missing, &["status"]).unwrap_err().code,
+            "CHECKOUT_UNAVAILABLE"
+        );
+        assert_eq!(
+            write(&missing, &["status".into()], vec![])
+                .unwrap_err()
+                .code,
+            "CHECKOUT_UNAVAILABLE"
+        );
+    }
     #[test]
     fn drain_caps_memory_but_consumes_the_entire_pipe() {
         let mut input = std::io::Cursor::new(vec![42; 100_000]);

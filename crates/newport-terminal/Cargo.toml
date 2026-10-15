@@ -1,0 +1,11 @@
+[package]
+name = "newport-terminal"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The bindings and C ABI must move together. This revision pins Ghostty to
+# 3425025e585a3403340d4dc6d65132f42e05e605 in its build script.
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "d2036baeb605d31d09a9e2ba6d0c923e04c34d54", default-features = false }
+newport-domain = { path = "../newport-domain" }

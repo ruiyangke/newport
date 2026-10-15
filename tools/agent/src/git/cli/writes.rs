@@ -488,6 +488,15 @@ fn apply(
                 return Err(Error::invalid("No configuration changes."));
             }
             refs::configuration_token(repo, expected_token)?;
+            // Reject invalid fields before changing any of the configuration.
+            // In particular, an invalid identity must not leave fetch.prune or
+            // the other identity field changed by a failed operation.
+            for value in [user_name, user_email].into_iter().flatten() {
+                text(value)?;
+                if value.starts_with('-') {
+                    return Err(Error::invalid("Git values cannot begin with '-'."));
+                }
+            }
             if let Some(prune) = fetch_prune {
                 run(
                     repo,
@@ -501,10 +510,6 @@ fn apply(
             }
             for (key, value) in [("user.name", &user_name), ("user.email", &user_email)] {
                 let Some(value) = value else { continue };
-                text(value)?;
-                if value.starts_with('-') {
-                    return Err(Error::invalid("Git values cannot begin with '-'."));
-                }
                 run(repo, args(&["config", key, value.as_str()]), vec![])?;
             }
             Ok(refresh)
@@ -973,6 +978,7 @@ fn apply(
             };
             let mut command = Vec::new();
             let mut input = vec![];
+            let mut edited_message = None;
             match action {
                 Action::IntegrationContinue {
                     message: msg,
@@ -990,6 +996,13 @@ fn apply(
                         }
                     } else {
                         command.extend(args(&[kind, "--continue"]));
+                        if let Some(msg) = msg {
+                            message(msg)?;
+                            if kind != "rebase" {
+                                command.push("--edit".into());
+                            }
+                            edited_message = Some(msg.as_str());
+                        }
                     }
                 }
                 Action::IntegrationSkip {} => {
@@ -1000,9 +1013,18 @@ fn apply(
                 }
                 _ => command.extend(args(&[kind, "--abort"])),
             }
+            let result = if let Some(message) = edited_message {
+                command::write_with_message(
+                    &repo.root,
+                    &command.iter().map(OsString::from).collect::<Vec<_>>(),
+                    message,
+                )
+            } else {
+                run(repo, command, input)
+            };
             finish_integration(
                 repo,
-                run(repo, command, input),
+                result,
                 info["kind"].as_str().unwrap(),
                 matches!(action, Action::MergeAbort {} | Action::IntegrationAbort {}),
             )

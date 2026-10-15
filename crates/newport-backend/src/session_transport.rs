@@ -1,0 +1,579 @@
+//! One connection task and retry policy per server session. Callers own demand,
+//! never the connection attempt or transport shutdown authority.
+use crate::{
+    model::Server,
+    ssh::{ConnectFailure, ExecSession},
+};
+use serde::Serialize;
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
+use tokio::{
+    sync::{Notify, watch},
+    time::Instant,
+};
+
+const RETIRED: &str = "Server session changed. Reconnect before retrying.";
+type Dial = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<ExecSession, ConnectFailure>> + Send>>
+        + Send
+        + Sync,
+>;
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Snapshot {
+    pub status: &'static str,
+    pub generation: u64,
+    pub attempt: u32,
+    pub error: Option<String>,
+    pub retryable: bool,
+    pub demand: usize,
+}
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            status: "disconnected",
+            generation: 0,
+            attempt: 0,
+            error: None,
+            retryable: false,
+            demand: 0,
+        }
+    }
+}
+#[derive(Default)]
+struct State {
+    snapshot: Snapshot,
+    connection: Option<Arc<ExecSession>>,
+    retry_at: Option<Instant>,
+}
+struct Shared {
+    state: Mutex<State>,
+    demand: watch::Sender<usize>,
+    changes: watch::Sender<u64>,
+    retry: watch::Sender<u64>,
+    generation: Arc<AtomicU64>,
+    connected: Arc<Notify>,
+    permissions: Arc<crate::integration_permissions::Gate>,
+}
+impl Shared {
+    fn update(&self, change: impl FnOnce(&mut State)) {
+        change(&mut self.state.lock().unwrap());
+        self.changes
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+}
+pub(crate) struct Demand(Arc<Shared>);
+impl Demand {
+    fn new(shared: &Arc<Shared>) -> Self {
+        shared.demand.send_modify(|count| *count += 1);
+        Self(shared.clone())
+    }
+}
+impl Drop for Demand {
+    fn drop(&mut self) {
+        self.0.demand.send_modify(|count| *count -= 1);
+    }
+}
+pub(crate) struct Transport {
+    shared: Arc<Shared>,
+    dial: Dial,
+    retired: watch::Receiver<bool>,
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+impl Transport {
+    pub fn new(
+        server: Server,
+        retired: watch::Receiver<bool>,
+        generation: Arc<AtomicU64>,
+        connected: Arc<Notify>,
+        permissions: Arc<crate::integration_permissions::Gate>,
+    ) -> Self {
+        let dial: Dial = Arc::new(move || {
+            let server = server.clone();
+            Box::pin(async move { ExecSession::connect_session(&server).await })
+        });
+        Self {
+            shared: Arc::new(Shared {
+                state: Mutex::default(),
+                demand: watch::channel(0).0,
+                changes: watch::channel(0).0,
+                retry: watch::channel(0).0,
+                generation,
+                connected,
+                permissions,
+            }),
+            dial,
+            retired,
+            task: Mutex::new(None),
+        }
+    }
+    pub fn snapshot(&self) -> Snapshot {
+        let mut snapshot = self.shared.state.lock().unwrap().snapshot.clone();
+        snapshot.demand = *self.shared.demand.borrow();
+        snapshot
+    }
+    pub fn demand(&self) -> Demand {
+        let demand = Demand::new(&self.shared);
+        let mut task = self.task.lock().unwrap();
+        if !*self.retired.borrow() && task.as_ref().is_none_or(|task| task.is_finished()) {
+            *task = Some(tokio::spawn(run(
+                self.shared.clone(),
+                self.dial.clone(),
+                self.retired.clone(),
+            )));
+        }
+        demand
+    }
+    pub fn observe(&self) -> Option<(Arc<ExecSession>, u64)> {
+        if *self.retired.borrow() {
+            return None;
+        }
+        let state = self.shared.state.lock().unwrap();
+        state
+            .connection
+            .as_ref()
+            .filter(|c| !c.is_closed())
+            .map(|c| (c.clone(), state.snapshot.generation))
+    }
+    pub async fn acquire(&self) -> Result<(Arc<ExecSession>, u64, Demand), String> {
+        let demand = self.demand();
+        let mut changes = self.shared.changes.subscribe();
+        let mut retired = self.retired.clone();
+        loop {
+            changes.borrow_and_update();
+            if *retired.borrow() {
+                return Err(RETIRED.into());
+            }
+            {
+                let state = self.shared.state.lock().unwrap();
+                if let Some(connection) = &state.connection
+                    && !connection.is_closed()
+                {
+                    return Ok((connection.clone(), state.snapshot.generation, demand));
+                }
+                if let Some(error) = &state.snapshot.error
+                    && (!state.snapshot.retryable
+                        || state.retry_at.is_some_and(|at| at > Instant::now()))
+                {
+                    return Err(error.clone());
+                }
+            }
+            tokio::select! {
+                biased;
+                _ = retired.changed() => return Err(RETIRED.into()),
+                _ = changes.changed() => {},
+            }
+        }
+    }
+    /// A persistent service waits for shared transport recovery, without adding
+    /// its own SSH backoff. Service-channel recovery remains independent.
+    pub async fn ready(&self) -> Result<(), String> {
+        let _demand = self.demand();
+        let mut changes = self.shared.changes.subscribe();
+        let mut retired = self.retired.clone();
+        loop {
+            changes.borrow_and_update();
+            if *retired.borrow() {
+                return Err(RETIRED.into());
+            }
+            if self.observe().is_some() {
+                return Ok(());
+            }
+            let snapshot = self.snapshot();
+            if !snapshot.retryable
+                && let Some(error) = snapshot.error
+            {
+                return Err(error);
+            }
+            tokio::select! {
+                _ = retired.changed() => return Err(RETIRED.into()),
+                _ = changes.changed() => {},
+            }
+        }
+    }
+    pub fn retry(&self) {
+        if self.observe().is_some() {
+            return;
+        }
+        self.shared.update(|state| {
+            state.snapshot.error = None;
+            state.retry_at = None;
+        });
+        self.shared
+            .retry
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+    pub async fn close(&self) {
+        self.shared.permissions.disconnected(None);
+        let task = self.task.lock().unwrap().take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+        let connection = {
+            let mut state = self.shared.state.lock().unwrap();
+            let connection = state.connection.take();
+            *state = State::default();
+            state.snapshot.generation = self.shared.generation.load(Ordering::Acquire);
+            connection
+        };
+        if let Some(connection) = connection {
+            connection.close().await;
+        }
+        self.shared.update(|_| {});
+    }
+}
+impl Drop for Transport {
+    fn drop(&mut self) {
+        self.shared.permissions.disconnected(None);
+        if let Some(task) = self.task.get_mut().unwrap().take() {
+            task.abort();
+        }
+        if let Some(connection) = self.shared.state.lock().unwrap().connection.take() {
+            connection.abort_transport();
+        }
+    }
+}
+pub(crate) fn backoff(attempt: u32, random: u64) -> Duration {
+    let base = 2_000u64.saturating_mul(1u64 << attempt.saturating_sub(1).min(4));
+    // 80–120% jitter, bounded even at the maximum backoff.
+    Duration::from_millis((base * (800 + random % 401) / 1000).min(30_000))
+}
+async fn run(shared: Arc<Shared>, dial: Dial, mut retired: watch::Receiver<bool>) {
+    let mut demand = shared.demand.subscribe();
+    let mut retry = shared.retry.subscribe();
+    let mut recovery = crate::recovery::subscribe();
+    let mut failures = 0u32;
+    let mut connected_at: Option<Instant> = None;
+    loop {
+        if *retired.borrow() {
+            return;
+        }
+        if retry.has_changed().unwrap_or(false) {
+            retry.borrow_and_update();
+            failures = 0;
+            shared.update(|s| {
+                s.snapshot.error = None;
+                s.retry_at = None;
+            });
+        }
+        let connection = shared.state.lock().unwrap().connection.clone();
+        if let Some(connection) = connection {
+            if !connection.is_closed() {
+                tokio::select! {
+                    biased;
+                    _ = retired.changed() => return,
+                    _ = connection.disconnected() => {},
+                    _ = retry.changed() => {},
+                }
+                if !connection.is_closed() {
+                    continue;
+                }
+            }
+            shared.permissions.disconnected(None);
+            if connected_at
+                .take()
+                .is_some_and(|at| at.elapsed() >= Duration::from_secs(60))
+            {
+                failures = 0;
+            }
+            failures = failures.saturating_add(1);
+            let delay = backoff(failures, uuid::Uuid::new_v4().as_u128() as u64);
+            shared.update(|s| {
+                s.connection = None;
+                s.snapshot.status = "recovering";
+                s.snapshot.error = Some("SSH transport interrupted: connection closed".into());
+                s.snapshot.retryable = true;
+                s.retry_at = Some(Instant::now() + delay);
+            });
+        }
+        if *demand.borrow_and_update() == 0 {
+            shared.update(|s| s.snapshot.status = "disconnected");
+            tokio::select! {
+                biased;
+                _ = retired.changed() => return,
+                _ = retry.changed() => { failures = 0; },
+                _ = demand.changed() => {},
+            }
+            continue;
+        }
+        let (permanent, retry_at) = {
+            let state = shared.state.lock().unwrap();
+            (
+                state.snapshot.error.is_some() && !state.snapshot.retryable,
+                state.retry_at,
+            )
+        };
+        if permanent {
+            tokio::select! {
+                biased;
+                _ = retired.changed() => return,
+                _ = retry.changed() => {
+                    failures = 0;
+                    shared.update(|s| { s.snapshot.error = None; s.retry_at = None; });
+                },
+                _ = demand.changed() => {},
+            }
+            continue;
+        }
+        if let Some(at) = retry_at
+            && at > Instant::now()
+        {
+            tokio::select! {
+                biased;
+                _ = retired.changed() => return,
+                _ = retry.changed() => { failures = 0; shared.update(|s| s.retry_at = None); },
+                _ = demand.changed() => {},
+                _ = recovery.wait(at.saturating_duration_since(Instant::now())) => {
+                    shared.update(|s| s.retry_at = None);
+                },
+            }
+            continue;
+        }
+        tokio::select! {
+            biased;
+            _ = retired.changed() => return,
+            _ = recovery.ready() => {},
+        }
+        if *demand.borrow() == 0 {
+            continue;
+        }
+        shared.update(|s| {
+            s.snapshot.status = if shared.generation.load(Ordering::Acquire) == 0 {
+                "connecting"
+            } else {
+                "recovering"
+            };
+            s.snapshot.attempt = failures.saturating_add(1);
+            s.snapshot.error = None;
+            s.retry_at = None;
+        });
+        let attempt = dial();
+        tokio::pin!(attempt);
+        let result = loop {
+            tokio::select! {
+                biased;
+                _ = retired.changed() => return,
+                _ = demand.changed() => { if *demand.borrow() == 0 { break None; } },
+                result = &mut attempt => break Some(result),
+            }
+        };
+        match result {
+            None => {
+                shared.update(|s| s.snapshot.status = "disconnected");
+            }
+            Some(Ok(connection)) => {
+                connected_at = Some(Instant::now());
+                let generation = shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
+                shared.update(|s| {
+                    s.connection = Some(Arc::new(connection));
+                    s.snapshot = Snapshot {
+                        status: "connected",
+                        generation,
+                        ..Snapshot::default()
+                    };
+                    s.retry_at = None;
+                });
+                shared.connected.notify_one();
+            }
+            Some(Err(error)) => {
+                failures = failures.saturating_add(1);
+                let random = uuid::Uuid::new_v4().as_u128() as u64;
+                shared.update(|s| {
+                    s.snapshot.status = if error.retryable {
+                        "recovering"
+                    } else {
+                        "failed"
+                    };
+                    s.snapshot.error = Some(error.message);
+                    s.snapshot.retryable = error.retryable;
+                    s.retry_at = error
+                        .retryable
+                        .then(|| Instant::now() + backoff(failures, random));
+                });
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    fn fixture(dial: Dial) -> (Arc<Transport>, watch::Sender<bool>) {
+        let server = serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::new_v4(), "name": "Supervisor test", "sshHost": "127.0.0.1", "sshUser": "fixture", "sshPort": 9
+        })).unwrap();
+        let (stop, retired) = watch::channel(false);
+        let mut transport = Transport::new(
+            server,
+            retired,
+            Arc::default(),
+            Arc::default(),
+            Arc::new(crate::integration_permissions::Gate::new(false, false)),
+        );
+        transport.dial = dial;
+        (Arc::new(transport), stop)
+    }
+    async fn until(condition: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    #[tokio::test]
+    async fn cancelling_one_caller_keeps_shared_startup_for_other_waiters() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        let (transport, _stop) = fixture({
+            let attempts = attempts.clone();
+            let release = release.clone();
+            Arc::new(move || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                let release = release.clone();
+                Box::pin(async move {
+                    release.notified().await;
+                    Err(ConnectFailure {
+                        message: "denied".into(),
+                        retryable: false,
+                    })
+                })
+            })
+        });
+        assert!(transport.observe().is_none());
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        let first = {
+            let transport = transport.clone();
+            tokio::spawn(async move { transport.acquire().await })
+        };
+        let second = {
+            let transport = transport.clone();
+            tokio::spawn(async move { transport.acquire().await })
+        };
+        until(|| transport.snapshot().demand == 2 && attempts.load(Ordering::SeqCst) == 1).await;
+        first.abort();
+        let _ = first.await;
+        assert_eq!(transport.snapshot().demand, 1);
+        release.notify_one();
+        assert_eq!(second.await.unwrap().err().unwrap(), "denied");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        transport.close().await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn transient_backoff_is_shared_and_stops_without_demand() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (transport, _stop) = fixture({
+            let attempts = attempts.clone();
+            Arc::new(move || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Err(ConnectFailure {
+                        message: "offline".into(),
+                        retryable: true,
+                    })
+                })
+            })
+        });
+        assert_eq!(transport.acquire().await.err().unwrap(), "offline");
+        for _ in 0..12 {
+            assert!(transport.acquire().await.is_err());
+        }
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "callers must share one failed attempt and deadline"
+        );
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "no background dial without demand"
+        );
+        assert!(transport.acquire().await.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let persistent = transport.demand();
+        tokio::time::advance(Duration::from_secs(31)).await;
+        until(|| attempts.load(Ordering::SeqCst) >= 3).await;
+        drop(persistent);
+        transport.close().await;
+        for attempt in 1..100 {
+            assert!(backoff(attempt, 400) <= Duration::from_secs(30));
+        }
+        assert!(backoff(1, 0) >= Duration::from_millis(1600));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn permanent_failures_wait_for_explicit_retry() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (transport, _stop) = fixture({
+            let attempts = attempts.clone();
+            Arc::new(move || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Err(ConnectFailure {
+                        message: "host key rejected".into(),
+                        retryable: false,
+                    })
+                })
+            })
+        });
+        let _persistent = transport.demand();
+        assert!(transport.acquire().await.is_err());
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert!(transport.acquire().await.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        transport.retry();
+        assert!(transport.acquire().await.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        transport.close().await;
+    }
+    #[tokio::test]
+    async fn retirement_and_zero_demand_cancel_pending_authentication() {
+        struct Cancelled(Arc<AtomicUsize>);
+        impl Drop for Cancelled {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let (transport, stop) = fixture({
+            let cancelled = cancelled.clone();
+            Arc::new(move || {
+                let guard = Cancelled(cancelled.clone());
+                Box::pin(async move {
+                    let _guard = guard;
+                    std::future::pending().await
+                })
+            })
+        });
+        let waiter = {
+            let t = transport.clone();
+            tokio::spawn(async move { t.acquire().await })
+        };
+        until(|| transport.snapshot().status == "connecting").await;
+        waiter.abort();
+        let _ = waiter.await;
+        until(|| cancelled.load(Ordering::SeqCst) == 1).await;
+        let waiter = {
+            let t = transport.clone();
+            tokio::spawn(async move { t.acquire().await })
+        };
+        until(|| transport.snapshot().status == "connecting").await;
+        stop.send_replace(true);
+        assert_eq!(waiter.await.unwrap().err().unwrap(), RETIRED);
+        until(|| cancelled.load(Ordering::SeqCst) == 2).await;
+        transport.close().await;
+    }
+}

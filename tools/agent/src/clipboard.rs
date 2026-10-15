@@ -1,5 +1,4 @@
 //! Read-only xclip and wl-paste command compatibility.
-use crate::paths::root;
 use std::io::{self, Write};
 pub fn read(args: &[String]) -> io::Result<()> {
     let mut target = "text/plain";
@@ -31,7 +30,9 @@ pub fn read(args: &[String]) -> io::Result<()> {
     if !read {
         return Err(io::Error::other("clipboard is read-only; use -o"));
     }
-    let path = root()?.join("snapshot.tar");
+    let path = crate::routing::select(Some("clipboard"))?
+        .root
+        .join("snapshot.tar");
     let (revision, formats) = crate::clipboard_source::offer(&path)?;
     if target == "TARGETS" {
         for key in formats.keys() {

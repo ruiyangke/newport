@@ -10,26 +10,23 @@ if [[ "$(basename "$binary")" == newport ]]; then
   binary_dir="$(cd "$(dirname "$binary")" && pwd)"
   script_dir="$(cd "$(dirname "$0")" && pwd)"
   node "$script_dir/check-signing.mjs" "$NEWPORT_SIGNING_ENTITLEMENTS" "$NEWPORT_PROVISIONING_PROFILE"
+  bundle_info="$(node "$script_dir/native-build-info.mjs" "$binary")"
   bundle="$binary_dir/Newport.app"
   mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
+  mkdir -p "$bundle/Contents/Resources/Fonts"
   cp "$binary" "$bundle/Contents/MacOS/newport"
+  mkdir -p "$bundle/Contents/Resources/agents"
+  cp "$binary_dir/agents/newport-agent-x86_64.gz" "$bundle/Contents/Resources/agents/"
+  cp "$binary_dir/agents/newport-agent-aarch64.gz" "$bundle/Contents/Resources/agents/"
+  mkdir -p "$bundle/Contents/Resources/grammars"
+  cp "$binary_dir/grammars/libnewport_grammars.dylib" "$bundle/Contents/Resources/grammars/"
+  /usr/bin/codesign --force --sign "$NEWPORT_SIGNING_IDENTITY" --timestamp=none \
+    "$bundle/Contents/Resources/grammars/libnewport_grammars.dylib"
   cp "$NEWPORT_PROVISIONING_PROFILE" "$bundle/Contents/embedded.provisionprofile"
-  cp "$script_dir/../src-tauri/icons/icon.icns" "$bundle/Contents/Resources/icon.icns"
-  cat > "$bundle/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>app.newport</string>
-<key>CFBundleExecutable</key><string>newport</string>
-<key>CFBundleName</key><string>Newport</string>
-<key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleIconFile</key><string>icon.icns</string>
-<key>CFBundleVersion</key><string>1</string>
-<key>CFBundleShortVersionString</key><string>0.2.0</string>
-<key>NSHighResolutionCapable</key><true/>
-<key>LSMinimumSystemVersion</key><string>14.0</string>
-</dict></plist>
-PLIST
+  cp "$script_dir/../resources/icons/icon.icns" "$bundle/Contents/Resources/icon.icns"
+  cp "$script_dir/../resources/fonts/SymbolsNerdFontMono-Regular.ttf" "$bundle/Contents/Resources/Fonts/"
+  cp "$script_dir/../resources/fonts/NERD-FONTS-LICENSE" "$bundle/Contents/Resources/"
+  printf '%s\n' "$bundle_info" > "$bundle/Contents/Info.plist"
   /usr/bin/codesign --force --sign "$NEWPORT_SIGNING_IDENTITY" \
     --entitlements "$NEWPORT_SIGNING_ENTITLEMENTS" --timestamp=none "$bundle"
   /usr/bin/codesign --verify --strict "$bundle"

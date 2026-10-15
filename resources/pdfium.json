@@ -1,0 +1,18 @@
+{
+  "release": "chromium/8086",
+  "source": "https://github.com/bblanchon/pdfium-binaries",
+  "architectures": {
+    "aarch64": {
+      "archive": "pdfium-win-arm64.tgz",
+      "sha256": "1799b8034e6d64946fec0ae79f3edfc8ba58ccd80c70a46194803b1eba408344",
+      "librarySha256": "2945d1bf3fb367f892df145712db853e7829cd1afe1a1a0897f34af7f494044e",
+      "licenseSha256": "3e7dce173020798f5942404a0192b72bb28540aa0481a2ef70b2b93ca26616f6"
+    },
+    "x86_64": {
+      "archive": "pdfium-win-x64.tgz",
+      "sha256": "1fd8af952832dbb0eb16d9249f68fe09e5f5ebf7c3dd9f6066ea2720cc28487d",
+      "librarySha256": "1f2aee4286b8cf0413ab4562b7121aa454f9cfd9afd6ca8609bcef80927b3f80",
+      "licenseSha256": "3e7dce173020798f5942404a0192b72bb28540aa0481a2ef70b2b93ca26616f6"
+    }
+  }
+}

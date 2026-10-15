@@ -1,2 +1,8 @@
 # Signed fixtures must remain byte-for-byte identical on every platform.
-/src-tauri/tests/fixtures/updater/* -text
+/resources/test-fixtures/updater/* -text
+/resources/test-fixtures/released-profile/*.stronghold -text
+/crates/newport-release/tests/fixtures/*.key* -text
+
+# Preserve binary PDF fixtures and whitespace in patch context lines.
+*.pdf binary
+/crates/newport-terminal/patches/*.patch -whitespace

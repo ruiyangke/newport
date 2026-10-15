@@ -322,16 +322,13 @@ impl Repo {
                 records.next().ok_or_else(failure)?;
             }
         }
-        let upstream = command::run(
-            &self.root,
-            &[
-                "rev-parse",
-                "--symbolic-full-name",
-                "--verify",
-                "@{upstream}",
-            ],
-        )?;
-        let counts = if upstream.is_some() {
+        let head = self.head()?;
+        let mut upstream = refs::upstream(self, &head)?;
+        let upstream_ref = upstream
+            .as_object_mut()
+            .and_then(|fields| fields.remove("upstream"))
+            .unwrap_or(Value::Null);
+        let counts = if !upstream.is_null() {
             command::run(
                 &self.root,
                 &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
@@ -348,7 +345,7 @@ impl Repo {
             None
         };
         Ok(
-            json!({"head":self.head()?,"operationState":state,"integration":self.integration()?,"ahead":counts.as_ref().and_then(|v|v.first()),"behind":counts.as_ref().and_then(|v|v.get(1)),"basis":"stored_refs","upstreamRef":upstream.as_deref().map(trim_line).map(WirePath::new),"truncated":false,"totalEntries":total,"groupCounts":{"staged":staged,"unstaged":unstaged,"untracked":untracked,"conflicted":conflicted}}),
+            json!({"head":head,"operationState":state,"integration":self.integration()?,"ahead":counts.as_ref().and_then(|v|v.first()),"behind":counts.as_ref().and_then(|v|v.get(1)),"basis":"stored_refs","upstreamRef":upstream_ref,"upstream":upstream,"truncated":false,"totalEntries":total,"groupCounts":{"staged":staged,"unstaged":unstaged,"untracked":untracked,"conflicted":conflicted}}),
         )
     }
 }

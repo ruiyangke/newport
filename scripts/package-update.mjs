@@ -9,7 +9,8 @@ import { tmpdir } from "node:os";
 import { join, resolve, basename } from "node:path";
 import { createHash } from "node:crypto";
 import { parseArgs } from "node:util";
-import { root, json, run, capture, plist, signerEnv } from "./tooling.mjs";
+import { root, json, run, capture, plist } from "./tooling.mjs";
+import { signUpdate } from "./sign-update.mjs";
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: { output: { type: "string" } },
@@ -20,7 +21,7 @@ const app = resolve(positionals[0]),
   output = resolve(values.output),
   info = plist(join(app, "Contents/Info.plist"));
 const version = info.CFBundleShortVersionString,
-  config = json(join(root, "src-tauri/tauri.conf.json"));
+  config = json(join(root, "resources/app.json"));
 if (version !== config.version || info.CFBundleIdentifier !== config.identifier)
   throw new Error("App version/identifier does not match the release source");
 run("codesign", ["--verify", "--deep", "--strict", app]);
@@ -35,7 +36,6 @@ if (
   throw new Error(
     "This release pipeline currently packages Apple Silicon only",
   );
-const env = signerEnv();
 mkdirSync(output, { recursive: true });
 const name = `Newport-${version}-macos-arm64`,
   archive = join(output, `${name}.app.tar.gz`),
@@ -51,18 +51,7 @@ try {
 } finally {
   rmSync(temp, { recursive: true, force: true });
 }
-run(
-  process.execPath,
-  [
-    join(root, "node_modules/@tauri-apps/cli/tauri.js"),
-    "signer",
-    "sign",
-    "--app-version",
-    version,
-    archive,
-  ],
-  { env },
-);
+signUpdate(archive, version);
 run("ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", app, zip]);
 const manifest = {
   version,

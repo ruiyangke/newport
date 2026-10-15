@@ -7,9 +7,9 @@ if (!/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(tag))
 const versions = [
   "package.json",
   "package-lock.json",
-  "src-tauri/tauri.conf.json",
+  "resources/app.json",
 ].map((path) => json(join(root, path)).version);
-const cargo = readFileSync(join(root, "src-tauri/Cargo.toml"), "utf8")
+const cargo = readFileSync(join(root, "crates/newport-app/Cargo.toml"), "utf8")
   .split("[package]")[1]
   ?.split(/^\[/m)[0];
 versions.push(cargo?.match(/^version\s*=\s*"([^"]+)"/m)?.[1]);

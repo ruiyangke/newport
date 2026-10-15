@@ -16,14 +16,11 @@ pub(crate) struct Endpoint {
     identity: (u64, u64),
     // Keep the stable lock inode for the entire listener lifetime. Never unlink it.
     _lock: Option<File>,
-    _temporary: Option<tempfile::TempDir>,
+    _temporary: Option<crate::owned_directory::Directory>,
 }
 impl Endpoint {
     pub(crate) fn temporary() -> io::Result<(UnixListener, Self)> {
-        let directory = tempfile::Builder::new()
-            .prefix("newport-wl-")
-            .permissions(fs::Permissions::from_mode(0o700))
-            .tempdir_in("/tmp")?;
+        let directory = crate::owned_directory::Directory::new(Path::new("/tmp"), "newport-wl-")?;
         Self::bind(directory.path().join("clipboard"), None, Some(directory))
     }
     pub(crate) fn fixed(path: &Path) -> io::Result<(UnixListener, Self)> {
@@ -98,7 +95,7 @@ impl Endpoint {
     fn bind(
         path: PathBuf,
         lock: Option<File>,
-        temporary: Option<tempfile::TempDir>,
+        temporary: Option<crate::owned_directory::Directory>,
     ) -> io::Result<(UnixListener, Self)> {
         let listener = UnixListener::bind(&path)?;
         let m = fs::symlink_metadata(&path)?;

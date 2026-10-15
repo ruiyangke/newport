@@ -1,7 +1,6 @@
 //! Porthop compatibility lives here. Active commands use Newport names.
 use std::{
     env, fs, io,
-    os::unix::fs::{symlink, MetadataExt},
     path::{Path, PathBuf},
 };
 
@@ -62,43 +61,39 @@ pub fn managed_alias(target: &Path) -> bool {
         Some("newport-agent" | "porthop-agent" | "porthop-clip" | "porthop-open")
     )
 }
-pub fn commands(directory: &Path) -> io::Result<()> {
+pub(crate) fn plan_commands(
+    directory: &Path,
+    transaction: &mut crate::helper_transaction::Transaction,
+) -> io::Result<()> {
+    use crate::helper_transaction::Snapshot;
     let browser = directory.join(LEGACY_BROWSER);
-    if fs::read_link(&browser).is_ok_and(|p| {
-        matches!(
-            p.to_str(),
-            Some("porthop-agent" | "porthop-open" | "newport-agent")
-        )
-    }) {
-        fs::remove_file(&browser)?;
-        symlink("newport-agent", &browser)?;
+    let before = transaction.read(&browser)?;
+    if matches!(&before, Snapshot::Link(target) if matches!(target.to_str(), Some("porthop-agent" | "porthop-open" | "newport-agent")))
+    {
+        transaction.plan(&browser, before, Snapshot::Link("newport-agent".into()))?;
     }
     for (name, marker) in [
         ("porthop-clip", "# Porthop clipboard helper"),
         ("porthop-open", "# Porthop browser helper"),
     ] {
         let path = directory.join(name);
-        if fs::symlink_metadata(&path).is_ok_and(|m| m.is_file())
-            && fs::read_to_string(&path).is_ok_and(|s| s.lines().any(|l| l.starts_with(marker)))
-        {
-            fs::remove_file(path)?;
+        let before = transaction.read(&path)?;
+        if matches!(before, Snapshot::File { .. }) {
+            let bytes = transaction.bytes(&before)?;
+            if std::str::from_utf8(&bytes).is_ok_and(|s| s.lines().any(|l| l.starts_with(marker))) {
+                transaction.plan(&path, before, Snapshot::Missing)?;
+            }
         }
     }
-    // Old shell snippets may still call the previous binary. Only replace a
-    // recognizable, owned legacy executable; preserve unrelated files/links.
     let old = directory.join("porthop-agent");
-    if fs::symlink_metadata(&old).is_ok_and(|m| {
-        m.is_file() && m.uid() == unsafe { libc::geteuid() } && m.len() <= 64 * 1024 * 1024
-    }) {
-        let bytes = fs::read(&old)?;
+    let before = transaction.read(&old)?;
+    if matches!(before, Snapshot::File { .. }) {
+        let bytes = transaction.bytes(&before)?;
         if bytes
             .windows(b"porthop-agent/1".len())
             .any(|w| w.starts_with(b"porthop-agent/") && matches!(w.last(), Some(b'1'..=b'5')))
         {
-            let staging = tempfile::tempdir_in(directory)?;
-            let link = staging.path().join("agent");
-            symlink("newport-agent", &link)?;
-            fs::rename(link, old)?;
+            transaction.plan(&old, before, Snapshot::Link("newport-agent".into()))?;
         }
     }
     Ok(())

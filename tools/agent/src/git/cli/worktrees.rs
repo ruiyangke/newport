@@ -88,9 +88,10 @@ pub(super) fn page(
             .is_none_or(|b| r["head"]["name"]["display"] == *b)
             && name.as_ref().is_none_or(|n| r["name"]["display"] == *n)
             && format!(
-                "{} {}",
+                "{} {} {}",
                 r["path"]["display"].as_str().unwrap_or_default(),
-                r["name"]["display"].as_str().unwrap_or_default()
+                r["name"]["display"].as_str().unwrap_or_default(),
+                r["head"]["name"]["display"].as_str().unwrap_or_default()
             )
             .to_lowercase()
             .contains(&filter.to_lowercase())

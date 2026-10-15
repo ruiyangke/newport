@@ -79,7 +79,7 @@ for (const scenario of [
 ])
   test(scenario, { skip: !minisign }, () =>
     fixture((temp) => {
-      const source = join(root, "src-tauri/tests/fixtures/updater");
+      const source = join(root, "resources/test-fixtures/updater");
       copyFileSync(join(source, "payload.txt"), join(temp, "payload.txt"));
       let key = readFileSync(join(source, "public.key"), "utf8").trim();
       const manifest = {
@@ -98,8 +98,7 @@ for (const scenario of [
         writeFileSync(join(temp, "payload.txt"), "tampered");
       if (scenario === "wrong version") manifest.version = "3.0.0";
       if (scenario === "wrong key")
-        key = json(join(root, "src-tauri/tauri.conf.json")).plugins.updater
-          .pubkey;
+        key = json(join(root, "resources/updater.json")).pubkey;
       if (scenario === "valid signature") verifyPackages(manifest, temp, key);
       else assert.throws(() => verifyPackages(manifest, temp, key));
     }),

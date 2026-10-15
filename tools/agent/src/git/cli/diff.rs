@@ -220,13 +220,48 @@ pub(super) fn history(
     context: u32,
 ) -> Result<Value, Error> {
     let (base, mut metadata) = comparison(repo, id, parent)?;
-    let paths = path
+    let mut paths = path
         .as_ref()
         .map(WirePath::decode)
         .transpose()?
         .into_iter()
         .collect::<Vec<_>>();
-    let files = read(repo, base, &paths, context)?;
+    // A pathspec containing only the destination hides the rename source from
+    // Git and turns a renamed file into an apparent whole-file addition. Resolve
+    // the pair from the same raw comparison used by the file list; only request
+    // patch content for that pair, not for the rest of a large commit.
+    let selected = if let Some(selected_path) = paths.first() {
+        let changes = comparison_files(repo, base.clone())?;
+        let selected_bytes = STANDARD.encode(selected_path);
+        let matches = |file: &&Value, key: &str| file[key]["bytesB64"] == selected_bytes;
+        let selected = changes
+            .iter()
+            .find(|file| matches(file, "newPath"))
+            .or_else(|| changes.iter().find(|file| matches(file, "oldPath")))
+            .cloned();
+        if let Some(file) = &selected {
+            for key in ["oldPath", "newPath"] {
+                let path: WirePath =
+                    serde_json::from_value(file[key].clone()).map_err(|_| failure())?;
+                let bytes = path.decode()?;
+                if !paths.contains(&bytes) {
+                    paths.push(bytes);
+                }
+            }
+        }
+        selected
+    } else {
+        None
+    };
+    let mut files = read(repo, base, &paths, context)?;
+    if let Some(selected) = selected {
+        files.retain(|file| {
+            file["oldPath"] == selected["oldPath"] && file["newPath"] == selected["newPath"]
+        });
+        if files.len() != 1 {
+            return Err(failure());
+        }
+    }
     metadata["files"] = json!(files);
     metadata["contextLines"] = json!(context);
     metadata["selectedPath"] = json!(path);
@@ -313,14 +348,7 @@ pub(super) fn working(
         json!({"files":files,"truncated":false,"readOnly":false,"sourceSnapshot":source,"entryId":entry,"side":side,"contextLines":context}),
     )
 }
-pub(super) fn commit_files(
-    repo: &Repo,
-    id: &str,
-    parent: usize,
-    count: usize,
-    cursor: Option<String>,
-) -> Result<Value, Error> {
-    let (mut command, mut comparison) = comparison(repo, id, parent)?;
+fn comparison_files(repo: &Repo, mut command: Vec<OsString>) -> Result<Vec<Value>, Error> {
     command.extend(strings(&[
         "--no-ext-diff",
         "--no-textconv",
@@ -330,7 +358,17 @@ pub(super) fn commit_files(
         "-z",
         "--",
     ]));
-    let rows = deltas(&execute(repo, &command)?)?;
+    deltas(&execute(repo, &command)?)
+}
+pub(super) fn commit_files(
+    repo: &Repo,
+    id: &str,
+    parent: usize,
+    count: usize,
+    cursor: Option<String>,
+) -> Result<Value, Error> {
+    let (command, mut comparison) = comparison(repo, id, parent)?;
+    let rows = comparison_files(repo, command)?;
     let fingerprint = pages::hash(&json!([rows, comparison]))?;
     comparison.as_object_mut().unwrap().remove("files");
     comparison["totalFiles"] = json!(rows.len());

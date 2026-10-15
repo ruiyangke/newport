@@ -2,6 +2,7 @@ use crate::{command, process, root};
 use anyhow::{ensure, Context, Result};
 use serde_json::Value;
 use std::{fs, path::PathBuf};
+mod fixtures;
 fn docker() -> PathBuf {
     if let Some(path) = std::env::var_os("NEWPORT_TEST_DOCKER") {
         return path.into();
@@ -69,7 +70,7 @@ pub fn runtime() -> Result<()> {
 pub fn build_agents() -> Result<()> {
     if std::env::var("NEWPORT_PREBUILT").as_deref() == Ok("1") {
         use sha2::{Digest, Sha256};
-        let dir = root().join("src-tauri/agents");
+        let dir = root().join("resources/agents");
         let expected: Value = serde_json::from_slice(&fs::read(dir.join("newport-build.json"))?)?;
         ensure!(
             expected["commit"] == process::text(command("git").args(["rev-parse", "HEAD"]))?,
@@ -103,12 +104,18 @@ pub fn build_agents() -> Result<()> {
         );
         return Ok(());
     }
-    let output = root().join("src-tauri/agents");
+    let output = root().join("resources/agents");
     fs::create_dir_all(&output)?;
     // Build both successfully before replacing the bundled binaries.
     let staging = tempfile::tempdir_in(&output)?;
     for arch in ["x86_64", "aarch64"] {
         docker_build("artifact", arch, staging.path())?;
+    }
+    // A locally rebuilt payload must not inherit a signed release identity.
+    match fs::remove_file(output.join("needle-release.json")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     for arch in ["x86_64", "aarch64"] {
         let name = format!("newport-agent-{arch}");
@@ -177,17 +184,8 @@ pub fn run(args: &[String]) -> Result<()> {
         "newport-test-docker:local",
         "tests/remote/docker",
     ]))?;
-    let mut run = command("cargo");
-    run.args([
-        "run",
-        "--locked",
-        "--manifest-path",
-        "src-tauri/Cargo.toml",
-        "--example",
-        "remote_tests",
-    ]);
-    if let Some(filter) = filter {
-        run.env("NEWPORT_TEST_FILTER", filter);
-    }
-    process::run(&mut run)
+    let filter = filter
+        .or_else(|| std::env::var("NEWPORT_TEST_FILTER").ok())
+        .unwrap_or_else(|| "remote_tests::".into());
+    tokio::runtime::Runtime::new()?.block_on(fixtures::run(&filter))
 }

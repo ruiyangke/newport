@@ -1,7 +1,10 @@
 use super::{home, Result};
 use std::{
     fs,
-    os::unix::fs::{symlink, MetadataExt, PermissionsExt},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{symlink, MetadataExt, OpenOptionsExt, PermissionsExt},
+    },
     path::Path,
     process::Command,
 };
@@ -50,6 +53,7 @@ pub fn run() -> Result<()> {
                 "DISPLAY",
                 "WAYLAND_DISPLAY",
                 "XAUTHORITY",
+                "NEWPORT_SESSION",
             ] {
                 c.env_remove(key);
             }
@@ -67,6 +71,17 @@ pub fn run() -> Result<()> {
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
         fs::write(state.join("features"), "clipboard browser")?;
         fs::write(state.join("display"), ":99")?;
+        // Match the live bridge's ownership lease: stale files alone must never
+        // redirect a new shell to a dead integration session.
+        let lease = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(state.join("agent.sock.lock"))?;
+        if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
         let run = |script: &str| {
             let args: &[&str] = match shell {
                 "bash" => &["--noprofile", "--norc", "-eu"],
@@ -97,6 +112,8 @@ pub fn run() -> Result<()> {
                 1
             );
         }
+        drop(lease);
+        assert_eq!(run("echo survived")?.trim(), "survived");
         fs::remove_file(&binary)?;
         assert_eq!(run("echo survived")?.trim(), "survived");
         fs::write(&binary, "#!/bin/sh\nexit 1\n")?;
@@ -107,7 +124,9 @@ pub fn run() -> Result<()> {
         fs::set_permissions(&rc, fs::Permissions::from_mode(0o444))?;
         let before = fs::metadata(&rc)?;
         let saved = backups(rc.parent().unwrap())?;
-        install()?;
+        let refused = command(binary.as_os_str()).arg("install").output()?;
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("read-only"));
         assert_eq!(fs::read_to_string(&rc)?, original);
         let after = fs::metadata(&rc)?;
         assert_eq!(before.ino(), after.ino());
@@ -118,7 +137,9 @@ pub fn run() -> Result<()> {
         let protected = home.join("protected");
         fs::write(&protected, original)?;
         symlink(&protected, &rc)?;
-        install()?;
+        let refused = command(binary.as_os_str()).arg("install").output()?;
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("symlink"));
         assert!(fs::symlink_metadata(&rc)?.is_symlink());
         assert_eq!(fs::read_to_string(protected)?, original);
         println!(

@@ -105,6 +105,204 @@ fn cmd(home: &std::path::Path, args: &[&str]) -> std::process::Output {
         .output()
         .unwrap()
 }
+
+#[test]
+fn managed_permissions_change_in_place_and_revocation_discards_pending_clipboard() {
+    use newport_agent::integration_control::{self as control, Applied, Hello, Permissions};
+    let _guard = WAYLAND_ENV.lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut agent = Agent::features(home.path(), false, &["--managed"]);
+    let hello: Hello = control::decode(&agent.event(b'R')).unwrap();
+    hello.validate().unwrap();
+    let pid = agent.child.id();
+    let root = home.path().join(".cache/newport/clipboard");
+    assert_eq!(
+        fs::read_to_string(root.join("features")).unwrap().trim(),
+        ""
+    );
+    assert!(!root.join("wayland.sock").exists());
+    let enable = Permissions {
+        revision: 1,
+        clipboard: true,
+        browser: true,
+    };
+    agent.send(b'P', &control::encode(&enable).unwrap());
+    let applied: Applied = control::decode(&agent.event(b'A')).unwrap();
+    assert_eq!(applied.permissions, enable);
+    assert_eq!(applied.error, None);
+    agent.send(
+        b'M',
+        &rmp_serde::to_vec(&(42i64, vec!["text/plain"])).unwrap(),
+    );
+    agent.event(b'A');
+    let mut reader = Command::new(BIN)
+        .args(["clipboard", "-o"])
+        .env("HOME", home.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pending = agent.event(b'C');
+    let (request_id, revision, _): (u64, i64, String) = rmp_serde::from_slice(&pending).unwrap();
+    let disable = Permissions {
+        revision: 2,
+        clipboard: false,
+        browser: true,
+    };
+    agent.send(b'P', &control::encode(&disable).unwrap());
+    let applied: Applied = control::decode(&agent.event(b'A')).unwrap();
+    assert_eq!(applied.permissions, disable);
+    for _ in 0..100 {
+        if reader.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        reader.try_wait().unwrap().is_some(),
+        "revocation must unblock pending readers"
+    );
+    assert!(!reader.wait().unwrap().success());
+    assert!(!root.join("clipboard.sock").exists());
+    assert!(!root.join("wayland.sock").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("features")).unwrap().trim(),
+        "browser"
+    );
+    let late = rmp_serde::to_vec(&(
+        request_id,
+        revision,
+        0u8,
+        true,
+        serde_bytes::Bytes::new(b"obsolete"),
+    ))
+    .unwrap();
+    agent.send(b'D', &late);
+    agent.send(b'H', &[]);
+    agent.event(b'A');
+    assert!(!root.join("clipboard.sock").exists());
+    // A delayed earlier permission message cannot restore access.
+    agent.send(b'P', &control::encode(&enable).unwrap());
+    let stale: Applied = control::decode(&agent.event(b'A')).unwrap();
+    assert_eq!(stale.permissions, disable);
+    let reenable = Permissions {
+        revision: 3,
+        clipboard: true,
+        browser: false,
+    };
+    agent.send(b'P', &control::encode(&reenable).unwrap());
+    let applied: Applied = control::decode(&agent.event(b'A')).unwrap();
+    assert_eq!(applied.permissions, reenable);
+    agent.send(
+        b'M',
+        &rmp_serde::to_vec(&(43i64, vec!["text/plain"])).unwrap(),
+    );
+    agent.event(b'A');
+    assert!(root.join("clipboard.sock").exists());
+    assert_eq!(agent.child.id(), pid);
+    assert!(agent.child.try_wait().unwrap().is_none());
+    assert!(
+        !home.path().join(".bashrc").exists(),
+        "permissions must not edit shell startup"
+    );
+    agent.send(b'Q', &[]);
+    agent.stopped();
+}
+
+#[test]
+fn managed_browser_revocation_rejects_pending_request_without_ending_session() {
+    use newport_agent::integration_control::{self as control, Applied, Permissions};
+    let _guard = WAYLAND_ENV.lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut agent = Agent::features(home.path(), false, &["--managed"]);
+    agent.event(b'R');
+    agent.send(
+        b'P',
+        &control::encode(&Permissions {
+            revision: 1,
+            clipboard: false,
+            browser: true,
+        })
+        .unwrap(),
+    );
+    agent.event(b'A');
+    let home_path = home.path().to_owned();
+    let open = std::thread::spawn(move || cmd(&home_path, &["open", "https://example.com"]));
+    agent.event(b'O');
+    agent.send(
+        b'P',
+        &control::encode(&Permissions {
+            revision: 2,
+            clipboard: false,
+            browser: false,
+        })
+        .unwrap(),
+    );
+    let applied: Applied = control::decode(&agent.event(b'A')).unwrap();
+    assert!(!applied.permissions.browser);
+    assert!(!open.join().unwrap().status.success());
+    agent.send(b'H', &[]);
+    agent.event(b'A');
+    agent.send(b'Q', &[]);
+    agent.stopped();
+}
+
+#[test]
+fn disabling_browser_keeps_pending_clipboard_transfer_and_socket() {
+    use newport_agent::integration_control::{self as control, Permissions};
+    use std::os::unix::fs::MetadataExt;
+    let _guard = WAYLAND_ENV.lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut agent = Agent::features(home.path(), false, &["--managed"]);
+    agent.event(b'R');
+    agent.send(
+        b'P',
+        &control::encode(&Permissions {
+            revision: 1,
+            clipboard: true,
+            browser: true,
+        })
+        .unwrap(),
+    );
+    agent.event(b'A');
+    agent.send(
+        b'M',
+        &rmp_serde::to_vec(&(42i64, vec!["text/plain"])).unwrap(),
+    );
+    agent.event(b'A');
+    let socket = home.path().join(".cache/newport/clipboard/clipboard.sock");
+    let inode = fs::metadata(&socket).unwrap().ino();
+    let read_home = home.path().to_owned();
+    let read = std::thread::spawn(move || cmd(&read_home, &["clipboard", "-o"]));
+    let (id, revision, _): (u64, i64, String) = rmp_serde::from_slice(&agent.event(b'C')).unwrap();
+    agent.send(
+        b'P',
+        &control::encode(&Permissions {
+            revision: 2,
+            clipboard: true,
+            browser: false,
+        })
+        .unwrap(),
+    );
+    agent.event(b'A');
+    assert_eq!(fs::metadata(socket).unwrap().ino(), inode);
+    agent.send(
+        b'D',
+        &rmp_serde::to_vec(&(
+            id,
+            revision,
+            0u8,
+            true,
+            serde_bytes::Bytes::new(b"uninterrupted"),
+        ))
+        .unwrap(),
+    );
+    let result = read.join().unwrap();
+    assert!(result.status.success());
+    assert_eq!(result.stdout, b"uninterrupted");
+    agent.send(b'Q', &[]);
+    agent.stopped();
+}
 #[test]
 fn single_agent_clipboard_browser_displays_and_disconnect_cleanup() {
     let _guard = WAYLAND_ENV.lock().unwrap();
@@ -365,7 +563,7 @@ fn upload_installer_verifies_hash_and_preserves_unrelated_binary() {
         let mut process = Command::new("sh")
             .args([
                 "-c",
-                include_str!("../../../src-tauri/src/agent-install.sh"),
+                include_str!("../../../crates/newport-backend/src/agent-install.sh"),
                 "install",
                 hash,
             ])
@@ -393,33 +591,33 @@ fn upload_installer_verifies_hash_and_preserves_unrelated_binary() {
     assert!(!install(&"0".repeat(64)));
     assert!(!home.path().join(".local/bin/newport-agent").exists());
     assert!(install(&hash));
-    assert_eq!(
-        fs::read(home.path().join(".local/bin/newport-agent")).unwrap(),
-        fs::read(BIN).unwrap()
-    );
-    // Reinstall replaces an identical binary and repairs missing aliases.
-    use std::os::unix::fs::MetadataExt;
     let agent_path = home.path().join(".local/bin/newport-agent");
+    let candidate = home.path().join(format!(
+        ".local/share/newport/needle/builds/{hash}/newport-agent"
+    ));
+    assert!(
+        !agent_path.exists(),
+        "upload only stages; it must not activate"
+    );
+    assert_eq!(fs::read(&candidate).unwrap(), fs::read(BIN).unwrap());
+    let activate = |expected: &str| cmd(home.path(), &["deployment", "activate", &hash, expected]);
+    assert!(activate("missing").status.success());
+    assert_eq!(fs::read_link(&agent_path).unwrap(), candidate);
+    use std::os::unix::fs::MetadataExt;
     let before = fs::metadata(&agent_path).unwrap().ino();
-    fs::remove_file(home.path().join(".local/bin/newport-browser")).unwrap();
     assert!(install(&hash));
-    assert_ne!(fs::metadata(&agent_path).unwrap().ino(), before);
+    assert!(activate(&hash).status.success());
     assert_eq!(
-        fs::read_link(home.path().join(".local/bin/newport-browser")).unwrap(),
-        std::path::Path::new("newport-agent")
+        fs::metadata(&agent_path).unwrap().ino(),
+        before,
+        "immutable builds are reused"
     );
     assert!(!install(&"0".repeat(64)));
     assert_eq!(fs::read(&agent_path).unwrap(), fs::read(BIN).unwrap());
-    fs::write(
-        home.path().join(".local/bin/newport-agent"),
-        b"unrelated command",
-    )
-    .unwrap();
-    assert!(!install(&hash));
-    assert_eq!(
-        fs::read(home.path().join(".local/bin/newport-agent")).unwrap(),
-        b"unrelated command"
-    );
+    fs::remove_file(&agent_path).unwrap();
+    fs::write(&agent_path, b"unrelated command").unwrap();
+    assert!(!activate(&hash).status.success());
+    assert_eq!(fs::read(&agent_path).unwrap(), b"unrelated command");
 }
 
 #[test]

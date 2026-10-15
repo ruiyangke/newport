@@ -21,6 +21,9 @@ use std::{
 use uuid::Uuid;
 
 pub fn serve() -> io::Result<()> {
+    serve_bound(crate::transport::Cancellation::default())
+}
+pub(crate) fn serve_bound(cancellation: crate::transport::Cancellation) -> io::Result<()> {
     use std::os::fd::{AsFd, AsRawFd};
     let stdout = std::fs::File::from(io::stdout().as_fd().try_clone_to_owned()?);
     let flags = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_GETFL) };
@@ -32,22 +35,43 @@ pub fn serve() -> io::Result<()> {
     let mut output = crate::transport::DeadlineWriter {
         inner: stdout,
         timeout: Duration::from_secs(5),
+        cancellation: cancellation.clone(),
     };
     let (tx, rx) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let mut stdin = io::stdin().lock();
-        loop {
-            let message = protocol::read(&mut stdin);
-            let failed = message.is_err();
-            if tx.send(message).is_err() || failed {
-                break;
-            }
+    let mut stdin = cancellation.stdin()?;
+    std::thread::spawn(move || loop {
+        let message = protocol::read(&mut stdin);
+        let failed = message.is_err();
+        if tx.send(message).is_err() || failed {
+            break;
         }
     });
     run(
         |timeout| {
-            rx.recv_timeout(timeout)
-                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Git RPC input timed out"))?
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                cancellation.check()?;
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Git RPC input timed out",
+                    ));
+                }
+                match rx.recv_timeout(remaining.min(Duration::from_millis(50))) {
+                    Ok(message) => {
+                        cancellation.check()?;
+                        return message;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => (),
+                    Err(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "Git RPC input closed",
+                        ))
+                    }
+                }
+            }
         },
         &mut output,
         std::env::var_os("HOME")
