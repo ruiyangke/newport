@@ -975,8 +975,14 @@ fn crashed_integration_directory_is_reclaimed_with_control_still_running() {
 fn runtime_start_reclaims_crashed_x11_socket_and_authority_without_touching_live_display() {
     use std::{
         io::{BufRead, BufReader},
+        os::unix::fs::MetadataExt,
         path::PathBuf,
     };
+    fn socket_identity(path: &std::path::Path) -> Option<(u64, u64)> {
+        std::fs::symlink_metadata(path)
+            .ok()
+            .map(|m| (m.dev(), m.ino()))
+    }
     fn display(home: &std::path::Path) -> (Worker, PathBuf, PathBuf) {
         let mut child = Worker(
             Command::new(BIN)
@@ -1021,12 +1027,18 @@ fn runtime_start_reclaims_crashed_x11_socket_and_authority_without_touching_live
     let (mut crashed, socket, authority) = display(home.path());
     let (mut live, live_socket, live_authority) = display(home.path());
     assert_ne!(socket, live_socket);
+    let crashed_identity = socket_identity(&socket).unwrap();
+    let live_identity = socket_identity(&live_socket).unwrap();
     crashed.kill().unwrap();
     crashed.wait().unwrap();
-    assert!(socket.exists());
-    assert!(authority.exists());
     let _runtime = Runtime::start(home.path(), "");
-    assert!(!socket.exists(), "crashed X11 public socket retained");
+    // Display numbers are shared across concurrent processes. Another display
+    // may reuse the public path immediately after recovery removes our inode.
+    assert_ne!(
+        socket_identity(&socket),
+        Some(crashed_identity),
+        "crashed X11 public socket retained"
+    );
     assert!(
         !authority.parent().unwrap().exists(),
         "crashed Xauthority retained"
@@ -1038,7 +1050,7 @@ fn runtime_start_reclaims_crashed_x11_socket_and_authority_without_touching_live
     live.kill().unwrap();
     live.wait().unwrap();
     let _cleanup = Runtime::start(home.path(), "");
-    assert!(!live_socket.exists());
+    assert_ne!(socket_identity(&live_socket), Some(live_identity));
     assert!(!live_authority.parent().unwrap().exists());
 }
 
