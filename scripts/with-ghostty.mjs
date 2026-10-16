@@ -70,7 +70,11 @@ function run(command, args, env, capture = false) {
   return result.stdout?.trim();
 }
 
-export function installZigDirectory(staged, install, executableName, version) {
+export function installZigDirectory(staged, install, executableName, version, {
+  platform = process.platform,
+  rename = renameSync,
+  wait = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
+} = {}) {
   if (version(join(staged, executableName)) !== ZIG_VERSION)
     throw new Error("Downloaded Zig version does not match the build pin");
   // A restored build cache can retain the library directory without the Zig
@@ -81,7 +85,19 @@ export function installZigDirectory(staged, install, executableName, version) {
     return;
   }
   rmSync(install, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  renameSync(staged, install);
+  // Windows can briefly retain a handle after the staged compiler's version
+  // check (including x64 emulation on ARM64). Keep the verified source intact
+  // and retry sharing/permission failures for at most five seconds.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rename(staged, install);
+      break;
+    } catch (error) {
+      if (platform !== "win32" || attempt >= 50
+          || !["EPERM", "EACCES", "EBUSY"].includes(error.code)) throw error;
+      wait(100);
+    }
+  }
 }
 
 export async function ghosttyBuildEnv(source = process.env) {

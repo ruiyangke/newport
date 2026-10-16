@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -71,6 +72,56 @@ test("Zig preserves an installation completed while the archive was downloading"
     assert.equal(existsSync(staged), true);
   } finally { rmSync(temp, { recursive: true, force: true }); }
 });
+
+for (const code of ["EPERM", "EACCES", "EBUSY"]) {
+  test(`Zig installation waits for a transient Windows ${code} lock`, () => {
+    const temp = mkdtempSync(join(tmpdir(), "newport-zig-locked-"));
+    try {
+      const staged = join(temp, "staged");
+      const install = join(temp, "install");
+      mkdirSync(staged);
+      writeFileSync(join(staged, "zig.exe"), ZIG_VERSION);
+      let attempts = 0;
+      const delays = [];
+      installZigDirectory(staged, install, "zig.exe", (binary) => readFileSync(binary, "utf8"), {
+        platform: "win32",
+        rename: (...args) => {
+          if (++attempts <= 2) throw Object.assign(new Error("compiler still in use"), { code });
+          renameSync(...args);
+        },
+        wait: (ms) => delays.push(ms),
+      });
+      assert.equal(attempts, 3);
+      assert.deepEqual(delays, [100, 100]);
+      assert.equal(readFileSync(join(install, "zig.exe"), "utf8"), ZIG_VERSION);
+      assert.equal(existsSync(staged), false);
+    } finally { rmSync(temp, { recursive: true, force: true }); }
+  });
+}
+
+for (const [platform, code, expectedAttempts] of [["win32", "EPERM", 51], ["win32", "EIO", 1], ["darwin", "EPERM", 1]]) {
+  test(`Zig installation preserves the staging directory after ${platform} ${code}`, () => {
+    const temp = mkdtempSync(join(tmpdir(), "newport-zig-denied-"));
+    try {
+      const staged = join(temp, "staged");
+      const install = join(temp, "install");
+      mkdirSync(staged);
+      writeFileSync(join(staged, "zig.exe"), ZIG_VERSION);
+      const failure = Object.assign(new Error("cannot move compiler"), { code });
+      let attempts = 0;
+      let waited = 0;
+      assert.throws(() => installZigDirectory(staged, install, "zig.exe", (binary) => readFileSync(binary, "utf8"), {
+        platform,
+        rename: () => { attempts++; throw failure; },
+        wait: (ms) => { waited += ms; },
+      }), (error) => error === failure);
+      assert.equal(attempts, expectedAttempts);
+      assert.equal(waited, (expectedAttempts - 1) * 100);
+      assert.equal(readFileSync(join(staged, "zig.exe"), "utf8"), ZIG_VERSION);
+      assert.equal(existsSync(install), false);
+    } finally { rmSync(temp, { recursive: true, force: true }); }
+  });
+}
 
 function fixture(check) {
   const source = mkdtempSync(join(tmpdir(), "newport-ghostty-source-test-"));
