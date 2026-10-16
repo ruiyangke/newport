@@ -1173,7 +1173,8 @@ fn compact_container_ports_wrap_and_failures_stay_inline_without_replaying(
         p.open_port_link(&server, Value::Null, &target, &mut operations, cx);
         p.open_port_link(&server, Value::Null, &target, &mut operations, cx);
     });
-    for _ in 0..100 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
         panel.update(cx, |p, cx| {
             p.sync_port_links(&server, Some(&config), &operations, cx)
         });
@@ -1182,6 +1183,10 @@ fn compact_container_ports_wrap_and_failures_stay_inline_without_replaying(
         }) {
             break;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "port handover did not finish"
+        );
         thread::sleep(Duration::from_millis(2));
     }
     draw(cx);

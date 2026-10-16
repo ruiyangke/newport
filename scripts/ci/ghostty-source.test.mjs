@@ -129,3 +129,31 @@ test("a patch that no longer applies fails before exposing a build directory", (
     );
   });
 });
+
+
+test("Windows ARM uses the pinned x64 compiler without changing the build target", async () => {
+  const { zigArchiveKey } = await import("../with-ghostty.mjs");
+  assert.equal(zigArchiveKey("win32", "arm64"), "win32-x64");
+  assert.equal(zigArchiveKey("win32", "x64"), "win32-x64");
+  assert.equal(zigArchiveKey("darwin", "arm64"), "darwin-arm64");
+});
+
+test("GitHub steps receive the prepared Zig library as well as Ghostty", async () => {
+  const { exportGitHubEnvironment } = await import("../with-ghostty.mjs");
+  const temp = mkdtempSync(join(tmpdir(), "newport-ghostty-env-"));
+  try {
+    const destination = { GITHUB_ENV: join(temp, "env"), GITHUB_PATH: join(temp, "path") };
+    exportGitHubEnvironment({
+      GHOSTTY_SOURCE_DIR: "prepared-source", LIBGHOSTTY_VT_SYS_OPTIMIZE: "ReleaseSafe",
+      GIT_CEILING_DIRECTORIES: "ceiling", ZIG_LIB_DIR: "prepared-stdlib",
+      PATH: "pinned-zig", CARGO_BUILD_TARGET: "aarch64-pc-windows-msvc",
+      RUSTUP_TOOLCHAIN: "1.98.0-x86_64-pc-windows-msvc",
+    }, destination);
+    const values = readFileSync(destination.GITHUB_ENV, "utf8");
+    assert.match(values, /^ZIG_LIB_DIR=prepared-stdlib$/m);
+    assert.match(values, /^GHOSTTY_SOURCE_DIR=prepared-source$/m);
+    assert.equal(readFileSync(destination.GITHUB_PATH, "utf8"), "pinned-zig\n");
+    assert.match(values, /^CARGO_BUILD_TARGET=aarch64-pc-windows-msvc$/m);
+    assert.match(values, /^RUSTUP_TOOLCHAIN=1.98.0-x86_64-pc-windows-msvc$/m);
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});

@@ -36,6 +36,7 @@ struct Fixture {
     metrics: MetricsDb,
     server: Server,
     task: tokio::task::JoinHandle<std::io::Result<()>>,
+    shutdown: tokio::sync::oneshot::Sender<()>,
 }
 impl Fixture {
     async fn start() -> Self {
@@ -59,7 +60,10 @@ impl Fixture {
             files: crate::files::Operations::default(),
         };
         let listener = rpc::Server::bind(&endpoint).unwrap();
-        let task = tokio::spawn(listener.run(host));
+        let (shutdown, stop) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(listener.run_until(host, async {
+            let _ = stop.await;
+        }));
         Self {
             directory,
             endpoint,
@@ -67,6 +71,7 @@ impl Fixture {
             metrics,
             server,
             task,
+            shutdown,
         }
     }
     async fn call(&self, method: &'static str, args: Value) -> Result<Value, String> {
@@ -82,9 +87,11 @@ impl Fixture {
         .unwrap()
     }
     async fn stop(self) {
-        self.task.abort();
-        assert!(self.task.await.unwrap_err().is_cancelled());
+        self.shutdown.send(()).unwrap();
+        self.task.await.unwrap().unwrap();
         self.metrics.close().await;
+        drop(self.manager);
+        drop(self.metrics);
         self.directory.close().unwrap();
     }
 }

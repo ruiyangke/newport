@@ -47,7 +47,7 @@ fn backend_command() -> Command {
 }
 
 pub(super) fn prepare(filters: &[String]) -> Result<(PathBuf, Vec<Vec<String>>)> {
-    // Cold compilation must not consume the ten-minute runtime allowance.
+    // Cold compilation must not consume the fixture runtime allowance.
     // Reuse Cargo's reported executable across isolated servers instead of
     // recompiling or guessing a hashed name in target/debug/deps.
     let output = tempfile::NamedTempFile::new()?;
@@ -92,6 +92,7 @@ pub(super) fn prepare(filters: &[String]) -> Result<(PathBuf, Vec<Vec<String>>)>
 
 pub(super) async fn run(executable: &Path, tests: &[String]) -> Result<()> {
     let root = crate::root();
+    let (needs_systemd, needs_docker) = crate::fixture_suites::auxiliary_services(tests);
     let temp = tempfile::tempdir()?;
     let key = temp.path().join("client");
     checked(
@@ -116,39 +117,60 @@ pub(super) async fn run(executable: &Path, tests: &[String]) -> Result<()> {
         .context("Starting OpenSSH test container")?;
     // systemd as PID 1 for the Services tab: it manages cgroups, so it needs
     // privilege and the host's cgroup tree.
-    let systemd = GenericImage::new("newport-test-systemd", "local")
-        .with_exposed_port(22.tcp())
-        .with_wait_for(WaitFor::healthcheck())
-        .with_copy_to("/fixture-key/client.pub", key.with_extension("pub"))
-        .with_privileged(true)
-        .with_cgroupns_mode(CgroupnsMode::Host)
-        .with_mount(Mount::bind_mount("/sys/fs/cgroup", "/sys/fs/cgroup"))
-        .with_startup_timeout(Duration::from_secs(120))
-        .with_host_config_modifier(loopback)
-        .start()
-        .await
-        .context("Starting systemd test container")?;
+    let systemd = if needs_systemd {
+        Some(
+            GenericImage::new("newport-test-systemd", "local")
+                .with_exposed_port(22.tcp())
+                .with_wait_for(WaitFor::healthcheck())
+                .with_copy_to("/fixture-key/client.pub", key.with_extension("pub"))
+                .with_privileged(true)
+                .with_cgroupns_mode(CgroupnsMode::Host)
+                .with_mount(Mount::bind_mount("/sys/fs/cgroup", "/sys/fs/cgroup"))
+                .with_startup_timeout(Duration::from_secs(120))
+                .with_host_config_modifier(loopback)
+                .start()
+                .await
+                .context("Starting systemd test container")?,
+        )
+    } else {
+        None
+    };
     // A Docker engine of its own (Docker-in-Docker) for the Containers tab:
     // prune and remove act engine-wide, so they must never reach the host's.
-    let docker = GenericImage::new("newport-test-docker", "local")
-        .with_exposed_port(22.tcp())
-        .with_wait_for(WaitFor::healthcheck())
-        .with_copy_to("/fixture-key/client.pub", key.with_extension("pub"))
-        .with_privileged(true)
-        .with_startup_timeout(Duration::from_secs(120))
-        .with_host_config_modifier(loopback)
-        .start()
-        .await
-        .context("Starting Docker test container")?;
+    let docker = if needs_docker {
+        Some(
+            GenericImage::new("newport-test-docker", "local")
+                .with_exposed_port(22.tcp())
+                .with_wait_for(WaitFor::healthcheck())
+                .with_copy_to("/fixture-key/client.pub", key.with_extension("pub"))
+                .with_privileged(true)
+                .with_startup_timeout(Duration::from_secs(120))
+                .with_host_config_modifier(loopback)
+                .start()
+                .await
+                .context("Starting Docker test container")?,
+        )
+    } else {
+        None
+    };
     let port = container.get_host_port_ipv4(22).await?;
-    let systemd_port = systemd.get_host_port_ipv4(22).await?;
-    let docker_port = docker.get_host_port_ipv4(22).await?;
+    let systemd_port = match &systemd {
+        Some(server) => Some(server.get_host_port_ipv4(22).await?),
+        None => None,
+    };
+    let docker_port = match &docker {
+        Some(server) => Some(server.get_host_port_ipv4(22).await?),
+        None => None,
+    };
+    let mut servers = vec![(&container, port)];
+    if let Some(server) = &systemd {
+        servers.push((server, systemd_port.unwrap()));
+    }
+    if let Some(server) = &docker {
+        servers.push((server, docker_port.unwrap()));
+    }
     let mut known = String::new();
-    for (server, port) in [
-        (&container, port),
-        (&systemd, systemd_port),
-        (&docker, docker_port),
-    ] {
+    for (server, port) in servers {
         let mut host_key = Vec::new();
         server
             .copy_file_from("/etc/ssh/ssh_host_ed25519_key.pub", &mut host_key)
@@ -183,12 +205,23 @@ pub(super) async fn run(executable: &Path, tests: &[String]) -> Result<()> {
         .current_dir(&root)
         .env("SSH_AUTH_SOCK", &socket)
         .env("NEWPORT_TEST_SSH_PORT", port.to_string())
-        .env("NEWPORT_TEST_SYSTEMD_PORT", systemd_port.to_string())
-        .env("NEWPORT_TEST_DOCKER_PORT", docker_port.to_string())
+        .env_remove("NEWPORT_TEST_SYSTEMD_PORT")
+        .env_remove("NEWPORT_TEST_DOCKER_PORT")
         .env("NEWPORT_TEST_IDENTITY", &key)
         .env("NEWPORT_TEST_KNOWN_HOSTS", &known_hosts);
+    if let Some(port) = systemd_port {
+        backend.env("NEWPORT_TEST_SYSTEMD_PORT", port.to_string());
+    }
+    if let Some(port) = docker_port {
+        backend.env("NEWPORT_TEST_DOCKER_PORT", port.to_string());
+    }
+    // The shared feature suite includes real image builds, service operations,
+    // and fault recovery. Keep a bounded suite budget separate from the tighter
+    // allowance for each isolated lifecycle case.
+    let budget = Duration::from_secs(if tests.len() > 1 { 1800 } else { 600 });
+    eprintln!("Running {} remote tests (budget {budget:?})", tests.len());
     let mut tests = Process(backend.spawn()?);
-    let deadline = Instant::now() + Duration::from_secs(600);
+    let deadline = Instant::now() + budget;
     let result = loop {
         if let Some(status) = tests.0.try_wait()? {
             break status.success();
@@ -207,8 +240,12 @@ pub(super) async fn run(executable: &Path, tests: &[String]) -> Result<()> {
         );
     }
     container.rm().await?;
-    systemd.rm().await?;
-    docker.rm().await?;
-    ensure!(result, "Remote tests failed or exceeded ten minutes");
+    if let Some(server) = systemd {
+        server.rm().await?;
+    }
+    if let Some(server) = docker {
+        server.rm().await?;
+    }
+    ensure!(result, "Remote tests failed or exceeded {budget:?}");
     Ok(())
 }

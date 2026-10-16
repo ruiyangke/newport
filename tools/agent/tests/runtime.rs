@@ -23,6 +23,15 @@ impl Drop for Worker {
         let _ = self.0.wait();
     }
 }
+// Keep IPC roots independent across concurrent tests and short enough for
+// macOS Unix sockets. Product runtime paths are selected independently.
+fn fixture_home() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("np-runtime-")
+        .tempdir_in("/tmp")
+        .unwrap()
+}
+
 struct Runtime {
     session: String,
     client: String,
@@ -42,6 +51,7 @@ impl Runtime {
         let mut child = Command::new(BIN)
             .args(["runtime", "--stdio"])
             .env("HOME", home)
+            .env("XDG_RUNTIME_DIR", home)
             .env("PATH", path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -130,6 +140,7 @@ impl Runtime {
         Worker(
             command
                 .env("HOME", home)
+                .env("XDG_RUNTIME_DIR", home)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -161,7 +172,7 @@ impl Runtime {
 #[test]
 fn control_eof_revokes_an_idle_integration_and_cleans_its_endpoints() {
     use newport_agent::{integration_control as control, wire};
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let mut runtime = Runtime::start(home.path(), "");
     runtime.initialize();
     let registration = runtime.register("integration", control::VERSION);
@@ -218,7 +229,7 @@ fn control_eof_revokes_an_idle_integration_and_cleans_its_endpoints() {
 #[test]
 fn negotiates_build_and_capabilities_without_installing_anything() {
     use sha2::{Digest, Sha256};
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let mut runtime = Runtime::start(home.path(), &std::env::var("PATH").unwrap());
     let expected: String = Sha256::digest(std::fs::read(BIN).unwrap())
         .iter()
@@ -242,7 +253,7 @@ fn negotiates_build_and_capabilities_without_installing_anything() {
 
 #[test]
 fn maintenance_excludes_every_cli_service_without_installing_anything() {
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let maintenance =
         newport_agent::installation_use::MaintenanceLease::acquire(home.path()).unwrap();
     for args in [
@@ -260,6 +271,7 @@ fn maintenance_excludes_every_cli_service_without_installing_anything() {
         let result = Command::new(BIN)
             .args(&args)
             .env("HOME", home.path())
+            .env("XDG_RUNTIME_DIR", home.path())
             .output()
             .unwrap();
         assert!(!result.status.success(), "{args:?}");
@@ -273,7 +285,7 @@ fn maintenance_excludes_every_cli_service_without_installing_anything() {
             result.stderr
         );
     }
-    let aliases = tempfile::tempdir().unwrap();
+    let aliases = fixture_home();
     for name in [
         "xclip",
         "wl-paste",
@@ -285,6 +297,7 @@ fn maintenance_excludes_every_cli_service_without_installing_anything() {
         std::os::unix::fs::symlink(BIN, &alias).unwrap();
         let result = Command::new(alias)
             .env("HOME", home.path())
+            .env("XDG_RUNTIME_DIR", home.path())
             .output()
             .unwrap();
         assert!(!result.status.success());
@@ -293,6 +306,7 @@ fn maintenance_excludes_every_cli_service_without_installing_anything() {
     let probe = Command::new(BIN)
         .args(["deployment", "protocol"])
         .env("HOME", home.path())
+        .env("XDG_RUNTIME_DIR", home.path())
         .output()
         .unwrap();
     assert!(probe.status.success());
@@ -312,8 +326,8 @@ fn maintenance_excludes_every_cli_service_without_installing_anything() {
 
 #[test]
 fn runtime_and_worker_usage_leases_survive_controller_loss_independently() {
-    let home = tempfile::tempdir().unwrap();
-    let other_home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
+    let other_home = fixture_home();
     let path = std::env::var("PATH").unwrap();
     let mut first = Runtime::start(home.path(), &path);
     let mut second = Runtime::start(home.path(), &path);
@@ -357,7 +371,7 @@ fn runtime_and_worker_usage_leases_survive_controller_loss_independently() {
 fn permission_revocation_bypasses_an_incomplete_feature_upload() {
     use newport_agent::{integration_control as control, wire};
     use std::io::Write;
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let mut runtime = Runtime::start(home.path(), &std::env::var("PATH").unwrap());
     runtime.initialize();
     let worker_id = runtime.register("integration", control::VERSION);
@@ -426,7 +440,7 @@ fn stalled_feature_output_cannot_prevent_revocation_or_worker_cleanup() {
         io::Write,
         os::{fd::OwnedFd, unix::net::UnixStream},
     };
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let mut runtime = Runtime::start(home.path(), "");
     runtime.initialize();
     let worker_id = runtime.register("integration", control::VERSION);
@@ -447,6 +461,7 @@ fn stalled_feature_output_cannot_prevent_revocation_or_worker_cleanup() {
                 &uuid::Uuid::new_v4().to_string(),
             ])
             .env("HOME", home.path())
+            .env("XDG_RUNTIME_DIR", home.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::from(descriptor))
             .stderr(Stdio::null())
@@ -518,7 +533,7 @@ fn stalled_feature_output_cannot_prevent_revocation_or_worker_cleanup() {
 }
 #[test]
 fn missing_git_does_not_disable_other_capabilities_and_eof_stops_control() {
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let mut runtime = Runtime::start(home.path(), "");
     assert!(!runtime.hello.dependencies["git"]);
     assert!(runtime.hello.require("git", 4).is_err());
@@ -529,7 +544,7 @@ fn missing_git_does_not_disable_other_capabilities_and_eof_stops_control() {
 }
 #[test]
 fn obsolete_runtime_identity_is_rejected() {
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let mut runtime = Runtime::start(home.path(), "");
     runtime.initialize();
     assert!(runtime
@@ -543,7 +558,7 @@ fn obsolete_runtime_identity_is_rejected() {
 #[test]
 fn two_desktops_route_helpers_explicitly_without_crossing_sessions() {
     use newport_agent::{integration_control as control, wire};
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let mut first = Runtime::start(home.path(), "");
     let mut second = Runtime::start(home.path(), "");
     first.initialize();
@@ -602,6 +617,7 @@ fn two_desktops_route_helpers_explicitly_without_crossing_sessions() {
         command
             .args(args)
             .env("HOME", home.path())
+            .env("XDG_RUNTIME_DIR", home.path())
             .env_remove("NEWPORT_SESSION");
         if let Some(session) = session {
             command.env("NEWPORT_SESSION", session);
@@ -642,6 +658,7 @@ fn two_desktops_route_helpers_explicitly_without_crossing_sessions() {
         Command::new(BIN)
             .args(["open", "https://example.test/first"])
             .env("HOME", home.path())
+            .env("XDG_RUNTIME_DIR", home.path())
             .env("NEWPORT_SESSION", &first.session)
             .stderr(Stdio::null())
             .spawn()
@@ -714,6 +731,7 @@ fn two_desktops_route_helpers_explicitly_without_crossing_sessions() {
         Command::new(BIN)
             .args(["open", "https://example.test/restarted"])
             .env("HOME", home.path())
+            .env("XDG_RUNTIME_DIR", home.path())
             .env("NEWPORT_SESSION", &first.session)
             .stderr(Stdio::null())
             .spawn()
@@ -733,7 +751,7 @@ fn two_desktops_route_helpers_explicitly_without_crossing_sessions() {
 }
 #[test]
 fn workers_require_the_negotiated_build_before_serving_feature_protocols() {
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let mut runtime = Runtime::start(home.path(), &std::env::var("PATH").unwrap());
     runtime.initialize();
     let worker_id = runtime.register("git", 4);
@@ -786,7 +804,7 @@ fn workers_require_the_negotiated_build_before_serving_feature_protocols() {
 
 #[test]
 fn registration_limit_does_not_kill_control_or_lose_liveness() {
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let mut runtime = Runtime::start(home.path(), "");
     runtime.initialize();
     for _ in 0..protocol::MAX_WORKERS {
@@ -817,7 +835,7 @@ fn registration_limit_does_not_kill_control_or_lose_liveness() {
 }
 #[test]
 fn registration_cannot_be_used_in_another_runtime() {
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let path = std::env::var("PATH").unwrap();
     let mut first = Runtime::start(home.path(), &path);
     let mut second = Runtime::start(home.path(), &path);
@@ -860,7 +878,7 @@ fn records(home: &std::path::Path) -> Vec<serde_json::Value> {
 
 #[test]
 fn crashed_runtime_cleanup_preserves_live_workers_and_other_clients() {
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let mut crashed = Runtime::start(home.path(), "");
     crashed.initialize();
     let mut stranded = start_integration(&mut crashed, home.path());
@@ -902,7 +920,7 @@ fn crashed_runtime_cleanup_preserves_live_workers_and_other_clients() {
 
 #[test]
 fn crashed_integration_directory_is_reclaimed_with_control_still_running() {
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let mut runtime = Runtime::start(home.path(), "");
     runtime.initialize();
     let mut crashed = start_integration(&mut runtime, home.path());
@@ -933,6 +951,7 @@ fn runtime_start_reclaims_crashed_x11_socket_and_authority_without_touching_live
             Command::new(BIN)
                 .args(["display", "--backend", "x11"])
                 .env("HOME", home)
+                .env("XDG_RUNTIME_DIR", home)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
                 .spawn()
@@ -966,7 +985,7 @@ fn runtime_start_reclaims_crashed_x11_socket_and_authority_without_touching_live
         }
         (child, socket.unwrap(), authority.unwrap())
     }
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let (mut crashed, socket, authority) = display(home.path());
     let (mut live, live_socket, live_authority) = display(home.path());
     assert_ne!(socket, live_socket);
@@ -994,11 +1013,12 @@ fn runtime_start_reclaims_crashed_x11_socket_and_authority_without_touching_live
 #[test]
 fn runtime_start_reclaims_crashed_standalone_wayland_directory() {
     use std::io::{BufRead, BufReader};
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let mut display = Worker(
         Command::new(BIN)
             .args(["display", "--backend", "wayland"])
             .env("HOME", home.path())
+            .env("XDG_RUNTIME_DIR", home.path())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -1031,7 +1051,7 @@ fn runtime_start_reclaims_crashed_standalone_wayland_directory() {
 #[test]
 fn reconnect_reconciles_old_selectors_and_retires_only_the_replaced_client() {
     use newport_agent::integration_control as control;
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let mut old = Runtime::start(home.path(), "");
     old.initialize();
     let mut old_worker = start_integration(&mut old, home.path());
@@ -1053,6 +1073,7 @@ fn reconnect_reconciles_old_selectors_and_retires_only_the_replaced_client() {
         Command::new(BIN)
             .args(["env", "--shell", "zsh"])
             .env("HOME", home.path())
+            .env("XDG_RUNTIME_DIR", home.path())
             .env("NEWPORT_SESSION", selector)
             .output()
             .unwrap()
@@ -1096,6 +1117,7 @@ fn reconnect_reconciles_old_selectors_and_retires_only_the_replaced_client() {
     let listed = Command::new(BIN)
         .arg("sessions")
         .env("HOME", home.path())
+        .env("XDG_RUNTIME_DIR", home.path())
         .output()
         .unwrap();
     assert!(listed.status.success());
@@ -1124,7 +1146,7 @@ fn reconnect_reconciles_old_selectors_and_retires_only_the_replaced_client() {
 #[test]
 fn unknown_selector_recovers_only_a_single_known_client_and_remembers_the_binding() {
     use newport_agent::integration_control as control;
-    let home = tempfile::tempdir().unwrap();
+    let home = fixture_home();
     let mut runtime = Runtime::start(home.path(), "");
     runtime.initialize();
     let worker_id = runtime.register("integration", control::VERSION);
@@ -1139,6 +1161,7 @@ fn unknown_selector_recovers_only_a_single_known_client_and_remembers_the_bindin
         Command::new(BIN)
             .args(args)
             .env("HOME", home.path())
+            .env("XDG_RUNTIME_DIR", home.path())
             .env("NEWPORT_SESSION", id)
             .output()
             .unwrap()

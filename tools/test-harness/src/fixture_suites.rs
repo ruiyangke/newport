@@ -23,8 +23,42 @@ pub fn runs(names: Vec<String>) -> Vec<Vec<String>> {
     runs
 }
 
+/// Lifecycle tests only need OpenSSH; privileged service fixtures are reserved
+/// for tests that actually exercise them.
+pub fn auxiliary_services(names: &[String]) -> (bool, bool) {
+    (
+        names
+            .iter()
+            .any(|name| name.starts_with("remote_tests::services::")),
+        names.iter().any(|name| {
+            name.starts_with("remote_tests::containers::")
+                || name.starts_with("remote_tests::compose::")
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auxiliary_servers_match_the_selected_feature_suites() {
+        for (name, expected) in [
+            ("agent_lifecycle::tests::install", (false, false)),
+            ("remote_tests::git::history", (false, false)),
+            ("remote_tests::services::units", (true, false)),
+            ("remote_tests::containers::list", (false, true)),
+            ("remote_tests::compose::up", (false, true)),
+        ] {
+            assert_eq!(super::auxiliary_services(&[name.into()]), expected);
+        }
+        assert_eq!(
+            super::auxiliary_services(&[
+                "remote_tests::services::units".into(),
+                "remote_tests::compose::up".into(),
+            ]),
+            (true, true)
+        );
+    }
+
     #[test]
     fn destructive_cases_never_share_a_server_with_other_tests() {
         let runs = super::runs(

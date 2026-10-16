@@ -21,6 +21,7 @@ mod sftp;
 #[derive(Clone)]
 struct Config {
     home: PathBuf,
+    runtime: PathBuf,
     agent: PathBuf,
     key: keys::PublicKey,
     sessions: Arc<Mutex<Vec<server::Handle>>>,
@@ -257,6 +258,18 @@ impl server::Handler for Client {
         Ok(())
     }
 }
+fn fixture_worker_socket(socket: &str, runtime: &std::path::Path) -> bool {
+    let path = std::path::Path::new(socket);
+    path.file_name().is_some_and(|name| name == "workers.sock")
+        && path.parent().is_some_and(|parent| {
+            parent.parent() == Some(runtime.join("newport-ipc").as_path())
+                && parent
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|name| name.starts_with("r-"))
+        })
+}
+
 async fn execute(channel: Channel<Msg>, command: &[u8], config: Config) -> anyhow::Result<()> {
     let worker_args = std::str::from_utf8(command)
         .ok()
@@ -276,8 +289,7 @@ async fn execute(channel: Channel<Msg>, command: &[u8], config: Config) -> anyho
             args.len() >= 5
                 && newport_backend::agent_runtime::protocol::valid_build(&args[0])
                 && uuid::Uuid::parse_str(&args[1]).is_ok()
-                && args[2].starts_with("/tmp/newport-runtime-")
-                && args[2].ends_with("/workers.sock")
+                && fixture_worker_socket(&args[2], &config.runtime)
                 && uuid::Uuid::parse_str(&args[3]).is_ok()
                 && (args.len() == 5 && matches!(args[4].as_str(), "git" | "monitor")
                     || args.len() == 6
@@ -373,6 +385,7 @@ async fn execute(channel: Channel<Msg>, command: &[u8], config: Config) -> anyho
             let mut child = tokio::process::Command::new(config.agent)
                 .args(args)
                 .env("HOME", config.home)
+                .env("XDG_RUNTIME_DIR", config.runtime)
                 .env("NEWPORT_CLIPBOARD_NATIVE", "0")
                 .env("NEWPORT_GIT_BACKEND", "cli")
                 .stdin(std::process::Stdio::piped())
@@ -431,6 +444,10 @@ pub async fn run() -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700))?;
     let home = home.canonicalize()?;
+    let runtime = directory.join("ipc");
+    std::fs::create_dir(&runtime)?;
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))?;
+    let runtime = runtime.canonicalize()?;
     std::fs::write(
         home.join("Documents/hello 世界.txt"),
         "Hello over SFTP!\n<script>inert text</script>\n",
@@ -452,6 +469,7 @@ pub async fn run() -> anyhow::Result<()> {
     });
     let mut server = Listener(Config {
         home,
+        runtime,
         agent: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tools/agent/target/debug/newport-agent"),
         key,

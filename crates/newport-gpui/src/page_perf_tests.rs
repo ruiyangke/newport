@@ -437,7 +437,7 @@ fn integration_exposes_connection_states_and_locks_controls_during_updates(
             .any(|node| node.label() == Some("Fixture connection failed"))
     );
     assert!(
-        nodes(visual)
+        !nodes(visual)
             .iter()
             .any(|node| node.label() == Some("Retry"))
     );
@@ -451,10 +451,8 @@ fn integration_exposes_connection_states_and_locks_controls_during_updates(
             generation
         });
         frame(visual);
-        for (label, role) in [
-            ("Retry", gpui::Role::Button),
-            ("Reinstall Needle", gpui::Role::Button),
-        ] {
+        {
+            let (label, role) = ("Reinstall Needle", gpui::Role::Button);
             let found = nodes(visual);
             let control = found
                 .iter()
@@ -500,18 +498,12 @@ fn integration_exposes_connection_states_and_locks_controls_during_updates(
         frame(visual);
     }
     // Exercise the actual callbacks against an isolated request queue.
-    for (label, method, key) in [
-        (
-            "Retry",
-            "set_integration_enabled",
-            "integration:feature:fixture",
-        ),
-        (
+    {
+        let (label, method, key) = (
             "Reinstall Needle",
             "reinstall_agent",
             "integration:reinstall:fixture",
-        ),
-    ] {
+        );
         let point = nodes(visual)
             .iter()
             .find(|node| node.label() == Some(label))

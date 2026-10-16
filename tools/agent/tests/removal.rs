@@ -261,8 +261,46 @@ fn cancelled_removal_is_durable_and_cannot_remove_files_later() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let _: newport_agent::runtime_protocol::Hello =
-        newport_agent::runtime_protocol::read(runtime.stdout.as_mut().unwrap()).unwrap();
+    // A real client initializes and sends heartbeats. Leaving the runtime at
+    // Hello only tests its five-second abandoned-handshake timeout on slow CI.
+    use newport_agent::runtime_protocol as protocol;
+    let mut input = runtime.stdin.take().unwrap();
+    let mut output = runtime.stdout.take().unwrap();
+    let hello: protocol::Hello = protocol::read(&mut output).unwrap();
+    let request = |operation| protocol::Request {
+        id: uuid::Uuid::new_v4().to_string(),
+        runtime_id: hello.instance_id.clone(),
+        operation,
+    };
+    protocol::write(
+        &mut input,
+        &request(protocol::Operation::Initialize {
+            version: protocol::VERSION,
+            session_id: uuid::Uuid::new_v4().to_string(),
+            transport_generation: 1,
+        }),
+    )
+    .unwrap();
+    let reply: protocol::Reply = protocol::read(&mut output).unwrap();
+    assert!(reply.error.is_none());
+    let (stop, stopping) = std::sync::mpsc::channel();
+    let heartbeat = std::thread::spawn(move || {
+        while stopping.recv_timeout(std::time::Duration::from_secs(1))
+            == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        {
+            protocol::write(
+                &mut input,
+                &protocol::Request {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    runtime_id: hello.instance_id.clone(),
+                    operation: protocol::Operation::Ping,
+                },
+            )
+            .unwrap();
+            let reply: protocol::Reply = protocol::read(&mut output).unwrap();
+            assert!(reply.error.is_none());
+        }
+    });
     assert_eq!(
         Fixture::state(&fixture.success(&[
             "deployment",
@@ -281,8 +319,10 @@ fn cancelled_removal_is_durable_and_cannot_remove_files_later() {
         .path()
         .join(".local/bin/newport-agent")
         .exists());
-    runtime.kill().unwrap();
-    runtime.wait().unwrap();
+    // End the client normally; dropping its input releases the runtime lease.
+    stop.send(()).unwrap();
+    heartbeat.join().unwrap();
+    assert!(runtime.wait().unwrap().success());
     // Later operations remain independent; replay of either old action cannot
     // resurrect the entry point removed by a newer operation.
     let next = uuid::Uuid::new_v4().to_string();

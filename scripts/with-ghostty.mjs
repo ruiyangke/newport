@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   renameSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -45,6 +46,13 @@ const archives = {
   ],
 };
 
+// The native Windows ARM64 Zig 0.16 compiler crashes in `zig build` on
+// hosted ARM runners (0xc0000005). Run the pinned x64 compiler under Windows
+// emulation; Ghostty still receives the native aarch64 target from Cargo.
+export function zigArchiveKey(platform, arch) {
+  return `${platform}-${platform === "win32" && arch === "arm64" ? "x64" : arch}`;
+}
+
 function run(command, args, env, capture = false) {
   const result = spawnSync(command, args, {
     env,
@@ -66,9 +74,26 @@ export async function ghosttyBuildEnv(source = process.env) {
   mkdirSync(cache, { recursive: true });
   const pathKey =
     Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+  if (process.platform === "win32") {
+    const host = run("rustc", ["-vV"], env, true).match(/^host: (.+)$/m)?.[1];
+    if (host === "aarch64-pc-windows-msvc") {
+      // libghostty-rs emits -Dtarget only for a Rust cross build. Pair the x64
+      // Zig host with an x64 Rust host so the produced library remains ARM64.
+      const channel = readFileSync(join(root, "rust-toolchain.toml"), "utf8")
+        .match(/^channel = "([^"]+)"$/m)?.[1];
+      if (!channel) throw new Error("Missing pinned Rust toolchain");
+      const toolchain = `${channel}-x86_64-pc-windows-msvc`;
+      run("rustup", ["toolchain", "install", toolchain, "--profile", "minimal",
+        "--component", "clippy,rustfmt", "--force-non-host"], env);
+      env.RUSTUP_TOOLCHAIN = toolchain;
+      env.CARGO_BUILD_TARGET ??= host;
+      run("rustup", ["target", "add", env.CARGO_BUILD_TARGET, "--toolchain", toolchain], env);
+    }
+  }
   const available = spawnSync("zig", ["version"], { env, encoding: "utf8" });
-  if (available.status !== 0 || available.stdout.trim() !== ZIG_VERSION) {
-    const archive = archives[`${process.platform}-${process.arch}`];
+  if (available.status !== 0 || available.stdout.trim() !== ZIG_VERSION
+      || (process.platform === "win32" && process.arch === "arm64")) {
+    const archive = archives[zigArchiveKey(process.platform, process.arch)];
     if (!archive)
       throw new Error(
         `No pinned Zig build for ${process.platform}-${process.arch}`,
@@ -167,6 +192,24 @@ export async function ghosttyBuildEnv(source = process.env) {
   return env;
 }
 
+export function exportGitHubEnvironment(env, destination) {
+  appendFileSync(
+    destination.GITHUB_ENV,
+    `GHOSTTY_SOURCE_DIR=${env.GHOSTTY_SOURCE_DIR}\nLIBGHOSTTY_VT_SYS_OPTIMIZE=${env.LIBGHOSTTY_VT_SYS_OPTIMIZE}\nGIT_CEILING_DIRECTORIES=${env.GIT_CEILING_DIRECTORIES}\n`,
+  );
+  for (const key of ["ZIG_LIB_DIR", "RUSTUP_TOOLCHAIN", "CARGO_BUILD_TARGET"])
+    if (env[key] && env[key] !== destination[key])
+      appendFileSync(destination.GITHUB_ENV, `${key}=${env[key]}\n`);
+  const pathKey = Object.keys(env).find(
+    (key) => key.toLowerCase() === "path",
+  );
+  if (pathKey && env[pathKey] !== destination[pathKey])
+    appendFileSync(
+      destination.GITHUB_PATH,
+      `${env[pathKey].split(delimiter)[0]}\n`,
+    );
+}
+
 if (isMain(import.meta.url)) {
   const args = process.argv.slice(2);
   if (!args.length)
@@ -177,18 +220,7 @@ if (isMain(import.meta.url)) {
   if (args[0] === "--github") {
     if (!process.env.GITHUB_ENV || !process.env.GITHUB_PATH)
       throw new Error("--github requires a GitHub Actions environment");
-    appendFileSync(
-      process.env.GITHUB_ENV,
-      `GHOSTTY_SOURCE_DIR=${env.GHOSTTY_SOURCE_DIR}\nLIBGHOSTTY_VT_SYS_OPTIMIZE=${env.LIBGHOSTTY_VT_SYS_OPTIMIZE}\nGIT_CEILING_DIRECTORIES=${env.GIT_CEILING_DIRECTORIES}\n`,
-    );
-    const pathKey = Object.keys(env).find(
-      (key) => key.toLowerCase() === "path",
-    );
-    if (pathKey && env[pathKey] !== process.env[pathKey])
-      appendFileSync(
-        process.env.GITHUB_PATH,
-        `${env[pathKey].split(delimiter)[0]}\n`,
-      );
+    exportGitHubEnvironment(env, process.env);
   } else {
     const result = spawnSync(args[0], args.slice(1), {
       env,
