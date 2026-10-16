@@ -47,12 +47,6 @@ pub fn native_clipboard_disabled() -> bool {
         .as_deref()
         == Ok("0")
 }
-pub fn forward_browser() -> bool {
-    env::var("NEWPORT_OPEN_ON_MAC")
-        .or_else(|_| env::var("PORTHOP_OPEN_ON_MAC"))
-        .as_deref()
-        == Ok("1")
-}
 pub fn helper_script(prefix: &[u8]) -> bool {
     prefix.starts_with(b"#!/usr/bin/env bash\n# Newport")
         || prefix.starts_with(b"#!/usr/bin/env bash\n# Porthop")

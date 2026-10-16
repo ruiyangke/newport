@@ -675,8 +675,6 @@ fn xdg_command(home: &std::path::Path) -> Command {
         .env("HOME", home)
         .env("PATH", home.join("bin"))
         .env_remove("NEWPORT_SESSION")
-        .env_remove("NEWPORT_OPEN_ON_MAC")
-        .env_remove("PORTHOP_OPEN_ON_MAC")
         .env_remove("DISPLAY")
         .env_remove("XAUTHORITY")
         .env_remove("WAYLAND_DISPLAY")
@@ -731,11 +729,56 @@ fn xdg_open_preserves_real_desktop_opener() {
     fs::set_permissions(&native, fs::Permissions::from_mode(0o700)).unwrap();
     let result = xdg_command(home.path())
         .env("DISPLAY", ":0")
+        // Obsolete overrides must not change automatic desktop routing.
+        .env("NEWPORT_OPEN_ON_MAC", "1")
+        .env("PORTHOP_OPEN_ON_MAC", "1")
         .arg("file:///desktop.txt")
         .output()
         .unwrap();
     assert!(result.status.success());
     assert_eq!(result.stdout, b"file:///desktop.txt");
+}
+
+#[test]
+fn clipboard_display_wrappers_route_browser_without_an_override() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    for backend in ["x11", "wayland"] {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join("bin")).unwrap();
+        fs::create_dir(home.path().join("native")).unwrap();
+        let opener = home.path().join("bin/xdg-open");
+        symlink(BIN, &opener).unwrap();
+        let native = home.path().join("native/xdg-open");
+        fs::write(&native, "#!/bin/sh\nexit 42\n").unwrap();
+        fs::set_permissions(&native, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut agent = Agent::features(home.path(), false, &["--browser"]);
+        agent.event(b'R');
+        let url = "https://example.com/login";
+        let child = Command::new(BIN)
+            .args(["display", "--backend", backend, "--"])
+            .arg(&opener)
+            .arg(url)
+            .env("HOME", home.path())
+            .env("PATH", home.path().join("native"))
+            .env_remove("NEWPORT_SESSION")
+            .env_remove("NEWPORT_OPEN_ON_MAC")
+            .env_remove("PORTHOP_OPEN_ON_MAC")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        assert_eq!(
+            wire::parse_browser_request(&agent.event(b'O')).unwrap(),
+            (1, url.into())
+        );
+        agent.send(b'B', &wire::browser_reply(1, true, None).unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]

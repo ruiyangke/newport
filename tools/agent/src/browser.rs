@@ -21,6 +21,7 @@ pub fn open(args: &[String], desktop: bool) -> io::Result<()> {
         || crate::paths::integration_display_path(&wayland)
         || crate::migration::fake_wayland(&wayland);
     let fake_x = authority.starts_with("/tmp/newport-runtime-")
+        || crate::x_endpoint::is_authority_path(&authority)
         || crate::paths::integration_display_path(&authority)
         || selection.as_ref().is_ok_and(|s| {
             fs::read_to_string(s.root.join("display"))
@@ -30,7 +31,7 @@ pub fn open(args: &[String], desktop: bool) -> io::Result<()> {
     let graphical = (env::var("DISPLAY").is_ok_and(|v| !v.is_empty()) && !fake_x)
         || (!wayland.is_empty() && !fake_wayland)
         || env::var_os("WAYLAND_SOCKET").is_some();
-    if desktop && graphical && !crate::migration::forward_browser() {
+    if desktop && graphical {
         if let Some(native) = crate::native::find("xdg-open") {
             use std::os::unix::process::CommandExt;
             return Err(Command::new(native).args(args).env_remove("BROWSER").exec());

@@ -100,8 +100,7 @@ pub fn run(args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<i32> {
     } else {
         Bridge::X11(x_server::Server::start(&snapshot, display)?)
     };
-    let (mut variables, removed) = bridge.environment();
-    variables.push(("NEWPORT_OPEN_ON_MAC", "1".into()));
+    let (variables, removed) = bridge.environment();
     if command.is_empty() {
         for (key, value) in &variables {
             println!("export {key}='{}'", value.replace('\'', "'\\''"));

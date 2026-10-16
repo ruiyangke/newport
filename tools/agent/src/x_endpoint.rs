@@ -18,6 +18,19 @@ const SOCKET: &str = "x11.sock";
 const PREFIX: &str = "newport-x11-";
 const PUBLIC: &str = "/tmp/.X11-unix";
 
+// Standalone clipboard displays have no desktop browser. Recognize their
+// authority location even when a shell retains it after the display closes.
+pub(crate) fn is_authority_path(value: &str) -> bool {
+    let Some(directory) = Path::new(value).parent() else {
+        return false;
+    };
+    directory.parent() == Some(Path::new(PUBLIC))
+        && directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(PREFIX))
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
