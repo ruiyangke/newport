@@ -2,6 +2,8 @@
 //! Keeps test-only SSH credentials out of the parent process and other Rust tests.
 use anyhow::{ensure, Context, Result};
 use std::{
+    io::Read,
+    net::{Ipv4Addr, SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -10,7 +12,7 @@ use testcontainers::{
     bollard::models::HostConfig,
     core::{CgroupnsMode, IntoContainerPort, Mount, WaitFor},
     runners::AsyncRunner,
-    GenericImage, ImageExt,
+    ContainerAsync, GenericImage, ImageExt,
 };
 
 struct Process(Child);
@@ -34,6 +36,53 @@ fn loopback(config: &mut HostConfig) {
 fn checked(command: &mut Command) -> Result<()> {
     ensure!(command.status()?.success(), "Command failed: {command:?}");
     Ok(())
+}
+
+fn wait_for_ssh(port: u16, budget: Duration) -> Result<()> {
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let deadline = Instant::now() + budget;
+    loop {
+        let result = (|| -> std::io::Result<()> {
+            let mut socket = TcpStream::connect_timeout(&address, Duration::from_millis(250))?;
+            socket.set_read_timeout(Some(Duration::from_millis(250)))?;
+            let mut banner = [0; 8];
+            socket.read_exact(&mut banner)?;
+            if &banner != b"SSH-2.0-" {
+                return Err(std::io::Error::other(
+                    "Endpoint did not return an SSH banner",
+                ));
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) if Instant::now() >= deadline => {
+                return Err(error).with_context(|| {
+                    format!("SSH endpoint {address} was not ready within {budget:?}")
+                });
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+fn diagnostics(label: &str, server: &ContainerAsync<GenericImage>) {
+    eprintln!("{label} fixture state, published ports and recent logs:");
+    for args in [
+        vec![
+            "inspect",
+            "--format",
+            "{{json .State}} {{json .NetworkSettings.Ports}}",
+            server.id(),
+        ],
+        vec!["logs", "--tail", "80", server.id()],
+    ] {
+        let result = crate::process::Process::spawn(crate::command(super::docker()).args(args))
+            .and_then(|mut process| process.success(Duration::from_secs(10)));
+        if let Err(error) = result {
+            eprintln!("Cannot collect {label} fixture diagnostics: {error:#}");
+        }
+    }
 }
 
 fn backend_command() -> Command {
@@ -162,15 +211,21 @@ pub(super) async fn run(executable: &Path, tests: &[String]) -> Result<()> {
         Some(server) => Some(server.get_host_port_ipv4(22).await?),
         None => None,
     };
-    let mut servers = vec![(&container, port)];
+    let mut servers = vec![("OpenSSH", &container, port)];
     if let Some(server) = &systemd {
-        servers.push((server, systemd_port.unwrap()));
+        servers.push(("systemd", server, systemd_port.unwrap()));
     }
     if let Some(server) = &docker {
-        servers.push((server, docker_port.unwrap()));
+        servers.push(("Docker", server, docker_port.unwrap()));
     }
     let mut known = String::new();
-    for (server, port) in servers {
+    for (label, server, port) in &servers {
+        // Container health does not prove that the VM's published port is
+        // reachable from the host running the backend tests (notably Colima).
+        if let Err(error) = wait_for_ssh(*port, Duration::from_secs(30)) {
+            diagnostics(label, server);
+            return Err(error).with_context(|| format!("Waiting for {label} fixture SSH"));
+        }
         let mut host_key = Vec::new();
         server
             .copy_file_from("/etc/ssh/ssh_host_ed25519_key.pub", &mut host_key)
@@ -234,11 +289,11 @@ pub(super) async fn run(executable: &Path, tests: &[String]) -> Result<()> {
     // Stop and reap the child before removing its containers, including timeout.
     drop(tests);
     if !result {
-        eprintln!(
-            "OpenSSH fixture logs:\n{}",
-            String::from_utf8_lossy(&container.stderr_to_vec().await?)
-        );
+        for (label, server, _) in &servers {
+            diagnostics(label, server);
+        }
     }
+    drop(servers);
     container.rm().await?;
     if let Some(server) = systemd {
         server.rm().await?;
@@ -248,4 +303,36 @@ pub(super) async fn run(executable: &Path, tests: &[String]) -> Result<()> {
     }
     ensure!(result, "Remote tests failed or exceeded {budget:?}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{io::Write, net::TcpListener};
+
+    #[test]
+    fn host_readiness_waits_for_a_fragmented_ssh_banner() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let writer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"SSH-").unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            stream.write_all(b"2.0-OpenSSH\r\n").unwrap();
+        });
+        wait_for_ssh(port, Duration::from_secs(2)).unwrap();
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn a_listening_non_ssh_endpoint_is_not_ready() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let writer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\n").unwrap();
+        });
+        assert!(wait_for_ssh(port, Duration::from_millis(100)).is_err());
+        writer.join().unwrap();
+    }
 }
