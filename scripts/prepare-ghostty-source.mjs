@@ -73,7 +73,7 @@ export function prepareGhosttySource({
     const archive = join(temporary, "source.tar");
     const staged = join(temporary, "source");
     mkdirSync(staged);
-    // target/ is nested inside Newport's Git checkout. Stop repository
+    // The build cache is nested inside Newport's Git checkout. Stop repository
     // discovery here or git apply silently skips paths outside that prefix.
     const patchEnv = { ...env, GIT_CEILING_DIRECTORIES: temporary };
     // Archive the pinned tree; local edits and untracked files are never copied.

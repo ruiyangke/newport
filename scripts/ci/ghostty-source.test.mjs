@@ -10,9 +10,17 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, isAbsolute, sep } from "node:path";
 import { prepareGhosttySource } from "../prepare-ghostty-source.mjs";
-import { installZigDirectory, ZIG_VERSION } from "../with-ghostty.mjs";
+import { GHOSTTY_CACHE, installZigDirectory, ZIG_VERSION } from "../with-ghostty.mjs";
+import { root } from "../tooling.mjs";
+
+test("build prerequisites stay outside Cargo's recursively pruned target cache", () => {
+  const fromTarget = relative(join(root, "target"), GHOSTTY_CACHE);
+  assert.ok(fromTarget.startsWith(`..${sep}`) || isAbsolute(fromTarget));
+  const ignored = spawnSync("git", ["check-ignore", GHOSTTY_CACHE], { cwd: root });
+  assert.equal(ignored.status, 0, "downloaded tools and source must remain untracked");
+});
 
 for (const executable of ["zig", "zig.exe"]) {
   test(`Zig repairs a partial restored cache (${executable})`, () => {

@@ -1,5 +1,6 @@
 // Reproducible build prerequisites for newport-terminal. Downloads live under
-// target/ghostty; no system installation or global PATH change is performed.
+// .cache/newport/ghostty; Cargo cache pruning must not strip these source trees.
+// No system installation or global PATH change is performed.
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
@@ -19,6 +20,7 @@ import { prepareZigStandardLibrary } from "./prepare-zig-stdlib.mjs";
 
 export const GHOSTTY_REVISION = "3425025e585a3403340d4dc6d65132f42e05e605";
 export const ZIG_VERSION = "0.16.0";
+export const GHOSTTY_CACHE = join(root, ".cache", "newport", "ghostty");
 const archives = {
   "darwin-arm64": [
     "aarch64-macos",
@@ -84,7 +86,7 @@ export function installZigDirectory(staged, install, executableName, version) {
 
 export async function ghosttyBuildEnv(source = process.env) {
   const env = { ...source };
-  const cache = join(root, "target", "ghostty");
+  const cache = GHOSTTY_CACHE;
   mkdirSync(cache, { recursive: true });
   const pathKey =
     Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";

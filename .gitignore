@@ -1,5 +1,6 @@
 .DS_Store
 /target/
+/.cache/newport/
 /crates/*/target/
 node_modules/
 dist/

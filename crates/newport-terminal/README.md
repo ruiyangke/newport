@@ -29,8 +29,9 @@ builds finish, and record the source/binary hashes with measured results.
 
 The wrapper uses Zig 0.16.0 from PATH when available, or downloads its official
 archive and verifies the pinned SHA-256. It caches dependencies in
-`target/ghostty`, without installing system software. A first build needs
-network access for Rust, Ghostty, and Zig package dependencies. Later builds can
+`.cache/newport/ghostty` (outside Cargo's pruned target cache), without installing
+system software. A first build needs network access for Rust, Ghostty, and Zig
+package dependencies. Later builds can
 use the caches. `GHOSTTY_SOURCE_DIR` can point to an existing checkout, but its
 revision must match the pin. The wrapper archives that pinned tree and applies
 Newport's small compatibility patches into a separate, content-addressed cache.
