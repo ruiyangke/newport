@@ -246,9 +246,13 @@ mod tests {
             requests.spawn(async move { state.prepare_integration(server.id).await });
         }
         let mut identity = None;
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        // The writer stays locked until every request completes, which proves
+        // independence. This deadline only catches a deadlock: first-use
+        // identities also perform real file writes and fsync on loaded CI hosts.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             while let Some(result) = requests.join_next().await {
                 let prepared = result.unwrap().unwrap();
+                assert!(state.try_lock().is_err(), "profile writer must remain held");
                 assert!(Arc::ptr_eq(&prepared.owner, &original));
                 assert_eq!(prepared.server.name, server.name);
                 assert_eq!(prepared.client, *identity.get_or_insert(prepared.client));
