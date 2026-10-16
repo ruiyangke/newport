@@ -230,11 +230,12 @@ fn control_eof_revokes_an_idle_integration_and_cleans_its_endpoints() {
 fn negotiates_build_and_capabilities_without_installing_anything() {
     use sha2::{Digest, Sha256};
     let home = fixture_home();
-    let mut runtime = Runtime::start(home.path(), &std::env::var("PATH").unwrap());
+    // Do expensive fixture work before the runtime's initialization deadline.
     let expected: String = Sha256::digest(std::fs::read(BIN).unwrap())
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
+    let mut runtime = Runtime::start(home.path(), &std::env::var("PATH").unwrap());
     assert_eq!(runtime.hello.build_sha256, expected);
     runtime.initialize();
     let id = runtime.hello.instance_id.clone();
@@ -330,8 +331,8 @@ fn runtime_and_worker_usage_leases_survive_controller_loss_independently() {
     let other_home = fixture_home();
     let path = std::env::var("PATH").unwrap();
     let mut first = Runtime::start(home.path(), &path);
-    let mut second = Runtime::start(home.path(), &path);
     first.initialize();
+    let mut second = Runtime::start(home.path(), &path);
     second.initialize();
     assert!(newport_agent::installation_use::MaintenanceLease::acquire(home.path()).is_err());
     assert!(newport_agent::installation_use::MaintenanceLease::acquire(other_home.path()).is_ok());
@@ -563,8 +564,8 @@ fn two_desktops_route_helpers_explicitly_without_crossing_sessions() {
     use newport_agent::{integration_control as control, wire};
     let home = fixture_home();
     let mut first = Runtime::start(home.path(), "");
-    let mut second = Runtime::start(home.path(), "");
     first.initialize();
+    let mut second = Runtime::start(home.path(), "");
     second.initialize();
     let first_id = first.register("integration", control::VERSION);
     let second_id = second.register("integration", control::VERSION);
@@ -841,8 +842,8 @@ fn registration_cannot_be_used_in_another_runtime() {
     let home = fixture_home();
     let path = std::env::var("PATH").unwrap();
     let mut first = Runtime::start(home.path(), &path);
-    let mut second = Runtime::start(home.path(), &path);
     first.initialize();
+    let mut second = Runtime::start(home.path(), &path);
     second.initialize();
     let worker = first.register("git", 4);
     let mut wrong = second.worker(&worker, "git", home.path());
@@ -964,9 +965,10 @@ fn runtime_start_reclaims_crashed_x11_socket_and_authority_without_touching_live
         let (send, lines) = mpsc::sync_channel(8);
         std::thread::spawn(move || {
             for line in BufReader::new(output).lines().map_while(Result::ok) {
-                if send.send(line).is_err() {
-                    break;
-                }
+                // The caller only needs DISPLAY and XAUTHORITY. Keep draining
+                // later environment lines after it drops the receiver, so the
+                // live display does not exit because stdout was closed early.
+                let _ = send.send(line);
             }
         });
         let mut socket = None;
