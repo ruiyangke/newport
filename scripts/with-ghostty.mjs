@@ -68,6 +68,20 @@ function run(command, args, env, capture = false) {
   return result.stdout?.trim();
 }
 
+export function installZigDirectory(staged, install, executableName, version) {
+  if (version(join(staged, executableName)) !== ZIG_VERSION)
+    throw new Error("Downloaded Zig version does not match the build pin");
+  // A restored build cache can retain the library directory without the Zig
+  // executable. Validate the replacement before discarding that partial cache.
+  if (existsSync(join(install, executableName))) {
+    if (version(join(install, executableName)) !== ZIG_VERSION)
+      throw new Error("Cached Zig version does not match the build pin");
+    return;
+  }
+  rmSync(install, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  renameSync(staged, install);
+}
+
 export async function ghosttyBuildEnv(source = process.env) {
   const env = { ...source };
   const cache = join(root, "target", "ghostty");
@@ -121,7 +135,11 @@ export async function ghosttyBuildEnv(source = process.env) {
         const path = join(staging, `archive.${extension}`);
         writeFileSync(path, data);
         run("tar", ["-xf", path, "-C", staging], env);
-        renameSync(join(staging, name), install);
+        installZigDirectory(
+          join(staging, name), install,
+          process.platform === "win32" ? "zig.exe" : "zig",
+          (binary) => run(binary, ["version"], env, true),
+        );
       } finally {
         rmSync(staging, { recursive: true, force: true });
       }

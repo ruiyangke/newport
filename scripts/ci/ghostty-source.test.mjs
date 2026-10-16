@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -11,6 +12,57 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareGhosttySource } from "../prepare-ghostty-source.mjs";
+import { installZigDirectory, ZIG_VERSION } from "../with-ghostty.mjs";
+
+for (const executable of ["zig", "zig.exe"]) {
+  test(`Zig repairs a partial restored cache (${executable})`, () => {
+    const temp = mkdtempSync(join(tmpdir(), "newport-zig-install-"));
+    try {
+      const staged = join(temp, "staged");
+      const install = join(temp, "install");
+      mkdirSync(join(install, "lib"), { recursive: true });
+      writeFileSync(join(install, "lib", "leftover"), "partial cache");
+      mkdirSync(staged);
+      writeFileSync(join(staged, executable), ZIG_VERSION);
+      const version = (binary) => readFileSync(binary, "utf8");
+      installZigDirectory(staged, install, executable, version);
+      assert.equal(version(join(install, executable)), ZIG_VERSION);
+      assert.equal(existsSync(join(install, "lib", "leftover")), false);
+      assert.equal(existsSync(staged), false);
+    } finally { rmSync(temp, { recursive: true, force: true }); }
+  });
+}
+
+test("Zig rejects an invalid replacement before removing a partial cache", () => {
+  const temp = mkdtempSync(join(tmpdir(), "newport-zig-install-"));
+  try {
+    const staged = join(temp, "staged");
+    const install = join(temp, "install");
+    mkdirSync(install);
+    writeFileSync(join(install, "sentinel"), "keep");
+    mkdirSync(staged);
+    writeFileSync(join(staged, "zig"), "wrong version");
+    assert.throws(() => installZigDirectory(staged, install, "zig",
+      (binary) => readFileSync(binary, "utf8")), /Downloaded Zig version/);
+    assert.equal(readFileSync(join(install, "sentinel"), "utf8"), "keep");
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("Zig preserves an installation completed while the archive was downloading", () => {
+  const temp = mkdtempSync(join(tmpdir(), "newport-zig-install-"));
+  try {
+    const staged = join(temp, "staged");
+    const install = join(temp, "install");
+    for (const directory of [staged, install]) {
+      mkdirSync(directory);
+      writeFileSync(join(directory, "zig"), ZIG_VERSION);
+    }
+    writeFileSync(join(install, "sentinel"), "keep");
+    installZigDirectory(staged, install, "zig", (binary) => readFileSync(binary, "utf8"));
+    assert.equal(readFileSync(join(install, "sentinel"), "utf8"), "keep");
+    assert.equal(existsSync(staged), true);
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});
 
 function fixture(check) {
   const source = mkdtempSync(join(tmpdir(), "newport-ghostty-source-test-"));
