@@ -187,6 +187,12 @@ impl Broker {
                     let _ = update.reply.send(result);
                 }
                 if let Ok((mut stream, _)) = listener.accept() {
+                    // macOS inherits the listener's nonblocking mode. The
+                    // handshake needs blocking reads bounded by its deadline;
+                    // otherwise an early accept rejects a valid slow writer.
+                    if stream.set_nonblocking(false).is_err() {
+                        continue;
+                    }
                     let request = protocol::read::<protocol::Attach>(&mut Handshake {
                         stream: &mut stream,
                         deadline: Instant::now() + Duration::from_secs(1),

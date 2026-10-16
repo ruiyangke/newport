@@ -143,7 +143,7 @@ impl Runtime {
                 .env("XDG_RUNTIME_DIR", home)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                .stderr(Stdio::inherit())
                 .spawn()
                 .unwrap(),
         )
@@ -551,6 +551,39 @@ fn obsolete_runtime_identity_is_rejected() {
         .unwrap()
         .contains("obsolete"));
     runtime.stopped();
+}
+
+#[test]
+fn worker_admission_waits_for_a_fragmented_handshake() {
+    use std::{io::Write, os::unix::net::UnixStream};
+    let home = fixture_home();
+    let mut runtime = Runtime::start(home.path(), "");
+    runtime.initialize();
+    let worker_id = runtime.register("integration", newport_agent::integration_control::VERSION);
+    let mut stream = UnixStream::connect(&runtime.hello.worker_socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut request = Vec::new();
+    protocol::write(
+        &mut request,
+        &protocol::Attach {
+            runtime_id: runtime.hello.instance_id.clone(),
+            worker_id: worker_id.clone(),
+            build_sha256: runtime.hello.build_sha256.clone(),
+            service: "integration".into(),
+        },
+    )
+    .unwrap();
+    // The listener must wait for input even when accept runs before the writer.
+    std::thread::sleep(Duration::from_millis(100));
+    stream.write_all(&request[..2]).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    stream.write_all(&request[2..]).unwrap();
+    let reply: protocol::Attached = protocol::read(&mut stream).unwrap();
+    assert!(reply.error.is_none(), "{:?}", reply.error);
+    assert_eq!(reply.worker_id, worker_id);
+    assert_eq!(reply.session_id.as_deref(), Some(runtime.session.as_str()));
 }
 
 #[test]
