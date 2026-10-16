@@ -1,7 +1,7 @@
 use crate::{command, process, root};
 use anyhow::{ensure, Context, Result};
 use serde_json::Value;
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, time::Duration};
 mod fixtures;
 fn docker() -> PathBuf {
     if let Some(path) = std::env::var_os("NEWPORT_TEST_DOCKER") {
@@ -40,7 +40,9 @@ fn docker_build(stage: &str, arch: &str, output: &std::path::Path) -> Result<()>
     } else {
         "linux/arm64"
     };
-    process::run(
+    // A cold optimized ARM build under QEMU can exceed the generic command
+    // budget on hosted runners. Keep the longer limit scoped to image builds.
+    process::Process::spawn(
         command(docker())
             .args([
                 "buildx",
@@ -57,8 +59,9 @@ fn docker_build(stage: &str, arch: &str, output: &std::path::Path) -> Result<()>
             ])
             .arg(format!("type=local,dest={}", output.display()))
             .arg("."),
-    )
-    .context("Docker agent build failed; Docker must support both amd64 and arm64")
+    )?
+    .success(Duration::from_secs(2400))
+    .with_context(|| format!("Docker agent {stage} build failed for {platform}"))
 }
 pub fn runtime() -> Result<()> {
     let temp = tempfile::tempdir()?;
