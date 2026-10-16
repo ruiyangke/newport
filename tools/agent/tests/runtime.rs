@@ -445,8 +445,11 @@ fn stalled_feature_output_cannot_prevent_revocation_or_worker_cleanup() {
     runtime.initialize();
     let worker_id = runtime.register("integration", control::VERSION);
     let (mut output, mut reader) = UnixStream::pair().unwrap();
+    // Starting a debug worker verifies the executable's hash before Ready.
+    // Allow the same startup budget as Runtime::start on loaded CI runners;
+    // the revocation and cleanup deadlines below remain independently bounded.
     reader
-        .set_read_timeout(Some(Duration::from_secs(3)))
+        .set_read_timeout(Some(Duration::from_secs(15)))
         .unwrap();
     let descriptor: OwnedFd = output.try_clone().unwrap().into();
     let mut worker = Worker(
@@ -468,7 +471,7 @@ fn stalled_feature_output_cannot_prevent_revocation_or_worker_cleanup() {
             .spawn()
             .unwrap(),
     );
-    assert_eq!(wire::read(&mut reader).unwrap().0, b'R');
+    assert_eq!(wire::read(&mut reader).expect("worker ready").0, b'R');
     let id = runtime.hello.instance_id.clone();
     assert!(
         runtime
