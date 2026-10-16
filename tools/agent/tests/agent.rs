@@ -640,6 +640,105 @@ fn unrelated_socket_file_is_preserved_and_not_treated_as_reconnect() {
 }
 
 #[test]
+fn xdg_open_without_native_desktop_uses_permitted_browser() {
+    for (display, value) in [
+        ("DISPLAY", ":99"),
+        ("DISPLAY", ""),
+        ("WAYLAND_DISPLAY", "stale-wayland"),
+        ("WAYLAND_SOCKET", "42"),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let mut agent = Agent::features(home.path(), false, &["--browser"]);
+        agent.event(b'R');
+        let mut opener = xdg_command(home.path());
+        let url = "https://example.com/login?next=/login/cli/test&keep=1#fragment";
+        let child = opener.arg(url).env(display, value).spawn().unwrap();
+        assert_eq!(
+            wire::parse_browser_request(&agent.event(b'O')).unwrap(),
+            (1, url.into())
+        );
+        agent.send(b'B', &wire::browser_reply(1, true, None).unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+fn xdg_command(home: &std::path::Path) -> Command {
+    use std::os::unix::process::CommandExt;
+    let mut command = Command::new(BIN);
+    command
+        .arg0("xdg-open")
+        .env("HOME", home)
+        .env("PATH", home.join("bin"))
+        .env_remove("NEWPORT_SESSION")
+        .env_remove("NEWPORT_OPEN_ON_MAC")
+        .env_remove("PORTHOP_OPEN_ON_MAC")
+        .env_remove("DISPLAY")
+        .env_remove("XAUTHORITY")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("WAYLAND_SOCKET")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+#[test]
+fn xdg_open_fallback_preserves_browser_permissions_and_url_validation() {
+    for enabled in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let features = if enabled {
+            &["--browser"][..]
+        } else {
+            &["--clipboard"][..]
+        };
+        let agent = Agent::features(home.path(), false, features);
+        agent.event(b'R');
+        let urls = if enabled {
+            vec![
+                "file:///etc/passwd",
+                "javascript:alert(1)",
+                "https://user:secret@example.com",
+            ]
+        } else {
+            vec!["https://example.com"]
+        };
+        for url in urls {
+            let result = xdg_command(home.path())
+                .env("DISPLAY", ":99")
+                .arg(url)
+                .output()
+                .unwrap();
+            assert!(!result.status.success());
+        }
+        assert!(
+            agent.events.try_recv().is_err(),
+            "rejected URLs must not be forwarded"
+        );
+    }
+}
+
+#[test]
+fn xdg_open_preserves_real_desktop_opener() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(home.path().join("bin")).unwrap();
+    let native = home.path().join("bin/xdg-open");
+    fs::write(&native, "#!/bin/sh\nprintf '%s' \"$1\"\n").unwrap();
+    fs::set_permissions(&native, fs::Permissions::from_mode(0o700)).unwrap();
+    let result = xdg_command(home.path())
+        .env("DISPLAY", ":0")
+        .arg("file:///desktop.txt")
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert_eq!(result.stdout, b"file:///desktop.txt");
+}
+
+#[test]
 fn browser_only_does_not_create_clipboard_services_or_accept_snapshots() {
     let home = tempfile::tempdir().unwrap();
     let mut agent = Agent::features(home.path(), false, &["--browser"]);

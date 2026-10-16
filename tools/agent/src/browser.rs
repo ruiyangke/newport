@@ -27,7 +27,7 @@ pub fn open(args: &[String], desktop: bool) -> io::Result<()> {
                 .ok()
                 .is_some_and(|v| env::var("DISPLAY").ok().as_deref() == Some(v.trim()))
         });
-    let graphical = (env::var_os("DISPLAY").is_some() && !fake_x)
+    let graphical = (env::var("DISPLAY").is_ok_and(|v| !v.is_empty()) && !fake_x)
         || (!wayland.is_empty() && !fake_wayland)
         || env::var_os("WAYLAND_SOCKET").is_some();
     if desktop && graphical && !crate::migration::forward_browser() {
@@ -35,9 +35,9 @@ pub fn open(args: &[String], desktop: bool) -> io::Result<()> {
             use std::os::unix::process::CommandExt;
             return Err(Command::new(native).args(args).env_remove("BROWSER").exec());
         }
-        return Err(io::Error::other(
-            "desktop opener unavailable; use newport-agent open URL for your Mac",
-        ));
+        // Display variables may outlive a desktop (for example in tmux), or
+        // describe a forwarded display on a headless server. Without a native
+        // opener, use the same permission-checked HTTP(S) route as `open`.
     }
     if wire::web_url(&args[0]).is_none() {
         return Err(io::Error::other("only HTTP and HTTPS URLs are supported"));
