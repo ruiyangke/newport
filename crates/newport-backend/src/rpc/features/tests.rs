@@ -92,6 +92,26 @@ impl Fixture {
         self.metrics.close().await;
         drop(self.manager);
         drop(self.metrics);
+        // Windows can retain a transient sharing violation after all service
+        // handles are closed. Retry only that OS condition, with a deadline;
+        // a persistent leaked handle must still fail teardown.
+        #[cfg(windows)]
+        {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                match std::fs::remove_dir_all(self.directory.path()) {
+                    Ok(()) => break,
+                    Err(error)
+                        if matches!(error.raw_os_error(), Some(32 | 145))
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                    Err(error) => panic!("Feature fixture cleanup failed: {error}"),
+                }
+            }
+        }
+        #[cfg(not(windows))]
         self.directory.close().unwrap();
     }
 }
