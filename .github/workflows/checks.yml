@@ -315,6 +315,12 @@ jobs:
           key: remote
           save-if: ${{ github.event_name != 'pull_request' }}
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      # Compile before the VM reserves host memory. Match fixtures::backend_command
+      # so the harness reuses this binary without spending its fixture budget on
+      # a cold Intel build (which exceeded 20 minutes on hosted macOS).
+      - name: Compile remote backend tests
+        timeout-minutes: 40
+        run: nix develop .#remote --command cargo test --locked -p newport-backend --lib --no-run --target-dir target
       - name: Start Linux VM
         timeout-minutes: 15
         run: nix develop .#remote --command colima start --cpu 3 --memory 6 --arch x86_64 --vm-type=vz --mount-type=virtiofs
