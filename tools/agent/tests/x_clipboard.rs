@@ -1,4 +1,6 @@
 use newport_agent::x_server::Server;
+#[path = "support/x11.rs"]
+mod x11;
 use std::{fs, io::Write, os::unix::net::UnixStream, path::Path};
 use x11rb::{
     connection::Connection,
@@ -196,10 +198,23 @@ fn rejects_unauthenticated_clients_and_clipboard_writes() {
             .present
     );
     let path = format!("/tmp/.X11-unix/X{}", &server.display[1..]);
+    let witness = x11::socket_witness();
+    let original = witness.path().join("socket");
+    fs::hard_link(&path, &original).unwrap();
     let authority = server.authority().to_owned();
     drop(server);
-    assert!(!Path::new(&path).exists());
-    assert!(!authority.exists());
+    // Parallel fork/exec can briefly inherit the listener or its lease. A
+    // subsequent display startup must safely reclaim that deferred cleanup.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while authority.parent().unwrap().exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "X11 private files retained"
+        );
+        drop(Server::start(&dir.path().join("missing"), None).unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    x11::assert_socket_released(Path::new(&path), &original);
 }
 
 #[test]
@@ -292,16 +307,22 @@ fn unmodified_arboard_reads_text_and_png() {
 #[test]
 fn wrapper_sets_environment_and_cleans_up() {
     let dir = tempfile::tempdir().unwrap();
+    let witness = x11::socket_witness();
+    let original = witness.path().join("socket");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_newport-agent")).args(["display", "--backend", "x11"])
         .args(["--snapshot", dir.path().join("snapshot.tar").to_str().unwrap(), "--", "sh", "-c",
-            "test -S /tmp/.X11-unix/X${DISPLAY#:} && test -f \"$XAUTHORITY\" && test -z \"${WAYLAND_DISPLAY-}${WAYLAND_SOCKET-}\" || exit 2; printf '%s\\n%s\\n' \"$DISPLAY\" \"$XAUTHORITY\"; exit 7"])
+            "test -S /tmp/.X11-unix/X${DISPLAY#:} && test -f \"$XAUTHORITY\" && test -z \"${WAYLAND_DISPLAY-}${WAYLAND_SOCKET-}\" || exit 2; ln /tmp/.X11-unix/X${DISPLAY#:} \"$NEWPORT_TEST_SOCKET_WITNESS\" || exit 3; printf '%s\\n%s\\n' \"$DISPLAY\" \"$XAUTHORITY\"; exit 7"])
         .env("WAYLAND_DISPLAY", "existing-display")
+        .env("NEWPORT_TEST_SOCKET_WITNESS", &original)
         .output().unwrap();
     assert_eq!(output.status.code(), Some(7));
     let text = String::from_utf8(output.stdout).unwrap();
     let lines: Vec<_> = text.lines().collect();
-    assert!(!Path::new(&format!("/tmp/.X11-unix/X{}", &lines[0][1..])).exists());
-    assert!(!Path::new(lines[1]).exists());
+    x11::assert_socket_released(
+        Path::new(&format!("/tmp/.X11-unix/X{}", &lines[0][1..])),
+        &original,
+    );
+    assert!(!Path::new(lines[1]).parent().unwrap().exists());
 }
 
 #[test]
