@@ -4,8 +4,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const LEGACY_BROWSER: &str = "porthop-browser";
-
 pub fn cache_root(home: &Path) -> io::Result<PathBuf> {
     let legacy = home.join(".cache/porthop/clipboard");
     match fs::symlink_metadata(&legacy) {
@@ -62,11 +60,11 @@ pub(crate) fn plan_commands(
     transaction: &mut crate::helper_transaction::Transaction,
 ) -> io::Result<()> {
     use crate::helper_transaction::Snapshot;
-    let browser = directory.join(LEGACY_BROWSER);
+    let browser = directory.join("porthop-browser");
     let before = transaction.read(&browser)?;
     if matches!(&before, Snapshot::Link(target) if matches!(target.to_str(), Some("porthop-agent" | "porthop-open" | "newport-agent")))
     {
-        transaction.plan(&browser, before, Snapshot::Link("newport-agent".into()))?;
+        transaction.plan(&browser, before, Snapshot::Missing)?;
     }
     for (name, marker) in [
         ("porthop-clip", "# Porthop clipboard helper"),
@@ -83,13 +81,17 @@ pub(crate) fn plan_commands(
     }
     let old = directory.join("porthop-agent");
     let before = transaction.read(&old)?;
+    if matches!(&before, Snapshot::Link(target) if target == Path::new("newport-agent")) {
+        transaction.plan(&old, before, Snapshot::Missing)?;
+        return Ok(());
+    }
     if matches!(before, Snapshot::File { .. }) {
         let bytes = transaction.bytes(&before)?;
         if bytes
             .windows(b"porthop-agent/1".len())
             .any(|w| w.starts_with(b"porthop-agent/") && matches!(w.last(), Some(b'1'..=b'5')))
         {
-            transaction.plan(&old, before, Snapshot::Link("newport-agent".into()))?;
+            transaction.plan(&old, before, Snapshot::Missing)?;
         }
     }
     Ok(())

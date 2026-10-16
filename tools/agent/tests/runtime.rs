@@ -287,13 +287,7 @@ fn maintenance_excludes_every_cli_service_without_installing_anything() {
         );
     }
     let aliases = fixture_home();
-    for name in [
-        "xclip",
-        "wl-paste",
-        "newport-browser",
-        "porthop-browser",
-        "xdg-open",
-    ] {
+    for name in ["xclip", "wl-paste", "newport-browser", "xdg-open"] {
         let alias = aliases.path().join(name);
         std::os::unix::fs::symlink(BIN, &alias).unwrap();
         let result = Command::new(alias)

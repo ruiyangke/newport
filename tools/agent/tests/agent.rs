@@ -437,13 +437,15 @@ fn installer_replaces_our_shims_but_preserves_unrelated_commands() {
     );
     assert!(!bin.join("porthop-clip").exists());
     assert_eq!(
-        fs::read_link(bin.join("porthop-browser")).unwrap().to_str(),
-        Some("newport-agent")
+        fs::symlink_metadata(bin.join("porthop-browser"))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::NotFound
     );
 }
 
 #[test]
-fn legacy_agent_alias_is_idempotent_and_preserves_unrelated_files() {
+fn legacy_agent_cleanup_is_idempotent_and_preserves_unrelated_files() {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join(".local/bin");
     fs::create_dir_all(&bin).unwrap();
@@ -452,14 +454,44 @@ fn legacy_agent_alias_is_idempotent_and_preserves_unrelated_files() {
     for _ in 0..2 {
         assert!(cmd(home.path(), &["install"]).status.success());
         assert_eq!(
-            fs::read_link(&old).unwrap(),
-            std::path::Path::new("newport-agent")
+            fs::symlink_metadata(&old).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
         );
     }
-    fs::remove_file(&old).unwrap();
     fs::write(&old, "unrelated executable").unwrap();
     assert!(cmd(home.path(), &["install"]).status.success());
     assert_eq!(fs::read_to_string(&old).unwrap(), "unrelated executable");
+}
+
+#[test]
+fn installer_removes_legacy_aliases_but_preserves_unrelated_links() {
+    use std::os::unix::fs::symlink;
+    for target in ["newport-agent", "custom-agent"] {
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join(".local/bin");
+        fs::create_dir_all(&bin).unwrap();
+        for name in ["porthop-agent", "porthop-browser"] {
+            symlink(target, bin.join(name)).unwrap();
+        }
+        for _ in 0..2 {
+            assert!(cmd(home.path(), &["install"]).status.success());
+            for name in ["porthop-agent", "porthop-browser"] {
+                let path = bin.join(name);
+                if target == "newport-agent" {
+                    assert_eq!(
+                        fs::symlink_metadata(&path).unwrap_err().kind(),
+                        std::io::ErrorKind::NotFound
+                    );
+                } else {
+                    assert_eq!(fs::read_link(&path).unwrap(), std::path::Path::new(target));
+                }
+            }
+            assert_eq!(
+                fs::read_link(bin.join("newport-browser")).unwrap(),
+                std::path::Path::new("newport-agent")
+            );
+        }
+    }
 }
 
 #[test]

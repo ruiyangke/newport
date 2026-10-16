@@ -16,7 +16,7 @@ fn run(args: &[String]) -> std::io::Result<()> {
     // their own maintenance authority rather than a conflicting shared lease.
     let service = matches!(
         name.as_ref(),
-        "xclip" | "wl-paste" | "newport-browser" | "porthop-browser" | "xdg-open"
+        "xclip" | "wl-paste" | "newport-browser" | "xdg-open"
     ) || matches!(
         args.get(1).map(String::as_str),
         Some(
@@ -40,9 +40,7 @@ fn run(args: &[String]) -> std::io::Result<()> {
     match name.as_ref() {
         "xclip" => newport_agent::clipboard::read(&args[1..]),
         "wl-paste" => newport_agent::clipboard::wl_paste(&args[1..]),
-        "newport-browser" | newport_agent::migration::LEGACY_BROWSER => {
-            newport_agent::browser::open(&args[1..], false)
-        }
+        "newport-browser" => newport_agent::browser::open(&args[1..], false),
         "xdg-open" => newport_agent::browser::open(&args[1..], true),
         _ => match args.get(1).map(String::as_str) {
             Some("runtime") if args.len() == 3 && args[2] == "--stdio" => {
