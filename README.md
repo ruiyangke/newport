@@ -4,120 +4,96 @@
 
 <h1 align="center">Newport</h1>
 
-<p align="center"><strong>Make your remote server feel closer.</strong></p>
+<p align="center"><strong>Your remote server, in one workspace.</strong></p>
 
 <p align="center">
-  SSH tunnels, terminals, files, and server health in one desktop app.<br />
-  Copy locally. Paste remotely. Open server links in your own browser.
+  Connect to your Linux servers from macOS or Windows.<br />
+  Manage tunnels, terminals, files, Git projects, services, and containers—without leaving the app.
 </p>
 
 <p align="center">
   <a href="https://github.com/ruiyangke/newport/releases"><strong>Download Newport</strong></a> ·
   <a href="docs/README.md">User guides</a> ·
-  <a href="https://github.com/ruiyangke/newport/issues">Feedback</a>
+  <a href="https://github.com/ruiyangke/newport/issues">Report an issue</a>
 </p>
 
-## Your server, within reach
+[Features](#features) · [Installation](#installation) · [Development](#development)
 
-Newport is a desktop workspace for your Linux servers, available on macOS and Windows. Save a connection once, then move between your server’s apps, terminal, files, and activity without juggling separate tools.
+## Features
 
-### Open remote apps locally
+Per-server workspaces with independent connection settings and integration permissions. Light and dark themes.
 
-Reach a development server, dashboard, or database through an SSH tunnel. Listening services are discovered automatically and grouped by project (Git — with each worktree under its branch — Compose, or the project root around each process), tagged with what they run. Forward one port in a click, or a whole project at once. Reverse forwards share a port on your Mac with the server. Automatic reconnect helps recover from temporary interruptions.
+### Connections
 
-### Copy here. Paste there.
+- Automatic port discovery, grouped by project, Git worktree, or Compose project.
+- Local and reverse SSH forwarding, individually or by project.
+- Background tunnels with automatic reconnection. Closing the window preserves connections; quitting disconnects them.
 
-Copy text or a screenshot on your computer and paste it into a supported remote application, including Codex. It works even when the server has no graphical desktop. Your clipboard is shared when a remote app requests it.
+### Terminal
 
-### Sign in with your own browser
+- Tabbed SSH terminals with custom names and output search.
+- Automatic reconnection after interruptions. Reconnection starts a fresh shell; persistent remote sessions require tmux or an equivalent tool.
 
-When a remote command opens a link, Newport can open it on your computer. Complete browser-based sign-ins without copying URLs between machines. Supported login callbacks are forwarded back to the server; some services still need a manual step.
+### Files
 
-### See how your server is doing
+- SFTP browsing, path navigation, filtering, and hidden files.
+- Source previews with syntax highlighting and search; image previews with fit and zoom; PDF previews with page navigation and selectable text.
+- Uploads and downloads with progress and cancellation. Unsupported binary formats remain download-only.
 
-Check CPU, memory, storage, and network usage at a glance. Explore up to seven days of history to spot busy periods, spikes, and changes over time.
+See [supported formats and preview limits](docs/files.md).
 
-### Work with terminals and files
+### Projects and Git
 
-Open an interactive SSH terminal that reconnects automatically if the connection drops and starts a fresh shell. Browse remote folders, preview files, and upload or download over SFTP—all from the same server workspace. Use tmux when you want remote work to continue after leaving the terminal.
+- Remote repository library, branch switching, and worktree creation and management.
+- Working-tree diffs, staging, unstaging, and commits.
+- Commit history and per-commit file diffs.
+- Fetch, pull, push, remotes, tags, and stashes.
 
-### Manage services and containers
+### Monitoring
 
-See what needs attention first: failed systemd services and unhealthy or crashed containers, with the reason in plain words. Follow logs live, start, stop, and restart services and containers, read unit files, and inspect a container’s environment, mounts, and networks. Open a shell inside a container, forward its published port and open it in your browser in one click, and see what Docker’s images, volumes, and build cache take on disk.
+- Live CPU, memory, load, network, storage, and process data.
+- Resource history from five minutes to seven days, with sampled charts for longer ranges.
 
-## Get started
+### Services
 
-1. **[Download the app](https://github.com/ruiyangke/newport/releases)** for your computer.
-2. **Add a server.** Enter its SSH host and username, then choose a key file, SSH agent—including 1Password—or password.
-3. **Set up your server.** Overview inspects the server, asks permission to install Needle, and lets you choose clipboard and browser sharing. You can skip installation and use features that do not require the agent.
-4. **Start working.** Open a terminal, browse files, or add your first tunnel from the sidebar.
+- systemd service status, failed-service visibility, and unit inspection.
+- Live logs with search; start, stop, and restart actions.
 
-| Your computer                              | Download                 |
-| ------------------------------------------ | ------------------------ |
-| Mac with Apple silicon · macOS 14 or later | macOS ARM64 ZIP          |
-| Windows PC with an Intel or AMD processor  | Windows x86_64 installer |
-| Windows PC with an ARM processor           | Windows ARM64 installer  |
+### Containers and Compose
 
-Windows support is experimental, and its installers are not yet Authenticode-signed. Linux is supported as a remote server, not as a desktop app.
+- Container status, resource usage, environment, mounts, and networks.
+- Live logs, container shells, lifecycle actions, and published-port forwarding.
+- Compose project and service actions, including creating missing containers and recreating changed services.
+- Compose configuration and activity; disk usage for images, volumes, and build cache.
 
-**Coming from Porthop?** Newport is its new name. Keep your existing app data and OS credentials when upgrading. Newport adopts the existing profile folder in place; do not rename it manually. See [storage and recovery](docs/storage.md) for migration, recovery snapshots, and downgrade limitations.
+### Desktop integrations
 
-## Set up clipboard and browser sharing
+- **Clipboard:** on-demand text and image access from supported remote tools, including on headless servers.
+- **Browser:** remote links open locally, with forwarding for supported login callbacks.
+- **Shell integration:** terminal commands and shell setup, managed alongside agent status in **Integrations**.
 
-Approve Needle installation in server setup, then enable **Clipboard**, **Browser**, or both. You can change these choices later in **Integration**. Open a new remote shell afterward, or follow the instructions on that page to use your current session.
+Newport must be running for desktop integrations. Some authentication flows require a manual callback step.
 
-Keep Newport running while sharing. You can switch either feature off independently, at any time. Clipboard sharing goes from your computer to the server.
+## Installation
 
-Only enable sharing for servers you trust: remote apps can read sensitive content you copy or request browser tabs while these features are on.
+Download the latest published release, [v0.3.0](https://github.com/ruiyangke/newport/releases/tag/v0.3.0):
 
-[Read the integration guide →](docs/clipboard.md)
+| Platform | Package |
+| --- | --- |
+| macOS 14+, Apple silicon | [Download ZIP](https://github.com/ruiyangke/newport/releases/download/v0.3.0/Newport-0.3.0-macos-arm64.zip) |
+| Windows x86_64 | [Download installer](https://github.com/ruiyangke/newport/releases/download/v0.3.0/Newport-0.3.0-windows-x86_64-setup.exe) |
+| Windows ARM64 | [Download installer](https://github.com/ruiyangke/newport/releases/download/v0.3.0/Newport-0.3.0-windows-aarch64-setup.exe) |
 
-## Made for everyday use
+Windows support is experimental; installers are not Authenticode-signed. Remote hosts run Linux; there is no Linux desktop build.
 
-- **Stay connected in the background.** Close the window and keep tunnels running, with access from the menu bar or system tray. Quit the app to disconnect.
-- **Choose your appearance.** Use a light or dark theme and optionally launch Newport at login.
-- **Update when you’re ready.** The native release candidate keeps automatic updates disabled until signed installation and upgrade acceptance is complete. The update flow verifies downloaded packages and requires a restart to apply them; restarting disconnects sessions and cancels transfers.
-- **Keep credentials on your computer.** Saved profiles and passwords are encrypted, with the vault key stored in macOS Keychain or Windows Credential Manager.
 
-Metric history is stored separately and is not encrypted. Clear it anytime in **Settings → Cache**. See [storage and recovery](docs/storage.md) and [security notes](docs/security.md) for backup requirements and known limitations.
+## Development
 
-## Before you connect
+Newport is built with Rust and GPUI. See the [development guide](crates/newport-app/README.md) for builds and packaging, and the [testing guide](docs/testing.md) for local and remote checks.
 
-Newport uses your SSH account’s permissions. Service management needs systemd (changing system services needs root or sudo), and container features need access to Docker or Podman. Monitoring, Git operations, services, containers, clipboard, and browser sharing use Needle, the server agent. Newport asks permission before installing it; opening a page does not install the agent. Installation and upgrade status live in the server's agent controls, while clipboard and browser permissions remain separate choices.
+[User documentation](docs/README.md) · [Issues and feature requests](https://github.com/ruiyangke/newport/issues)
 
-SSH configuration aliases, ProxyJump, host certificates, and interactive MFA are not currently supported. Container actions manage existing containers; they do not deploy or recreate Compose projects.
-
-## Help shape Newport
-
-Found a bug or have an idea? [Open an issue](https://github.com/ruiyangke/newport/issues). For bugs, include your app version, operating system, and steps to reproduce, with private information removed from any logs.
-
-Contributions are welcome. The [testing guide](docs/testing.md) covers local checks and tests against disposable Linux servers.
-
-## Native development
-
-The root Cargo workspace owns the standalone `newport-app`, GPUI interface,
-shared backend/client/platform services, grammars, and release tooling. The Tauri
-host has been removed from the source tree and CI; native development no longer
-requires a running Tauri application. Build output lives in `target/`.
-
-Shared application models and pure rules live in
-[`newport-domain`](crates/newport-domain/README.md). Desktop IPC contracts and OS
-adapters belong to `newport-platform`; feature runtime state stays with its owner.
-
-```sh
-node scripts/build-grammars.mjs
-NEWPORT_DATA_DIR=/absolute/path/to/test-profile npm run dev:native
-npm run test:native
-```
-
-See the [standalone development guide](crates/newport-app/README.md) for Windows
-dependencies and packaging. Debug builds require an explicit profile; release
-builds use the existing profile with upgrade recovery snapshots. Automatic updates
-remain gated while cross-platform acceptance is incomplete. Use the pinned
-[released v0.3.0 desktop baseline](resources/test-fixtures/legacy-desktop-release.json)
-for comparisons. The React desktop source and browser harness have been retired;
-Git protocol oracles and native fixture generators remain isolated test tools.
-macOS and Windows release acceptance remains in progress.
+Bug reports should include app and OS versions, reproduction steps, and relevant logs with sensitive information removed.
 
 ## License
 
