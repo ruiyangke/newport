@@ -2,6 +2,31 @@
 //! retained and reconciled; only state consumed by this window requests a redraw.
 use serde_json::Value;
 
+pub(super) fn awaiting_approval(snapshot: &Value, server: &str) -> bool {
+    snapshot["runtime"]["awaitingAgent"]
+        .as_array()
+        .is_some_and(|servers| servers.iter().any(|id| id == server))
+}
+
+pub(super) fn connection_health<'a>(
+    snapshot: &'a Value,
+    server: &str,
+    terminal_connected: bool,
+) -> &'a str {
+    // A live authenticated transport (or a newer Ready PTY event) is stronger
+    // evidence than a pending sign request belonging to another channel/forward.
+    if terminal_connected || snapshot["runtime"]["agentTransport"][server]["status"] == "connected"
+    {
+        "reachable"
+    } else if awaiting_approval(snapshot, server) {
+        "awaiting-agent"
+    } else {
+        snapshot["runtime"]["health"][server]
+            .as_str()
+            .unwrap_or("unknown")
+    }
+}
+
 // Server-keyed fields from manager::Runtime. Unknown fields remain conservative:
 // adding a new backend field cannot silently suppress an existing UI update.
 const SERVER_FIELDS: &[&str] = &[
@@ -69,6 +94,9 @@ pub(super) fn changed(previous: &Value, next: &Value, server: &str, surface: Sur
     {
         return true;
     }
+    if previous["agentTransport"][server]["status"] != next["agentTransport"][server]["status"] {
+        return true;
+    }
     if SERVER_FIELDS.iter().any(|key| {
         if !surface.watches(key) {
             return false;
@@ -95,6 +123,43 @@ pub(super) fn changed(previous: &Value, next: &Value, server: &str, surface: Sur
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn authenticated_connection_overrides_sibling_approval_but_is_server_scoped() {
+        let mut snapshot = json!({"runtime": {
+            "awaitingAgent": ["selected"],
+            "health": {"selected": "failed"},
+            "agentTransport": {"other": {"status": "connected"}}
+        }});
+        assert_eq!(
+            connection_health(&snapshot, "selected", false),
+            "awaiting-agent"
+        );
+        assert_eq!(connection_health(&snapshot, "selected", true), "reachable");
+        snapshot["runtime"]["agentTransport"]["selected"]["status"] = json!("connected");
+        assert_eq!(connection_health(&snapshot, "selected", false), "reachable");
+        snapshot["runtime"]["agentTransport"]["selected"]["status"] = json!("recovering");
+        assert_eq!(
+            connection_health(&snapshot, "selected", false),
+            "awaiting-agent"
+        );
+        snapshot["runtime"]["awaitingAgent"] = json!([]);
+        assert_eq!(connection_health(&snapshot, "selected", false), "failed");
+    }
+
+    #[test]
+    fn header_observes_transport_status_without_repainting_for_transport_telemetry() {
+        let before = json!({"runtime": {"agentTransport": {
+            "selected": {"status":"connecting", "demand":1}
+        }}});
+        let mut next = before.clone();
+        next["runtime"]["agentTransport"]["selected"]["demand"] = json!(2);
+        assert!(!changed(&before, &next, "selected", Surface::General));
+        next["runtime"]["agentTransport"]["other"]["status"] = json!("connected");
+        assert!(!changed(&before, &next, "selected", Surface::General));
+        next["runtime"]["agentTransport"]["selected"]["status"] = json!("connected");
+        assert!(changed(&before, &next, "selected", Surface::General));
+    }
 
     #[test]
     fn each_known_runtime_owner_is_selected_independently() {

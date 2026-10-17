@@ -5,6 +5,14 @@
 use serde_json::Value;
 use std::collections::HashSet;
 
+mod patterns;
+pub use patterns::is_runtime_kind;
+use patterns::{framework, python, runtime, service};
+
+fn image_service(image: &str) -> Option<&'static str> {
+    patterns::image_service(image_repository(image))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Detail {
     pub label: &'static str,
@@ -13,6 +21,20 @@ pub struct Detail {
 
 fn text<'a>(port: &'a Value, field: &str) -> Option<&'a str> {
     port[field].as_str().filter(|value| !value.is_empty())
+}
+
+/// Docker discovery supplies container identity and/or an image reference.
+pub fn is_docker(port: &Value) -> bool {
+    text(port, "containerName").is_some() || text(port, "image").is_some()
+}
+
+fn image_repository(image: &str) -> &str {
+    let repository = image.split('@').next().unwrap_or(image);
+    // Only a colon after the final slash is a tag, not a registry port.
+    match repository.rsplit_once(':') {
+        Some((name, tag)) if !tag.contains('/') => name,
+        _ => repository,
+    }
 }
 
 pub fn owner(port: &Value) -> Option<&str> {
@@ -25,13 +47,28 @@ pub fn name(port: &Value) -> Option<&str> {
     text(port, "composeService").or_else(|| owner(port))
 }
 
+/// Nix wrapProgram hides the original as `.name-wrapped`, appending `_`
+/// on collisions. Repeated wrapping can nest this shape. This is a display
+/// hint only: never rewrite the observed path or use it to address a process.
+fn unwrapped_name(mut name: &str) -> &str {
+    while let Some(inner) = name
+        .strip_prefix('.')
+        .and_then(|value| value.trim_end_matches('_').strip_suffix("-wrapped"))
+        .filter(|value| !value.is_empty() && !value.contains('/'))
+    {
+        name = inner;
+    }
+    name
+}
+
 fn executable(port: &Value) -> &str {
-    port["executable"]
-        .as_str()
+    let name = text(port, "executable")
         .map(|value| value.strip_suffix(" (deleted)").unwrap_or(value))
         .and_then(|value| value.rsplit('/').next())
-        .or_else(|| port["processName"].as_str())
-        .unwrap_or_default()
+        .filter(|value| !value.is_empty())
+        .or_else(|| text(port, "processName"))
+        .unwrap_or_default();
+    unwrapped_name(name)
 }
 
 fn arguments(port: &Value) -> Vec<&str> {
@@ -47,15 +84,6 @@ fn arguments(port: &Value) -> Vec<&str> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-fn python(exe: &str) -> bool {
-    exe == "python"
-        || exe.strip_prefix("python").is_some_and(|version| {
-            version
-                .split('.')
-                .all(|part| !part.is_empty() && part.bytes().all(|c| c.is_ascii_digit()))
-        })
 }
 
 fn workspace(directory: &str) -> Option<&str> {
@@ -104,7 +132,7 @@ fn option<'a>(argv: &[&'a str], flag: &str) -> Option<&'a str> {
 /// At most two curated details. Known services retain operational paths even
 /// under system directories; arbitrary flags, inline code and passwords stay out.
 pub fn process_details(port: &Value) -> Vec<Detail> {
-    if text(port, "containerName").is_some() {
+    if is_docker(port) {
         return Vec::new();
     }
     let exe = executable(port);
@@ -194,93 +222,6 @@ pub fn process_details(port: &Value) -> Vec<Detail> {
     details
 }
 
-fn service(exe: &str) -> Option<&'static str> {
-    Some(match exe {
-        "postgres" | "postgresql" | "postgis" | "timescaledb" => "Postgres",
-        "mysqld" | "mysql" => "MySQL",
-        "mariadbd" | "mariadb" => "MariaDB",
-        "redis-server" | "redis" | "redis-stack" => "Redis",
-        "valkey-server" | "valkey" => "Valkey",
-        "mongod" | "mongo" => "MongoDB",
-        "memcached" => "Memcached",
-        "nginx" => "nginx",
-        "caddy" => "Caddy",
-        "httpd" | "apache2" => "Apache",
-        "traefik" => "Traefik",
-        "haproxy" => "HAProxy",
-        "envoy" => "Envoy",
-        "sshd" | "sshd-session" => "SSH",
-        "elasticsearch" => "Elasticsearch",
-        "opensearch" => "OpenSearch",
-        "clickhouse-server" | "clickhouse" => "ClickHouse",
-        "rabbitmq" => "RabbitMQ",
-        "nats-server" | "nats" => "NATS",
-        "kafka" => "Kafka",
-        "minio" => "MinIO",
-        "etcd" => "etcd",
-        "consul" => "Consul",
-        "vault" => "Vault",
-        "grafana" | "grafana-server" => "Grafana",
-        "prometheus" => "Prometheus",
-        "ollama" => "Ollama",
-        "code-server" => "code-server",
-        "cloudflared" => "Cloudflare Tunnel",
-        "tailscaled" => "Tailscale",
-        "dnsmasq" | "systemd-resolve" | "systemd-resolved" => "DNS",
-        "docker-proxy" => "Docker",
-        _ => return None,
-    })
-}
-
-fn runtime(exe: &str) -> Option<&'static str> {
-    Some(match exe {
-        "node" | "nodejs" => "Node",
-        "bun" => "Bun",
-        "deno" => "Deno",
-        "ruby" => "Ruby",
-        "php" | "php-fpm" => "PHP",
-        "java" => "Java",
-        "dotnet" => ".NET",
-        "beam.smp" => "Erlang",
-        _ => return None,
-    })
-}
-
-fn framework(exe: &str) -> Option<&'static str> {
-    Some(match exe {
-        "vite" | "vite.js" => "Vite",
-        "next" | "next-server" => "Next.js",
-        "nuxt" | "nuxi" => "Nuxt",
-        "astro" => "Astro",
-        "remix" => "Remix",
-        "react-router" => "React Router",
-        "webpack-dev-server" | "webpack" => "webpack",
-        "react-scripts" => "Create React App",
-        "storybook" => "Storybook",
-        "ng" => "Angular",
-        "uvicorn" => "Uvicorn",
-        "gunicorn" => "Gunicorn",
-        "hypercorn" => "Hypercorn",
-        "flask" => "Flask",
-        "fastapi" => "FastAPI",
-        "streamlit" => "Streamlit",
-        "jupyter" | "jupyter-lab" | "jupyter-notebook" => "Jupyter",
-        "http.server" => "HTTP server",
-        "rails" => "Rails",
-        "puma" => "Puma",
-        "unicorn" => "Unicorn",
-        "artisan" => "Laravel",
-        _ => return None,
-    })
-}
-
-pub fn is_runtime_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "Node" | "Bun" | "Deno" | "Ruby" | "PHP" | "Java" | ".NET" | "Erlang" | "Python" | "Docker"
-    )
-}
-
 /// Service/framework first, runtime second. Only observed executable, individual
 /// argv values and image names participate; deduplicated and bounded to 3 tags.
 pub fn kinds(port: &Value) -> Vec<&'static str> {
@@ -292,21 +233,17 @@ pub fn kinds(port: &Value) -> Vec<&'static str> {
             }
         }
     };
-    if text(port, "containerName").is_some() {
-        if let Some(image) = text(port, "image") {
-            // Strip the digest, then registry, then tag. A registry may contain a
-            // port, so stripping ':' before '/' would misclassify its image.
-            let repository = image.split('@').next().unwrap_or(image);
-            let basename = repository.rsplit('/').next().unwrap_or(repository);
-            let image = basename.split(':').next().unwrap_or(basename);
-            add(service(image)
-                .or_else(|| image.rsplit_once('-').and_then(|(base, _)| service(base))));
-        }
+    if is_docker(port) {
+        add(text(port, "image").and_then(image_service));
         add(Some("Docker"));
         return result;
     }
     let exe = executable(port).to_lowercase();
     let argv = arguments(port);
+    if exe == "kubectl" {
+        add(Some(patterns::kubectl(&argv)));
+        return result;
+    }
     add(service(&exe));
     let is_python = python(&exe);
     if is_python {
@@ -318,14 +255,8 @@ pub fn kinds(port: &Value) -> Vec<&'static str> {
         if arg.starts_with('-') {
             continue;
         }
-        let base = arg.rsplit('/').next().unwrap_or(arg);
-        if base == "manage.py" && argv.contains(&"runserver") {
-            add(Some("Django"));
-        }
-        let stem = [".js", ".cjs", ".mjs"]
-            .iter()
-            .find_map(|suffix| base.strip_suffix(suffix));
-        add(framework(base).or_else(|| stem.and_then(framework)));
+        let base = unwrapped_name(arg.rsplit('/').next().unwrap_or(arg));
+        add(patterns::framework_argument(base, &argv));
     }
     add(framework(&exe));
     add(if is_python {
@@ -337,11 +268,27 @@ pub fn kinds(port: &Value) -> Vec<&'static str> {
 }
 
 pub fn service_name(port: &Value) -> Option<String> {
-    text(port, "composeService")
-        .or_else(|| text(port, "containerName"))
-        .or_else(|| kinds(port).into_iter().find(|kind| !is_runtime_kind(kind)))
-        .or_else(|| text(port, "applicationName"))
-        .or_else(|| text(port, "processName"))
+    if is_docker(port) {
+        return Some(
+            text(port, "composeService")
+                .or_else(|| text(port, "containerName"))
+                .or_else(|| {
+                    text(port, "image").and_then(|image| {
+                        image_repository(image)
+                            .rsplit('/')
+                            .next()
+                            .filter(|name| !name.is_empty())
+                    })
+                })
+                .unwrap_or("Container")
+                .to_owned(),
+        );
+    }
+    kinds(port)
+        .into_iter()
+        .find(|kind| !is_runtime_kind(kind))
+        .or_else(|| text(port, "applicationName").map(unwrapped_name))
+        .or_else(|| text(port, "processName").map(unwrapped_name))
         .or_else(|| name(port))
         .map(str::to_owned)
 }
@@ -376,7 +323,7 @@ pub fn service_detail(port: &Value, addresses: &[String], base: Option<&str>) ->
     }
     let tags = kinds(port);
     for kind in &tags {
-        if Some(*kind) != name.as_deref() {
+        if *kind != "Docker" && Some(*kind) != name.as_deref() {
             parts.push((*kind).to_owned());
         }
     }
@@ -387,9 +334,9 @@ pub fn service_detail(port: &Value, addresses: &[String], base: Option<&str>) ->
             parts.push(container.to_owned());
         }
     }
-    if text(port, "containerName").is_none() && !tags.iter().any(|kind| is_runtime_kind(kind)) {
+    if !is_docker(port) && !tags.iter().any(|kind| is_runtime_kind(kind)) {
         if let Some(process) = text(port, "processName").filter(|process| {
-            Some(process.to_lowercase()) != name.as_ref().map(|s| s.to_lowercase())
+            Some(unwrapped_name(process).to_lowercase()) != name.as_ref().map(|s| s.to_lowercase())
         }) {
             parts.push(process.to_owned());
         }
@@ -464,8 +411,29 @@ pub fn short_path(path: &str, users: &[Option<&str>], budget: usize) -> String {
 
 pub fn tooltip(port: &Value, addresses: &[String]) -> String {
     let mut lines = Vec::new();
+    if let Some(raw) = text(port, "executable") {
+        let base = raw
+            .strip_suffix(" (deleted)")
+            .unwrap_or(raw)
+            .rsplit('/')
+            .next()
+            .unwrap_or(raw);
+        if unwrapped_name(base) != base {
+            lines.push(format!("Executable: {raw}"));
+        }
+    } else if let Some(raw) = text(port, "processName") {
+        if unwrapped_name(raw) != raw {
+            lines.push(format!("Process: {raw}"));
+        }
+    }
     if let Some(container) = text(port, "containerName") {
         lines.push(format!("Container: {container}"));
+    }
+    if let Some(image) = text(port, "image") {
+        lines.push(format!("Image: {image}"));
+    }
+    if let Some(service) = text(port, "composeService") {
+        lines.push(format!("Compose service: {service}"));
     }
     lines.extend(
         process_details(port)
@@ -505,6 +473,7 @@ pub fn search_text(port: &Value, addresses: &[String]) -> String {
     }
     parts.extend_from_slice(addresses);
     for field in [
+        "image",
         "containerName",
         "composeService",
         "applicationName",

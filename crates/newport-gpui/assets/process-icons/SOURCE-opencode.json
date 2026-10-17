@@ -1,0 +1,8 @@
+{
+  "project": "OpenCode",
+  "commit": "22e771f5893e255ea78fc10557ed3fb98d3a1072",
+  "url": "https://github.com/anomalyco/opencode/blob/22e771f5893e255ea78fc10557ed3fb98d3a1072/packages/ui/src/assets/icons/provider/opencode.svg",
+  "license": "MIT; see LICENSE-opencode",
+  "sha256": "018a85654f13635373dc283ecc27928fa4e001c06cde47f7efa1cbcab567b51c",
+  "modifications": "None. Rendered in the UI foreground color."
+}

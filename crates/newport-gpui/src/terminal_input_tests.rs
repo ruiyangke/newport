@@ -221,6 +221,26 @@ fn poll_hidden(
 }
 
 #[gpui::test]
+fn terminal_ready_and_reconnect_events_drive_header_despite_stale_snapshot(
+    cx: &mut TestAppContext,
+) {
+    let peer = Peer::new();
+    let (view, cx) = connect(&peer, cx);
+    let snapshot = json!({"runtime":{"awaitingAgent":["server"]}});
+    let health = |view: &TerminalView| {
+        crate::snapshot_presentation::connection_health(&snapshot, "server", view.ready())
+    };
+    assert_eq!(view.read_with(cx, |view, _| health(view)), "reachable");
+    peer.event(json!({"type":"reconnecting", "data":{"attempt":1,"message":"fixture reconnect"}}));
+    wait(&view, cx, |view| !view.ready() && view.observed_epoch == 1);
+    assert_eq!(view.read_with(cx, |view, _| health(view)), "awaiting-agent");
+    peer.event(json!({"type":"ready"}));
+    wait(&view, cx, |view| view.ready());
+    assert_eq!(view.read_with(cx, |view, _| health(view)), "reachable");
+    view.update(cx, |view, _| view.close());
+}
+
+#[gpui::test]
 fn hidden_output_is_retained_without_notifications_and_visible_output_notifies(
     cx: &mut TestAppContext,
 ) {

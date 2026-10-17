@@ -20,6 +20,12 @@ struct Rename {
     _blur: Subscription,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ConnectionState {
+    pub connected: bool,
+    pub pending: bool,
+}
+
 pub struct Workspace {
     endpoint: String,
     immersive: bool,
@@ -33,6 +39,27 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    pub(super) fn connection_state(&self, scope: &Value, cx: &App) -> ConnectionState {
+        if &self.connection != scope {
+            return ConnectionState::default();
+        }
+        self.connection_state_unscoped(cx)
+    }
+
+    pub(super) fn connection_state_unscoped(&self, cx: &App) -> ConnectionState {
+        let mut state = ConnectionState::default();
+        for tab in &self.tabs {
+            let view = tab.view.read(cx);
+            state.connected |= view.ready();
+            state.pending |= matches!(
+                view.status.phase,
+                crate::terminal_status::Phase::Connecting
+                    | crate::terminal_status::Phase::Reconnecting { .. }
+            );
+        }
+        state
+    }
+
     pub fn deactivate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for tab in &self.tabs {
             tab.view.update(cx, |view, cx| view.deactivate(window, cx));
@@ -1106,6 +1133,73 @@ mod tests {
                 assert!(tab.bottom() <= bar.bottom());
             }
         }
+    }
+
+    #[gpui::test]
+    fn lifecycle_subscription_invalidates_owner_without_polling_or_output_redraws(
+        cx: &mut TestAppContext,
+    ) {
+        use std::{cell::Cell, rc::Rc};
+        let (workspace, cx) = visual_fixture(cx);
+        workspace.update(cx, |workspace, cx| {
+            for tab in &workspace.tabs {
+                tab.view.update(cx, |view, _| {
+                    view.status.phase = crate::terminal_status::Phase::Connecting
+                });
+            }
+        });
+        let owner = cx.update(|window, cx| cx.new(|cx| crate::page_perf_tests::owner(window, cx)));
+        owner.update(cx, |owner, cx| {
+            owner.server = "selected".into();
+            owner.terminals.insert("selected".into(), workspace.clone());
+            owner.observe_terminal_connections(cx);
+            owner.observe_terminal_connections(cx);
+            assert_eq!(owner.terminal_observers.len(), 1);
+        });
+        let count = Rc::new(Cell::new(0));
+        let observed = count.clone();
+        let _subscription =
+            cx.update(|_, cx| cx.observe(&owner, move |_, _| observed.set(observed.get() + 1)));
+        let views = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .tabs
+                .iter()
+                .map(|tab| tab.view.clone())
+                .collect::<Vec<_>>()
+        });
+        for view in &views {
+            view.update(cx, |view, cx| {
+                view.status.failed("fixture offline");
+                cx.notify();
+            });
+        }
+        draw(cx);
+        assert_eq!(
+            count.get(),
+            1,
+            "lifecycle invalidates parent without owner.tick"
+        );
+        views[0].update(cx, |view, cx| {
+            view.title = "new title".into();
+            cx.notify();
+        });
+        draw(cx);
+        assert_eq!(
+            count.get(),
+            1,
+            "titles and output must not invalidate header"
+        );
+        owner.update(cx, |owner, _| owner.server = "other".into());
+        views[0].update(cx, |view, cx| {
+            view.status.phase = crate::terminal_status::Phase::Connecting;
+            cx.notify();
+        });
+        draw(cx);
+        assert_eq!(
+            count.get(),
+            1,
+            "another server's terminal cannot invalidate selected header"
+        );
     }
 
     #[gpui::test]

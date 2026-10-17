@@ -327,7 +327,7 @@ mod tests {
                 format!("show-{server}"),
                 "Show",
                 self.values[server][0],
-                ["All", "Forwarded", "Needs attention"]
+                ["All", "Saved", "Needs attention"]
                     .into_iter()
                     .enumerate()
                     .filter(|(index, _)| *index != 2 || self.attention)
@@ -456,7 +456,7 @@ mod tests {
         });
         for (id, label, checked) in [
             ("show-0-0", "All", true),
-            ("show-0-1", "Forwarded", false),
+            ("show-0-1", "Saved", false),
             ("show-0-2", "Needs attention", false),
             ("view-0-0", "Projects view", true),
             ("view-0-1", "Ports view", false),

@@ -1,0 +1,346 @@
+{
+  "package": "simple-icons",
+  "version": "16.0.0",
+  "url": "https://registry.npmjs.org/simple-icons/-/simple-icons-16.0.0.tgz",
+  "integrity": "sha512-FPA/dxEy0dfXplKhPhqFI6KoPKAhe7t75emZ5i1T1vmqCYwboCqVNezRWaMmPkBazpHKmMAnaUYxoYsfRoDnZQ==",
+  "modifications": "None. Rendered in the current UI foreground color.",
+  "icons": [
+    {
+      "title": ".NET",
+      "slug": "dotnet",
+      "hex": "512BD4",
+      "source": "https://github.com/dotnet/brand/blob/c7d0f51b8ec59531332d05fb27a5b758a7a3d689/logo/dotnet-logo.svg",
+      "guidelines": "https://github.com/dotnet/brand/blob/c7d0f51b8ec59531332d05fb27a5b758a7a3d689/dotnet-styleGuide-2024.pdf",
+      "license": {
+        "type": "CC0-1.0"
+      }
+    },
+    {
+      "title": "Astro",
+      "slug": "astro",
+      "hex": "BC52EE",
+      "source": "https://astro.build/press"
+    },
+    {
+      "title": "Bun",
+      "slug": "bun",
+      "hex": "000000",
+      "source": "https://bun.sh/press-kit"
+    },
+    {
+      "title": "Caddy",
+      "slug": "caddy",
+      "hex": "1F88C0",
+      "source": "https://caddyserver.com"
+    },
+    {
+      "title": "ClickHouse",
+      "slug": "clickhouse",
+      "hex": "FFCC01",
+      "source": "https://github.com/ClickHouse/ClickHouse/blob/12bd453a43819176d25ecf247033f6cb1af54beb/website/images/logo-clickhouse.svg"
+    },
+    {
+      "title": "Cloudflare",
+      "slug": "cloudflare",
+      "hex": "F38020",
+      "source": "https://www.cloudflare.com/logo/",
+      "guidelines": "https://www.cloudflare.com/trademark/"
+    },
+    {
+      "title": "Cockroach Labs",
+      "slug": "cockroachlabs",
+      "hex": "6933FF",
+      "source": "https://www.cockroachlabs.com"
+    },
+    {
+      "title": "Consul",
+      "slug": "consul",
+      "hex": "F24C53",
+      "source": "https://www.hashicorp.com/brand",
+      "guidelines": "https://www.hashicorp.com/brand"
+    },
+    {
+      "title": "Django",
+      "slug": "django",
+      "hex": "092E20",
+      "source": "https://www.djangoproject.com/community/logos/"
+    },
+    {
+      "title": "Docker",
+      "slug": "docker",
+      "hex": "2496ED",
+      "source": "https://www.docker.com/company/newsroom/media-resources"
+    },
+    {
+      "title": "Elasticsearch",
+      "slug": "elasticsearch",
+      "hex": "005571",
+      "source": "https://www.elastic.co/brand"
+    },
+    {
+      "title": "Envoy Proxy",
+      "slug": "envoyproxy",
+      "hex": "AC6199",
+      "source": "https://d33wubrfki0l68.cloudfront.net/6f16455dae972425b77c7e31642269b375ec250e/3bd11/img/envoy-logo.svg"
+    },
+    {
+      "title": "etcd",
+      "slug": "etcd",
+      "hex": "419EDA",
+      "source": "https://cncf-branding.netlify.app/projects/etcd/"
+    },
+    {
+      "title": "FastAPI",
+      "slug": "fastapi",
+      "hex": "009688",
+      "source": "https://github.com/tiangolo/fastapi/blob/ffb4f77a11f83132b521ba0aac6c95792c19e797/docs/en/docs/img/icon-white.svg"
+    },
+    {
+      "title": "Flask",
+      "slug": "flask",
+      "hex": "3BABC3",
+      "source": "https://github.com/pallets/flask/blob/85c5d93cbd049c4bd0679c36fd1ddcae8c37b642/docs/_static/flask-icon.svg"
+    },
+    {
+      "title": "Gitea",
+      "slug": "gitea",
+      "hex": "609926",
+      "source": "https://github.com/go-gitea/gitea/blob/e0c753e770a64cda5e3900aa1da3d7e1f3263c9a/assets/logo.svg"
+    },
+    {
+      "title": "Grafana",
+      "slug": "grafana",
+      "hex": "F46800",
+      "source": "https://grafana.com"
+    },
+    {
+      "title": "InfluxDB",
+      "slug": "influxdb",
+      "hex": "22ADF6",
+      "source": "https://influxdata.github.io/branding/logo/downloads/",
+      "guidelines": "https://influxdata.github.io/branding/logo/usage/"
+    },
+    {
+      "title": "Jupyter",
+      "slug": "jupyter",
+      "hex": "F37626",
+      "source": "https://github.com/jupyter/design/blob/80716ee75dd7b2a6ec6abcd89922d020483589b1/logos/Logo%20Mark/logomark-whitebody-whitemoons/logomark-whitebody-whitemoons.svg",
+      "guidelines": "https://github.com/jupyter/design"
+    },
+    {
+      "title": "Kubernetes",
+      "slug": "kubernetes",
+      "hex": "326CE5",
+      "source": "https://github.com/kubernetes/kubernetes/tree/cac53883f4714452f3084a22e4be20d042a9df33/logo"
+    },
+    {
+      "title": "Laravel",
+      "slug": "laravel",
+      "hex": "FF2D20",
+      "source": "https://github.com/laravel/art/tree/5a8325b064634b900f25dbb6f1cafd888b2d2211"
+    },
+    {
+      "title": "MariaDB",
+      "slug": "mariadb",
+      "hex": "003545",
+      "source": "https://mariadb.com/about-us/logos/",
+      "guidelines": "https://mariadb.com/about-us/logos/"
+    },
+    {
+      "title": "Meilisearch",
+      "slug": "meilisearch",
+      "hex": "FF5CAA",
+      "source": "https://www.meilisearch.com"
+    },
+    {
+      "title": "MinIO",
+      "slug": "minio",
+      "hex": "C72E49",
+      "source": "https://min.io",
+      "guidelines": "https://min.io/logo"
+    },
+    {
+      "title": "MongoDB",
+      "slug": "mongodb",
+      "hex": "47A248",
+      "source": "https://www.mongodb.com/pressroom"
+    },
+    {
+      "title": "MySQL",
+      "slug": "mysql",
+      "hex": "4479A1",
+      "source": "https://www.mysql.com/about/legal/logos.html",
+      "guidelines": "https://www.mysql.com/about/legal/logos.html"
+    },
+    {
+      "title": "n8n",
+      "slug": "n8n",
+      "hex": "EA4B71",
+      "source": "https://n8n.io/press"
+    },
+    {
+      "title": "NATS.io",
+      "slug": "natsdotio",
+      "hex": "27AAE1",
+      "source": "https://github.com/cncf/artwork/blob/88bc5e7a0cc7f3770ba6edddc92e1ab8a6006171/projects/nats/icon/black/nats-icon-black.svg"
+    },
+    {
+      "title": "Neo4j",
+      "slug": "neo4j",
+      "hex": "4581C3",
+      "source": "https://neo4j.com/brand/#logo",
+      "guidelines": "https://neo4j.com/brand/#logo"
+    },
+    {
+      "title": "Next.js",
+      "slug": "nextdotjs",
+      "hex": "000000",
+      "source": "https://vercel.com/design/brands#next-js",
+      "guidelines": "https://vercel.com/design/brands#next-js"
+    },
+    {
+      "title": "NGINX",
+      "slug": "nginx",
+      "hex": "009639",
+      "source": "https://www.nginx.com/press/",
+      "guidelines": "https://www.nginx.com/press/"
+    },
+    {
+      "title": "Node.js",
+      "slug": "nodedotjs",
+      "hex": "5FA04E",
+      "source": "https://nodejs.org/en/about/branding",
+      "guidelines": "https://nodejs.org/en/about/branding"
+    },
+    {
+      "title": "Nuxt",
+      "slug": "nuxt",
+      "hex": "00DC82",
+      "source": "https://nuxt.com/design-kit",
+      "guidelines": "https://nuxt.com/design-kit",
+      "aliases": {
+        "aka": [
+          "Nuxt.js"
+        ]
+      }
+    },
+    {
+      "title": "Ollama",
+      "slug": "ollama",
+      "hex": "000000",
+      "source": "https://github.com/ollama/ollama/issues/2152#issuecomment-1905286922"
+    },
+    {
+      "title": "OpenSearch",
+      "slug": "opensearch",
+      "hex": "005EB8",
+      "source": "https://opensearch.org/trademark-brand-policy.html",
+      "guidelines": "https://opensearch.org/trademark-brand-policy.html"
+    },
+    {
+      "title": "Portainer",
+      "slug": "portainer",
+      "hex": "13BEF9",
+      "source": "https://www.portainer.io"
+    },
+    {
+      "title": "PostgreSQL",
+      "slug": "postgresql",
+      "hex": "4169E1",
+      "source": "https://wiki.postgresql.org/wiki/Logo",
+      "guidelines": "https://www.postgresql.org/about/policies/trademarks/"
+    },
+    {
+      "title": "Prometheus",
+      "slug": "prometheus",
+      "hex": "E6522C",
+      "source": "https://prometheus.io"
+    },
+    {
+      "title": "Python",
+      "slug": "python",
+      "hex": "3776AB",
+      "source": "https://www.python.org/community/logos/",
+      "guidelines": "https://www.python.org/community/logos/"
+    },
+    {
+      "title": "RabbitMQ",
+      "slug": "rabbitmq",
+      "hex": "FF6600",
+      "source": "https://www.rabbitmq.com",
+      "guidelines": "https://www.rabbitmq.com/trademark-guidelines.html"
+    },
+    {
+      "title": "React",
+      "slug": "react",
+      "hex": "61DAFB",
+      "source": "https://github.com/facebook/create-react-app/blob/282c03f9525fdf8061ffa1ec50dce89296d916bd/test/fixtures/relative-paths/src/logo.svg",
+      "aliases": {
+        "dup": [
+          {
+            "title": "React Native",
+            "source": "https://reactnative.dev"
+          }
+        ]
+      }
+    },
+    {
+      "title": "Redis",
+      "slug": "redis",
+      "hex": "FF4438",
+      "source": "https://redis.io/brand-guidelines",
+      "guidelines": "https://redis.io/brand-guidelines"
+    },
+    {
+      "title": "Remix",
+      "slug": "remix",
+      "hex": "000000",
+      "source": "https://drive.google.com/drive/u/0/folders/1pbHnJqg8Y1ATs0Oi8gARH7wccJGv4I2c"
+    },
+    {
+      "title": "Ruby on Rails",
+      "slug": "rubyonrails",
+      "hex": "D30001",
+      "source": "https://github.com/simple-icons/simple-icons/issues/9619#issuecomment-1735150580",
+      "guidelines": "https://rubyonrails.org/trademarks/"
+    },
+    {
+      "title": "Streamlit",
+      "slug": "streamlit",
+      "hex": "FF4B4B",
+      "source": "https://www.streamlit.io/brand",
+      "guidelines": "https://www.streamlit.io/brand"
+    },
+    {
+      "title": "Tailscale",
+      "slug": "tailscale",
+      "hex": "242424",
+      "source": "https://tailscale.com/press"
+    },
+    {
+      "title": "Temporal",
+      "slug": "temporal",
+      "hex": "000000",
+      "source": "https://github.com/temporalio/temporaldotio/blob/b6b5f3ed1fda818d5d6c07e27ec15d51a61f2267/public/images/icons/temporal-no-text.svg"
+    },
+    {
+      "title": "Traefik Proxy",
+      "slug": "traefikproxy",
+      "hex": "24A1C1",
+      "source": "https://traefik.io/traefik"
+    },
+    {
+      "title": "Vault",
+      "slug": "vault",
+      "hex": "FFEC6E",
+      "source": "https://www.hashicorp.com/brand",
+      "guidelines": "https://www.hashicorp.com/brand"
+    },
+    {
+      "title": "Vite",
+      "slug": "vite",
+      "hex": "646CFF",
+      "source": "https://vitejs.dev"
+    }
+  ]
+}

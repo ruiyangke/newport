@@ -80,6 +80,182 @@ fn drag(from: Point<Pixels>, to: Point<Pixels>, modifiers: Modifiers, cx: &mut V
 }
 
 #[gpui::test]
+fn terminal_link_hover_tracks_modifiers_without_mouse_movement(cx: &mut TestAppContext) {
+    let (view, cx) = fixture(
+        cx,
+        "\x1b[?1049h\x1b[?1000h\x1b[34;1mhttp://localhost:5178/\x1b[0m plain",
+    );
+    let position = at(&view, 3.2, 0.3, cx);
+    cx.simulate_mouse_move(position, None, Modifiers::default());
+    draw(cx);
+    assert!(view.read_with(cx, |view, _| view.hovered_link.is_none()));
+
+    for modifiers in [
+        Modifiers {
+            control: true,
+            ..Default::default()
+        },
+        Modifiers {
+            platform: true,
+            ..Default::default()
+        },
+    ] {
+        cx.simulate_event(gpui::ModifiersChangedEvent {
+            modifiers,
+            ..Default::default()
+        });
+        draw(cx);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.hovered_link.clone())
+                .as_deref(),
+            Some("http://localhost:5178/"),
+            "either modifier enables the pointer and underline without moving the mouse"
+        );
+        cx.simulate_event(gpui::ModifiersChangedEvent::default());
+        draw(cx);
+        assert!(view.read_with(cx, |view, _| view.hovered_link.is_none()));
+    }
+
+    let control = Modifiers {
+        control: true,
+        ..Default::default()
+    };
+    cx.simulate_mouse_move(position, None, control);
+    draw(cx);
+    assert!(view.read_with(cx, |view, _| view.hovered_link.is_some()));
+    cx.simulate_mouse_move(at(&view, 25.2, 0.3, cx), None, control);
+    draw(cx);
+    assert!(view.read_with(cx, |view, _| view.hovered_link.is_none()));
+}
+
+#[gpui::test]
+#[cfg(target_os = "macos")]
+fn terminal_links_handle_macos_control_click_translation(cx: &mut TestAppContext) {
+    use std::{cell::RefCell, rc::Rc};
+    let (view, cx) = fixture(cx, "\x1b[?1000hhttp://localhost:5178/ plain");
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let capture = events.clone();
+    let _subscription = cx.update(|_, cx| {
+        cx.subscribe(&view, move |_, event: &super::OpenLink, _| {
+            capture.borrow_mut().push(event.0.clone());
+        })
+    });
+    let position = at(&view, 3.2, 0.3, cx);
+    let control = Modifiers {
+        control: true,
+        ..Default::default()
+    };
+    let plain = Modifiers::default();
+
+    // Match gpui_macos::window::handle_input: both button events are Right
+    // with Control removed, although flags-changed still reports Control.
+    cx.simulate_event(gpui::ModifiersChangedEvent {
+        modifiers: control,
+        ..Default::default()
+    });
+    cx.simulate_mouse_down(position, MouseButton::Right, plain);
+    draw(cx);
+    assert!(view.read_with(cx, |view, _| view.hovered_link.is_some()));
+    cx.simulate_mouse_up(position, MouseButton::Right, plain);
+    draw(cx);
+    assert_eq!(&*events.borrow(), &["http://localhost:5178/"]);
+
+    // A plain secondary click must not become a link activation.
+    cx.simulate_event(gpui::ModifiersChangedEvent::default());
+    cx.simulate_mouse_down(position, MouseButton::Right, plain);
+    cx.simulate_mouse_up(position, MouseButton::Right, plain);
+    draw(cx);
+    assert_eq!(events.borrow().len(), 1);
+
+    // Ctrl released before the mouse: native GPUI now sends Left up. Consume
+    // it without opening the URL or retaining a stale pending link gesture.
+    cx.simulate_event(gpui::ModifiersChangedEvent {
+        modifiers: control,
+        ..Default::default()
+    });
+    cx.simulate_mouse_down(position, MouseButton::Right, plain);
+    cx.simulate_event(gpui::ModifiersChangedEvent::default());
+    cx.simulate_mouse_up(position, MouseButton::Left, plain);
+    draw(cx);
+    assert!(view.read_with(cx, |view, _| view.link_press.is_none()));
+    assert_eq!(events.borrow().len(), 1);
+
+    // Drag events retain the physical Left button and Control flag.
+    cx.simulate_mouse_move(position, None, control);
+    cx.simulate_mouse_down(position, MouseButton::Right, plain);
+    cx.simulate_mouse_move(at(&view, 9.2, 0.3, cx), Some(MouseButton::Left), control);
+    cx.simulate_mouse_up(at(&view, 9.2, 0.3, cx), MouseButton::Right, plain);
+    draw(cx);
+    assert_eq!(events.borrow().len(), 1);
+    assert!(view.read_with(cx, |view, _| view.link_press.is_none()));
+}
+
+#[gpui::test]
+fn plain_terminal_urls_open_with_either_modifier_and_cancel_on_drag(cx: &mut TestAppContext) {
+    use std::{cell::RefCell, rc::Rc};
+    let (view, cx) = fixture(
+        cx,
+        "\x1b[?1049h\x1b[?1000h\x1b[34;1mhttp://localhost:5178/\x1b[0m",
+    );
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let capture = events.clone();
+    let _subscription = cx.update(|_, cx| {
+        cx.subscribe(&view, move |_, event: &super::OpenLink, _| {
+            capture.borrow_mut().push(event.0.clone());
+        })
+    });
+    let position = at(&view, 3.2, 0.3, cx);
+    click(position, 1, Modifiers::default(), cx);
+    assert!(events.borrow().is_empty());
+    for modifiers in [
+        Modifiers {
+            control: true,
+            ..Default::default()
+        },
+        Modifiers {
+            platform: true,
+            ..Default::default()
+        },
+    ] {
+        click(position, 1, modifiers, cx);
+        drag(position, at(&view, 9.2, 0.3, cx), modifiers, cx);
+    }
+    assert_eq!(
+        &*events.borrow(),
+        &["http://localhost:5178/", "http://localhost:5178/"]
+    );
+    cx.simulate_mouse_down(
+        position,
+        MouseButton::Left,
+        Modifiers {
+            control: true,
+            ..Default::default()
+        },
+    );
+    view.update(cx, |view, cx| {
+        view.engine
+            .advance(b"\r\x1b[Khttp://localhost:5191/")
+            .unwrap();
+        cx.notify();
+    });
+    draw(cx);
+    cx.simulate_mouse_up(
+        position,
+        MouseButton::Left,
+        Modifiers {
+            control: true,
+            ..Default::default()
+        },
+    );
+    draw(cx);
+    assert_eq!(
+        events.borrow().len(),
+        2,
+        "rewritten output must not retarget a press"
+    );
+}
+
+#[gpui::test]
 fn terminal_links_require_a_modified_click_and_preserve_selection(cx: &mut TestAppContext) {
     use std::{cell::RefCell, rc::Rc};
     let (view, cx) = fixture(

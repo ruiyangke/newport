@@ -1,8 +1,10 @@
 //! Shared command handlers. Desktop adapters supply explicit backend services.
 mod control;
+mod terminal_links;
 use crate::manager::{Shared, Snapshot};
 use crate::server_queries::{self, Read};
 pub use control::*;
+pub use terminal_links::open_terminal_link;
 use uuid::Uuid;
 
 pub async fn get_metrics_cache(

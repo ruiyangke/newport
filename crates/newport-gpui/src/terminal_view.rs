@@ -26,8 +26,14 @@ pub struct OpenLink(pub String);
 impl EventEmitter<OpenLink> for TerminalView {}
 struct LinkPress {
     link: String,
+    button: MouseButton,
+    mac_control_click: bool,
     position: Point<Pixels>,
     cancelled: bool,
+}
+
+fn link_modifier(modifiers: Modifiers) -> bool {
+    (modifiers.platform || modifiers.control) && !modifiers.shift && !modifiers.alt
 }
 
 // Synthetic events have no physical identity; keep their logical fallback in a
@@ -88,6 +94,9 @@ pub struct TerminalView {
     forwarded_keys: std::collections::HashMap<ForwardedKey, ForwardedPress>,
     last_motion: Option<Vec<u8>>,
     hovered_link: Option<String>,
+    // macOS GPUI turns Ctrl-left into Right and strips Control from down/up.
+    // Flags-changed and motion events still carry the physical modifier state.
+    link_control_held: bool,
     link_press: Option<LinkPress>,
     link_generation: u64,
     scroll_remainder: f32,
@@ -95,13 +104,18 @@ pub struct TerminalView {
 }
 impl TerminalView {
     pub(super) fn open_link(&mut self, url: String, cx: &mut Context<Self>) {
+        let Some(terminal) = self.session_id() else {
+            self.input_error = Some("Reconnect the terminal before opening its links.".into());
+            cx.notify();
+            return;
+        };
         self.link_generation = self.link_generation.wrapping_add(1);
         let generation = self.link_generation;
         cx.spawn(async move |view, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    newport_client::backend::Backend::discover().open_terminal_link(&url)
+                    newport_client::backend::Backend::discover().open_terminal_link(terminal, &url)
                 })
                 .await;
             if let Err(error) = result {
@@ -151,6 +165,7 @@ impl TerminalView {
             forwarded_keys: Default::default(),
             last_motion: None,
             hovered_link: None,
+            link_control_held: false,
             link_press: None,
             link_generation: 0,
             scroll_remainder: 0.,
@@ -270,7 +285,7 @@ impl TerminalView {
         self.open();
         cx.notify();
     }
-    fn ready(&self) -> bool {
+    pub(super) fn ready(&self) -> bool {
         self.observed_ready
             && self
                 .session
@@ -486,6 +501,7 @@ impl TerminalView {
         }
     }
     fn clear_input(&mut self) {
+        self.link_control_held = false;
         self.pending_title = None;
         self.link_generation = self.link_generation.wrapping_add(1);
         self.link_press = None;
@@ -515,6 +531,7 @@ impl TerminalView {
             && window.is_window_active()
             && !window.has_active_dialog(cx);
         if was_focused && !self.focused {
+            self.link_control_held = false;
             self.link_press = None;
             self.release_keys(
                 window.modifiers(),
@@ -531,6 +548,7 @@ impl TerminalView {
         self.report_focus();
     }
     pub fn deactivate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.link_control_held = false;
         self.link_press = None;
         self.hovered_link = None;
         self.clear_find(cx);
@@ -629,11 +647,33 @@ impl TerminalView {
                 .clamp(0., f64::from(self.dimensions.1 - 1)) as u32,
         })
     }
-    fn link_at(&self, position: Point<Pixels>) -> Option<String> {
-        self.bounds
-            .contains(&position)
-            .then(|| self.engine.link_at(self.position(position)).ok().flatten())
-            .flatten()
+    fn link_at(&mut self, position: Point<Pixels>) -> Option<String> {
+        if !self.bounds.contains(&position) {
+            return None;
+        }
+        let TermPoint::Viewport(point) = self.position(position) else {
+            return None;
+        };
+        self.engine
+            .frame()
+            .ok()?
+            .link_at(usize::from(point.x), point.y as usize)
+            .map(str::to_owned)
+    }
+    fn update_link_hover(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        self.link_control_held = modifiers.control;
+        let link = link_modifier(modifiers)
+            .then(|| self.link_at(position))
+            .flatten();
+        if self.hovered_link != link {
+            self.hovered_link = link;
+            cx.notify();
+        }
     }
     fn update_selection(&mut self, position: Point<Pixels>) {
         let result = self
@@ -723,17 +763,22 @@ impl TerminalView {
             return;
         }
         self.focus.focus(window, cx);
-        if event.button == MouseButton::Left
+        let mac_control_click = cfg!(target_os = "macos")
+            && event.button == MouseButton::Right
+            && self.link_control_held;
+        let mut link_modifiers = event.modifiers;
+        link_modifiers.control |= mac_control_click;
+        if (event.button == MouseButton::Left || mac_control_click)
             && event.click_count == 1
-            && (event.modifiers.platform || event.modifiers.control)
-            && !event.modifiers.shift
-            && !event.modifiers.alt
+            && link_modifier(link_modifiers)
             && let Some(link) = self.link_at(event.position)
         {
             self.selecting = false;
             self.selection_pointer = None;
             self.link_press = Some(LinkPress {
                 link,
+                button: event.button,
+                mac_control_click,
                 position: event.position,
                 cancelled: false,
             });
@@ -768,14 +813,19 @@ impl TerminalView {
         }
     }
     fn mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if event.button == MouseButton::Left
-            && let Some(press) = self.link_press.take()
+        if self.link_press.as_ref().is_some_and(|press| {
+            event.button == press.button
+                // Releasing Ctrl first makes GPUI deliver the physical Left up.
+                || (press.mac_control_click && event.button == MouseButton::Left)
+        }) && let Some(press) = self.link_press.take()
         {
+            let mut modifiers = event.modifiers;
+            if press.mac_control_click {
+                modifiers.control = self.link_control_held;
+            }
             if !press.cancelled
                 && !window.has_active_dialog(cx)
-                && (event.modifiers.platform || event.modifiers.control)
-                && !event.modifiers.shift
-                && !event.modifiers.alt
+                && link_modifier(modifiers)
                 && self.link_at(event.position).as_ref() == Some(&press.link)
             {
                 cx.emit(OpenLink(press.link));
@@ -809,11 +859,7 @@ impl TerminalView {
         if window.has_active_dialog(cx) {
             return;
         }
-        let link = self.link_at(event.position);
-        if self.hovered_link != link {
-            self.hovered_link = link;
-            cx.notify();
-        }
+        self.update_link_hover(event.position, event.modifiers, cx);
         if let Some(press) = self.link_press.as_mut() {
             let delta = event.position - press.position;
             press.cancelled |= delta.x.abs() > px(4.) || delta.y.abs() > px(4.);
@@ -1067,7 +1113,13 @@ fn terminal_button(button: MouseButton) -> Option<TerminalButton> {
 }
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.hovered_link = self.link_at(window.mouse_position());
+        let mut link_modifiers = window.modifiers();
+        if cfg!(target_os = "macos") {
+            link_modifiers.control |= self.link_control_held;
+        }
+        self.hovered_link = link_modifier(link_modifiers)
+            .then(|| self.link_at(window.mouse_position()))
+            .flatten();
         self.visible = true;
         if self.focus_subscriptions.is_empty() {
             let focus = self.focus.clone();
@@ -1143,6 +1195,11 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
             .on_key_up(cx.listener(Self::key_up))
+            .on_modifiers_changed(
+                cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
+                    this.update_link_hover(window.mouse_position(), event.modifiers, cx);
+                }),
+            )
             .map(|mut div| {
                 for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
                     div = div
@@ -1163,7 +1220,7 @@ impl Render for TerminalView {
                 let url = link.clone();
                 view.cursor_pointer().tooltip(move |window, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(format!(
-                        "Command/Ctrl-click to open: {url}"
+                        "Ctrl-click or Cmd-click to open: {url}"
                     ))
                     .build(window, cx)
                 })

@@ -259,7 +259,7 @@ pub async fn forward_tunnel_batch(
         .map_err(|error| format!("Forwards saved, but a connection could not start: {error}"))
 }
 
-fn validate_forward_owner(
+pub(super) fn validate_forward_owner(
     manager: &crate::manager::Manager,
     owner: &std::sync::Arc<crate::server_session::ServerSession>,
 ) -> Result<(), String> {
@@ -278,7 +278,7 @@ fn validate_forward_owner(
 
 /// Optional native handover precondition; validation and the following effect
 /// are repeated at commit so a changed profile cannot receive a stale action.
-fn validate_forward_connection(
+pub(super) fn validate_forward_connection(
     manager: &crate::manager::Manager,
     server_id: Uuid,
     expected: Option<&serde_json::Value>,

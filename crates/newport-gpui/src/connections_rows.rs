@@ -4,8 +4,8 @@ use super::*;
 use gpui_kit::base::{Table, TableBody, TableHead, TableHeader, TableRow};
 use gpui_kit::component::animation::cubic_bezier;
 
-/// Match the reference StateDot: only unsettled SSH transport pulses. Destination
-/// health is reported separately and must not animate an otherwise settled row.
+/// A steady core communicates connection state; a single ring expands and fades.
+/// Destination health remains separate from SSH transport state.
 fn transport_dot(status: &str, cx: &App) -> AnyElement {
     let dark = cx.theme().is_dark();
     let tone = match status {
@@ -15,24 +15,62 @@ fn transport_dot(status: &str, cx: &App) -> AnyElement {
         _ => None,
     };
     let dot = div()
+        .relative()
         .w(px(8.))
         .h(px(8.))
         .flex_shrink_0()
         .rounded_full()
         .when_some(tone, |v, color| v.bg(color))
-        .when(status == "connected", |v| {
-            v.shadow(vec![BoxShadow {
-                color: theme::success(dark).opacity(0.15),
-                offset: point(px(0.), px(0.)),
-                blur_radius: px(0.),
-                spread_radius: px(3.),
-                inset: false,
-            }])
-        })
         .when(tone.is_none(), |v| {
             v.border(px(1.5))
                 .border_color(cx.theme().muted_foreground.opacity(0.35))
         });
+    if status == "connected" {
+        let color = theme::success(dark);
+        // Keep the row's 8px layout slot while centering the selected 6px core.
+        let dot = div().relative().size(px(8.)).flex_shrink_0().child(
+            div()
+                .absolute()
+                .left(px(1.))
+                .top(px(1.))
+                .size(px(6.))
+                .rounded_full()
+                .bg(color),
+        );
+        if cx.reduce_motion() {
+            return dot.into_any_element();
+        }
+        let ease = cubic_bezier(0.2, 0.6, 0.4, 1.);
+        return dot
+            .with_animation(
+                "transport-ripple",
+                Animation::new(Duration::from_millis(3600))
+                    .repeat_synced()
+                    .with_max_fps(24.),
+                move |dot, phase| {
+                    // Match the HTML reference: appear at 15–25%, fade by 80%,
+                    // and rest before the next ring. Never blink the core.
+                    let growth = ease(((phase - 0.15) / 0.65).clamp(0., 1.));
+                    let diameter = 7.5 + 11.5 * growth;
+                    let opacity = if phase < 0.25 {
+                        0.5 * ease(((phase - 0.15) / 0.10).clamp(0., 1.))
+                    } else {
+                        0.5 * (1. - ease(((phase - 0.25) / 0.55).clamp(0., 1.)))
+                    };
+                    dot.child(
+                        div()
+                            .absolute()
+                            .left(px((8. - diameter) / 2.))
+                            .top(px((8. - diameter) / 2.))
+                            .size(px(diameter))
+                            .rounded_full()
+                            .border(px(diameter / 10.))
+                            .border_color(color.opacity(opacity)),
+                    )
+                },
+            )
+            .into_any_element();
+    }
     if matches!(status, "connecting" | "reconnecting") && !cx.reduce_motion() {
         dot.with_animation(
             "transport-pulse",
@@ -45,6 +83,42 @@ fn transport_dot(status: &str, cx: &App) -> AnyElement {
     } else {
         dot.into_any_element()
     }
+}
+
+// Isolate animation invalidation from the Connections page and its tables.
+struct TransportIndicator {
+    props: (String, bool, bool),
+}
+
+impl Render for TransportIndicator {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        transport_dot(&self.props.0, cx)
+    }
+}
+
+fn retained_transport_dot(
+    key: &str,
+    status: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let props = (status.to_owned(), cx.theme().is_dark(), cx.reduce_motion());
+    let indicator = window.use_keyed_state(
+        SharedString::from(format!("transport-indicator-{key}")),
+        cx,
+        |_, _| TransportIndicator {
+            props: props.clone(),
+        },
+    );
+    indicator.update(cx, |indicator, cx| {
+        if indicator.props != props {
+            indicator.props = props;
+            cx.notify();
+        }
+    });
+    indicator
+        .cached(div().size(px(8.)).flex_shrink_0().style().clone())
+        .into_any_element()
 }
 
 use crate::quiet_action::Menu as RowMenu;
@@ -148,6 +222,7 @@ struct RowPresentation {
     row: Row,
     table: bool,
     stripe: bool,
+    nested: bool,
     index: Option<usize>,
     position: Option<(usize, usize)>,
 }
@@ -263,9 +338,14 @@ pub(super) struct Row {
     pub(super) project_name: String,
     pub(super) branch: String,
     pub(super) worktree: Option<newport_domain::port_grouping::Worktree>,
-    number: u64,
+    pub(super) number: u64,
     port: String,
     title: String,
+    service: String,
+    process_icon: crate::connections_process_icon::ProcessIcon,
+    hover: std::rc::Rc<crate::connections_hover::Card>,
+    context: String,
+    generated_title: bool,
     detail: String,
     address: String,
     open: Option<(Value, Option<u16>)>,
@@ -279,7 +359,7 @@ pub(super) struct Row {
 impl Row {
     pub(super) fn new(key: &str, entry: Entry, runtime: &Value, branches: bool) -> Self {
         let p = &entry.port;
-        let worktree = (!entry.saved)
+        let worktree = (p["direction"] != "remote")
             .then(|| newport_domain::port_grouping::worktree_of(p))
             .flatten();
         let destination_port = (!entry.saved).then(|| p["port"].as_u64()).flatten();
@@ -327,9 +407,8 @@ impl Row {
             0 => "Unreachable",
             1 if connection == "reconnecting" => "Reconnecting…",
             1 => "Connecting…",
-            2 => "Connected",
-            3 => "Off",
-            _ => "—",
+            2 => "Forwarding",
+            _ => "Forwarding off",
         }
         .to_owned();
         if rank == 1 && connection == "reconnecting" {
@@ -374,6 +453,27 @@ impl Row {
             .filter(|s| !s.is_empty())
             .unwrap_or(&fallback)
             .to_owned();
+        let base = worktree.as_ref().map(|w| w.path.as_str()).unwrap_or(key);
+        let context = if entry.saved {
+            String::new()
+        } else {
+            newport_domain::port_context::service_detail(
+                p,
+                &entry.addresses,
+                (!base.is_empty()).then_some(base),
+            )
+            .join(" · ")
+        };
+        let generated_title = title == service
+            || title == newport_domain::port_context::forward_name(p)
+            || entry.forwards.iter().any(|forward| {
+                title
+                    == format!(
+                        "Terminal · {}:{}",
+                        string(forward, "remoteHost"),
+                        forward["remotePort"].as_u64().unwrap_or(0)
+                    )
+            });
         let mut details = Vec::new();
         if problem {
             for t in &entry.forwards {
@@ -406,12 +506,9 @@ impl Row {
             if title != service && service != "Owner not reported" {
                 details.push(service.to_owned());
             }
-            let base = worktree.as_ref().map(|w| w.path.as_str()).unwrap_or(key);
-            details.extend(newport_domain::port_context::service_detail(
-                p,
-                &entry.addresses,
-                (!base.is_empty()).then_some(base),
-            ));
+            if !context.is_empty() {
+                details.push(context.clone());
+            }
         }
         let branch = if reverse {
             "From this computer".into()
@@ -442,7 +539,28 @@ impl Row {
             )
         };
         let transport = connection.to_owned();
+        let process_icon = crate::connections_process_icon::ProcessIcon::for_port(p, entry.saved);
+        let mut hover = crate::connections_hover::Card::new(
+            &entry,
+            if entry.saved {
+                title.clone()
+            } else {
+                service.clone()
+            },
+            process_icon,
+        );
+        if !entry.forwards.is_empty() || entry.saved {
+            hover.forward = Some(crate::connections_hover::Forward {
+                name: (!entry.saved && !generated_title).then(|| title.clone()),
+                address: address.clone(),
+                status: status.clone(),
+            });
+        }
+        if problem || entry.saved {
+            hover.notice = Some(details.join(" · ")).filter(|s| !s.is_empty());
+        }
         Self {
+            hover: std::rc::Rc::new(hover),
             entry,
             key: identity,
             project: key.into(),
@@ -452,6 +570,10 @@ impl Row {
             number,
             port,
             title,
+            service,
+            process_icon,
+            context,
+            generated_title,
             detail: details.join(" · "),
             address,
             open,
@@ -463,12 +585,34 @@ impl Row {
             fix,
         }
     }
+
+    fn presentation_text(&self, detailed: bool) -> (String, String) {
+        if self.entry.saved {
+            return (self.title.clone(), self.detail.clone());
+        }
+        let title = self.service.clone();
+        let mut parts = Vec::new();
+        if detailed && !self.generated_title {
+            parts.push(format!("Saved as {}", self.title));
+        }
+        if self.problem || self.rank == 1 {
+            // Connection failures must never disappear when shared metadata is folded up.
+            if self.detail != self.status {
+                parts.push(self.detail.clone());
+            }
+        } else if detailed && !self.context.is_empty() {
+            parts.push(self.context.clone());
+        }
+        (title, parts.join(" · "))
+    }
 }
 
 pub(super) fn sort(rows: &mut [Row], column: usize, descending: bool) {
     rows.sort_by(|a, b| {
         let order = match column {
-            1 => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+            1 => (if a.entry.saved { &a.title } else { &a.service })
+                .to_lowercase()
+                .cmp(&(if b.entry.saved { &b.title } else { &b.service }).to_lowercase()),
             2 => (
                 a.project.is_empty(),
                 a.project_name.to_lowercase(),
@@ -648,6 +792,7 @@ impl Newport {
         &self,
         row: Row,
         position: (usize, usize),
+        nested: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         RowPresentation {
@@ -655,6 +800,7 @@ impl Newport {
             row,
             table: false,
             stripe: false,
+            nested,
             index: None,
             position: Some(position),
         }
@@ -674,6 +820,7 @@ impl Newport {
             row,
             table,
             stripe,
+            nested: false,
             index: row_index,
             position: None,
         }
@@ -685,13 +832,14 @@ impl Newport {
         presentation: RowPresentation,
         row_focus: &FocusHandle,
         engaged: bool,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let RowPresentation {
             row,
             table,
             stripe,
+            nested,
             index: row_index,
             position,
             ..
@@ -703,12 +851,17 @@ impl Newport {
         let wide = content_width > 640.;
         let compact = content_width <= 560.;
         let inline_route = (table && !wide) || (!table && compact);
-        let p = &row.entry.port;
-        let tooltip = if row.entry.saved {
-            format!("{}\n{}", row.title, row.detail)
-        } else {
-            newport_domain::port_context::tooltip(p, &row.entry.addresses)
-        };
+        let show_route = table
+            || row.open.is_some()
+            || row.active
+            || row.entry.saved
+            || row.entry.forwards.iter().any(|t| {
+                t["direction"] == "remote"
+                    || t["localPort"] != t["remotePort"]
+                    || t["localPortEnd"] != t["remotePortEnd"]
+            });
+        let hover = row.hover.clone();
+        let (display_title, display_detail) = row.presentation_text(table);
         let mut route = Some(self.connection_route(&row, cx));
         let tone = match row.rank {
             0 => theme::error(cx.theme().is_dark()),
@@ -716,7 +869,7 @@ impl Newport {
             2 => theme::success(cx.theme().is_dark()),
             _ => cx.theme().muted_foreground,
         };
-        let dot = transport_dot(&row.transport, cx);
+        let dot = retained_transport_dot(&row.key, &row.transport, window, cx);
         let fix_server = self.server.clone();
         let fix = row.fix.clone();
         let identity =
@@ -725,7 +878,7 @@ impl Newport {
                 .when(table, |v| {
                     v.role(accesskit::Role::Cell)
                         .aria_column_index(2)
-                        .aria_label(row.title.clone())
+                        .aria_label(display_title.clone())
                         .aria_description(
                             [
                                 row.detail.as_str(),
@@ -745,23 +898,60 @@ impl Newport {
                 .min_w_0()
                 .when(table, |v| v.px(px(10.)))
                 .when(!table, |v| v.pr_2())
-                .tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
-                })
+                .tooltip(move |window, cx| hover.clone().build(window, cx))
                 .child(
                     div()
-                        .text_size(px(13.))
-                        .font_weight(if row.entry.forwards.is_empty() {
-                            FontWeight::MEDIUM
-                        } else {
-                            FontWeight::SEMIBOLD
-                        })
-                        .truncate()
-                        .child(row.title.clone()),
+                        .flex()
+                        .flex_wrap()
+                        .items_baseline()
+                        .gap_x(px(8.))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(row.process_icon.render(cx))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .text_size(px(13.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .truncate()
+                                        .child(display_title.clone()),
+                                )
+                                .when(
+                                    !row.entry.saved
+                                        && newport_domain::port_context::is_docker(&row.entry.port),
+                                    |v| {
+                                        v.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .px(px(5.))
+                                                .py(px(1.))
+                                                .rounded(px(4.))
+                                                .bg(cx.theme().muted)
+                                                .text_color(cx.theme().muted_foreground)
+                                                .text_size(px(10.))
+                                                .child("Docker"),
+                                        )
+                                    },
+                                ),
+                        )
+                        .when((compact && row.rank <= 1) || (table && !wide), |v| {
+                            v.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(11.))
+                                    .text_color(tone)
+                                    .child(row.status.clone()),
+                            )
+                        }),
                 )
-                .when(!row.detail.is_empty(), |v| {
+                .when(!display_detail.is_empty(), |v| {
                     v.child(
                         div()
+                            .pl(px(24.))
                             .mt(px(1.))
                             .flex()
                             .flex_wrap()
@@ -781,7 +971,7 @@ impl Newport {
                                     .min_w_0()
                                     .when(row.problem, |text| text.line_clamp(2))
                                     .when(!row.problem, |text| text.truncate())
-                                    .child(row.detail.clone()),
+                                    .child(display_detail),
                             )
                             .when_some(fix, |view, id| {
                                 view.child(
@@ -807,17 +997,17 @@ impl Newport {
                             }),
                     )
                 })
-                .when(inline_route && !row.address.is_empty(), |v| {
+                .when(inline_route && show_route && !row.address.is_empty(), |v| {
                     v.child(div().mt(px(3.)).ml(px(-8.)).child(route.take().unwrap()))
                 });
-        let menu = self.connection_menu(&row, engaged, cx);
+        let menu = self.connection_menu(&row, true, cx);
         let pending = self.port_busy(&row.entry);
         let server = self.server.clone();
         let entry = row.entry.clone();
         let project = row.project.clone();
         let control = crate::controls::switch(SharedString::from(format!("forward-{}", row.key)))
             .color(cx.theme().primary)
-            .accessibility_label(format!("Forward port {} ({})", row.port, row.title))
+            .accessibility_label(format!("Forward port {} ({})", row.port, display_title))
             .checked(row.active)
             .disabled(pending)
             .on_click(cx.listener(move |this, checked: &bool, _, cx| {
@@ -841,13 +1031,17 @@ impl Newport {
             .when_some(position, |v, (index, count)| {
                 v.aria_position_in_set(index).aria_size_of_set(count)
             })
-            .aria_label(format!("Port {}: {}, {}", row.port, row.title, row.status))
+            .aria_label(format!(
+                "Port {}: {}, {}",
+                row.port, display_title, row.status
+            ))
             .flex()
             .items_center()
             .min_h(px(42.))
             .py(px(5.))
             .flex_shrink_0()
             .when(!table, |v| v.px_3().rounded(px(8.)))
+            .when(nested, |v| v.ml(px(if compact { 16. } else { 32. })))
             .when(stripe, |v| v.bg(cx.theme().foreground.opacity(0.02)))
             .when(engaged, |v| v.bg(theme::row_hover(cx)))
             .hover(|v| v.bg(theme::row_hover(cx)))
@@ -871,7 +1065,11 @@ impl Newport {
                     .flex()
                     .items_center()
                     .gap(px(9.))
-                    .child(dot)
+                    .child(if table || row.active || row.problem {
+                        dot
+                    } else {
+                        div().w(px(8.)).flex_shrink_0().into_any_element()
+                    })
                     .child(
                         div()
                             .font_family(cx.theme().mono_font_family.clone())
@@ -951,10 +1149,10 @@ impl Newport {
                         .px(px(10.))
                         .text_size(px(12.))
                         .text_color(tone)
-                        .child(row.status),
+                        .child(row.status.clone()),
                 )
             })
-            .when(!inline_route, |v| {
+            .when(!inline_route && show_route, |v| {
                 v.child(
                     div()
                         .id("port-route")
@@ -970,7 +1168,7 @@ impl Newport {
                                 .px(px(10.))
                         })
                         .flex_shrink_0()
-                        .when(!table, |v| v.pr(px(12.)))
+                        .when(!table, |v| v.w(px(184.)).pr(px(12.)))
                         .text_right()
                         .font_family(cx.theme().mono_font_family.clone())
                         .text_size(px(11.5))
@@ -990,8 +1188,10 @@ impl Newport {
                         84.
                     } else if compact {
                         72.
+                    } else if row.rank <= 1 {
+                        166.
                     } else {
-                        74.
+                        72.
                     }))
                     .flex_shrink_0()
                     .pr(px(if table { 10. } else { 0. }))
@@ -1005,8 +1205,16 @@ impl Newport {
                     } else {
                         12.
                     }))
-                    .child(menu)
-                    .child(control),
+                    .when(!table && !compact && row.rank <= 1, |v| {
+                        v.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(tone)
+                                .child(row.status.clone()),
+                        )
+                    })
+                    .child(control)
+                    .child(menu),
             )
             .into_any_element()
     }
@@ -1183,6 +1391,48 @@ mod tests {
         )
     }
     #[test]
+    fn live_identity_is_consistent_without_losing_saved_names_or_failures() {
+        let entry = |name| Entry {
+            port: json!({"port":5179,"processName":"node","arguments":["node","vite"],
+                "worktreePath":"/srv/app","worktreeBranch":"feature","worktreeMain":false,
+                "workingDirectory":"/srv/app/web"}),
+            addresses: vec!["127.0.0.1".into()],
+            forwards: vec![json!({"id":"a","name":name,"remoteHost":"127.0.0.1",
+                "remotePort":5179,"localPort":5179})],
+            saved: false,
+        };
+        for name in ["Vite", "Vite · feature", "Terminal · 127.0.0.1:5179"] {
+            let row = Row::new("/srv/app", entry(name), &json!({}), true);
+            assert_eq!(row.presentation_text(false), ("Vite".into(), "".into()));
+            assert_eq!(row.status, "Forwarding off");
+            assert_eq!(row.entry.forwards[0]["name"], name);
+        }
+        let row = Row::new("/srv/app", entry("Customer preview"), &json!({}), true);
+        assert_eq!(row.presentation_text(false), ("Vite".into(), "".into()));
+        assert!(
+            row.presentation_text(true)
+                .1
+                .contains("Saved as Customer preview")
+        );
+        let row = Row::new(
+            "/srv/app",
+            entry("Customer preview"),
+            &json!({"tunnels":{"a":{"status":"error","errorMessage":"Connection refused"}}}),
+            true,
+        );
+        assert_eq!(
+            row.presentation_text(false),
+            ("Vite".into(), "Connection refused".into())
+        );
+        let mut saved = entry("Customer preview");
+        saved.saved = true;
+        saved.port = saved.forwards[0].clone();
+        let row = Row::new("/srv/app", saved, &json!({}), true);
+        assert_eq!(row.presentation_text(false).0, "Customer preview");
+        assert!(row.presentation_text(false).1.contains("Nothing listening"));
+    }
+
+    #[test]
     fn table_sort_is_numeric_stable_and_other_projects_sort_last() {
         let mut rows = vec![
             row(100, ""),
@@ -1310,7 +1560,7 @@ mod tests {
             {"remotePort":3002,"status":"reachable"}
         ]);
         let row = Row::new("", entry.clone(), &runtime, false);
-        assert_eq!(row.status, "Connected");
+        assert_eq!(row.status, "Forwarding");
         assert!(!row.problem);
         for status in ["disconnected", "connecting", "reconnecting", "error"] {
             runtime["tunnels"][second.id.to_string()]["status"] = json!(status);
@@ -1421,14 +1671,14 @@ mod motion_tests {
     }
 
     #[gpui::test]
-    fn pulse_stops_scheduling_frames_when_transport_settles(cx: &mut TestAppContext) {
+    fn pulse_stops_scheduling_frames_when_transport_disconnects(cx: &mut TestAppContext) {
         cx.update(gpui_kit::component::init);
         let (view, cx) = cx.add_window_view(|_, _| TransportHost("connecting"));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let frames = cx.update(|window, cx| window.simulate_next_frame(cx));
         assert!(frames > 0, "connecting transport schedules its pulse");
         view.update(cx, |view, cx| {
-            view.0 = "connected";
+            view.0 = "disconnected";
             cx.notify();
         });
         cx.update(|window, cx| {
@@ -1446,7 +1696,7 @@ mod motion_tests {
         let (view, cx) = cx.add_window_view(|_, _| TransportHost("disconnected"));
         for (reduced, status) in [
             (false, "disconnected"),
-            (false, "connected"),
+            (true, "connected"),
             (false, "error"),
             (true, "connecting"),
             (true, "reconnecting"),

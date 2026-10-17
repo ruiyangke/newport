@@ -108,7 +108,7 @@ pub fn render_grid(
             if !style.invisible
                 && style.underline == Underline::None
                 && hovered_link.is_some()
-                && hovered_link == cell.hyperlink.as_deref()
+                && hovered_link == frame.link_at(column, row)
             {
                 style.underline = Underline::Single;
             }

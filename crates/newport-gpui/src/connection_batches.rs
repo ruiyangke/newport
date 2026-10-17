@@ -4,92 +4,93 @@ use connections_grouped::{Entry, string};
 use newport_client::tunnel_operations::Action;
 use newport_domain::{
     forwarding_batch::{self, Plan},
-    model::Tunnel,
+    model::{Direction, Tunnel},
     port_grouping::ListenerSelection,
 };
 use std::collections::HashSet;
 
-type MenuBuilder = dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu;
-
 pub(super) struct HeadingAction {
     pub button: Button,
-    busy: bool,
-    menu: Option<Box<MenuBuilder>>,
 }
 
-struct HeadingState {
-    focus: FocusHandle,
-    menu_open: bool,
-    _subscriptions: [Subscription; 2],
-}
-
-/// Heading disclosure is local presentation state. Opacity keeps the action
-/// in the layout, accessibility tree, and keyboard order while it is quiet.
+/// Group actions remain visible and keyboard accessible.
 #[derive(IntoElement)]
 pub(super) struct Heading {
-    id: SharedString,
     content: Stateful<Div>,
     action: Option<HeadingAction>,
 }
 
 impl Heading {
-    pub(super) fn new(
-        id: SharedString,
-        content: Stateful<Div>,
-        action: Option<HeadingAction>,
-    ) -> Self {
-        Self {
-            id,
-            content,
-            action,
-        }
+    pub(super) fn new(content: Stateful<Div>, action: Option<HeadingAction>) -> Self {
+        Self { content, action }
     }
 }
 
 impl RenderOnce for Heading {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let state = window.use_keyed_state(
-            SharedString::from(format!("heading-presentation:{}", self.id)),
-            cx,
-            |window, cx| {
-                let focus = cx.focus_handle();
-                let entered = cx.on_focus_in(&focus, window, |_, _, cx| cx.notify());
-                let exited = cx.on_focus_out(&focus, window, |_, _, _, cx| cx.notify());
-                HeadingState {
-                    focus,
-                    menu_open: false,
-                    _subscriptions: [entered, exited],
-                }
-            },
-        );
-        let presentation = state.read(cx);
-        let focus = presentation.focus.clone();
-        let engaged = presentation.menu_open || focus.contains_focused(window, cx);
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         self.content
-            .group(self.id.clone())
-            .track_focus(&focus)
-            .tab_stop(false)
-            .when_some(self.action, |heading, action| {
-                let button = action
-                    .button
-                    .opacity(if engaged || action.busy { 1. } else { 0. })
-                    .group_hover(self.id, |style| style.opacity(1.))
-                    .focus(|style| style.opacity(1.));
-                let button = if let Some(builder) = action.menu {
-                    button
-                        .dropdown_menu(move |menu, window, cx| builder(menu, window, cx))
-                        .on_open_change(move |open, _, cx| {
-                            state.update(cx, |state, cx| {
-                                state.menu_open = *open;
-                                cx.notify();
-                            });
-                        })
-                        .into_any_element()
-                } else {
-                    button.into_any_element()
-                };
-                heading.child(button)
+            .children(self.action.map(|action| action.button))
+    }
+}
+
+/// Freeze a checkout action at render time. Saved forwards use their definition,
+/// not just their ID: editing a destination must not retarget a pending click.
+#[derive(Clone)]
+struct CheckoutSelection {
+    listeners: ListenerSelection,
+    forwards: Vec<Tunnel>,
+}
+
+impl CheckoutSelection {
+    fn capture(entries: &[Entry]) -> Self {
+        Self {
+            listeners: ListenerSelection::capture(entries),
+            forwards: entries
+                .iter()
+                .filter(|entry| entry.saved)
+                .flat_map(|entry| &entry.forwards)
+                .filter_map(|forward| serde_json::from_value::<Tunnel>(forward.clone()).ok())
+                .filter(|forward| forward.direction == Direction::Local)
+                .collect(),
+        }
+    }
+
+    fn contains_forward(&self, value: &Value) -> bool {
+        let Ok(current) = serde_json::from_value::<Tunnel>(value.clone()) else {
+            return false;
+        };
+        self.forwards.iter().any(|captured| {
+            captured.id == current.id
+                && captured.server_id == current.server_id
+                && current.direction == Direction::Local
+                && captured.project == current.project
+                && captured.local_port == current.local_port
+                && captured.local_port_end == current.local_port_end
+                && captured.remote_host == current.remote_host
+                && captured.remote_port == current.remote_port
+                && captured.remote_port_end == current.remote_port_end
+        })
+    }
+
+    fn resolve(&self, latest: Vec<Entry>) -> Vec<Entry> {
+        latest
+            .into_iter()
+            .filter_map(|mut entry| {
+                if !self.listeners.resolve(vec![entry.clone()]).is_empty() {
+                    return Some(entry);
+                }
+                entry
+                    .forwards
+                    .retain(|forward| self.contains_forward(forward));
+                if entry.forwards.is_empty() {
+                    return None;
+                }
+                // A previously saved-only row may now have a listener. Keep the
+                // captured forwards, but never create a new forward for that row.
+                entry.saved = true;
+                Some(entry)
             })
+            .collect()
     }
 }
 
@@ -101,20 +102,25 @@ pub(super) struct Scope {
 impl Scope {
     pub(super) fn includes_checkout(&self, entry: &Entry) -> bool {
         self.worktree.as_ref().is_none_or(|path| {
-            !entry.saved
+            (!entry.saved || entry.port["direction"] != "remote")
                 && newport_domain::port_grouping::worktree_of(&entry.port)
                     .is_some_and(|worktree| worktree.path == *path)
         })
     }
-    fn selection(&self, entries: &[Entry]) -> Option<ListenerSelection> {
-        self.worktree
-            .as_ref()
-            .map(|_| ListenerSelection::capture(entries))
+    fn selection(&self, entries: &[Entry]) -> Option<CheckoutSelection> {
+        self.worktree.as_ref().map(|_| {
+            let entries = entries
+                .iter()
+                .filter(|entry| self.includes_checkout(entry))
+                .cloned()
+                .collect::<Vec<_>>();
+            CheckoutSelection::capture(&entries)
+        })
     }
     fn resolve_entries(
         &self,
         latest: Vec<Entry>,
-        selection: Option<&ListenerSelection>,
+        selection: Option<&CheckoutSelection>,
     ) -> Vec<Entry> {
         let entries = latest
             .into_iter()
@@ -128,6 +134,14 @@ impl Scope {
             entries
         }
     }
+    fn action_label(&self, connect: bool) -> &'static str {
+        match (self.worktree.is_some(), connect) {
+            (true, true) => "Forward worktree",
+            (true, false) => "Stop worktree",
+            (false, true) => "Forward project",
+            (false, false) => "Stop project",
+        }
+    }
     fn key(&self) -> String {
         format!(
             "{}#{}",
@@ -137,7 +151,7 @@ impl Scope {
     }
 }
 impl Newport {
-    fn scoped_ports(&self, scope: &Scope, selection: Option<&ListenerSelection>) -> Vec<Entry> {
+    fn scoped_ports(&self, scope: &Scope, selection: Option<&CheckoutSelection>) -> Vec<Entry> {
         let latest = self
             .connection_projects()
             .into_iter()
@@ -201,7 +215,7 @@ impl Newport {
     fn run_port_batch(
         &mut self,
         scope: &Scope,
-        selection: Option<&ListenerSelection>,
+        selection: Option<&CheckoutSelection>,
         connect: bool,
         cx: &mut Context<Self>,
     ) {
@@ -262,6 +276,9 @@ impl Newport {
         }
         let plan = self.plan_port_batch(&scope.project, entries);
         let (forward, has_action) = match &plan {
+            // Projects have separate forward and stop controls. Worktrees keep
+            // their existing single contextual action.
+            Ok(p) if scope.worktree.is_none() => (true, p.can_forward()),
             Ok(p) => (
                 if p.creation_error.is_some() {
                     p.stop.is_empty()
@@ -277,16 +294,15 @@ impl Newport {
         }
         let busy = entries.iter().any(|e| self.port_busy(e));
         let server = self.server.clone();
-        // Worktree buttons represent filtered rows; project buttons cover the
-        // full project, including discoveries made since the last render.
+        // Both buttons represent their entire named scope, regardless of search.
+        // Checkout membership is captured so a refresh cannot broaden the click.
+        // Project actions explicitly cover all current project entries.
         let selection = scope.selection(entries);
         let button = crate::controls::button(SharedString::from(format!("batch-{}", scope.key())))
             .label(if busy {
                 "Working…"
-            } else if forward {
-                "Forward all"
             } else {
-                "Stop all"
+                scope.action_label(forward)
             })
             .icon(if forward {
                 IconName::Zap
@@ -296,85 +312,47 @@ impl Newport {
             .ghost()
             .text_color(cx.theme().muted_foreground)
             .disabled(busy)
-            .accessibility_label(format!(
-                "{} in {name}",
-                if forward {
-                    "Forward all ports"
-                } else {
-                    "Stop all forwards"
-                }
-            ))
+            .accessibility_label(format!("{}: {name}", scope.action_label(forward)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.server == server {
                     this.run_port_batch(&scope, selection.as_ref(), forward, cx);
                 }
             }));
-        Some(HeadingAction {
-            button,
-            busy,
-            menu: None,
-        })
+        Some(HeadingAction { button })
     }
-    pub(super) fn port_project_menu(
+    pub(super) fn port_project_stop_button(
         &self,
         project: &str,
         name: &str,
         entries: &[Entry],
         cx: &mut Context<Self>,
     ) -> Option<HeadingAction> {
-        if project.is_empty() {
+        if project.is_empty()
+            || !self
+                .plan_port_batch(project, entries)
+                .is_ok_and(|p| !p.stop.is_empty())
+        {
             return None;
         }
-        let can_stop = self
-            .plan_port_batch(project, entries)
-            .is_ok_and(|p| p.creation_error.is_none() && p.can_forward() && !p.stop.is_empty());
         let busy = entries.iter().any(|e| self.port_busy(e));
         let scope = Scope {
             project: project.to_owned(),
             worktree: None,
         };
         let server = self.server.clone();
-        let weak = cx.weak_entity();
-        let button = crate::controls::compact_icon_button(SharedString::from(format!(
-            "project-actions-{project}"
-        )))
-        .icon(IconName::Ellipsis)
-        .ghost()
-        .accessibility_label(format!("Actions for {name}"));
-        Some(HeadingAction {
-            button,
-            busy,
-            menu: Some(Box::new(move |menu, _, _| {
-                let owner = weak.clone();
-                let server_id = server.clone();
-                let key = scope.project.clone();
-                let menu = menu.item(PopupMenuItem::new("New forward here").icon(IconName::Plus).on_click(move |_,window,cx| {
-                    let _ = owner.update(cx, |this,cx| {
-                        if this.server != server_id { return }
-                        let value = json!({"id":uuid::Uuid::new_v4(),"serverId":server_id,"name":"","localPort":8000,"remotePort":8000,"remoteHost":"127.0.0.1","direction":"local","autoConnect":false,"autoReconnect":true,"project":key});
-                        this.open_tunnel_form(Some(value),false,window,cx);
-                    });
-                }));
-                if !can_stop {
-                    return menu;
+        let button = crate::controls::button(SharedString::from(format!("stop-project-{project}")))
+            .label("Stop project")
+            .icon(IconName::Square)
+            .ghost()
+            .text_color(cx.theme().muted_foreground)
+            .disabled(busy)
+            .accessibility_label(format!("Stop project: {name}"))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.server == server {
+                    this.run_port_batch(&scope, None, false, cx);
                 }
-                let owner = weak.clone();
-                let server_id = server.clone();
-                let scope = scope.clone();
-                menu.item(
-                    PopupMenuItem::new("Stop all")
-                        .icon(IconName::Square)
-                        .disabled(busy)
-                        .on_click(move |_, _, cx| {
-                            let _ = owner.update(cx, |this, cx| {
-                                if this.server == server_id {
-                                    this.run_port_batch(&scope, None, false, cx);
-                                }
-                            });
-                        }),
-                )
-            })),
-        })
+            }));
+        Some(HeadingAction { button })
     }
 }
 
@@ -382,6 +360,100 @@ impl Newport {
 mod tests {
     use super::Scope;
     use serde_json::json;
+    fn saved_entry() -> crate::connections_grouped::Entry {
+        let forward = json!({
+            "id": uuid::Uuid::new_v4(), "serverId": uuid::Uuid::new_v4(),
+            "name": "Vite", "localPort": 5173, "remoteHost": "127.0.0.1",
+            "remotePort": 5173, "direction": "local", "project": "/repo"
+        });
+        let mut port = forward.clone();
+        port["worktreePath"] = json!("/repo/feature");
+        crate::connections_grouped::Entry {
+            port,
+            addresses: vec![],
+            forwards: vec![forward],
+            saved: true,
+        }
+    }
+
+    #[test]
+    fn worktree_saved_membership_fences_destination_direction_and_checkout() {
+        let scope = Scope {
+            project: "/repo".into(),
+            worktree: Some("/repo/feature".into()),
+        };
+        let saved = saved_entry();
+        assert!(scope.includes_checkout(&saved));
+        let selection = scope.selection(std::slice::from_ref(&saved));
+        assert_eq!(
+            scope.resolve_entries(vec![saved.clone()], selection.as_ref()),
+            vec![saved.clone()]
+        );
+
+        let mut moved = saved.clone();
+        moved.port["worktreePath"] = json!("/repo/other");
+        let mut retargeted = saved.clone();
+        retargeted.forwards[0]["remotePort"] = json!(8000);
+        let mut rebound = saved.clone();
+        rebound.forwards[0]["localPort"] = json!(9000);
+        let mut reverse = saved.clone();
+        reverse.port["direction"] = json!("remote");
+        reverse.forwards[0]["direction"] = json!("remote");
+        assert!(!scope.includes_checkout(&reverse));
+        assert!(
+            scope
+                .resolve_entries(
+                    vec![moved, retargeted, rebound, reverse, saved_entry()],
+                    selection.as_ref()
+                )
+                .is_empty()
+        );
+
+        let mut renamed = saved.clone();
+        renamed.forwards[0]["name"] = json!("Renamed service");
+        assert_eq!(
+            scope.resolve_entries(vec![renamed.clone()], selection.as_ref()),
+            vec![renamed]
+        );
+    }
+
+    #[test]
+    fn saved_worktree_forward_survives_listener_discovery_without_expanding_action() {
+        let scope = Scope {
+            project: "/repo".into(),
+            worktree: Some("/repo/feature".into()),
+        };
+        let saved = saved_entry();
+        let selection = scope.selection(std::slice::from_ref(&saved));
+        let mut discovered = saved.clone();
+        discovered.saved = false;
+        discovered.port = json!({"port": 5173, "pid": 42, "address": "127.0.0.1", "worktreePath": "/repo/feature"});
+        discovered.forwards.push(saved_entry().forwards.remove(0));
+        let selected = scope.resolve_entries(vec![discovered], selection.as_ref());
+        assert_eq!(selected.len(), 1);
+        assert!(
+            selected[0].saved,
+            "a newly discovered listener must not create another forward"
+        );
+        assert_eq!(selected[0].forwards, saved.forwards);
+    }
+
+    #[test]
+    fn batch_labels_name_their_scope() {
+        let project = Scope {
+            project: "/repo".into(),
+            worktree: None,
+        };
+        let worktree = Scope {
+            worktree: Some("/repo/feature".into()),
+            ..project.clone()
+        };
+        assert_eq!(project.action_label(true), "Forward project");
+        assert_eq!(project.action_label(false), "Stop project");
+        assert_eq!(worktree.action_label(true), "Forward worktree");
+        assert_eq!(worktree.action_label(false), "Stop worktree");
+    }
+
     #[test]
     fn worktree_scope_keeps_all_equivalent_paths_and_excludes_other_checkouts() {
         let ports = ["/repo/feature/", "/repo/feature", "/repo/feature-other"]
@@ -402,12 +474,12 @@ mod tests {
     }
 
     #[test]
-    fn worktree_batches_keep_visible_selection_but_project_batches_cover_all_latest_rows() {
+    fn worktree_batches_keep_captured_membership_but_project_batches_cover_all_latest_rows() {
         let ports = (8000..8004)
             .map(|port| json!({"port":port,"pid":port,"address":"127.0.0.1","projectRoot":"/repo","worktreePath":"/repo/feature"}))
             .collect();
         let original = newport_domain::port_grouping::group(ports, &[], "s", &[]).remove(0);
-        let visible = vec![original.entries[0].clone(), original.entries[2].clone()];
+        let captured = vec![original.entries[0].clone(), original.entries[2].clone()];
         let worktree = Scope {
             project: "/repo".into(),
             worktree: Some("/repo/feature".into()),
@@ -416,7 +488,7 @@ mod tests {
             project: "/repo".into(),
             worktree: None,
         };
-        let selection = worktree.selection(&visible);
+        let selection = worktree.selection(&captured);
         let mut latest = original.entries;
         let mut new_listener = latest[0].clone();
         new_listener.port["port"] = json!(9000);
@@ -426,7 +498,7 @@ mod tests {
         latest.push(other_checkout);
 
         let selected = worktree.resolve_entries(latest.clone(), selection.as_ref());
-        assert_eq!(selected, visible);
+        assert_eq!(selected, captured);
         assert!(worktree.resolve_entries(latest.clone(), None).is_empty());
         let empty = worktree.selection(&[]);
         assert!(
@@ -434,7 +506,7 @@ mod tests {
                 .resolve_entries(latest.clone(), empty.as_ref())
                 .is_empty()
         );
-        let unfiltered = project.selection(&visible);
+        let unfiltered = project.selection(&captured);
         assert!(unfiltered.is_none());
         assert_eq!(
             project.resolve_entries(latest.clone(), unfiltered.as_ref()),
@@ -445,21 +517,14 @@ mod tests {
 
 #[cfg(test)]
 mod heading_disclosure_tests {
-    use super::{Heading, HeadingAction, MenuBuilder};
+    use super::{Heading, HeadingAction};
     use gpui::{
-        Context, FocusHandle, Focusable, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, Render,
-        TestAppContext, VisualTestContext, WeakEntity, Window, div, point, prelude::*, px, rgb,
+        Context, FocusHandle, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, Render,
+        TestAppContext, VisualTestContext, Window, div, point, prelude::*, px, rgb,
     };
     use gpui_kit as gpui;
-    use gpui_kit::component::{
-        Disableable,
-        button::Button,
-        menu::{PopupMenu, PopupMenuItem},
-    };
-    use std::{
-        cell::{Cell, RefCell},
-        rc::Rc,
-    };
+    use gpui_kit::component::{Disableable, button::Button};
+    use std::{cell::Cell, rc::Rc};
 
     const QUIET_MARKER: u32 = 0xfc02d9;
     const PROJECT_MARKER: u32 = 0x02fcd9;
@@ -470,22 +535,18 @@ mod heading_disclosure_tests {
         action: FocusHandle,
         outside: FocusHandle,
         busy: bool,
-        with_menu: bool,
         clicks: Rc<Cell<usize>>,
-        menu: Rc<RefCell<Option<WeakEntity<PopupMenu>>>>,
     }
 
     impl Harness {
-        fn new(with_menu: bool, cx: &mut Context<Self>) -> Self {
+        fn new(cx: &mut Context<Self>) -> Self {
             Self {
                 sibling: cx.focus_handle(),
                 project: cx.focus_handle(),
                 action: cx.focus_handle(),
                 outside: cx.focus_handle(),
                 busy: false,
-                with_menu,
                 clicks: Rc::default(),
-                menu: Rc::default(),
             }
         }
     }
@@ -493,7 +554,6 @@ mod heading_disclosure_tests {
     impl Render for Harness {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let clicks = self.clicks.clone();
-            let menu_probe = self.menu.clone();
             let action = HeadingAction {
                 button: Button::new("quiet-action")
                     .track_focus(&self.action)
@@ -508,15 +568,6 @@ mod heading_disclosure_tests {
                             .debug_selector(|| "quiet-marker".into()),
                     )
                     .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
-                busy: self.busy,
-                menu: self.with_menu.then(|| {
-                    Box::new(
-                        move |menu: PopupMenu, _: &mut Window, cx: &mut Context<PopupMenu>| {
-                            *menu_probe.borrow_mut() = Some(cx.weak_entity());
-                            menu.item(PopupMenuItem::new("New forward"))
-                        },
-                    ) as Box<MenuBuilder>
-                }),
             };
             div()
                 .size_full()
@@ -524,7 +575,6 @@ mod heading_disclosure_tests {
                 .flex_col()
                 .pt(px(60.))
                 .child(Heading::new(
-                    "test-heading".into(),
                     div()
                         .id("test-heading")
                         .flex()
@@ -567,12 +617,12 @@ mod heading_disclosure_tests {
     }
 
     #[gpui::test]
-    fn quiet_heading_actions_reveal_on_hover_focus_and_busy_without_extra_tab_stops(
+    fn bulk_heading_actions_stay_visible_and_keyboard_accessible_without_extra_tab_stops(
         cx: &mut TestAppContext,
     ) {
         cx.update(gpui_kit::init);
-        let (view, visual) = cx.add_window_view(|_, cx| Harness::new(false, cx));
-        assert!(!painted(visual, QUIET_MARKER));
+        let (view, visual) = cx.add_window_view(|_, cx| Harness::new(cx));
+        assert!(painted(visual, QUIET_MARKER));
         assert!(
             painted(visual, PROJECT_MARKER),
             "project batch stays visible"
@@ -582,10 +632,10 @@ mod heading_disclosure_tests {
         visual.simulate_mouse_move(point(px(260.), px(75.)), None, Default::default());
         assert!(
             painted(visual, QUIET_MARKER),
-            "hover anywhere in the heading reveals the action"
+            "bulk action stays visible when hovering the heading"
         );
         visual.simulate_mouse_move(point(px(350.), px(250.)), None, Default::default());
-        assert!(!painted(visual, QUIET_MARKER));
+        assert!(painted(visual, QUIET_MARKER));
         visual.update(|window, cx| {
             window.focus_next(cx);
             assert!(
@@ -595,7 +645,7 @@ mod heading_disclosure_tests {
         });
         assert!(
             painted(visual, QUIET_MARKER),
-            "focus in a sibling reveals the action"
+            "bulk action stays visible while focusing a sibling"
         );
         assert_eq!(
             visual.debug_bounds("quiet-marker").unwrap(),
@@ -608,7 +658,7 @@ mod heading_disclosure_tests {
             window.focus_next(cx);
             assert!(
                 view.read(cx).action.is_focused(window),
-                "quiet action remains in Tab order"
+                "bulk action remains in Tab order"
             );
         });
         assert!(painted(visual, QUIET_MARKER));
@@ -631,8 +681,8 @@ mod heading_disclosure_tests {
             assert!(view.read(cx).outside.is_focused(window));
         });
         assert!(
-            !painted(visual, QUIET_MARKER),
-            "leaving the heading makes the action quiet again"
+            painted(visual, QUIET_MARKER),
+            "bulk action stays visible after leaving the heading"
         );
         view.update(visual, |view, cx| {
             view.busy = true;
@@ -646,46 +696,6 @@ mod heading_disclosure_tests {
             view.busy = false;
             cx.notify();
         });
-        assert!(!painted(visual, QUIET_MARKER));
-    }
-
-    #[gpui::test]
-    fn quiet_heading_menu_stays_visible_while_open_and_restores_keyboard_focus(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(gpui_kit::init);
-        let (view, visual) = cx.add_window_view(|_, cx| Harness::new(true, cx));
-        assert!(!painted(visual, QUIET_MARKER));
-        let trigger = visual.debug_bounds("quiet-marker").unwrap().center();
-        visual.simulate_click(trigger, Default::default());
-        visual.simulate_mouse_move(point(px(350.), px(250.)), None, Default::default());
-        assert!(
-            painted(visual, QUIET_MARKER),
-            "open menus retain their visible trigger without hover"
-        );
-        visual.update(|window, cx| {
-            let menu = view
-                .read(cx)
-                .menu
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .upgrade()
-                .unwrap();
-            assert!(
-                menu.focus_handle(cx).contains_focused(window, cx),
-                "keyboard focus is inside the open menu"
-            );
-        });
-        visual.simulate_keystrokes("escape");
-        assert!(
-            painted(visual, QUIET_MARKER),
-            "dismissal restores visible trigger focus"
-        );
-        visual.update(|window, cx| view.read(cx).outside.clone().focus(window, cx));
-        assert!(
-            !painted(visual, QUIET_MARKER),
-            "closed menu does not retain stale visibility"
-        );
+        assert!(painted(visual, QUIET_MARKER));
     }
 }

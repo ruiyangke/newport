@@ -61,6 +61,22 @@ pub fn size(cols: u32, rows: u32) -> Result<(), String> {
     Ok(())
 }
 impl Sessions {
+    pub(crate) fn link_owner(
+        &self,
+        id: Uuid,
+    ) -> Result<Arc<crate::server_session::ServerSession>, String> {
+        let sessions = self.inner.entries.lock().unwrap();
+        let session = sessions
+            .get(&id)
+            .ok_or("Terminal is closed. Reconnect before opening a server link.")?;
+        if session.owner.is_revoked() {
+            return Err(
+                "The terminal's server connection changed. Reconnect before opening its links."
+                    .into(),
+            );
+        }
+        Ok(session.owner.clone())
+    }
     /// Lease drop cannot await. Abort synchronously and retain the task so the
     /// application can join it before releasing profile ownership.
     pub fn cancel(&self, id: Uuid) {

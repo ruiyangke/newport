@@ -86,6 +86,7 @@ pub(crate) struct Transport {
     shared: Arc<Shared>,
     dial: Dial,
     retired: watch::Receiver<bool>,
+    recovery: crate::recovery::Recovery,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 impl Transport {
@@ -112,6 +113,7 @@ impl Transport {
             }),
             dial,
             retired,
+            recovery: crate::recovery::subscribe(),
             task: Mutex::new(None),
         }
     }
@@ -128,6 +130,7 @@ impl Transport {
                 self.shared.clone(),
                 self.dial.clone(),
                 self.retired.clone(),
+                self.recovery.clone(),
             )));
         }
         demand
@@ -247,10 +250,14 @@ pub(crate) fn backoff(attempt: u32, random: u64) -> Duration {
     // 80–120% jitter, bounded even at the maximum backoff.
     Duration::from_millis((base * (800 + random % 401) / 1000).min(30_000))
 }
-async fn run(shared: Arc<Shared>, dial: Dial, mut retired: watch::Receiver<bool>) {
+async fn run(
+    shared: Arc<Shared>,
+    dial: Dial,
+    mut retired: watch::Receiver<bool>,
+    mut recovery: crate::recovery::Recovery,
+) {
     let mut demand = shared.demand.subscribe();
     let mut retry = shared.retry.subscribe();
-    let mut recovery = crate::recovery::subscribe();
     let mut failures = 0u32;
     let mut connected_at: Option<Instant> = None;
     loop {
@@ -273,6 +280,28 @@ async fn run(shared: Arc<Shared>, dial: Dial, mut retired: watch::Receiver<bool>
                     _ = retired.changed() => return,
                     _ = connection.disconnected() => {},
                     _ = retry.changed() => {},
+                    _ = recovery.changed() => {
+                        let responsive = tokio::select! {
+                            biased;
+                            _ = retired.changed() => return,
+                            responsive = recovery.revalidate(connection.responsive()) => responsive,
+                        };
+                        if !responsive {
+                            // A socket can remain open across sleep and a network
+                            // change. Retire it before another caller can reuse it.
+                            connection.abort_transport();
+                            shared.permissions.disconnected(None);
+                            shared.update(|s| {
+                                s.connection = None;
+                                s.snapshot.status = "recovering";
+                                s.snapshot.error = None;
+                                s.retry_at = None;
+                            });
+                            failures = 0;
+                            connected_at = None;
+                            continue;
+                        }
+                    },
                 }
                 if !connection.is_closed() {
                     continue;
@@ -356,6 +385,11 @@ async fn run(shared: Arc<Shared>, dial: Dial, mut retired: watch::Receiver<bool>
             s.snapshot.error = None;
             s.retry_at = None;
         });
+        // This dial satisfies retry requests received before it started. A
+        // later request must survive a failure of this older attempt, but must
+        // not interrupt an approval prompt that may still succeed.
+        retry.borrow_and_update();
+        let sleep_epoch = recovery.sleep_epoch();
         let attempt = dial();
         tokio::pin!(attempt);
         let result = loop {
@@ -363,6 +397,13 @@ async fn run(shared: Arc<Shared>, dial: Dial, mut retired: watch::Receiver<bool>
                 biased;
                 _ = retired.changed() => return,
                 _ = demand.changed() => { if *demand.borrow() == 0 { break None; } },
+                _ = recovery.changed() => {
+                    // Approval may legitimately take a long time, but an attempt
+                    // started before sleep must not hold recovery hostage after wake.
+                    if recovery.sleeping() || recovery.sleep_epoch() != sleep_epoch {
+                        break None;
+                    }
+                },
                 result = &mut attempt => break Some(result),
             }
         };
@@ -383,6 +424,12 @@ async fn run(shared: Arc<Shared>, dial: Dial, mut retired: watch::Receiver<bool>
                     s.retry_at = None;
                 });
                 shared.connected.notify_one();
+            }
+            Some(Err(_)) if retry.has_changed().unwrap_or(false) => {
+                // Do not publish a superseded failure: acquire/ready waiters
+                // could otherwise terminate before the next loop clears it.
+                // The queued retry resets failures and starts the next dial.
+                continue;
             }
             Some(Err(error)) => {
                 failures = failures.saturating_add(1);
@@ -433,6 +480,58 @@ mod tests {
         .await
         .unwrap();
     }
+    #[tokio::test(start_paused = true)]
+    async fn sleep_cancels_old_approval_and_wake_retries_without_manual_test() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (mut transport, _stop) = fixture({
+            let attempts = attempts.clone();
+            Arc::new(move || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::pending())
+            })
+        });
+        let (recovery, report) = crate::recovery::fixture();
+        Arc::get_mut(&mut transport).unwrap().recovery = recovery;
+        let _persistent = transport.demand();
+        until(|| attempts.load(Ordering::SeqCst) == 1).await;
+        report(crate::recovery::Event::NetworkChanged);
+        tokio::task::yield_now().await;
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "network hints alone must preserve pending approval"
+        );
+        report(crate::recovery::Event::Sleep);
+        until(|| transport.snapshot().status == "disconnected").await;
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "no dial while asleep");
+        report(crate::recovery::Event::Wake);
+        until(|| attempts.load(Ordering::SeqCst) == 2).await;
+        assert_eq!(transport.snapshot().status, "connecting");
+        transport.close().await;
+    }
+
+    #[tokio::test]
+    async fn coalesced_sleep_and_wake_still_replace_pre_sleep_attempt() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (mut transport, _stop) = fixture({
+            let attempts = attempts.clone();
+            Arc::new(move || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::pending())
+            })
+        });
+        let (recovery, report) = crate::recovery::fixture();
+        Arc::get_mut(&mut transport).unwrap().recovery = recovery;
+        let _persistent = transport.demand();
+        until(|| attempts.load(Ordering::SeqCst) == 1).await;
+        report(crate::recovery::Event::Sleep);
+        report(crate::recovery::Event::Wake);
+        until(|| attempts.load(Ordering::SeqCst) == 2).await;
+        transport.close().await;
+    }
+
     #[tokio::test]
     async fn cancelling_one_caller_keeps_shared_startup_for_other_waiters() {
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -537,6 +636,88 @@ mod tests {
         transport.retry();
         assert!(transport.acquire().await.is_err());
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        transport.close().await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn explicit_retry_bypasses_shared_backoff_immediately() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (transport, _stop) = fixture({
+            let attempts = attempts.clone();
+            Arc::new(move || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Err(ConnectFailure {
+                        message: "agent temporarily unavailable".into(),
+                        retryable: true,
+                    })
+                })
+            })
+        });
+        let _persistent = transport.demand();
+        assert!(transport.acquire().await.is_err());
+        let deadline = transport.shared.state.lock().unwrap().retry_at.unwrap();
+        let now = Instant::now();
+        assert!(deadline > now);
+        transport.retry();
+        assert!(transport.acquire().await.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            Instant::now(),
+            now,
+            "explicit retry must not wait for backoff"
+        );
+        assert_eq!(transport.snapshot().attempt, 1);
+        transport.close().await;
+    }
+
+    #[tokio::test]
+    async fn retry_preserves_pending_approval_and_suppresses_its_superseded_failure() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        let (transport, _stop) = fixture({
+            let attempts = attempts.clone();
+            let release = release.clone();
+            Arc::new(move || {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                let release = release.clone();
+                Box::pin(async move {
+                    if attempt == 0 {
+                        release.notified().await;
+                    }
+                    Err(ConnectFailure {
+                        message: if attempt == 0 {
+                            "old failure"
+                        } else {
+                            "new failure"
+                        }
+                        .into(),
+                        retryable: false,
+                    })
+                })
+            })
+        });
+        let _persistent = transport.demand();
+        let waiter = {
+            let transport = transport.clone();
+            tokio::spawn(async move { transport.acquire().await })
+        };
+        until(|| attempts.load(Ordering::SeqCst) == 1).await;
+        let before_retry = *transport.shared.changes.borrow();
+        // Multiple callers can request retry while a shared approval is open.
+        // Keep that prompt alive and coalesce their requests into one retry.
+        transport.retry();
+        transport.retry();
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(!waiter.is_finished());
+        release.notify_one();
+        assert_eq!(waiter.await.unwrap().err().unwrap(), "new failure");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(transport.snapshot().attempt, 1);
+        // Only retry resets, the new attempt and its failure are published;
+        // the obsolete failure must never become observable to waiters.
+        let publications = transport.shared.changes.borrow().wrapping_sub(before_retry);
+        assert_eq!(publications, 5, "obsolete failures must not be published");
         transport.close().await;
     }
     #[tokio::test]

@@ -73,6 +73,7 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
         work: work.into(),
         replies,
         last_refresh: Instant::now(),
+        terminal_observers: Default::default(),
         window_visible: window.is_visible(),
         focus: cx.focus_handle(),
         sidebar_focus: cx.focus_handle(),
@@ -1665,7 +1666,7 @@ fn connections_toolbar_wraps_and_loading_replaces_the_list_in_place(cx: &mut Tes
             let nodes = gpui_kit::base::test_support::snapshots(window);
             for name in [
                 "All",
-                "Forwarded",
+                "Saved",
                 "Projects view",
                 "Ports view",
                 "Discover ports",
@@ -1819,6 +1820,86 @@ fn connections_collapse_search_and_refresh_update_virtual_ranges(cx: &mut TestAp
     });
     frame(visual);
     assert!(visual.debug_bounds(row_selector(499)).is_none());
+}
+
+#[gpui::test]
+fn connections_worktree_disclosure_survives_refresh_and_search(cx: &mut TestAppContext) {
+    let (view, visual) = connections_fixture(cx, false);
+    let ports = |branch: &str| {
+        Value::Array((0..63).map(|i| json!({
+        "port":8000+i, "pid":i+1, "address":"127.0.0.1", "processName":"node",
+        "projectRoot":"/srv/project-0",
+        "worktreePath":if i < 60 { "/srv/project-0/feature-a" } else { "/srv/project-0/feature-b" },
+        "worktreeBranch":if i < 60 { branch } else { "feature-b" }, "worktreeMain":false
+    })).collect())
+    };
+    view.update(visual, |view, cx| {
+        put(view, "page", ports("feature-a"));
+        cx.notify();
+    });
+    frame(visual);
+    let point = visual.update(|window, _| {
+        gpui_kit::base::test_support::snapshots(window)
+            .into_iter()
+            .find(|node| node.label() == Some("Collapse worktree feature-a"))
+            .unwrap()
+            .bounds()
+            .center()
+    });
+    visual.simulate_click(point, Default::default());
+    frame(visual);
+    assert!(visual.debug_bounds(row_selector(0)).is_none());
+    assert!(
+        visual
+            .debug_bounds("connection-row-port-8060-61-127.0.0.1-")
+            .is_some()
+    );
+    assert_eq!(
+        view.read_with(visual, |view, _| view.connections_state["fixture"]
+            .viewport
+            .borrow()
+            .list
+            .item_count()),
+        1
+    );
+    // A branch rename changes the label, never the disclosure identity.
+    view.update(visual, |view, cx| {
+        put(view, "page", ports("renamed-a"));
+        cx.notify();
+    });
+    frame(visual);
+    assert!(visual.debug_bounds(row_selector(0)).is_none());
+    let input = view.read_with(visual, |view, _| {
+        view.connections_state["fixture"].input.clone().unwrap()
+    });
+    visual.update(|window, cx| input.update(cx, |input, cx| input.set_value("8000", window, cx)));
+    frame(visual);
+    assert!(
+        visual.debug_bounds(row_selector(0)).is_some(),
+        "search reveals matches in a folded checkout"
+    );
+    visual.update(|window, cx| input.update(cx, |input, cx| input.set_value("", window, cx)));
+    frame(visual);
+    assert!(
+        visual.debug_bounds(row_selector(0)).is_none(),
+        "clearing search restores disclosure choice"
+    );
+    let point = visual.update(|window, _| {
+        gpui_kit::base::test_support::snapshots(window)
+            .into_iter()
+            .find(|node| node.label() == Some("Expand worktree renamed-a"))
+            .unwrap()
+            .bounds()
+            .center()
+    });
+    visual.simulate_click(point, Default::default());
+    frame(visual);
+    assert!(visual.debug_bounds(row_selector(0)).is_some());
+    visual.simulate_resize(size(px(550.), px(500.)));
+    frame(visual);
+    let viewport = visual.debug_bounds("connections-scroll").unwrap();
+    let row = visual.debug_bounds(row_selector(0)).unwrap();
+    assert!(row.right() <= viewport.right() && row.left() >= viewport.left());
 }
 
 #[gpui::test]

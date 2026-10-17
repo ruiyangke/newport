@@ -18,6 +18,9 @@ pub(super) struct State {
     pub(super) table: bool,
     pub(super) sort: usize,
     pub(super) descending: bool,
+    pub(super) collapsed_worktrees: std::collections::HashSet<(String, String)>,
+    pub(super) worktree_associations:
+        std::cell::RefCell<newport_domain::port_grouping::WorktreeAssociations>,
     pub(super) collapsed: std::collections::HashSet<String>,
     pub(super) expanded: std::collections::HashSet<String>,
 }
@@ -57,7 +60,14 @@ pub(super) fn entry_matches(
     }
     let mut parts = vec![project.name.clone(), project.key.clone()];
     if entry.saved {
-        for key in ["name", "localPort", "remotePort", "remoteHost"] {
+        for key in [
+            "name",
+            "localPort",
+            "remotePort",
+            "remoteHost",
+            "worktreePath",
+            "worktreeBranch",
+        ] {
             if let Some(value) = entry.port.get(key).filter(|v| !v.is_null()) {
                 parts.push(
                     value
@@ -265,9 +275,7 @@ impl Newport {
             .entry(self.server.clone())
             .or_default();
         if state.input.is_none() {
-            let input = cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Find a port, project, process, or kind")
-            });
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find a connection…"));
             state.subscription = Some(cx.subscribe(&input, move |this, _, event, cx| {
                 if matches!(event, InputEvent::Change)
                     && this.page == Page::Ports

@@ -20,6 +20,34 @@ struct DesktopProbe {
 }
 
 #[tokio::test]
+async fn terminal_link_rpc_opens_public_url_but_requires_terminal_for_loopback() {
+    let fixture = Fixture::start().await;
+    let terminal = Uuid::new_v4();
+    fixture
+        .call(
+            "open_terminal_link",
+            json!({"terminalId":terminal,"url":"https://example.test/path?q=1#section"}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .call(
+                "open_terminal_link",
+                json!({"terminalId":terminal,"url":"http://localhost:5178/path"})
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        *fixture.desktop.urls.lock().unwrap(),
+        vec!["https://example.test/path?q=1#section"]
+    );
+    assert!(fixture.manager.snapshot().config.tunnels.is_empty());
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn connections_query_returns_immediately_and_shares_backend_owned_refresh() {
     let fixture = Fixture::start().await;
     let server: Server = serde_json::from_value(json!({"id":Uuid::new_v4(),"name":"Query scope", "sshHost":"127.0.0.1", "sshPort":9,"sshUser":"fixture"})).unwrap();

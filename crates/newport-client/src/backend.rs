@@ -63,11 +63,15 @@ impl Backend {
     }
     /// Called only for an explicit user gesture; terminal escape parsing has
     /// no connection to the platform opener.
-    pub fn open_terminal_link(&self, url: &str) -> Result<(), String> {
+    pub fn open_terminal_link(&self, terminal: uuid::Uuid, url: &str) -> Result<(), String> {
         let url = newport_domain::external_link::http_url(url)
             .ok_or("Only http and https links can be opened.")?;
-        self.call("open_url", serde_json::json!({"url":url}))
-            .map(|_| ())
+        self.call_with_timeout(
+            "open_terminal_link",
+            serde_json::json!({"terminalId":terminal,"url":url}),
+            Duration::from_secs(60),
+        )
+        .map(|_| ())
     }
     /// Connect to an explicitly selected local backend, without process-global
     /// environment changes. The same bounded IPC contract applies.
@@ -1996,21 +2000,29 @@ mod creation_transport_tests {
     fn terminal_link_opener_rejects_unsafe_schemes_and_dispatches_exact_url_once() {
         let host = Host::new();
         let backend = Backend::at_path(host.path.clone());
-        assert!(backend.open_terminal_link("file:///etc/passwd").is_err());
+        let terminal = uuid::Uuid::new_v4();
+        assert!(
+            backend
+                .open_terminal_link(terminal, "file:///etc/passwd")
+                .is_err()
+        );
         assert!(
             matches!(host.listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
         );
         let task = thread::spawn(move || {
             let (mut stream, request) = host.receive();
-            assert_eq!(request.method, "open_url");
-            assert_eq!(request.args, json!({"url":"https://example.org/服务?q=1"}));
+            assert_eq!(request.method, "open_terminal_link");
+            assert_eq!(
+                request.args,
+                json!({"terminalId":terminal,"url":"https://example.org/服务?q=1"})
+            );
             Host::reply(&mut stream, Value::Null, None);
             assert!(
                 matches!(host.listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
             );
         });
         backend
-            .open_terminal_link("HTTPS://example.org/服务?q=1")
+            .open_terminal_link(terminal, "HTTPS://example.org/服务?q=1")
             .unwrap();
         task.join().unwrap();
     }

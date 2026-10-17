@@ -85,6 +85,115 @@ pub struct Worktree {
     pub main: bool,
 }
 
+/// Last unambiguous checkout observed for a saved forward during this app session.
+/// This is display metadata, never a routing or authorization decision. Entries
+/// are bounded by the saved forwards and invalidated when their destination or
+/// explicitly assigned project changes. Names are deliberately not copied.
+#[derive(Default)]
+pub struct WorktreeAssociations {
+    entries: HashMap<(String, String), WorktreeAssociation>,
+}
+
+struct WorktreeAssociation {
+    signature: Value,
+    project: String,
+    worktree: Worktree,
+}
+
+fn association_signature(tunnel: &Value) -> Value {
+    serde_json::json!([
+        tunnel["direction"],
+        tunnel["remoteHost"],
+        tunnel["remotePort"],
+        tunnel["remotePortEnd"],
+        tunnel["project"]
+    ])
+}
+
+impl WorktreeAssociations {
+    pub fn group(
+        &mut self,
+        ports: Vec<Value>,
+        saved: &[Value],
+        server: &str,
+        known: &[Value],
+    ) -> Vec<Project> {
+        // The supplied saved configuration contains all servers. Prune deleted
+        // forwards globally, but never infer an association from another server.
+        self.entries.retain(|(server, id), association| {
+            saved.iter().any(|tunnel| {
+                text(tunnel, "serverId") == server
+                    && text(tunnel, "id") == id
+                    && association.signature == association_signature(tunnel)
+            })
+        });
+        group_inner(ports, saved, server, known, Some(self))
+    }
+
+    fn observe(&mut self, server: &str, projects: &[Project]) {
+        let mut observed: HashMap<&str, Option<(&Value, &str, Worktree)>> = HashMap::new();
+        let mut live_checkouts = HashMap::new();
+        for project in projects {
+            for entry in &project.entries {
+                if let Some(worktree) = worktree_of(&entry.port) {
+                    live_checkouts
+                        .entry((project.key.as_str(), worktree.path.clone()))
+                        .or_insert(worktree);
+                }
+                for tunnel in &entry.forwards {
+                    let candidate = worktree_of(&entry.port)
+                        .map(|worktree| (tunnel, project.key.as_str(), worktree));
+                    observed
+                        .entry(text(tunnel, "id"))
+                        .and_modify(|previous| {
+                            if previous
+                                .as_ref()
+                                .map(|(_, project, worktree)| (*project, &worktree.path))
+                                != candidate
+                                    .as_ref()
+                                    .map(|(_, project, worktree)| (*project, &worktree.path))
+                            {
+                                *previous = None;
+                            }
+                        })
+                        .or_insert(candidate);
+                }
+            }
+        }
+        for (id, observed) in observed {
+            let key = (server.to_owned(), id.to_owned());
+            if let Some((tunnel, project, worktree)) = observed {
+                self.entries.insert(
+                    key,
+                    WorktreeAssociation {
+                        signature: association_signature(tunnel),
+                        project: project.to_owned(),
+                        worktree,
+                    },
+                );
+            } else {
+                // A port range spanning checkouts, or a replacement listener
+                // with unknown checkout, must not inherit a guessed identity.
+                self.entries.remove(&key);
+            }
+        }
+        // The branch belongs to the checkout, not an individual listener. A
+        // live sibling can report a branch switch while this forward's process
+        // is stopped. Refresh the remembered value as well as this render, so
+        // the old branch cannot return after the final listener disappears.
+        for ((entry_server, _), association) in &mut self.entries {
+            if entry_server == server {
+                if let Some(worktree) = live_checkouts.get(&(
+                    association.project.as_str(),
+                    association.worktree.path.clone(),
+                )) {
+                    association.worktree = worktree.clone();
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Project {
     pub key: String,
@@ -231,6 +340,16 @@ fn owner(port: &Value) -> String {
 /// preserved for equal-rank listeners and equal-name entries, matching Tauri's
 /// stable sorting; hash maps are only indexes and never determine row order.
 pub fn group(ports: Vec<Value>, saved: &[Value], server: &str, known: &[Value]) -> Vec<Project> {
+    group_inner(ports, saved, server, known, None)
+}
+
+fn group_inner(
+    ports: Vec<Value>,
+    saved: &[Value],
+    server: &str,
+    known: &[Value],
+    mut associations: Option<&mut WorktreeAssociations>,
+) -> Vec<Project> {
     let known: Vec<_> = known
         .iter()
         .filter(|p| p["serverId"].as_str().is_none_or(|id| id == server) && known_path(p).is_some())
@@ -302,17 +421,35 @@ pub fn group(ports: Vec<Value>, saved: &[Value], server: &str, known: &[Value]) 
             saved: false,
         });
     }
+    if let Some(associations) = associations.as_mut() {
+        associations.observe(server, &projects);
+    }
     for tunnel in mine {
         if placed.contains(text(tunnel, "id")) {
             continue;
         }
-        let key = fold(text(tunnel, "project"));
+        let association = associations.as_ref().and_then(|associations| {
+            associations
+                .entries
+                .get(&(server.to_owned(), text(tunnel, "id").to_owned()))
+        });
+        let key = fold(
+            association
+                .map(|a| a.project.as_str())
+                .unwrap_or_else(|| text(tunnel, "project")),
+        );
+        let mut port = tunnel.clone();
+        if let Some(association) = association {
+            port["worktreePath"] = Value::String(association.worktree.path.clone());
+            port["worktreeBranch"] = serde_json::to_value(&association.worktree.branch).unwrap();
+            port["worktreeMain"] = Value::Bool(association.worktree.main);
+        }
         let index = *project_indexes.entry(key.clone()).or_insert_with(|| {
             projects.push(describe(&key, None, &known));
             projects.len() - 1
         });
         projects[index].entries.push(Entry {
-            port: tunnel.clone(),
+            port,
             addresses: Vec::new(),
             forwards: vec![tunnel.clone()],
             saved: true,
@@ -320,9 +457,10 @@ pub fn group(ports: Vec<Value>, saved: &[Value], server: &str, known: &[Value]) 
     }
     for project in &mut projects {
         let mut checkouts = HashMap::new();
-        for entry in project.entries.iter().filter(|entry| !entry.saved) {
+        for entry in &project.entries {
             if let Some(worktree) = worktree_of(&entry.port) {
-                checkouts.insert(worktree.path.clone(), worktree);
+                // Live metadata wins over a remembered branch label.
+                checkouts.entry(worktree.path.clone()).or_insert(worktree);
             }
         }
         project.worktrees = checkouts.into_values().collect();
@@ -370,6 +508,174 @@ mod tests {
 
     fn forward(id: &str, port: u16, project: &str) -> Value {
         json!({"id":id,"serverId":"s","remoteHost":"127.0.0.1","remotePort":port,"project":project})
+    }
+
+    fn checkout_listener(port: u16, path: &str, branch: &str) -> Value {
+        json!({"port":port,"pid":port,"address":"127.0.0.1","projectRoot":"/repo",
+            "worktreePath":path,"worktreeBranch":branch,"worktreeMain":false})
+    }
+
+    #[test]
+    fn saved_forward_keeps_observed_checkout_and_custom_name_when_listener_disappears() {
+        let mut associations = WorktreeAssociations::default();
+        let mut tunnel = forward("web", 3000, "/repo");
+        tunnel["name"] = json!("My custom name");
+        let saved = [tunnel.clone()];
+        associations.group(
+            vec![checkout_listener(3000, "/checkouts/ui/", "ui")],
+            &saved,
+            "s",
+            &[],
+        );
+        let projects = associations.group(vec![], &saved, "s", &[]);
+        let project = &projects[0];
+        assert_eq!(project.key, "/repo");
+        assert_eq!(project.worktrees[0].path, "/checkouts/ui");
+        assert_eq!(project.worktrees[0].branch.as_deref(), Some("ui"));
+        assert!(project.entries[0].saved);
+        assert_eq!(project.entries[0].port["name"], "My custom name");
+        assert_eq!(project.entries[0].forwards, [tunnel]);
+
+        associations.group(
+            vec![checkout_listener(3000, "/checkouts/ui", "renamed")],
+            &saved,
+            "s",
+            &[],
+        );
+        let project = associations.group(vec![], &saved, "s", &[]).remove(0);
+        assert_eq!(project.worktrees[0].branch.as_deref(), Some("renamed"));
+    }
+
+    #[test]
+    fn checkout_associations_are_server_scoped_and_invalidated_by_destination_changes() {
+        let mut associations = WorktreeAssociations::default();
+        let tunnel = forward("web", 3000, "/repo");
+        let mut foreign = tunnel.clone();
+        foreign["serverId"] = json!("other");
+        let saved = [tunnel.clone(), foreign];
+        associations.group(
+            vec![checkout_listener(3000, "/checkouts/ui", "ui")],
+            &saved,
+            "s",
+            &[],
+        );
+        assert!(associations.group(vec![], &saved, "other", &[])[0]
+            .worktrees
+            .is_empty());
+        assert_eq!(
+            associations.group(vec![], &saved, "s", &[])[0]
+                .worktrees
+                .len(),
+            1
+        );
+
+        for (field, replacement) in [
+            ("remotePort", json!(3001)),
+            ("remotePortEnd", json!(3002)),
+            ("remoteHost", json!("192.0.2.1")),
+            ("direction", json!("remote")),
+            ("project", json!("/another")),
+        ] {
+            associations.group(
+                vec![checkout_listener(3000, "/checkouts/ui", "ui")],
+                &saved,
+                "s",
+                &[],
+            );
+            let mut edited = tunnel.clone();
+            edited[field] = replacement;
+            assert!(
+                associations.group(vec![], &[edited], "s", &[])[0]
+                    .worktrees
+                    .is_empty(),
+                "{field}"
+            );
+        }
+        associations.group(
+            vec![checkout_listener(3000, "/checkouts/ui", "ui")],
+            &saved,
+            "s",
+            &[],
+        );
+        associations.group(vec![], &[], "s", &[]);
+        assert!(associations.entries.is_empty());
+        assert!(associations.group(vec![], &saved, "s", &[])[0]
+            .worktrees
+            .is_empty());
+    }
+
+    #[test]
+    fn live_checkout_rename_updates_stopped_forwards_and_survives_all_listeners_stopping() {
+        let mut associations = WorktreeAssociations::default();
+        let saved = [forward("web", 3000, "/repo"), forward("api", 3001, "/repo")];
+        associations.group(
+            vec![
+                checkout_listener(3000, "/checkouts/ui", "old"),
+                checkout_listener(3001, "/checkouts/ui", "old"),
+            ],
+            &saved,
+            "s",
+            &[],
+        );
+        // Even an unsaved listener carries authoritative checkout metadata.
+        let live = associations.group(
+            vec![checkout_listener(3002, "/checkouts/ui", "new")],
+            &saved,
+            "s",
+            &[],
+        );
+        assert_eq!(live[0].entries.len(), 3);
+        assert!(live[0]
+            .entries
+            .iter()
+            .all(|entry| entry.port["worktreeBranch"] == "new"));
+        assert_eq!(live[0].worktrees.len(), 1);
+        let stopped = associations.group(vec![], &saved, "s", &[]);
+        assert_eq!(stopped[0].entries.len(), 2);
+        assert!(stopped[0]
+            .entries
+            .iter()
+            .all(|entry| entry.saved && entry.port["worktreeBranch"] == "new"));
+        assert_eq!(stopped[0].worktrees[0].branch.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn ambiguous_range_or_unknown_replacement_drops_checkout_association() {
+        let mut associations = WorktreeAssociations::default();
+        let mut tunnel = forward("range", 3000, "/repo");
+        tunnel["remotePortEnd"] = json!(3002);
+        let saved = [tunnel];
+        let first = checkout_listener(3000, "/checkouts/ui", "ui");
+        associations.group(vec![first.clone()], &saved, "s", &[]);
+        assert_eq!(
+            associations.group(vec![], &saved, "s", &[])[0]
+                .worktrees
+                .len(),
+            1
+        );
+        associations.group(
+            vec![
+                first.clone(),
+                checkout_listener(3001, "/checkouts/api", "api"),
+                first.clone(),
+            ],
+            &saved,
+            "s",
+            &[],
+        );
+        assert!(associations.group(vec![], &saved, "s", &[])[0]
+            .worktrees
+            .is_empty());
+        associations.group(vec![first], &saved, "s", &[]);
+        associations.group(
+            vec![listener(3000, 9000, "127.0.0.1", "/repo")],
+            &saved,
+            "s",
+            &[],
+        );
+        assert!(associations.group(vec![], &saved, "s", &[])[0]
+            .worktrees
+            .is_empty());
     }
 
     #[test]

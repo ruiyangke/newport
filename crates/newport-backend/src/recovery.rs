@@ -5,6 +5,7 @@ use tokio::sync::watch;
 #[derive(Clone, Copy, Default)]
 struct State {
     sleeping: bool,
+    sleep_epoch: u64,
 }
 
 fn events() -> &'static watch::Sender<State> {
@@ -12,6 +13,7 @@ fn events() -> &'static watch::Sender<State> {
     EVENTS.get_or_init(|| watch::channel(State::default()).0)
 }
 
+#[derive(Clone)]
 pub struct Recovery(watch::Receiver<State>);
 
 pub fn subscribe() -> Recovery {
@@ -19,6 +21,29 @@ pub fn subscribe() -> Recovery {
 }
 
 impl Recovery {
+    pub fn sleep_epoch(&self) -> u64 {
+        self.0.borrow().sleep_epoch
+    }
+
+    pub fn sleeping(&self) -> bool {
+        self.0.borrow().sleeping
+    }
+
+    pub async fn changed(&mut self) {
+        let _ = self.0.changed().await;
+    }
+
+    /// Check the existing authenticated connection after the OS resumes and
+    /// network notifications settle. A failed check never replays application work.
+    pub async fn revalidate(&mut self, probe: impl std::future::Future<Output = bool>) -> bool {
+        self.ready().await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        matches!(
+            tokio::time::timeout(Duration::from_secs(3), probe).await,
+            Ok(true)
+        )
+    }
+
     pub async fn ready(&mut self) {
         while self.0.borrow_and_update().sleeping {
             if self.0.changed().await.is_err() {
@@ -44,20 +69,62 @@ pub use newport_platform::events::Event;
 
 /// The application supplies OS lifecycle hints; they never prove reachability.
 pub fn report(event: Event) {
-    events().send_modify(|state| match event {
-        Event::Sleep => state.sleeping = true,
-        Event::Wake => state.sleeping = false,
+    publish(events(), event);
+}
+
+fn publish(events: &watch::Sender<State>, event: Event) {
+    events.send_modify(|state| match event {
+        Event::Sleep | Event::Wake => {
+            state.sleeping = matches!(event, Event::Sleep);
+            state.sleep_epoch = state.sleep_epoch.wrapping_add(1);
+        }
         Event::NetworkChanged => {}
     });
+}
+
+#[cfg(test)]
+pub(crate) fn fixture() -> (Recovery, impl Fn(Event)) {
+    let (tx, rx) = watch::channel(State::default());
+    (Recovery(rx), move |event| publish(&tx, event))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[tokio::test(start_paused = true)]
+    async fn wake_check_waits_for_wake_then_bounds_a_stale_socket() {
+        let (mut recovery, report) = fixture();
+        report(Event::Sleep);
+        let check = tokio::spawn(async move { recovery.revalidate(std::future::pending()).await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert!(!check.is_finished(), "do not probe or retry while asleep");
+        report(Event::Wake);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(500)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert!(
+            !check.await.unwrap(),
+            "silent old sockets must fail the bounded check"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn network_check_preserves_responsive_connection() {
+        let (mut recovery, report) = fixture();
+        report(Event::NetworkChanged);
+        recovery.changed().await;
+        assert!(recovery.revalidate(async { true }).await);
+    }
+
     #[tokio::test]
     async fn sleep_blocks_recovery_until_wake() {
-        let (tx, rx) = watch::channel(State { sleeping: true });
+        let (tx, rx) = watch::channel(State {
+            sleeping: true,
+            ..State::default()
+        });
         let mut recovery = Recovery(rx);
         assert!(
             tokio::time::timeout(Duration::from_millis(10), recovery.ready())

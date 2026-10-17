@@ -45,6 +45,7 @@ pub enum Command {
     KeepAgentFile,
     OpenTunnel,
     OpenUrl,
+    OpenTerminalLink,
 }
 impl Command {
     pub fn parse(method: &str) -> Option<Self> {
@@ -300,6 +301,17 @@ impl Command {
                 crate::commands::open_url(services.desktop.clone(), argument(args, "url")?)
                     .await
                     .map_err(error)?,
+            ),
+            Self::OpenTerminalLink => encode(
+                crate::commands::open_terminal_link(
+                    services.manager,
+                    services.terminals,
+                    services.desktop.clone(),
+                    argument(args, "terminalId")?,
+                    argument(args, "url")?,
+                )
+                .await
+                .map_err(error)?,
             ),
         }
     }

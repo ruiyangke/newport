@@ -37,9 +37,36 @@ pub struct Frame {
     pub scrollback_rows: usize,
     /// Viewport top measured from the start of retained history.
     pub viewport_top: usize,
+    pub(crate) detected_links: Vec<crate::links::DetectedLink>,
 }
 
 impl Frame {
+    /// Resolve links from the same visible snapshot used for painting, including
+    /// plain URLs emitted by applications that do not preserve OSC 8 metadata.
+    pub fn link_at(&self, column: usize, row: usize) -> Option<&str> {
+        let cells = &self.rows.get(row)?.cells;
+        let cell = cells.get(column)?;
+        let cell = if cell.wide == CellWide::SpacerTail {
+            cells.get(column.checked_sub(1)?)?
+        } else {
+            cell
+        };
+        if cell.style.invisible || cell.wide == CellWide::SpacerHead {
+            return None;
+        }
+        if let Some(url) = cell.hyperlink.as_deref() {
+            return Some(url);
+        }
+        let offset = row * usize::from(self.columns) + column;
+        let index = self
+            .detected_links
+            .partition_point(|link| *link.cells.end() < offset);
+        self.detected_links
+            .get(index)
+            .filter(|link| link.cells.contains(&offset))
+            .map(|link| link.url.as_str())
+    }
+
     /// Text for accessibility. Concealed text and wide tails are not exposed.
     pub fn visible_lines(&self) -> Vec<String> {
         let mut lines: Vec<String> = self
@@ -116,6 +143,7 @@ impl Renderer {
             palette: [RgbColor::default(); 256],
             scrollback_rows: 0,
             viewport_top: 0,
+            detected_links: Vec::new(),
         });
         frame.columns = columns;
         frame.rows.resize_with(height, Row::default);
@@ -130,8 +158,10 @@ impl Renderer {
             .offset
             .try_into()
             .map_err(|_| libghostty_vt::Error::InvalidValue)?;
+        let mut changed = resize;
         let mut rows = self.rows.update(&snapshot)?;
         while let Some((y, row)) = rows.next_dirty() {
+            changed = true;
             let target = &mut frame.rows[usize::from(y)];
             update_row(
                 target,
@@ -141,6 +171,11 @@ impl Renderer {
                 u32::from(y),
                 crate::Point::Viewport,
             )?;
+        }
+        if changed {
+            // Detect only when visible rows change, never scan scrollback or
+            // reparse text on each mouse move/modifier change.
+            frame.detected_links = crate::links::detect(&frame.rows, columns);
         }
         snapshot.clean()?;
         self.force_redraw = false;

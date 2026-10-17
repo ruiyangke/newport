@@ -199,7 +199,6 @@ struct ProjectChunk {
 struct GroupLayout {
     query: String,
     projects: usize,
-    content_width: f32,
 }
 
 /// WorkspaceDetail uses a window media query, but ports use their containing
@@ -327,17 +326,6 @@ fn project_location(key: &str, entries: &[Entry]) -> String {
             .collect::<Vec<_>>(),
     )
 }
-fn worktree_location(path: &str, root: &str) -> String {
-    if let Some(relative) = path.strip_prefix(&format!("{root}/")) {
-        return format!("{relative}/");
-    }
-    if let Some((parent, _)) = root.rsplit_once('/')
-        && let Some(relative) = path.strip_prefix(&format!("{parent}/"))
-    {
-        return format!("../{relative}/");
-    }
-    path.to_owned()
-}
 pub(super) fn trouble(runtime: &Value, t: &Value) -> bool {
     trouble_for(runtime, t, None)
 }
@@ -393,14 +381,12 @@ enum RowSection {
 }
 
 fn row_section(row: &connections_rows::Row, show_branches: bool) -> RowSection {
-    if row.entry.saved {
-        if row.entry.port["direction"] == "remote" {
-            RowSection::Reverse
-        } else {
-            RowSection::Saved
-        }
+    if row.entry.saved && row.entry.port["direction"] == "remote" {
+        RowSection::Reverse
     } else if show_branches && let Some(worktree) = &row.worktree {
         RowSection::Worktree(worktree.path.clone())
+    } else if row.entry.saved && row.worktree.is_none() {
+        RowSection::Saved
     } else {
         RowSection::Project
     }
@@ -410,15 +396,63 @@ fn sort_project_rows(rows: &mut [connections_rows::Row]) {
     rows.sort_by_key(|row| {
         let worktree = &row.worktree;
         (
-            row.entry.saved,
+            row.entry.saved && worktree.is_none(),
             row.entry.saved && row.entry.port["direction"] == "remote",
             worktree.is_some(),
             worktree.as_ref().is_some_and(|w| !w.main),
-            worktree.as_ref().and_then(|w| w.branch.clone()),
             worktree.as_ref().map(|w| w.path.clone()),
-            row.entry.port["port"].as_u64(),
+            row.number,
         )
     });
+}
+
+fn worktree_heading(worktree: &newport_domain::port_grouping::Worktree) -> (String, &'static str) {
+    let branch = worktree
+        .branch
+        .as_deref()
+        .filter(|branch| !branch.is_empty());
+    let detached = branch.is_none_or(|branch| {
+        (7..=40).contains(&branch.len()) && branch.bytes().all(|b| b.is_ascii_hexdigit())
+    });
+    let title = if detached {
+        worktree
+            .path
+            .rsplit('/')
+            .find(|part| !part.is_empty())
+            .unwrap_or(&worktree.path)
+            .to_owned()
+    } else {
+        branch.unwrap().to_owned()
+    };
+    (
+        title,
+        if detached {
+            "Detached"
+        } else if worktree.main {
+            "Main checkout"
+        } else {
+            ""
+        },
+    )
+}
+
+// Retain one row as the collapsed section's heading anchor. Hidden rows never
+// enter the virtual list, so a large folded checkout consumes one small item.
+fn worktree_disclosure_rows(
+    rows: &[connections_rows::Row],
+    project: &str,
+    collapsed: &std::collections::HashSet<(String, String)>,
+) -> Vec<connections_rows::Row> {
+    let mut seen = std::collections::HashSet::new();
+    rows.iter()
+        .filter(|row| {
+            row.worktree.as_ref().is_none_or(|worktree| {
+                !collapsed.contains(&(project.to_owned(), worktree.path.clone()))
+                    || seen.insert(worktree.path.clone())
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 impl Newport {
@@ -442,7 +476,14 @@ impl Newport {
             .as_array()
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        newport_domain::port_grouping::group(ports, saved, &self.server, &known)
+        if let Some(state) = self.connections_state.get(&self.server) {
+            state
+                .worktree_associations
+                .borrow_mut()
+                .group(ports, saved, &self.server, &known)
+        } else {
+            newport_domain::port_grouping::group(ports, saved, &self.server, &known)
+        }
     }
 
     pub(super) fn grouped_ports(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -537,7 +578,10 @@ impl Newport {
                     .collect()
             });
         let empty = visible.is_empty();
-        let mut summary = format!("{active} forwarding");
+        let mut summary = format!(
+            "{active} {} enabled",
+            if active == 1 { "forward" } else { "forwards" }
+        );
         if has_reading {
             summary.push_str(&format!(" · {listening} listening"));
         }
@@ -554,7 +598,7 @@ impl Newport {
             .and_then(|at| chrono::Duration::from_std(at.elapsed()).ok())
             .map(|elapsed| {
                 (chrono::Local::now() - elapsed)
-                    .format("%-I:%M:%S %p")
+                    .format("%-I:%M %p")
                     .to_string()
             });
         let content = if empty {
@@ -568,7 +612,8 @@ impl Newport {
                 state.sort,
                 state.descending,
                 state.collapsed,
-                state.expanded
+                state.expanded,
+                state.collapsed_worktrees
             ]);
             let prepared = state.prepared.borrow_mut().get(version, || {
                 if state.table {
@@ -595,6 +640,20 @@ impl Newport {
                             || (project.key.is_empty()
                                 && projects > 0
                                 && !state.expanded.contains(&project.key)));
+                    let data = if query.is_empty()
+                        && !state.collapsed_worktrees.is_empty()
+                        && (project.worktrees.len() > 1
+                            || project.worktrees.iter().any(|w| !w.main))
+                    {
+                        let rows = worktree_disclosure_rows(
+                            &data.rows,
+                            &project.key,
+                            &state.collapsed_worktrees,
+                        );
+                        Rc::new(ProjectRows::new(project.clone(), data.full.clone(), rows))
+                    } else {
+                        data.clone()
+                    };
                     let count = if collapsed { 0 } else { data.rows.len() };
                     for start in (0..count.max(1)).step_by(ROWS_PER_CHUNK) {
                         let end = (start + ROWS_PER_CHUNK).min(count);
@@ -626,7 +685,6 @@ impl Newport {
                     let layout = GroupLayout {
                         query: query.clone(),
                         projects,
-                        content_width,
                     };
                     list(
                         list_state,
@@ -707,7 +765,7 @@ impl Newport {
                         format!("port-filter:{}", self.server),
                         "Show",
                         filter,
-                        ["All", "Forwarded", "Needs attention"]
+                        ["All", "Saved", "Needs attention"]
                             .into_iter()
                             .enumerate()
                             .filter(|(i, _)| *i != 2 || attention > 0)
@@ -833,7 +891,11 @@ impl Newport {
                             .flex()
                             .flex_wrap()
                             .gap_1()
-                            .child(summary)
+                            .child(if has_reading {
+                                format!("{listening} listening ports")
+                            } else {
+                                "Discovering ports…".into()
+                            })
                             .when(attention > 0, |v| {
                                 v.child(
                                     div()
@@ -868,12 +930,8 @@ impl Newport {
         let rows = &chunk.data.rows;
         let index = chunk.index;
         let first = chunk.range.start == 0;
-        let GroupLayout {
-            query,
-            projects,
-            content_width,
-        } = layout;
-        let (projects, content_width) = (*projects, *content_width);
+        let GroupLayout { query, projects } = layout;
+        let projects = *projects;
 
         let key = project.key.clone();
         let collapsed = query.is_empty()
@@ -900,9 +958,7 @@ impl Newport {
             newport_domain::port_grouping::Source::Saved
                 | newport_domain::port_grouping::Source::Vcs
         );
-        // A worktree action represents its filtered rows. Project
-        // actions and totals deliberately continue to use `full`.
-        let visible_entries: Vec<_> = rows.iter().map(|row| row.entry.clone()).collect();
+        // Both project and checkout actions use the full scope, independent of search.
         let show_branches =
             project.worktrees.len() > 1 || project.worktrees.iter().any(|w| !w.main);
         let mut children = Vec::new();
@@ -915,27 +971,16 @@ impl Newport {
         let mut list_section = String::new();
         let mut list_name = format!("{name} ports");
         let count = full.len();
-        let forwarded = full.iter().filter(|e| !e.forwards.is_empty()).count();
-        let has_batch = !key.is_empty()
-            && full
-                .iter()
-                .filter(|e| !e.saved || e.port["direction"] != "remote")
-                .count()
-                > 1;
-        let tally = if forwarded > 0 {
-            format!("{forwarded} of {count} forwarded")
-        } else {
-            format!(
-                "{count} {}",
-                if key.is_empty() {
-                    "services"
-                } else if count == 1 {
-                    "port"
-                } else {
-                    "ports"
-                }
-            )
-        };
+        let tally = format!(
+            "{count} {}",
+            if key.is_empty() {
+                "services"
+            } else if count == 1 {
+                "port"
+            } else {
+                "ports"
+            }
+        );
         if !collapsed {
             for (offset, row) in rows[chunk.range.clone()].iter().cloned().enumerate() {
                 let worktree = &row.worktree;
@@ -1001,71 +1046,161 @@ impl Newport {
                             .child("shared with the server")
                             .into_any_element(),
                     );
+                } else if new_section && kind == RowSection::Saved && show_branches {
+                    children.push(
+                        div()
+                            .id(SharedString::from(format!("saved-heading:{key}")))
+                            .role(accesskit::Role::Heading)
+                            .aria_label("Other saved forwards")
+                            .px(px(16.))
+                            .pt(px(8.))
+                            .pb(px(4.))
+                            .text_size(px(11.5))
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Other saved forwards")
+                            .into_any_element(),
+                    );
                 } else if new_section && matches!(kind, RowSection::Worktree(_)) {
-                    let branch = worktree
-                        .as_ref()
-                        .and_then(|w| w.branch.as_deref())
-                        .unwrap_or_default();
-                    let title = if branch.is_empty() {
-                        worktree_location(path, &key)
-                    } else {
-                        branch.to_owned()
-                    };
-                    let secondary = if worktree.as_ref().is_some_and(|w| !w.main) {
-                        format!("worktree · {}", worktree_location(path, &key))
-                    } else {
-                        String::new()
-                    };
+                    let checkout = worktree.as_ref().expect("worktree section");
+                    let (title, kind_label) = worktree_heading(checkout);
+                    let disclosure_key = (key.clone(), path.to_owned());
+                    let folded =
+                        query.is_empty() && state.collapsed_worktrees.contains(&disclosure_key);
+                    let server = self.server.clone();
+                    let tooltip = format!(
+                        "{}{}\n{}",
+                        checkout.branch.as_deref().unwrap_or("Detached HEAD"),
+                        if kind_label.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {kind_label}")
+                        },
+                        path
+                    );
                     let scope = connection_batches::Scope {
                         project: key.clone(),
                         worktree: Some(path.to_owned()),
                     };
-                    let section: Vec<_> = visible_entries
+                    let section: Vec<_> = full
                         .iter()
                         .filter(|e| scope.includes_checkout(e))
                         .cloned()
                         .collect();
+                    let tally = format!(
+                        "{} {}",
+                        section.len(),
+                        if section.len() == 1 { "port" } else { "ports" }
+                    );
                     let heading_id = SharedString::from(format!("worktree-heading:{key}:{path}"));
                     children.push(
                         connection_batches::Heading::new(
-                            heading_id.clone(),
                             div()
                                 .id(heading_id)
                                 .role(accesskit::Role::Heading)
-                                .aria_label(if secondary.is_empty() {
-                                    title.clone()
-                                } else {
-                                    format!("{title}, {secondary}")
-                                })
+                                .aria_label(
+                                    [title.as_str(), kind_label, tally.as_str()]
+                                        .into_iter()
+                                        .filter(|part| !part.is_empty())
+                                        .collect::<Vec<_>>()
+                                        .join(", "),
+                                )
                                 .flex()
                                 .items_center()
-                                .gap(px(6.))
-                                .min_h(px(26.))
-                                .px(px(12.))
+                                .gap(px(8.))
+                                .min_h(px(32.))
+                                .pl(px(16.))
+                                .pr(px(12.))
                                 .pt(px(4.))
-                                .text_size(px(11.5))
+                                .text_size(px(12.))
                                 .text_color(cx.theme().muted_foreground)
-                                .child(Icon::new(IconName::GitBranch).size(px(12.)))
                                 .child(
-                                    div()
-                                        .font_family(cx.theme().mono_font_family.clone())
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(title.clone()),
+                                    gpui_kit::base::Button::new(SharedString::from(format!(
+                                        "fold-worktree:{key}:{path}"
+                                    )))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .justify_start()
+                                    .gap(px(6.))
+                                    .py(px(4.))
+                                    .rounded(px(6.))
+                                    .text_left()
+                                    .aria_expanded(!folded)
+                                    .accessibility_label(format!(
+                                        "{} worktree {title}",
+                                        if folded { "Expand" } else { "Collapse" }
+                                    ))
+                                    .focus_visible(|style| {
+                                        style.shadow(vec![BoxShadow {
+                                            color: cx.theme().ring,
+                                            offset: point(px(0.), px(0.)),
+                                            blur_radius: px(0.),
+                                            spread_radius: px(2.),
+                                            inset: false,
+                                        }])
+                                    })
+                                    .tooltip(move |window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(tooltip.clone())
+                                            .build(window, cx)
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if this.server != server {
+                                            return;
+                                        }
+                                        let state = this
+                                            .connections_state
+                                            .entry(server.clone())
+                                            .or_default();
+                                        if folded {
+                                            state.collapsed_worktrees.remove(&disclosure_key);
+                                        } else {
+                                            state
+                                                .collapsed_worktrees
+                                                .insert(disclosure_key.clone());
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        Icon::new(if folded {
+                                            IconName::ChevronRight
+                                        } else {
+                                            IconName::ChevronDown
+                                        })
+                                        .size(px(12.)),
+                                    )
+                                    .child(Icon::new(IconName::GitBranch).size(px(12.)))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(cx.theme().foreground)
+                                            .child(title.clone()),
+                                    ),
                                 )
-                                .when(!secondary.is_empty(), |v| {
-                                    v.child(label(secondary).min_w_0().truncate())
-                                })
-                                .child(div().flex_1()),
+                                .when(folded, |v| {
+                                    v.child(label(tally).text_size(px(11.)).flex_shrink_0())
+                                }),
                             self.port_batch_button(scope, &title, &section, cx),
                         )
                         .into_any_element(),
                     );
                 }
                 previous_section = Some(kind);
+                if query.is_empty()
+                    && show_branches
+                    && worktree.as_ref().is_some_and(|w| {
+                        state
+                            .collapsed_worktrees
+                            .contains(&(key.clone(), w.path.clone()))
+                    })
+                {
+                    continue;
+                }
+                let nested = show_branches && worktree.is_some();
                 list_rows.push(self.connection_row(
                     row,
                     chunk.data.positions[chunk.range.start + offset],
+                    nested,
                     cx,
                 ));
             }
@@ -1093,7 +1228,6 @@ impl Newport {
             .flex_shrink_0()
             .when(first, |v| {
                 v.child(connection_batches::Heading::new(
-                    SharedString::from(format!("project-heading:{key}")),
                     div()
                         .id(SharedString::from(format!("project-heading:{key}")))
                         .flex()
@@ -1121,6 +1255,13 @@ impl Newport {
                                         spread_radius: px(2.),
                                         inset: false,
                                     }])
+                                })
+                                .tooltip({
+                                    let location = location.clone();
+                                    move |window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(location.clone())
+                                            .build(window, cx)
+                                    }
                                 })
                                 .accessibility_label(format!(
                                     "{} {name}",
@@ -1190,29 +1331,24 @@ impl Newport {
                                             ),
                                     )
                                 })
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(label(location).text_size(px(11.5)).truncate()),
-                                ),
+                                .child(div().flex_1().min_w_0()),
                         )
-                        .when(content_width > 560. || !has_batch, |v| {
+                        .when(collapsed, |v| {
                             v.child(label(tally).text_size(px(11.5)).flex_shrink_0())
                         })
                         .children(
-                            self.port_batch_button(
-                                connection_batches::Scope {
-                                    project: key.clone(),
-                                    worktree: None,
-                                },
-                                &name,
-                                full,
-                                cx,
-                            )
-                            .map(|action| action.button),
+                            self.port_project_stop_button(&key, &name, full, cx)
+                                .map(|action| action.button),
                         ),
-                    self.port_project_menu(&key, &name, full, cx),
+                    self.port_batch_button(
+                        connection_batches::Scope {
+                            project: key.clone(),
+                            worktree: None,
+                        },
+                        &name,
+                        full,
+                        cx,
+                    ),
                 ))
             })
             .children(children)
@@ -1231,6 +1367,80 @@ mod tests {
         size,
     };
     use serde_json::json;
+
+    #[test]
+    fn saved_checkout_rows_stay_with_their_live_siblings() {
+        let make = |port, saved| {
+            Row::new(
+                "/repo",
+                Entry {
+                    port,
+                    saved,
+                    addresses: vec![],
+                    forwards: vec![],
+                },
+                &json!({}),
+                true,
+            )
+        };
+        let mut rows = vec![
+            make(
+                json!({"remotePort":8001,"worktreePath":"/repo/a","worktreeBranch":"a","worktreeMain":false}),
+                true,
+            ),
+            make(
+                json!({"port":8002,"worktreePath":"/repo/b","worktreeBranch":"b","worktreeMain":false}),
+                false,
+            ),
+            make(
+                json!({"port":8000,"worktreePath":"/repo/a","worktreeBranch":"a","worktreeMain":false}),
+                false,
+            ),
+        ];
+        sort_project_rows(&mut rows);
+        assert_eq!(
+            rows.iter()
+                .map(|r| row_section(r, true))
+                .collect::<Vec<_>>(),
+            vec![
+                RowSection::Worktree("/repo/a".into()),
+                RowSection::Worktree("/repo/a".into()),
+                RowSection::Worktree("/repo/b".into())
+            ]
+        );
+        let collapsed = [("/repo".to_owned(), "/repo/a".to_owned())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            super::worktree_disclosure_rows(&rows, "/repo", &collapsed).len(),
+            2
+        );
+        assert_eq!(
+            super::worktree_disclosure_rows(&rows, "/other", &collapsed).len(),
+            3
+        );
+    }
+
+    #[test]
+    fn worktree_heading_uses_directory_for_detached_checkout() {
+        use newport_domain::port_grouping::Worktree;
+        let worktree = Worktree {
+            path: "/scratch/review-demo".into(),
+            branch: Some("d3c15da".into()),
+            main: false,
+        };
+        assert_eq!(
+            super::worktree_heading(&worktree),
+            ("review-demo".into(), "Detached")
+        );
+        assert_eq!(
+            super::worktree_heading(&Worktree {
+                branch: Some("feature/search".into()),
+                ..worktree
+            }),
+            ("feature/search".into(), "")
+        );
+    }
 
     #[gpui::test]
     fn hidden_forwarding_updates_invalidate_retained_projection_but_other_features_do_not(

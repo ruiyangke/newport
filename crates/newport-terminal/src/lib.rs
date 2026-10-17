@@ -7,6 +7,7 @@
 mod engine;
 mod frame;
 mod input;
+mod links;
 mod search;
 mod selection;
 

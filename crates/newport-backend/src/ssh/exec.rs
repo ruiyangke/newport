@@ -217,6 +217,10 @@ impl ExecSession {
                 message: session_error(error),
             })
     }
+    /// Protocol round trip only: no shell command and no new authentication.
+    pub(crate) async fn responsive(&self) -> bool {
+        self.0.handle.send_ping().await.is_ok() && !self.is_closed()
+    }
     pub(crate) async fn disconnected(&self) {
         while !self.is_closed() {
             // The SSH callback can notify before the channel sender closes.

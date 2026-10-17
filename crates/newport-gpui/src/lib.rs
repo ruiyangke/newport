@@ -21,6 +21,8 @@ mod assets;
 mod connection_batches;
 mod connections;
 mod connections_grouped;
+mod connections_hover;
+mod connections_process_icon;
 mod connections_rows;
 mod connections_selector;
 mod containers;
@@ -256,6 +258,7 @@ struct Newport {
     work: request_dispatch::Dispatcher,
     replies: mpsc::Receiver<Completion>,
     last_refresh: Instant,
+    terminal_observers: std::collections::HashMap<String, (gpui::EntityId, Subscription)>,
     window_visible: bool,
     focus: FocusHandle,
     navigation_focus: Vec<FocusHandle>,
@@ -494,6 +497,7 @@ impl Newport {
             work,
             replies,
             last_refresh: Instant::now(),
+            terminal_observers: Default::default(),
             window_visible: window.is_visible(),
             focus: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
@@ -592,6 +596,51 @@ impl Newport {
             cx.notify();
         }
     }
+    fn terminal_connection_state(&self, cx: &App) -> terminal_workspace::ConnectionState {
+        if !self.configuration_available() {
+            return Default::default();
+        }
+        let Some(server) = self.selected_server() else {
+            return Default::default();
+        };
+        let scope = terminal_scope::connection(&server, &self.snapshot);
+        self.terminals
+            .get(&self.server)
+            .map(|workspace| workspace.read(cx).connection_state(&scope, cx))
+            .unwrap_or_default()
+    }
+
+    fn observe_terminal_connections(&mut self, cx: &mut Context<Self>) {
+        self.terminal_observers
+            .retain(|id, _| self.terminals.contains_key(id));
+        for (server, workspace) in &self.terminals {
+            if self
+                .terminal_observers
+                .get(server)
+                .is_some_and(|(id, _)| *id == workspace.entity_id())
+            {
+                continue;
+            }
+            let observed_server = server.clone();
+            let mut previous = workspace.read(cx).connection_state_unscoped(cx);
+            let subscription = cx.observe(workspace, move |this, workspace, cx| {
+                let next = workspace.read(cx).connection_state_unscoped(cx);
+                if next == previous {
+                    return;
+                }
+                previous = next;
+                if this.server == observed_server {
+                    // Lifecycle changes invalidate the header immediately. Output,
+                    // titles and selection never refresh the application snapshot.
+                    this.request("snapshot", "snapshot", json!({}));
+                    cx.notify();
+                }
+            });
+            self.terminal_observers
+                .insert(server.clone(), (workspace.entity_id(), subscription));
+        }
+    }
+
     fn tick(&mut self, cx: &mut Context<Self>) {
         self.poll_project_library();
         self.poll_project_checks(cx);
@@ -1275,6 +1324,7 @@ impl Render for Newport {
                 .new(|cx| terminal_workspace::Workspace::new(server.clone(), scope, endpoint, cx));
             self.terminals.insert(server, workspace);
         }
+        self.observe_terminal_connections(cx);
         let viewport = f32::from(window.viewport_size().width);
         for (server, workspace) in &self.terminals {
             if self.page != Page::Terminal || server != &self.server || self.server_form.is_some() {
@@ -1312,16 +1362,12 @@ impl Render for Newport {
                 )
             })
             .unwrap_or_else(|| "Connect to Newport".into());
-        let awaiting_agent = self.snapshot["runtime"]["awaitingAgent"]
-            .as_array()
-            .is_some_and(|servers| servers.iter().any(|server| server == &self.server));
-        let health = if awaiting_agent {
-            "awaiting-agent"
-        } else {
-            self.snapshot["runtime"]["health"][&self.server]
-                .as_str()
-                .unwrap_or("unknown")
-        };
+        let terminal = self.terminal_connection_state(cx);
+        let health = snapshot_presentation::connection_health(
+            &self.snapshot,
+            &self.server,
+            terminal.connected,
+        );
         let health_label = match health {
             "awaiting-agent" => "Waiting for SSH approval",
             "reachable" => "Reachable",
