@@ -351,12 +351,17 @@ mod tests {
             .open_bound(terminal, server, 80, 24, owner)
             .unwrap();
         let browser = Arc::new(Browser::default());
-        // Force local-port conflict: 8080 is either ours or already occupied.
-        let _occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 8080)).ok();
-        let url = "http://localhost:8080/?q=preserved#section";
+        // The local SSH fixture publishes an allocated HTTP destination; the
+        // Linux/OpenSSH fixture serves HTTP on 8080.
+        let http_port = std::env::var("NEWPORT_TEST_HTTP_PORT")
+            .map(|port| port.parse::<u16>().unwrap())
+            .unwrap_or(8080);
+        // Force a local-port conflict: the port is ours or already occupied.
+        let _occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, http_port)).ok();
+        let url = format!("http://localhost:{http_port}/?q=preserved#section");
         let (first, second) = tokio::join!(
-            open_terminal_link(&state, &sessions, browser.clone(), terminal, url.into()),
-            open_terminal_link(&state, &sessions, browser.clone(), terminal, url.into()),
+            open_terminal_link(&state, &sessions, browser.clone(), terminal, url.clone()),
+            open_terminal_link(&state, &sessions, browser.clone(), terminal, url.clone()),
         );
         first.unwrap();
         second.unwrap();
@@ -367,7 +372,7 @@ mod tests {
             "concurrent clicks share one forward"
         );
         let port = config.tunnels[0].local_port;
-        assert_ne!(port, 8080);
+        assert_ne!(port, http_port);
         assert!(!config.tunnels[0].auto_connect);
         assert_eq!(
             *browser.0.lock().unwrap(),
@@ -389,13 +394,16 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(response.contains("200 OK"), "{response}");
-        open_terminal_link(&state, &sessions, browser.clone(), terminal, url.into())
+        if std::env::var_os("NEWPORT_TEST_HTTP_PORT").is_some() {
+            assert!(response.ends_with("Newport HTTP fixture\r\n"), "{response}");
+        }
+        open_terminal_link(&state, &sessions, browser.clone(), terminal, url.clone())
             .await
             .unwrap();
         assert_eq!(state.snapshot().config.tunnels, config.tunnels);
         sessions.close_server(None).await;
         assert!(
-            open_terminal_link(&state, &sessions, browser, terminal, url.into())
+            open_terminal_link(&state, &sessions, browser, terminal, url)
                 .await
                 .is_err()
         );

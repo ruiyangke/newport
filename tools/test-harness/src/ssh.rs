@@ -101,6 +101,10 @@ pub fn run(args: &[String]) -> Result<()> {
             .env("NEWPORT_TEST_IDENTITY", dir.join("client"))
             .env("NEWPORT_TEST_KNOWN_HOSTS", dir.join("known_hosts"))
             .env(
+                "NEWPORT_TEST_HTTP_PORT",
+                fs::read_to_string(dir.join("http-port"))?.trim(),
+            )
+            .env(
                 "NEWPORT_TEST_SSH_PORT",
                 fs::read_to_string(dir.join("port"))?.trim(),
             ),

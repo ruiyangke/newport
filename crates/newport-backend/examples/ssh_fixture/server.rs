@@ -20,6 +20,7 @@ mod sftp;
 
 #[derive(Clone)]
 struct Config {
+    http_port: u16,
     home: PathBuf,
     runtime: PathBuf,
     agent: PathBuf,
@@ -108,6 +109,14 @@ impl server::Handler for Client {
                     ChannelOpenFailure::AdministrativelyProhibited
                 })
                 .await;
+        } else if host == "127.0.0.1" && port == u32::from(self.config.http_port) {
+            let mut socket =
+                tokio::net::TcpStream::connect(("127.0.0.1", self.config.http_port)).await?;
+            reply.accept().await;
+            self.tasks.push(tokio::spawn(async move {
+                let _ =
+                    tokio::io::copy_bidirectional(&mut channel.into_stream(), &mut socket).await;
+            }));
         } else {
             reply.accept().await;
             self.tasks.push(tokio::spawn(async move {
@@ -456,6 +465,33 @@ pub async fn run() -> anyhow::Result<()> {
     std::fs::write(home.join("large.txt"), vec![b'x'; 17 * 1024 * 1024])?;
     let key = keys::load_public_key(directory.join("client.pub"))?;
     let host = keys::load_secret_key(directory.join("host"), None)?;
+    // A separate real HTTP destination exercises forwarding through the SSH
+    // channel without changing the echo protocol used by the transport tests.
+    let http = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let http_port = http.local_addr()?.port();
+    let _http = AbortTask(tokio::spawn(async move {
+        while let Ok((mut socket, _)) = http.accept().await {
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                    let mut request = Vec::new();
+                    let mut bytes = [0; 1024];
+                    while !request.windows(4).any(|v| v == b"\r\n\r\n") {
+                        let n = socket.read(&mut bytes).await?;
+                        if n == 0 || request.len() + n > 8192 {
+                            return Ok::<_, std::io::Error>(());
+                        }
+                        request.extend_from_slice(&bytes[..n]);
+                    }
+                    if request.starts_with(b"GET / HTTP/1.0\r\n") {
+                        socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 21\r\nConnection: close\r\n\r\nNewport HTTP fixture\r\n").await?;
+                    }
+                    socket.shutdown().await
+                })
+                .await;
+            });
+        }
+    }));
+    std::fs::write(directory.join("http-port"), http_port.to_string())?;
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let port = listener.local_addr()?.port();
     std::fs::write(
@@ -468,6 +504,7 @@ pub async fn run() -> anyhow::Result<()> {
         ..Default::default()
     });
     let mut server = Listener(Config {
+        http_port,
         home,
         runtime,
         agent: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
