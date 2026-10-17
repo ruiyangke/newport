@@ -582,11 +582,14 @@ impl Client {
                         delete = r[1] != 0 && end == p.bytes.len();
                     }
                 }
-                self.send(&b)?;
                 if delete {
+                    // Queue the next INCR chunk's PropertyNotify before waking
+                    // the reader with this reply. arboard starts a 10 ms timer
+                    // on receipt; sending the event afterward makes a server
+                    // scheduling delay look like an empty clipboard.
                     self.delete(key)?;
                 }
-                Ok(())
+                self.send(&b)
             }
             22 => self.error(10, op, 0),
             23 => {
@@ -655,6 +658,84 @@ impl Client {
             }
             127 => Ok(()),
             _ => unreachable!(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incr_next_chunk_is_announced_before_get_property_reply() {
+        for order in [Order(true), Order(false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("snapshot.tar");
+            let (socket, mut reader) = UnixStream::pair().unwrap();
+            reader
+                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
+            let key = (3, 69);
+            let mut client = Client {
+                socket,
+                order,
+                seq: 1,
+                base: 0,
+                shared: Arc::new(Shared {
+                    atoms: Mutex::new(Atoms::default()),
+                    snapshot: path.clone(),
+                    source: crate::clipboard_source::Source::new(&path),
+                }),
+                windows: HashSet::from([key.0]),
+                graphics_contexts: HashSet::new(),
+                masks: HashMap::from([(key.0, 1 << 22)]),
+                properties: HashMap::from([(
+                    key,
+                    Property {
+                        kind: 31,
+                        format: 8,
+                        bytes: b"first".to_vec(),
+                    },
+                )]),
+                transfer: Some(Transfer {
+                    key,
+                    kind: 31,
+                    bytes: b"last".to_vec(),
+                    offset: 0,
+                }),
+            };
+            let mut request = vec![0; 24];
+            request[0] = 20; // GetProperty with delete=true.
+            request[1] = 1;
+            order.set16(&mut request, 2, 6);
+            order.set32(&mut request, 4, key.0);
+            order.set32(&mut request, 8, key.1);
+            order.set32(&mut request, 12, 31);
+            order.set32(&mut request, 20, u32::MAX / 4);
+
+            for expected in [b"first".as_slice(), b"last".as_slice()] {
+                client.request(&request).unwrap();
+                // A reader may be scheduled as soon as it receives the reply.
+                // The next chunk (including the zero-length terminator) must
+                // already be announced, without another server scheduling turn.
+                for state in [1, 0] {
+                    let mut event = [0; 32];
+                    reader.read_exact(&mut event).unwrap();
+                    assert_eq!(event[0], 28, "PropertyNotify must precede the reply");
+                    assert_eq!(event[16], state);
+                    assert_eq!(order.u32(&event, 4), key.0);
+                    assert_eq!(order.u32(&event, 8), key.1);
+                }
+                let mut reply = [0; 32];
+                reader.read_exact(&mut reply).unwrap();
+                assert_eq!(reply[0], 1);
+                assert_eq!(order.u32(&reply, 16) as usize, expected.len());
+                let mut bytes = vec![0; order.u32(&reply, 4) as usize * 4];
+                reader.read_exact(&mut bytes).unwrap();
+                assert_eq!(&bytes[..expected.len()], expected);
+            }
+            assert!(client.transfer.is_none());
+            assert!(client.properties[&key].bytes.is_empty());
         }
     }
 }
