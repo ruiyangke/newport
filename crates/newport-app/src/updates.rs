@@ -10,10 +10,7 @@ use std::{
     time::Duration,
 };
 
-const UNAVAILABLE: &str =
-    "Updates are unavailable until standalone release acceptance is complete.";
-// Remove this gate only with the joint signed-install/upgrade acceptance record.
-const RELEASES_ACCEPTED: bool = false;
+const UNAVAILABLE: &str = "Updates are unavailable in this build.";
 
 #[cfg(target_os = "macos")]
 pub mod install;
@@ -79,8 +76,8 @@ struct State<P> {
     pending: Option<Arc<P>>,
 }
 
-fn available(releases_accepted: bool, debug: bool, isolated: bool, app_store: bool) -> bool {
-    releases_accepted && !debug && !isolated && !app_store
+fn available(debug: bool, isolated: bool, app_store: bool) -> bool {
+    !debug && !isolated && !app_store
 }
 
 impl Service {
@@ -113,7 +110,6 @@ impl Service {
 
     pub fn for_host() -> Result<Self, String> {
         if !available(
-            RELEASES_ACCEPTED,
             cfg!(debug_assertions),
             newport_backend::profile::data_directory_override().is_some(),
             option_env!("NEWPORT_APP_STORE").is_some(),

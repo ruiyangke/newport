@@ -190,20 +190,31 @@ async fn failed_or_panicking_workers_release_ownership_for_an_explicit_retry() {
 }
 
 #[test]
-fn only_accepted_installed_release_builds_may_check_or_install() {
-    for accepted in [false, true] {
-        for debug in [false, true] {
-            for isolated in [false, true] {
-                for app_store in [false, true] {
-                    assert_eq!(
-                        available(accepted, debug, isolated, app_store),
-                        accepted && !debug && !isolated && !app_store
-                    );
+fn standalone_release_builds_enable_updates_and_other_builds_stay_isolated() {
+    assert!(available(false, false, false));
+    for debug in [false, true] {
+        for isolated in [false, true] {
+            for app_store in [false, true] {
+                if debug || isolated || app_store {
+                    assert!(!available(debug, isolated, app_store));
                 }
             }
         }
     }
-    assert_eq!(Service::for_host().unwrap().status()["enabled"], false);
+    let supported = cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        || cfg!(all(
+            windows,
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ));
+    assert_eq!(
+        Service::for_host().unwrap().status()["enabled"],
+        supported
+            && available(
+                cfg!(debug_assertions),
+                newport_backend::profile::data_directory_override().is_some(),
+                option_env!("NEWPORT_APP_STORE").is_some(),
+            )
+    );
 }
 
 #[tokio::test]
