@@ -118,6 +118,11 @@ impl Drop for Endpoint {
         if fs::symlink_metadata(&self.path).is_ok_and(|m| (m.dev(), m.ino()) == self.identity) {
             let _ = fs::remove_file(&self.path);
         }
+        // A parallel fork can retain a duplicate until exec. Ownership ends
+        // here, after socket cleanup, rather than when that child closes it.
+        if let Some(lock) = &self._lock {
+            let _ = FileExt::unlock(lock);
+        }
     }
 }
 fn already_running() -> io::Error {
@@ -125,4 +130,31 @@ fn already_running() -> io::Error {
         io::ErrorKind::AddrInUse,
         "a Newport service is already listening at this socket",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_releases_fixed_socket_lock_with_an_inherited_descriptor() {
+        let directory = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir_in("/tmp")
+            .unwrap();
+        let socket = directory.path().join("wayland.sock");
+        let (listener, endpoint) = Endpoint::fixed(&socket).unwrap();
+        // A parallel fork shares this open file description until exec.
+        let inherited = endpoint._lock.as_ref().unwrap().try_clone().unwrap();
+        assert!(matches!(Endpoint::fixed(&socket), Err(e) if e.kind() == io::ErrorKind::AddrInUse));
+        drop(listener);
+        drop(endpoint);
+        assert!(!socket.exists());
+        let (listener, endpoint) = Endpoint::fixed(&socket).unwrap();
+        drop(inherited);
+        // Closing the old descriptor must not release the new owner's lock.
+        assert!(matches!(Endpoint::fixed(&socket), Err(e) if e.kind() == io::ErrorKind::AddrInUse));
+        drop(listener);
+        drop(endpoint);
+    }
 }
