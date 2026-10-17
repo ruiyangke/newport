@@ -52,8 +52,8 @@ jobs:
           path: resources/agents
       - name: Sign exact Needle release payloads
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          NEWPORT_SIGNING_PRIVATE_KEY: ${{ secrets.NEWPORT_SIGNING_PRIVATE_KEY }}
+          NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: node scripts/sign-needle-release.mjs
       - run: node scripts/ci/artifact.mjs record resources/agents
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -105,8 +105,8 @@ jobs:
           APPLE_TEAM_ID: X6ZPK45A26
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          NEWPORT_SIGNING_PRIVATE_KEY: ${{ secrets.NEWPORT_SIGNING_PRIVATE_KEY }}
+          NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: node scripts/release-native-macos.mjs
       - name: Verify the signed release executable preserves upgrade profiles
         env:
@@ -209,8 +209,8 @@ jobs:
       - name: Sign updater package
         shell: pwsh
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          NEWPORT_SIGNING_PRIVATE_KEY: ${{ secrets.NEWPORT_SIGNING_PRIVATE_KEY }}
+          NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD }}
           UPDATE_ARCH: ${{ matrix.arch }}
         run: |
           $directory = Join-Path (Join-Path target $env:CARGO_BUILD_TARGET) 'release/native-package'
