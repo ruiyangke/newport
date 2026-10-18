@@ -1,14 +1,16 @@
 //! Controlled, exclusive Connections selectors. Selection belongs to the page;
 //! this presentation component owns only roving keyboard focus.
+use crate::hover::HoverExt as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{Radio, RadioGroup};
-use gpui_kit::component::{ActiveTheme, Icon, ThemeStyled, tooltip::Tooltip};
+use gpui_kit::component::{ActiveTheme, Icon, ThemeStyled};
 use gpui_kit::{prelude::*, *};
 use std::{collections::HashMap, rc::Rc};
 
 pub(super) struct Choice {
     pub value: usize,
     pub label: &'static str,
+    pub count: Option<usize>,
     pub icon: Option<IconName>,
     pub tooltip: Option<&'static str>,
     pub danger: bool,
@@ -20,6 +22,7 @@ impl Choice {
         Self {
             value,
             label,
+            count: None,
             icon: None,
             tooltip: None,
             danger: false,
@@ -198,7 +201,10 @@ impl Selector {
                 let checked = self.selected == choice.value;
                 let icon_only = choice.icon.is_some();
                 Radio::new(SharedString::from(format!("{}-{}", self.id, choice.value)))
-                    .accessibility_label(choice.label)
+                    .accessibility_label(match choice.count {
+                        Some(count) => SharedString::from(format!("{} ({count})", choice.label)),
+                        None => choice.label.into(),
+                    })
                     .checked(checked)
                     .disabled(choice.disabled)
                     .set_position(index + 1, count)
@@ -245,13 +251,18 @@ impl Selector {
                     .when(focus.is_focused(window) && !choice.disabled, |item| {
                         item.focus_ring_style(window, cx)
                     })
-                    .when_some(choice.tooltip, |item, tooltip| {
-                        item.tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
-                    })
+                    .when_some(choice.tooltip, |item, tooltip| item.hover_hint(tooltip))
                     .when_some(choice.icon, |item, icon| {
                         item.child(Icon::new(icon).size(px(crate::controls::ICON_SIZE)))
                     })
                     .when(!icon_only, |item| item.child(choice.label))
+                    .when_some(choice.count, |item, count| {
+                        item.gap(px(5.)).child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(count.to_string()),
+                        )
+                    })
                     .on_change(move |_, _, window, cx| {
                         state.update(cx, |state, cx| {
                             state.focused = Some(choice.value);

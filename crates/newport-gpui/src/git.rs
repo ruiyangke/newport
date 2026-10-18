@@ -55,6 +55,7 @@ pub(super) struct Workspace {
     pub(super) diff: Value,
     pub(super) diff_demand: git_diff::ScrollDemand,
     pub(super) diff_recovery: newport_client::git_read_recovery::Recovery,
+    pub(super) index_refresh: Option<git_index_refresh::Refresh>,
     diff_cursor: Option<String>,
     pub diff_scroll: UniformListScrollHandle,
     pub(super) continuation: Option<String>,
@@ -136,15 +137,37 @@ impl Workspace {
         changed
     }
     fn accept_listing(&mut self, page: Value) -> bool {
+        self.accept_listing_with_scope(page, false)
+    }
+    pub(super) fn accept_listing_with_scope(&mut self, page: Value, index_only: bool) -> bool {
         let changed_comparison = self.tab == 0 && self.page["snapshot"] != page["snapshot"];
         if changed_comparison {
-            self.selected = newport_client::git_read_recovery::matching_entry(
+            let selected = newport_client::git_read_recovery::matching_entry(
                 &page,
                 &self.selected["path"],
                 self.diff_staged,
-            )
-            .unwrap_or(Value::Null);
-            self.diff = Value::Null;
+            );
+            // A fully staged/unstaged file moves groups. Follow that same byte
+            // path, while partial staging stays on the current comparison side.
+            let other = (index_only && selected.is_none())
+                .then(|| {
+                    newport_client::git_read_recovery::matching_entry(
+                        &page,
+                        &self.selected["path"],
+                        !self.diff_staged,
+                    )
+                })
+                .flatten();
+            let moved = other.is_some();
+            self.selected = selected.or(other).unwrap_or(Value::Null);
+            if moved {
+                self.diff_staged = !self.diff_staged;
+            }
+            // Keep the previous comparison visible during a background read.
+            // Its snapshot no longer matches, so all mutation controls reject it.
+            if !index_only || moved || self.selected.is_null() {
+                self.diff = Value::Null;
+            }
             self.diff_cursor = None;
         }
         if self.tab == 0 && page["metadata"]["head"].is_object() {
@@ -174,6 +197,7 @@ impl Workspace {
             transfer.invalidate(resources);
         }
         self.diff_demand = git_diff::ScrollDemand::default();
+        self.index_refresh = None;
         self.diff_recovery.reset();
         self.listing.demand = git_page_demand::Demand::default();
         let mut saved = std::mem::take(&mut self.saved_views);
@@ -630,7 +654,7 @@ impl Newport {
             if stage { "Stage" } else { "Unstage" },
             self.diff_title()
         );
-        self.start_git_mutation(
+        self.start_git_index_mutation(
             self.git_repository_id(),
             title,
             move |backend, server, repo, id| {
@@ -677,6 +701,7 @@ impl Newport {
         if self.git.switching_path.is_some() || !self.git.repo["repoId"].is_string() {
             return;
         }
+        self.git_cancel_index_refresh();
         // Local resource invalidation alone can return the backend's still-fresh
         // cache. Wait for scoped invalidation before dispatching replacement reads.
         self.request_refresh(
@@ -775,6 +800,7 @@ impl Newport {
         self.git_load();
     }
     pub(super) fn git_reset_changes_filter(&mut self) {
+        self.git_cancel_index_refresh();
         self.git.diff_recovery.reset();
         for key in ["git-list", "git-more", "git-diff", "git-diff-more"] {
             self.resources.invalidate(key);
@@ -806,6 +832,10 @@ impl Newport {
         )));
     }
     pub(super) fn git_completed(&mut self, key: &str) {
+        if matches!(key, "git-index-refresh" | "git-index-status") {
+            self.git_index_refresh_completed(key);
+            return;
+        }
         if key == "git-refresh" {
             self.git_refresh_completed();
             return;
@@ -949,22 +979,7 @@ impl Newport {
                     self.git.error = Some(error);
                     return;
                 }
-                let comparison_changed = self.git.accept_listing(self.value(key));
-                if comparison_changed {
-                    for key in ["git-diff", "git-diff-more"] {
-                        self.resources.invalidate(key);
-                    }
-                    self.reset_conflict_preview();
-                    self.resources.invalidate("git-clean-commit");
-                }
-                self.load_clean_commit();
-                if let Some((entry, staged)) = self.git.diff_recovery.resolve(&self.git.page) {
-                    self.git.selected = entry;
-                    self.git.diff_staged = staged;
-                    self.git_diff_request(false);
-                } else if comparison_changed && self.git.selected["entryId"].is_string() {
-                    self.git_diff_request(false);
-                }
+                self.git_listing_completed(false);
             }
             "git-more" => {
                 if let Some(cursor) = self.git.continuation.take() {
@@ -1009,6 +1024,29 @@ impl Newport {
                 }
             }
             _ => {}
+        }
+    }
+    pub(super) fn git_listing_completed(&mut self, index_only: bool) {
+        let page = self.value("git-list");
+        let comparison_changed = if index_only {
+            self.git.accept_listing_with_scope(page, true)
+        } else {
+            self.git.accept_listing(page)
+        };
+        if comparison_changed {
+            for key in ["git-diff", "git-diff-more"] {
+                self.resources.invalidate(key);
+            }
+            self.reset_conflict_preview();
+            self.resources.invalidate("git-clean-commit");
+        }
+        self.load_clean_commit();
+        if let Some((entry, staged)) = self.git.diff_recovery.resolve(&self.git.page) {
+            self.git.selected = entry;
+            self.git.diff_staged = staged;
+            self.git_diff_request(false);
+        } else if comparison_changed && self.git.selected["entryId"].is_string() {
+            self.git_diff_request(false);
         }
     }
     pub(super) fn git_params(&self) -> Value {
@@ -1062,7 +1100,10 @@ impl Newport {
         self.git_load();
     }
     fn git_diff_request(&mut self, more: bool) {
-        if !self.git.selected["entryId"].is_string() || self.git.error.is_some() {
+        if self.git.index_refresh.is_some()
+            || !self.git.selected["entryId"].is_string()
+            || self.git.error.is_some()
+        {
             return;
         }
         let side = if self.git.diff_staged {
@@ -1138,6 +1179,9 @@ impl Newport {
     }
 
     pub(super) fn git_load(&mut self) {
+        if self.git.index_refresh.is_some() {
+            return;
+        }
         let Some((_, method)) = tab_info(self.git.tab) else {
             return;
         };
@@ -1203,6 +1247,9 @@ impl Newport {
         }
     }
     pub(super) fn git_more(&mut self) {
+        if self.git.index_refresh.is_some() {
+            return;
+        }
         let Some((_, method)) = tab_info(self.git.tab) else {
             return;
         };
@@ -1456,7 +1503,7 @@ impl Newport {
                 };
                 let entry=e.clone();
                 div().h(px(git_listing::row_height(tab))).w_full().min_w_0().px(px(6.)).flex().items_center()
-                    .child(Button::new(("git-entry",i)).accessibility_label(if subtitle.is_empty() {title.clone()} else {format!("{title} · {subtitle}")}).tooltip(format!("{title}\n{subtitle}")).custom(git_file_row::selection_style(this.git.selected==*e,cx)).selected(this.git.selected==*e).w_full().h_full().min_w_0().toggled(this.git.selected==*e)
+                    .child(Button::new(("git-entry",i)).accessibility_label(if subtitle.is_empty() {title.clone()} else {format!("{title} · {subtitle}")}).hover_detail(title.clone(), subtitle.clone()).custom(git_file_row::selection_style(this.git.selected==*e,cx)).selected(this.git.selected==*e).w_full().h_full().min_w_0().toggled(this.git.selected==*e)
                         .when(matches!(tab,3|4), |button|button.child(Icon::new(if tab==3 {gpui_kit::assets::IconName::Archive} else {gpui_kit::assets::IconName::Tag}).size(px(14.)).text_color(cx.theme().muted_foreground)))
                         .child(div().flex_1().min_w_0().flex().when(tab!=0,|row|row.flex_col().items_start()).when(tab==0,|row|row.items_center()).gap(px(if tab==1 {2.} else if matches!(tab,3|4) {3.} else {6.}))
                             .when(tab==0,|row|row.child(div().text_size(px(11.)).text_color(cx.theme().muted_foreground).w(px(16.)).flex_shrink_0().child(change_mark(e))))
@@ -1726,6 +1773,59 @@ mod tests {
         assert_eq!(view.selected["oid"]["hex"], "inspected");
         assert_eq!(view.switch_view(0, &mut resources), Some(true));
         assert!(view.page.is_null());
+    }
+    #[test]
+    fn index_refresh_follows_the_selected_file_between_groups() {
+        let entry = json!({"entryId":"old","path":{"bytesB64":"YQ=="},"untracked":true});
+        let mut view = Workspace {
+            page: json!({"snapshot":"before","entries":[entry]}),
+            selected: entry,
+            diff: json!({"snapshot":"old-diff"}),
+            ..Default::default()
+        };
+        let staged = json!({"entryId":"new","path":{"bytesB64":"YQ=="},"staged":true});
+        assert!(
+            view.accept_listing_with_scope(json!({"snapshot":"staged","entries":[staged]}), true)
+        );
+        assert_eq!(view.selected, staged);
+        assert!(view.diff_staged);
+        assert!(view.diff.is_null());
+        let unstaged = json!({"entryId":"unstaged","path":{"bytesB64":"YQ=="},"unstaged":true});
+        assert!(
+            view.accept_listing_with_scope(
+                json!({"snapshot":"unstaged","entries":[unstaged]}),
+                true
+            )
+        );
+        assert_eq!(view.selected, unstaged);
+        assert!(!view.diff_staged);
+    }
+    #[test]
+    fn index_refresh_keeps_partial_or_unrelated_selection_but_retires_old_authority() {
+        let entry = json!({"entryId":"old","path":{"bytesB64":"YQ=="},"unstaged":true});
+        let old_diff = json!({"snapshot":"old-diff","metadata":{"sourceSnapshot":"before"}});
+        let mut view = Workspace {
+            page: json!({"snapshot":"before","entries":[entry]}),
+            selected: entry,
+            diff: old_diff.clone(),
+            ..Default::default()
+        };
+        let partial =
+            json!({"entryId":"new","path":{"bytesB64":"YQ=="},"staged":true,"unstaged":true});
+        assert!(
+            view.accept_listing_with_scope(json!({"snapshot":"after","entries":[partial]}), true)
+        );
+        assert_eq!(view.selected, partial);
+        assert!(!view.diff_staged);
+        assert_eq!(view.diff, old_diff);
+        assert_ne!(
+            view.diff["metadata"]["sourceSnapshot"],
+            view.page["snapshot"]
+        );
+        // A filtered-out or removed file must not select a different sibling.
+        assert!(view.accept_listing_with_scope(json!({"snapshot":"filtered","entries":[{"entryId":"sibling","path":{"bytesB64":"Yg=="},"staged":true}]}), true));
+        assert!(view.selected.is_null());
+        assert!(view.diff.is_null());
     }
     #[test]
     fn diff_recovery_rebinds_to_new_status_and_is_cancelled_when_leaving_changes() {

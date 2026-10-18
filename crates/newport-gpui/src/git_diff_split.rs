@@ -21,6 +21,12 @@ pub(super) struct Model {
     runs: [Vec<Option<git_diff_runs::Segment>>; 2],
 }
 impl Model {
+    pub(super) fn source_row(&self, row: usize) -> Option<usize> {
+        self.pairs
+            .get(row)
+            .or_else(|| self.pairs.last())
+            .and_then(|pair| pair.old.or(pair.new))
+    }
     pub(super) fn row_count(&self) -> usize {
         self.pairs.len()
     }
@@ -347,6 +353,34 @@ mod tests {
             origin: origin.into(),
             ..Default::default()
         }
+    }
+    #[test]
+    fn visible_split_rows_resolve_to_the_correct_source_file() {
+        let rows = [
+            Row {
+                heading: true,
+                file_path: Some("docs/a.md".into()),
+                ..Default::default()
+            },
+            row("-"),
+            row("+"),
+            row("+"),
+            Row {
+                heading: true,
+                file_path: Some("docs/b.md".into()),
+                ..Default::default()
+            },
+            row("+"),
+        ];
+        let model = super::Model {
+            pairs: align(&rows),
+            width: super::px(0.),
+            runs: [vec![], vec![]],
+        };
+        assert_eq!(model.source_row(1), Some(1));
+        assert_eq!(model.source_row(2), Some(3));
+        assert_eq!(model.source_row(3), Some(4));
+        assert_eq!(model.source_row(4), Some(5));
     }
     #[test]
     fn replacements_pair_and_pad_before_context_resumes() {

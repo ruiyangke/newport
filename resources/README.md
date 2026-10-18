@@ -1,19 +1,19 @@
-# Shared application resources
+# Application resources
 
-`app.json` holds the product name, version, and production identifier independently
-of the UI. The native development bundle keeps its separate
-`app.newport.native-test` identity. Native packaging validates executable build
-receipts against this metadata.
+`app.json` defines the product name, version, and production identifier. Native
+packaging validates executable build receipts against this metadata.
 
-The native app and retained React reference use `icons/` and `fonts/`. Retain the
-font license when packaging. These assets are independent of the removed Tauri host.
+`icons/` and `fonts/` supply native UI assets. Preserve their license files when
+packaging. `agents/` holds the Linux Needle builds and release metadata; packaging
+compresses the binaries into resources, and the backend verifies them before
+installation. Do not replace signed resources during unrelated development.
 
-`updater.json` preserves the release endpoint and public verification key used by
-the released desktop app. `test-fixtures/updater/` contains inert payloads
-and public signatures shared by native and packaging tests; none
-is an executable update or a production private key.
+`updater.json` holds the release endpoint and public verification key used by
+existing installations. Keep that key compatible across releases.
+`test-fixtures/updater/` contains inert payloads and public signatures for tests,
+not executable updates or production private keys.
 
-`test-fixtures/legacy-desktop-release.json` pins the v0.3.0 desktop acceptance
-baseline by release URL, asset name and SHA-256 digest. See the
-[acceptance instructions](../docs/testing.md#released-desktop-baseline) before
-running it. Pinning a baseline is not evidence that an upgrade has passed.
+`test-fixtures/legacy-desktop-release.json` pins the released desktop acceptance
+baseline by asset URL and SHA-256 digest. Follow the
+[acceptance instructions](../docs/testing.md#released-desktop-baseline).
+Pinning a baseline does not establish that an upgrade has passed.

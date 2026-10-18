@@ -693,9 +693,7 @@ fn tag_metadata(id: &'static str, content: String) -> AnyElement {
         .aria_label(content.clone())
         .text_xs()
         .truncate()
-        .tooltip(move |window, cx| {
-            gpui_kit::component::tooltip::Tooltip::new(content.clone()).build(window, cx)
-        })
+        .hover_hint(content.clone())
         .into_any_element()
 }
 

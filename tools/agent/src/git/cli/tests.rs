@@ -878,6 +878,55 @@ fn cli_diff_pages_partial_lines_and_historical_reads() {
     request(&mut service, "repo.close", json!({"repoId":id})).unwrap();
 }
 #[test]
+fn cli_select_loaded_lines_without_fetching_remaining_diff_pages() {
+    let dir = setup();
+    let home = tempfile::tempdir().unwrap();
+    let mut service = writable(home.path());
+    git(dir.path(), &["commit", "--allow-empty", "-qm", "initial"]);
+    fs::write(dir.path().join("new-file"), "one\ntwo\nthree\nfour\n").unwrap();
+    let id = opened(&mut service, dir.path());
+    for (side, kind, expected) in [
+        ("index_to_worktree", "stage", "one\ntwo\n"),
+        ("head_to_index", "unstage", "two\n"),
+    ] {
+        let status = request(&mut service, "repo.status", json!({"repoId":id})).unwrap();
+        let entry = status["entries"][0]["entryId"].clone();
+        let page = request(
+            &mut service,
+            "repo.diff_page",
+            json!({
+                "repoId":id,"snapshot":status["snapshot"],"entryId":entry,
+                "side":side,"contextLines":3,"pageSize":if kind == "stage" {2} else {1}
+            }),
+        )
+        .unwrap();
+        assert!(page["nextCursor"].is_string());
+        let hunk = &page["entries"][0]["hunks"][0];
+        let lines: Vec<_> = hunk["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| {
+                assert_eq!(line["lineComplete"], true);
+                line["id"].clone()
+            })
+            .collect();
+        operation(
+            &mut service,
+            &id,
+            json!({
+                "kind":kind,"entryIds":[entry],
+                "hunks":{"ids":[hunk["id"]],"lines":lines,"contextLines":3}
+            }),
+        );
+        assert_eq!(git(dir.path(), &["show", ":new-file"]), expected.as_bytes());
+        assert_eq!(
+            fs::read(dir.path().join("new-file")).unwrap(),
+            b"one\ntwo\nthree\nfour\n"
+        );
+    }
+}
+#[test]
 fn cli_stash_and_tag_round_trip() {
     let dir = setup();
     let home = tempfile::tempdir().unwrap();
@@ -1593,6 +1642,70 @@ fn cli_long_line_pages_and_large_blob_windows_are_bounded() {
     assert_eq!(last["metadata"]["size"], 33 * 1024 * 1024);
 }
 #[test]
+fn cli_untracked_directory_lists_and_stages_individual_files() {
+    let dir = setup();
+    fs::write(dir.path().join(".gitignore"), "*.ignored\n").unwrap();
+    git(dir.path(), &["add", ".gitignore"]);
+    git(dir.path(), &["commit", "-qm", "initial"]);
+    fs::create_dir_all(dir.path().join("docs/nested")).unwrap();
+    fs::write(dir.path().join("docs/a.md"), "one\ntwo\n").unwrap();
+    fs::write(dir.path().join("docs/nested/b.md"), "other\n").unwrap();
+    fs::write(dir.path().join("docs/secret.ignored"), "ignored\n").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut service = writable(home.path());
+    let id = opened(&mut service, dir.path());
+    let summary = request(&mut service, "repo.status_summary", json!({"repoId":id})).unwrap();
+    assert_eq!(summary["totalEntries"], 2);
+    assert_eq!(summary["groupCounts"]["untracked"], 2);
+    let first = request(
+        &mut service,
+        "repo.status",
+        json!({"repoId":id,"pageSize":1}),
+    )
+    .unwrap();
+    assert_eq!(first["entries"][0]["path"]["display"], "docs/a.md");
+    let second = request(
+        &mut service,
+        "repo.status",
+        json!({"repoId":id,"pageSize":1,"cursor":first["nextCursor"]}),
+    )
+    .unwrap();
+    assert_eq!(second["entries"][0]["path"]["display"], "docs/nested/b.md");
+    assert!(second["nextCursor"].is_null());
+    let entry = first["entries"][0]["entryId"].clone();
+    let page = request(
+        &mut service,
+        "repo.diff_page",
+        json!({
+            "repoId":id,"snapshot":first["snapshot"],"entryId":entry,
+            "side":"index_to_worktree","pageSize":1
+        }),
+    )
+    .unwrap();
+    assert_eq!(page["metadata"]["totalFiles"], 1);
+    assert_eq!(page["entries"][0]["newPath"]["display"], "docs/a.md");
+    let hunk = &page["entries"][0]["hunks"][0];
+    operation(
+        &mut service,
+        &id,
+        json!({"kind":"stage","entryIds":[entry],
+        "hunks":{"ids":[hunk["id"]],"lines":[hunk["lines"][0]["id"]],"contextLines":3}}),
+    );
+    assert_eq!(git(dir.path(), &["show", ":docs/a.md"]), b"one\n");
+    assert_eq!(
+        git(dir.path(), &["diff", "--cached", "--name-only"]),
+        b"docs/a.md\n"
+    );
+    assert_eq!(
+        fs::read(dir.path().join("docs/a.md")).unwrap(),
+        b"one\ntwo\n"
+    );
+    assert_eq!(
+        fs::read(dir.path().join("docs/nested/b.md")).unwrap(),
+        b"other\n"
+    );
+}
+#[test]
 fn cli_status_excludes_ignored_files_from_write_fingerprints() {
     let dir = setup();
     fs::write(dir.path().join(".gitignore"), "*.ignored\n").unwrap();
@@ -1741,15 +1854,15 @@ fn cli_discard_untracked_is_literal_and_preserves_other_files_and_index() {
     assert_eq!(fs::read(dir.path().join("new1.txt")).unwrap(), b"keep");
     assert_eq!(git(dir.path(), &["show", ":tracked"]), b"staged\n");
     let status = request(&mut service, "repo.status", json!({"repoId":id})).unwrap();
-    let entry = status["entries"]
+    assert!(status["entries"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|r| r["path"]["display"] == "directory/")
-        .unwrap()["entryId"]
-        .clone();
+        .any(|row| row["path"]["display"] == "directory/keep"));
+    // An old collapsed directory selection cannot silently widen this action.
+    let entry = super::super::tokens::EntryRef::new(&[b"directory/".to_vec()]).encode();
     let rejected = request(&mut service,"operation.start",json!({"repoId":id,"operationId":uuid::Uuid::new_v4().to_string(),"expectedSnapshot":status["snapshot"],"action":{"kind":"discard","entryIds":[entry],"source":"index"}})).unwrap();
-    assert_eq!(rejected["error"]["code"], "UNSUPPORTED_CAPABILITY");
+    assert_eq!(rejected["error"]["code"], "STALE_SNAPSHOT");
     assert_eq!(
         fs::read(dir.path().join("directory/keep")).unwrap(),
         b"keep"

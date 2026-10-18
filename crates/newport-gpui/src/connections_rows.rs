@@ -898,7 +898,7 @@ impl Newport {
                 .min_w_0()
                 .when(table, |v| v.px(px(10.)))
                 .when(!table, |v| v.pr_2())
-                .tooltip(move |window, cx| hover.clone().build(window, cx))
+                .hoverable_tooltip(move |window, cx| hover.clone().build(window, cx))
                 .child(
                     div()
                         .flex()

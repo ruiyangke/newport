@@ -1,7 +1,6 @@
 //! Variable-height bookmark rows with demand-driven status reads.
 use super::*;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tooltip::Tooltip;
 use newport_client::project_bookmark::reading;
 use project_library::status_key;
 
@@ -389,7 +388,7 @@ impl Newport {
                                 .icon(IconName::RefreshCw)
                                 .ghost()
                                 .accessibility_label(format!("Retry status of {name}"))
-                                .tooltip(error.clone().unwrap_or_default())
+                                .hover_hint(error.clone().unwrap_or_default())
                                 .on_click({
                                     let project = project.clone();
                                     cx.listener(move |this, _, _, cx| {
@@ -438,10 +437,7 @@ impl Newport {
                     .id(("project-status", index))
                     .role(accesskit::Role::Status)
                     .aria_label(format!("Status for {name}: {summary}"))
-                    .tooltip({
-                        let summary = summary.clone();
-                        move |window, cx| Tooltip::new(summary.clone()).build(window, cx)
-                    })
+                    .hover_detail("Project status", summary.clone())
                     .flex()
                     .gap(px(12.))
                     .min_w_0()
@@ -470,7 +466,7 @@ impl Newport {
                                 if favorite { "Remove" } else { "Add" },
                                 if favorite { "from" } else { "to" }
                             ))
-                            .tooltip(if favorite {
+                            .hover_hint(if favorite {
                                 "Remove from favorites"
                             } else {
                                 "Add to favorites"
@@ -489,7 +485,7 @@ impl Newport {
                             .ghost()
                             .disabled(busy)
                             .accessibility_label(format!("Actions for {name}"))
-                            .tooltip(summary),
+                            .tooltip("Project actions"),
                         builder: Box::new(move |mut menu, _, _| {
                             let p = menu_project.clone();
                             let view = weak.clone();
@@ -554,7 +550,7 @@ fn identity(
             Button::new(("project-open", index))
                 .debug_selector(move || format!("project-library-name-{index}"))
                 .accessibility_label(format!("Open {name} — {path}"))
-                .tooltip(format!("{name} — {path}"))
+                .hover_path(name.clone(), path.clone())
                 .w_full()
                 .h_auto()
                 .min_h(px(18.))

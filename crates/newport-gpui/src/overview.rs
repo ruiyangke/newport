@@ -1362,7 +1362,7 @@ impl Newport {
                             })
                             .child(
                                 Button::new(("resource", index))
-                                    .when_some(hint, |button, hint| button.tooltip(hint))
+                                    .when_some(hint, |button, hint| button.hover_hint(hint))
                                     .accessibility_label(format!(
                                         "{}: {}{}",
                                         NAMES[index],

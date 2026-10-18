@@ -1,4 +1,4 @@
-//! Explicit Needle lifecycle. Feature channels never deploy or upgrade binaries.
+//! Managed Needle lifecycle. Feature channels never deploy or upgrade binaries.
 use crate::ssh::ExecSession;
 #[path = "agent_helper_history.rs"]
 pub(crate) mod helpers;
@@ -23,7 +23,8 @@ pub fn payload_size(arch: &str) -> Option<usize> {
 pub fn check_resources() -> Result<(), String> {
     crate::agent_payload::check_resources()
 }
-/// The only operation allowed to copy or replace Needle. Callers are explicit user actions.
+/// The only operation allowed to copy or replace Needle. Automatic upgrades use
+/// the same verified, journaled deployment as explicit installation actions.
 pub struct Deployment {
     pub output: String,
     pub build_sha256: String,
@@ -37,6 +38,7 @@ pub async fn manage(
     integrations: bool,
     receipts: &crate::lifecycle_receipts::Store,
     operation_id: uuid::Uuid,
+    automatic: bool,
 ) -> Result<Deployment, String> {
     deploy(
         session,
@@ -45,6 +47,7 @@ pub async fn manage(
         integrations,
         receipts,
         operation_id,
+        automatic,
     )
     .await
 }
@@ -287,6 +290,14 @@ pub struct Status {
     pub checked_at: u64,
     pub error: Option<String>,
 }
+impl Status {
+    pub(crate) fn automatic_update_available(&self) -> bool {
+        self.installed == Some(true)
+            && self.update_available == Some(true)
+            && self.build_relation == BuildRelation::Older
+            && self.error.is_none()
+    }
+}
 #[derive(Default)]
 struct Observation {
     status: Status,
@@ -302,6 +313,7 @@ pub struct State {
     pub progress: Arc<crate::agent_install::State>,
     pub(crate) helper_history: helpers::State,
     observation: Mutex<Observation>,
+    automatic_attempt: Mutex<Option<Instant>>,
 }
 impl State {
     pub fn new(receipts: Arc<crate::lifecycle_receipts::Store>) -> Self {
@@ -332,6 +344,44 @@ impl State {
             // Preserve last verified evidence; an unreachable server is not missing.
             Err(error) => observation.status.error = Some(error.clone()),
         }
+    }
+    /// A reconnect or helper-history retry must not repeatedly start upgrades.
+    pub(crate) fn claim_automatic_update(&self, now: Instant) -> bool {
+        let mut previous = self.automatic_attempt.lock().unwrap();
+        if previous.is_some_and(|at| now.saturating_duration_since(at) < Duration::from_secs(3600))
+        {
+            return false;
+        }
+        *previous = Some(now);
+        true
+    }
+    pub(crate) fn automatic_update_unblocked(
+        &self,
+        server: &crate::model::Server,
+    ) -> Result<bool, String> {
+        if !server.agent_install_approved || self.tasks.active().is_some() {
+            return Ok(false);
+        }
+        self.automatic_update_journal_clear(server)
+    }
+    pub(crate) fn automatic_update_journal_clear(
+        &self,
+        server: &crate::model::Server,
+    ) -> Result<bool, String> {
+        use crate::lifecycle_receipts::{HelperRecoveryPhase, RemovalPhase};
+        if self.receipts.require_agent_available(server).is_err() {
+            return Ok(false);
+        }
+        let records = self.receipts.operations_snapshot(server)?;
+        Ok(records.operations.iter().all(|r| r.phase.terminal())
+            && records
+                .removals
+                .iter()
+                .all(|r| r.phase == RemovalPhase::Restored)
+            && records
+                .helper_recoveries
+                .iter()
+                .all(|r| r.phase == HelperRecoveryPhase::Restored))
     }
 }
 fn parse_check(output: &str) -> Result<Status, String> {
@@ -446,8 +496,8 @@ pub(crate) const CHECK: &str = include_str!("agent-release-check.sh");
 pub(crate) async fn check(session: &ExecSession) -> Result<Status, String> {
     parse_check(&session.execute(CHECK, None).await?)
 }
-/// Observe only existing sessions. Checking for an update never connects a
-/// disconnected profile. Connection establishment wakes this worker immediately.
+/// Observe and upgrade only existing sessions. This never connects a disconnected
+/// profile. Connection establishment wakes this worker immediately.
 pub async fn run(state: crate::manager::Shared) {
     let registry = state.sessions.clone();
     let mut timer = tokio::time::interval(Duration::from_secs(60));
@@ -462,14 +512,20 @@ pub async fn run(state: crate::manager::Shared) {
             let Some(lease) = owner.connected_lease().await else {
                 continue;
             };
-            if !owner.lifecycle.due(lease.generation(), Instant::now()) {
+            if !owner.lifecycle.due(lease.generation(), Instant::now())
+                && !owner.lifecycle.snapshot().automatic_update_available()
+            {
                 continue;
             }
             if checks.len() >= 4 {
                 let _ = checks.join_next().await;
             }
             checks.spawn(async move {
-                let _ = lease.check_installation_if_due().await;
+                if let Ok(status) = lease.check_installation_if_due().await
+                    && let Err(error) = lease.automatically_update_needle(&status).await
+                {
+                    log::warn!("Automatic Needle update did not complete: {error}");
+                }
             });
         }
         while checks.join_next().await.is_some() {}
@@ -493,6 +549,7 @@ pub(crate) async fn manage_test(
         integrations,
         &state.receipts,
         uuid::Uuid::new_v4(),
+        false,
     )
     .await
     .map(|d| d.output);
@@ -530,13 +587,23 @@ async fn deploy(
     integrate: bool,
     receipts: &crate::lifecycle_receipts::Store,
     operation_id: uuid::Uuid,
+    automatic: bool,
 ) -> Result<Deployment, String> {
     if !session.server().agent_install_approved {
         return Err(
             "Needle installation requires approval. Open Overview to set up this server.".into(),
         );
     }
-    deploy_inner(session, force, integrate, progress, receipts, operation_id).await
+    deploy_inner(
+        session,
+        force,
+        integrate,
+        progress,
+        receipts,
+        operation_id,
+        automatic,
+    )
+    .await
 }
 async fn deploy_inner(
     session: &ExecSession,
@@ -545,6 +612,7 @@ async fn deploy_inner(
     progress: &crate::agent_install::Attempt,
     receipts: &crate::lifecycle_receipts::Store,
     operation_id: uuid::Uuid,
+    automatic: bool,
 ) -> Result<Deployment, String> {
     use crate::lifecycle_receipts::{
         Phase, Record,
@@ -589,6 +657,11 @@ async fn deploy_inner(
         record
     } else {
         let status = check(session).await?;
+        if automatic && !status.automatic_update_available() {
+            return Err(
+                "Needle changed since the automatic update check; leaving it unchanged.".into(),
+            );
+        }
         require_ordered_replacement(&status)?;
         let previous = status.installed_hash.unwrap_or_else(|| "missing".into());
         receipts
@@ -1036,7 +1109,8 @@ mod tests {
                         }
                         Action::Helpers => lease.configure_integrations_operation(id).await,
                         Action::Recover => lease.recover_installation(id).await,
-                        Action::Keep { .. }
+                        Action::AutoUpdate
+                        | Action::Keep { .. }
                         | Action::Remove { .. }
                         | Action::RestoreRemoval
                         | Action::RestoreHelpers { .. } => {

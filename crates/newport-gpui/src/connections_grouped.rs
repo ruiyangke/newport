@@ -29,6 +29,13 @@ impl ProjectsCache {
         *self.counts.get_or_insert_with(|| {
             let mine = saved.iter().filter(|t| t["serverId"] == server);
             Counts {
+                all: self.projects.iter().map(|p| p.entries.len()).sum(),
+                saved: self
+                    .projects
+                    .iter()
+                    .flat_map(|p| &p.entries)
+                    .filter(|e| !e.forwards.is_empty())
+                    .count(),
                 listening: self
                     .projects
                     .iter()
@@ -53,6 +60,8 @@ impl ProjectsCache {
 
 #[derive(Clone, Copy)]
 struct Counts {
+    all: usize,
+    saved: usize,
     listening: usize,
     projects: usize,
     active: usize,
@@ -145,6 +154,7 @@ struct ProjectRows {
     project: Project,
     full: Vec<Entry>,
     rows: Vec<connections_rows::Row>,
+    matched_count: usize,
     positions: Vec<(usize, usize)>,
 }
 #[derive(Default)]
@@ -185,6 +195,7 @@ impl ProjectRows {
         Self {
             project,
             full,
+            matched_count: rows.len(),
             rows,
             positions,
         }
@@ -522,6 +533,8 @@ impl Newport {
         let (
             groups,
             Counts {
+                all,
+                saved: saved_count,
                 listening,
                 projects,
                 active,
@@ -578,6 +591,32 @@ impl Newport {
                     .collect()
             });
         let empty = visible.is_empty();
+        let shown = visible.iter().map(|group| group.rows.len()).sum::<usize>();
+        let total = match filter {
+            1 => saved_count,
+            2 => groups
+                .iter()
+                .flat_map(|group| &group.entries)
+                .filter(|entry| entry_needs_attention(runtime, entry))
+                .count(),
+            _ => all,
+        };
+        let noun = if filter == 1 {
+            "saved connection"
+        } else {
+            "connection"
+        };
+        let mut displayed_summary = if shown == total {
+            format!("{shown} {noun}{}", if shown == 1 { "" } else { "s" })
+        } else {
+            format!(
+                "{shown} of {total} {noun}{}",
+                if total == 1 { "" } else { "s" }
+            )
+        };
+        if filter == 0 && query.is_empty() && has_reading {
+            displayed_summary.push_str(&format!(" · {listening} listening"));
+        }
         let mut summary = format!(
             "{active} {} enabled",
             if active == 1 { "forward" } else { "forwards" }
@@ -650,7 +689,9 @@ impl Newport {
                             &project.key,
                             &state.collapsed_worktrees,
                         );
-                        Rc::new(ProjectRows::new(project.clone(), data.full.clone(), rows))
+                        let mut folded = ProjectRows::new(project.clone(), data.full.clone(), rows);
+                        folded.matched_count = data.matched_count;
+                        Rc::new(folded)
                     } else {
                         data.clone()
                     };
@@ -771,6 +812,16 @@ impl Newport {
                             .filter(|(i, _)| *i != 2 || attention > 0)
                             .map(|(i, name)| Choice {
                                 danger: i == 2,
+                                count: match i {
+                                    0 => Some(all),
+                                    1 => Some(saved_count),
+                                    _ => None,
+                                },
+                                tooltip: match i {
+                                    0 => Some("Discovered ports and saved forwards"),
+                                    1 => Some("Saved forwards, including those switched off"),
+                                    _ => None,
+                                },
                                 ..Choice::text(i, name)
                             })
                             .collect(),
@@ -884,15 +935,17 @@ impl Newport {
                             .id("connections-summary")
                             .role(accesskit::Role::Status)
                             .aria_label(if attention > 0 {
-                                format!("{summary} · {attention} need attention")
+                                format!(
+                                    "{displayed_summary}; {summary} · {attention} need attention"
+                                )
                             } else {
-                                summary.clone()
+                                format!("{displayed_summary}; {summary}")
                             })
                             .flex()
                             .flex_wrap()
                             .gap_1()
                             .child(if has_reading {
-                                format!("{listening} listening ports")
+                                displayed_summary
                             } else {
                                 "Discovering ports…".into()
                             })
@@ -970,7 +1023,7 @@ impl Newport {
         let mut list_rows = Vec::new();
         let mut list_section = String::new();
         let mut list_name = format!("{name} ports");
-        let count = full.len();
+        let count = chunk.data.matched_count;
         let tally = format!(
             "{count} {}",
             if key.is_empty() {
@@ -1138,10 +1191,7 @@ impl Newport {
                                             inset: false,
                                         }])
                                     })
-                                    .tooltip(move |window, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(tooltip.clone())
-                                            .build(window, cx)
-                                    })
+                                    .hover_path(title.clone(), tooltip.clone())
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         if this.server != server {
                                             return;
@@ -1256,13 +1306,7 @@ impl Newport {
                                         inset: false,
                                     }])
                                 })
-                                .tooltip({
-                                    let location = location.clone();
-                                    move |window, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(location.clone())
-                                            .build(window, cx)
-                                    }
-                                })
+                                .hover_path(name.clone(), location.clone())
                                 .accessibility_label(format!(
                                     "{} {name}",
                                     if collapsed { "Expand" } else { "Collapse" }
@@ -1549,6 +1593,92 @@ mod tests {
                 .attention),
             1
         );
+    }
+
+    #[gpui::test]
+    fn clicking_saved_filters_rendered_connections_in_both_layouts(cx: &mut TestAppContext) {
+        use crate::page_perf_tests::{connections_fixture, frame};
+        for table in [false, true] {
+            let (view, visual) = connections_fixture(cx, table);
+            view.update(visual, |view, cx| {
+                let mut snapshot = view.snapshot.clone();
+                snapshot["config"]["tunnels"] = json!([{
+                    "id":"forward", "serverId":"fixture", "name":"App", "localPort":9000,
+                    "remotePort":8000, "remoteHost":"127.0.0.1", "direction":"local", "project":"/srv/project-0", "enabled":false
+                }, {
+                    "id":"stopped", "serverId":"fixture", "name":"Stopped service", "localPort":9001,
+                    "remotePort":9001, "remoteHost":"127.0.0.1", "direction":"local", "enabled":false
+                }]);
+                view.sync_connections_snapshot(&snapshot);
+                view.snapshot = snapshot;
+                cx.notify();
+            });
+            frame(visual);
+            for (filter, expected) in [(1, 2), (0, 501), (1, 2)] {
+                let button = visual.update(|window, _| {
+                    let control = gpui_kit::base::test_support::find(
+                        window,
+                        &[],
+                        &format!("port-filter:fixture-{filter}").into(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        control.label(),
+                        Some(if filter == 1 {
+                            "Saved (2)"
+                        } else {
+                            "All (501)"
+                        })
+                    );
+                    control.bounds()
+                });
+                visual.simulate_click(button.center(), Default::default());
+                frame(visual);
+                view.read_with(visual, |view, _| {
+                    let state = &view.connections_state["fixture"];
+                    assert_eq!(state.filter, filter);
+                    assert_eq!(
+                        state
+                            .visible
+                            .borrow()
+                            .groups
+                            .iter()
+                            .map(|g| g.rows.len())
+                            .sum::<usize>(),
+                        expected
+                    );
+                });
+                assert!(
+                    visual
+                        .debug_bounds("connection-row-port-8000-1-127.0.0.1-")
+                        .is_some()
+                );
+                assert_eq!(
+                    visual
+                        .debug_bounds("connection-row-port-8001-2-127.0.0.1-")
+                        .is_some(),
+                    filter == 0
+                );
+            }
+            view.update(visual, |view, cx| {
+                let mut snapshot = view.snapshot.clone();
+                snapshot["config"]["tunnels"] = json!([]);
+                view.sync_connections_snapshot(&snapshot);
+                view.snapshot = snapshot;
+                cx.notify();
+            });
+            frame(visual);
+            view.read_with(visual, |view, _| {
+                let state = &view.connections_state["fixture"];
+                assert!(state.visible.borrow().groups.is_empty());
+                assert_eq!(state.projects.borrow().counts.unwrap().saved, 0);
+            });
+            assert!(
+                visual
+                    .debug_bounds("connection-row-port-8000-1-127.0.0.1-")
+                    .is_none()
+            );
+        }
     }
 
     #[gpui::test]

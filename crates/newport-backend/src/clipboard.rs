@@ -600,7 +600,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh clipboard::tests::managed_bridge"]
+    #[ignore = "Run with npm run test:ssh -- clipboard::tests::managed_bridge"]
     async fn managed_bridge_updates_permissions_without_reopening_channel() {
         let server: Server = serde_json::from_value(serde_json::json!({
             "id": uuid::Uuid::new_v4(), "name":"Managed bridge fixture",
@@ -692,7 +692,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh clipboard::tests::integration_owner"]
+    #[ignore = "Run with npm run test:ssh -- clipboard::tests::integration_owner"]
     async fn integration_owner_deduplicates_start_and_isolates_retired_status() {
         let directory = tempfile::tempdir().unwrap();
         let server: Server = serde_json::from_value(serde_json::json!({
@@ -793,7 +793,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh clipboard::tests::runtime_loss"]
+    #[ignore = "Run with npm run test:ssh -- clipboard::tests::runtime_loss"]
     async fn runtime_loss_recovers_bridge_and_invalidates_git_without_reconnecting_ssh() {
         let directory = tempfile::tempdir().unwrap();
         let server: Server = serde_json::from_value(serde_json::json!({
@@ -861,7 +861,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh clipboard::tests::reinstall_command"]
+    #[ignore = "Run with npm run test:ssh -- clipboard::tests::reinstall_command"]
     async fn reinstall_command_does_not_interrupt_a_healthy_bridge_on_failure() {
         let directory = tempfile::tempdir().unwrap();
         let server: Server = serde_json::from_value(serde_json::json!({
@@ -1357,7 +1357,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh and its isolated remote HOME"]
+    #[ignore = "Run with npm run test:ssh and its isolated remote HOME"]
     async fn ssh_agent_snapshot_browser_and_cleanup() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let server = Server {
@@ -1507,7 +1507,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh clipboard::tests"]
+    #[ignore = "Run with npm run test:ssh -- clipboard::tests"]
     async fn retiring_integration_keeps_permissions_when_new_runtime_fails() {
         let directory = tempfile::tempdir().unwrap();
         let server: Server = serde_json::from_value(serde_json::json!({

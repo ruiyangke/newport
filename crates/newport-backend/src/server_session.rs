@@ -665,11 +665,29 @@ impl Lease {
         force: bool,
         integrations: bool,
         operation_id: Uuid,
+        automatic: bool,
     ) -> Result<String, String> {
         self.validate()?;
         let owner = self.owner.upgrade().ok_or(STALE)?;
         let operation = owner.lifecycle.operation.lock().await;
         self.validate()?;
+        if automatic {
+            // Recheck under lifecycle exclusion. A manual install, removal, or
+            // another desktop may have changed the target since discovery.
+            if !self.connection.server().agent_install_approved
+                || !owner
+                    .lifecycle
+                    .automatic_update_journal_clear(self.connection.server())?
+            {
+                return Ok("Automatic Needle update deferred.".into());
+            }
+            let status = crate::agent_lifecycle::check(&self.connection).await;
+            self.validate()?;
+            owner.lifecycle.record(self.generation, &status);
+            if !status?.automatic_update_available() {
+                return Ok("Needle does not need an automatic update.".into());
+            }
+        }
         let progress = owner.lifecycle.progress.attempt_for(Some(operation_id));
         let result: Result<String, String> = async {
             let deployment = crate::agent_lifecycle::manage(
@@ -679,6 +697,7 @@ impl Lease {
                 integrations,
                 &owner.lifecycle.receipts,
                 operation_id,
+                automatic,
             )
             .await?;
             self.validate()?;
@@ -1097,8 +1116,13 @@ impl Lease {
                 owner.cancellation(),
                 async move {
                     match action {
+                        Action::AutoUpdate => {
+                            lease.install_operation_inner(true, false, id, true).await
+                        }
                         Action::Install { integrations } => {
-                            lease.install_operation_inner(force, integrations, id).await
+                            lease
+                                .install_operation_inner(force, integrations, id, false)
+                                .await
                         }
                         Action::Helpers => lease.configure_integrations_operation_inner(id).await,
                         Action::Recover => lease.recover_installation_inner(id).await,
@@ -1188,6 +1212,30 @@ impl Lease {
     }
     pub async fn check_installation(&self) -> Result<crate::agent_lifecycle::Status, String> {
         self.check_installation_inner(false).await
+    }
+    pub(crate) async fn automatically_update_needle(
+        &self,
+        status: &crate::agent_lifecycle::Status,
+    ) -> Result<(), String> {
+        self.validate()?;
+        let owner = self.owner.upgrade().ok_or(STALE)?;
+        if !status.automatic_update_available()
+            || !owner
+                .lifecycle
+                .automatic_update_unblocked(self.connection.server())?
+            || !owner
+                .lifecycle
+                .claim_automatic_update(std::time::Instant::now())
+        {
+            return Ok(());
+        }
+        self.run_lifecycle(
+            Uuid::new_v4(),
+            crate::lifecycle_task::Action::AutoUpdate,
+            true,
+        )
+        .await
+        .map(|_| ())
     }
     pub(crate) async fn check_installation_if_due(
         &self,
@@ -1430,7 +1478,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh server_session::tests"]
+    #[ignore = "Run with npm run test:ssh -- server_session::tests"]
     async fn removal_admission_keeps_existing_ssh_transport_usable() {
         let registry = Registry::default();
         let mut server = profile();
@@ -1485,7 +1533,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh server_session::tests"]
+    #[ignore = "Run with npm run test:ssh -- server_session::tests"]
     async fn shared_runtime_negotiates_once_and_does_not_serialize_feature_channels() {
         let registry = Registry::default();
         let mut server = profile();
@@ -1538,7 +1586,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh server_session::tests"]
+    #[ignore = "Run with npm run test:ssh -- server_session::tests"]
     async fn supervisor_recovers_lost_transport_once_for_all_services_with_backoff() {
         let registry = Registry::default();
         let mut server = profile();
@@ -1597,7 +1645,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh server_session::tests"]
+    #[ignore = "Run with npm run test:ssh -- server_session::tests"]
     async fn background_inspection_only_uses_connected_transports() {
         let directory = tempfile::tempdir().unwrap();
         let mut manager =
@@ -1680,7 +1728,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh server_session::tests"]
+    #[ignore = "Run with npm run test:ssh -- server_session::tests"]
     async fn shared_transport_survives_lease_drop_and_channel_failure() {
         let registry = Registry::default();
         let mut server = profile();
@@ -1748,7 +1796,7 @@ mod tests {
         assert!(approved.is_closed());
     }
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh server_session::tests"]
+    #[ignore = "Run with npm run test:ssh -- server_session::tests"]
     async fn registration_rotation_keeps_old_channels_alive_and_bounds_overlap() {
         use crate::git::client::Client;
         let registry = Registry::default();
@@ -1824,7 +1872,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh server_session::tests"]
+    #[ignore = "Run with npm run test:ssh -- server_session::tests"]
     async fn saturated_worker_admission_is_retryable_without_runtime_or_transport_replacement() {
         let registry = Registry::default();
         let mut server = profile();

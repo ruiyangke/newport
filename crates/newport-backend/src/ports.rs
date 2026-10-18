@@ -346,7 +346,7 @@ fn decode_hex(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh ports::tests::session_query"]
+    #[ignore = "Run with npm run test:ssh -- ports::tests::session_query"]
     async fn session_query_discovers_over_shared_ssh_without_installing_needle() {
         let server = serde_json::from_value(serde_json::json!({
             "id":uuid::Uuid::new_v4(), "name":"Query SSH fixture", "sshUser":"fixture",

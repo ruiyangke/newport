@@ -54,7 +54,8 @@ The Windows-only `native_package_runtime` Rust integration test exercises a real
 candidate in an isolated install directory, including locked-file rollback,
 interrupted-installer recovery, upgrade retry, and profile-preserving uninstall.
 It is ignored by default because it changes current-user installation registration. See
-[the test guide](../../docs/testing.md) for its explicit invocation and preflight.
+[the test guide](../../docs/testing.md#signing-and-installation-checks) for its
+requirements and [test source](tests/native_package_runtime.rs) for preflight.
 
 ## Dependency boundary
 

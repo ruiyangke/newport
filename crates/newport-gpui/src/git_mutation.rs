@@ -8,6 +8,7 @@ enum Reply {
     Outcome(Result<Operation, String>),
 }
 pub struct Mutation {
+    index_only: bool,
     pub(super) project_creation: Option<(uuid::Uuid, String)>,
     pub(super) integration_review: Option<uuid::Uuid>,
     pub(super) remote_refs_write: bool,
@@ -66,6 +67,7 @@ impl Newport {
     }
     pub(super) fn git_mutation_blocks_write(&self) -> bool {
         self.git.switching_path.is_some()
+            || self.git.index_refresh.is_some()
             || self.resources.get("git-refresh").is_some_and(|r| r.pending)
             || self.git_mutation.as_ref().is_some_and(|state| {
                 state.pending.is_some()
@@ -106,6 +108,7 @@ impl Newport {
         let id = uuid::Uuid::new_v4();
         let (send, receive) = mpsc::sync_channel(1);
         let mut state = Mutation {
+            index_only: false,
             project_creation: None,
             integration_review: None,
             remote_refs_write: false,
@@ -179,6 +182,28 @@ impl Newport {
         self.git_mutation = Some(state);
         self.notify_git_failure(cx);
         cx.notify();
+    }
+    pub(super) fn start_git_index_mutation(
+        &mut self,
+        repo: String,
+        title: String,
+        work: impl FnOnce(
+            backend::Backend,
+            &str,
+            &str,
+            uuid::Uuid,
+        ) -> Result<Operation, newport_gpui::git_operation::WriteError>
+        + Send
+        + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if self.git_mutation_blocks_write() {
+            return;
+        }
+        self.start_git_mutation(repo, title, work, cx);
+        if let Some(state) = self.git_mutation.as_mut() {
+            state.index_only = true;
+        }
     }
     fn check_git_outcome(&mut self, reviewed: bool, cx: &mut Context<Self>) {
         let Some(state) = self.git_mutation.as_mut() else {
@@ -460,6 +485,18 @@ impl Newport {
         if let Some(path) = created_checkout {
             self.git_open_worktree_path(path, cx);
         } else if refresh && !current_repo.is_empty() {
+            if self.git.tab == 0
+                && self.git_mutation.as_ref().is_some_and(|state| {
+                    state.index_only
+                        && state
+                            .outcome
+                            .as_ref()
+                            .is_some_and(|o| o.state == State::Succeeded)
+                })
+            {
+                self.git_refresh_index();
+                return true;
+            }
             let form = self.git.pull_form.take();
             self.git_refresh();
             if let Some(mut form) = form {

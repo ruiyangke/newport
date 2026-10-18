@@ -345,7 +345,7 @@ impl ContainersPanel {
                             )
                             .label("Up")
                             .accessibility_label(format!("Up {service}"))
-                            .tooltip(format!("Create and start {service}"))
+                            .hover_hint(format!("Create and start {service}"))
                             .disabled(blocked)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if this.compose_project_selected(&project)
@@ -414,7 +414,7 @@ impl ContainersPanel {
                             .px_0()
                             .w_full()
                             .justify_start()
-                            .tooltip(tooltip)
+                            .hover_hint(tooltip)
                             .accessibility_label(format!("Open container {}", container.name))
                             .child(name)
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -483,7 +483,7 @@ impl ContainersPanel {
             .ghost()
             .icon(IconName::Ellipsis)
             .accessibility_label(format!("More actions for {service}"))
-            .tooltip(format!("Actions for {service}"))
+            .hover_hint(format!("Actions for {service}"))
             .disabled(blocked)
             .dropdown_menu(move |mut menu, _, cx| {
                 let enabled = weak.upgrade().is_some_and(|panel| {

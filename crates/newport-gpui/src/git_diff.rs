@@ -18,6 +18,13 @@ pub(super) struct Presentation {
     pub(super) width: OnceCell<Pixels>,
 }
 impl Presentation {
+    fn file_at(&self, row: usize) -> Option<String> {
+        self.lines
+            .iter()
+            .take(row.saturating_add(1))
+            .rev()
+            .find_map(|row| row.file_path.clone())
+    }
     pub(super) fn text_width(&self, cx: &App) -> Pixels {
         *self.width.get_or_init(|| {
             let system = WindowTextSystem::new(cx.text_system().clone());
@@ -61,11 +68,33 @@ impl Cache {
         }
         let decoded = decode(page);
         let error = decoded.as_ref().err().cloned();
+        let review = newport_client::git_selection::Review::from_page(page).map(Rc::new);
+        let continued = cache.as_ref().filter(|(previous, view)| {
+            error.is_none()
+                && view.error.is_none()
+                && review.is_ok()
+                && view.review.is_ok()
+                && key[0].is_string()
+                && previous[0] == key[0]
+                && previous[1] == key[1]
+                && previous[2].is_string()
+                && previous[2] != key[2]
+                && previous[3]
+                    .as_u64()
+                    .zip(key[3].as_u64())
+                    .is_some_and(|(old, new)| new > old)
+        });
+        let (selection, range_selection) = if let Some((_, previous)) = continued {
+            previous.range_selection.borrow_mut().page_extended();
+            (previous.selection.clone(), previous.range_selection.clone())
+        } else {
+            (Rc::default(), Rc::default())
+        };
         let view = Rc::new(Presentation {
             lines: decoded.unwrap_or_default(),
-            selection: Rc::default(),
-            range_selection: Rc::default(),
-            review: newport_client::git_selection::Review::from_page(page).map(Rc::new),
+            selection,
+            range_selection,
+            review,
             error,
             split: OnceCell::new(),
             runs: OnceCell::new(),
@@ -79,7 +108,7 @@ impl Cache {
 /// A page is loaded only in response to scrolling its rendered comparison.
 /// Consuming the gesture prevents stale viewport geometry draining later pages.
 #[derive(Default)]
-pub(super) struct ScrollDemand(Option<Value>, git_page_demand::Demand);
+pub(super) struct ScrollDemand(Option<Value>, git_page_demand::Demand, Option<String>);
 impl ScrollDemand {
     fn arm(&mut self, key: Value) {
         self.0 = Some(key);
@@ -95,7 +124,20 @@ fn page_key(page: &Value) -> Value {
         page["snapshot"],
         page["metadata"],
         page["nextCursor"],
-        page["entries"].as_array().map(Vec::len)
+        page["entries"].as_array().map(|files| files
+            .iter()
+            .map(|file| {
+                file["hunks"]
+                    .as_array()
+                    .filter(|hunks| !hunks.is_empty())
+                    .map_or(1, |hunks| {
+                        hunks
+                            .iter()
+                            .map(|hunk| hunk["lines"].as_array().map_or(0, Vec::len))
+                            .sum::<usize>()
+                    })
+            })
+            .sum::<usize>())
     ])
 }
 
@@ -181,6 +223,7 @@ impl Footer {
 #[derive(Default)]
 pub(super) struct Row {
     pub(super) heading: bool,
+    pub(super) file_path: Option<String>,
     pub(super) hunk: Option<String>,
     pub(super) selection: Option<(String, String)>,
     pub(super) origin: String,
@@ -223,6 +266,20 @@ fn decode(page: &Value) -> Result<Vec<Row>, String> {
         let first_file = files_seen.insert(file["fileIndex"].as_u64());
         let old = &file["oldPath"];
         let new = &file["newPath"];
+        let file_start = result.len();
+        let path = new["display"].as_str().or_else(|| old["display"].as_str());
+        if first_file
+            && page["metadata"]["totalFiles"]
+                .as_u64()
+                .is_some_and(|n| n > 1)
+            && let Some(path) = path
+        {
+            result.push(Row {
+                heading: true,
+                bytes: path.as_bytes().to_vec(),
+                ..Default::default()
+            });
+        }
         if first_file
             && old["bytesB64"].is_string()
             && new["bytesB64"].is_string()
@@ -286,6 +343,9 @@ fn decode(page: &Value) -> Result<Vec<Row>, String> {
                 }
             }
         }
+        if first_file && let Some(row) = result.get_mut(file_start) {
+            row.file_path = path.map(str::to_owned);
+        }
     }
     if let Some(line) = lines.finish(page["nextCursor"].as_str().is_some())? {
         let row = Row::from(line);
@@ -301,6 +361,20 @@ fn decode(page: &Value) -> Result<Vec<Row>, String> {
     Ok(result)
 }
 impl Newport {
+    fn visible_diff_file(&self, presentation: &Presentation) -> Option<String> {
+        let top =
+            (-self.git.diff_scroll.0.borrow().base_handle.offset().y / px(22.)).max(0.) as usize;
+        let row = if self.diff_layout() == git_diff_split::Layout::Split {
+            presentation
+                .split
+                .get()
+                .and_then(|model| model.source_row(top))
+                .unwrap_or(0)
+        } else {
+            top
+        };
+        presentation.file_at(row)
+    }
     pub(super) fn poll_git_diff_scroll(&mut self) -> bool {
         let inspection = self.git_is_inspection();
         let visible = self.page == Page::Projects
@@ -337,6 +411,9 @@ impl Newport {
         // downward gesture still loads its continuation without eager reads.
         let at_end = self.git.diff_scroll.is_scrolled_to_end() != Some(false);
         let presentation = self.git.diff_presentation.get(page);
+        let file = self.visible_diff_file(&presentation);
+        let file_changed = self.git.diff_demand.2 != file;
+        self.git.diff_demand.2 = file;
         let count = if self.diff_layout() == git_diff_split::Layout::Split {
             presentation
                 .split
@@ -362,7 +439,7 @@ impl Newport {
             .take_ready(page, footer, visible, at_end)
             && !scrolled
         {
-            return false;
+            return file_changed;
         }
         self.git_diff_more();
         true
@@ -449,7 +526,7 @@ impl Newport {
                 |view| {
                     view.child(
                         crate::controls::compact_button("git-stage-file")
-                            .label("Stage file")
+                            .label(git_changes::index_action_label(true, &self.git.selected))
                             .disabled(!self.git_can_change_index(true))
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.git_change_index(true, cx)),
@@ -460,7 +537,7 @@ impl Newport {
             .when(working && self.git.selected["staged"] == true, |view| {
                 view.child(
                     crate::controls::compact_button("git-unstage-file")
-                        .label("Unstage file")
+                        .label(git_changes::index_action_label(false, &self.git.selected))
                         .disabled(!self.git_can_change_index(false))
                         .on_click(cx.listener(|this, _, _, cx| this.git_change_index(false, cx))),
                 )
@@ -629,10 +706,17 @@ impl Newport {
             invalid || error.is_some(),
         );
         let partial_hint = (!self.git_is_inspection() && footer != Footer::Loading)
-            .then(|| presentation.review.as_ref().err().cloned())
+            .then(|| presentation.review.as_ref().err().map(|reason| {
+                if text(&self.git.selected["path"], "display").ends_with('/') {
+                    "Folder preview. Stage folder includes all non-ignored files in this folder.".to_owned()
+                } else { reason.clone() }
+            }))
             .flatten();
         let empty = presentation.lines.is_empty();
         let title = self.diff_title();
+        let file_context = self
+            .visible_diff_file(&presentation)
+            .filter(|path| path != &title);
         let selection_bar = self
             .diff_actions(&presentation, cx)
             .and_then(|actions| actions.selection_bar(cx));
@@ -656,6 +740,20 @@ impl Newport {
             .flex_col()
             .child(self.git_diff_toolbar(title, cx))
             .child(self.git_find_bar(cx))
+            .when_some(file_context, |view, path| {
+                view.child(
+                    div()
+                        .id("git-diff-current-file")
+                        .px_3()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .role(accesskit::Role::Label)
+                        .aria_label(format!("Current diff file: {path}"))
+                        .hover_path("File", path.clone())
+                        .child(git_file_row::path(path, cx)),
+                )
+            })
             .when_some(selection_bar, |view, bar| view.child(bar))
             .child(self.status(first_key, cx))
             .child(self.status(more_key, cx))
@@ -1011,6 +1109,74 @@ mod tests {
             decode(&binary).unwrap()[0].bytes,
             b"Binary file changed. A text diff is not available."
         );
+    }
+    #[test]
+    fn multi_file_diffs_identify_each_file_and_keep_context_between_headers() {
+        let file = |index, name: &str| {
+            json!({"fileIndex":index,"oldPath":{"bytesB64":name,"display":name},
+            "newPath":{"bytesB64":name,"display":name}, "hunks":[{"index":0,"oldStart":0,"oldLines":0,"newStart":1,"newLines":1,
+                "lines":[{"lineIndex":0,"byteOffset":0,"lineComplete":true,"origin":"+","oldLine":null,"newLine":1,"contentBytesB64":"YQo="}]}]})
+        };
+        let mut page = json!({"snapshot":"s","nextCursor":null,"metadata":{"totalFiles":2},
+            "entries":[file(0, "docs/a.md"), file(1, "docs/nested/b.md")]});
+        let cache = Cache::default();
+        let view = cache.get(&page);
+        assert!(view.error.is_none());
+        assert_eq!(view.lines.len(), 6);
+        assert_eq!(view.lines[0].text(), "docs/a.md");
+        assert_eq!(view.lines[3].text(), "docs/nested/b.md");
+        for (row, path) in [
+            (0, "docs/a.md"),
+            (2, "docs/a.md"),
+            (3, "docs/nested/b.md"),
+            (5, "docs/nested/b.md"),
+            (50, "docs/nested/b.md"),
+        ] {
+            assert_eq!(view.file_at(row).as_deref(), Some(path));
+        }
+        // A legacy collapsed directory containing one file still gets an exact
+        // sticky file identity without adding a redundant in-body heading.
+        page["snapshot"] = json!("single");
+        page["metadata"]["totalFiles"] = json!(1);
+        page["entries"].as_array_mut().unwrap().truncate(1);
+        let view = cache.get(&page);
+        assert_eq!(view.lines.len(), 2);
+        assert_eq!(view.file_at(1).as_deref(), Some("docs/a.md"));
+    }
+    #[test]
+    fn pagination_preserves_selected_lines_but_refresh_does_not() {
+        let cache = Cache::default();
+        let mut page = json!({"snapshot":"diff", "nextCursor":"page2",
+            "metadata":{"readOnly":false,"totalFiles":1,"sourceSnapshot":"status","entryId":"file","side":"index_to_worktree","contextLines":3},
+            "entries":[{"fileIndex":0,"status":"Untracked","oldMode":0,"newMode":33188,
+                "oldPath":{"bytesB64":"Zg=="},"newPath":{"bytesB64":"Zg=="},
+                "hunks":[{"id":"h","index":0,"totalLines":2,"oldStart":0,"oldLines":0,"newStart":1,"newLines":2,
+                    "lines":[{"lineIndex":0,"byteOffset":0,"lineComplete":true,"origin":"+","oldLine":null,"newLine":1,"id":"a","contentBytesB64":"YQo="}]}]}]});
+        let first = cache.get(&page);
+        assert!(first.error.is_none());
+        first.selection.borrow_mut().insert("a".into());
+        assert!(!first.review.as_ref().unwrap().hunk_complete("h"));
+        let mut fragment = page["entries"][0].clone();
+        fragment["hunks"][0]["lines"][0] = json!({"lineIndex":1,"byteOffset":0,"lineComplete":true,"origin":"+","oldLine":null,"newLine":2,"id":"b","contentBytesB64":"Ygo="});
+        page["entries"][0]["hunks"][0]["lines"]
+            .as_array_mut()
+            .unwrap()
+            .push(fragment["hunks"][0]["lines"][0].clone());
+        page["nextCursor"] = json!(null);
+        let next = cache.get(&page);
+        assert!(next.error.is_none());
+        assert!(next.selection.borrow().contains("a"));
+        assert!(std::rc::Rc::ptr_eq(
+            &first.range_selection,
+            &next.range_selection
+        ));
+        assert!(next.review.as_ref().unwrap().hunk_complete("h"));
+        assert_eq!(
+            next.lines.iter().filter(|r| r.selection.is_some()).count(),
+            2
+        );
+        page["snapshot"] = json!("refreshed");
+        assert!(cache.get(&page).selection.borrow().is_empty());
     }
     #[test]
     fn line_selection_is_scoped_to_the_cached_comparison() {

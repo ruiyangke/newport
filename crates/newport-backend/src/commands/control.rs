@@ -521,7 +521,7 @@ pub async fn reinstall_agent_with_id(
     let (server, owner) = state.current(id)?;
     owner.retry_transport();
     // Healthy integrations keep their pinned runtime throughout staging and
-    // activation. Only explicit lifecycle work deploys a new installation.
+    // activation. Deployment uses the shared managed lifecycle.
     let installed = async {
         let session = owner.acquire(&server).await?;
         // Updating the shared agent must not rewrite optional shell configuration.

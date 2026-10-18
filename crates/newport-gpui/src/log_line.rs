@@ -1,7 +1,8 @@
 //! Shared literal log-row presentation; collection, filtering and polling stay
 //! with each screen's retained log view and client.
+use crate::hover::HoverExt as _;
 use crate::selectable_log::SelectableLog;
-use gpui_kit::component::{ActiveTheme, tooltip::Tooltip};
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::{prelude::*, *};
 use std::{cell::RefCell, rc::Rc};
 
@@ -84,9 +85,7 @@ pub(crate) fn render(
                     .flex_shrink_0()
                     .whitespace_nowrap()
                     .when_some(line.at, |v, at| {
-                        v.tooltip(move |window, cx| {
-                            Tooltip::new(crate::localized_time::full_date(at)).build(window, cx)
-                        })
+                        v.hover_hint(crate::localized_time::full_date(at))
                     })
                     .text_color(cx.theme().muted_foreground)
                     .child(

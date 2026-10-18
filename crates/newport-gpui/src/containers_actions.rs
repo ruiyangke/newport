@@ -94,7 +94,7 @@ impl ContainersPanel {
                 crate::controls::button("container-shell")
                     .icon(IconName::Terminal)
                     .label("Shell")
-                    .tooltip(if c.state == domain::ContainerState::Running {
+                    .hover_hint(if c.state == domain::ContainerState::Running {
                         "Open a shell inside this container in the Terminal"
                     } else {
                         "Start the container to open a shell in it"

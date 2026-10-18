@@ -4,7 +4,7 @@ Open **Files** (⌘6) to browse a server through SFTP using its saved SSH authen
 
 ## Browse and preview
 
-Enter a remote path or expand folders in the tree. **Home** opens the account's initial SFTP directory. Filter by name, show hidden files, or move through pages of 100 entries. Listings are limited to 20,000 entries; open a smaller folder if a listing exceeds that limit.
+Enter a remote path or expand folders in the tree. **Home** opens the account's initial SFTP directory. Filter by name, show hidden files, or move through pages of 40 entries. Listings are limited to 20,000 entries; open a smaller folder if a listing exceeds that limit.
 
 Select a file to preview it:
 
@@ -20,9 +20,9 @@ Content determines the preview type. Text is displayed as text, and PDFs render 
 
 **Upload** selects one local file and sends it to the current remote directory. Existing remote files are not overwritten. Rename your local file if the destination name is already in use. Uploads do not preserve executable permissions.
 
-**Download** opens the Mac save dialog, including a confirmation before replacing a local file. Newport writes to a temporary file and replaces the destination only after a successful transfer. Failed or cancelled downloads leave the existing destination intact.
+**Download** opens the system save dialog, including a confirmation before replacing a local file. Newport writes to a temporary file and replaces the destination only after a successful transfer. Failed or cancelled downloads leave the existing destination intact.
 
-Transfers show progress and support cancellation. Leaving Files, switching servers, changing connection credentials or quitting cancels the associated work.
+Transfers show progress and support cancellation. Leaving Files or switching pages/servers keeps the original transfer running. Changing or deleting its connection, disconnecting that session, or quitting retires the associated work.
 
 ## Interrupted transfers
 

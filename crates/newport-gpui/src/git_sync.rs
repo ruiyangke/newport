@@ -219,7 +219,7 @@ impl Newport {
                         Kind::Pull => IconName::ArrowDown,
                         Kind::Push => IconName::ArrowUp,
                     })
-                    .tooltip(tooltip)
+                    .hover_hint(tooltip)
                     .loading(
                         self.git_write_pending()
                             || self.git.sync_form.as_ref().is_some_and(|form| {

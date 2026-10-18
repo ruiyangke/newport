@@ -218,7 +218,7 @@ impl Newport {
             .child(
                 crate::controls::button("git-commit")
                     .label(title)
-                    .tooltip(commit_title(&self.git.page, head))
+                    .hover_hint(commit_title(&self.git.page, head))
                     .when(enabled, |button| button.primary())
                     .when(!enabled, |button| button.bg(cx.theme().background).text_color(cx.theme().muted_foreground).border_color(cx.theme().border))
                     .disabled(!enabled)

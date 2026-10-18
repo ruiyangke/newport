@@ -14,6 +14,7 @@ impl Newport {
             && self.git.repo["repoId"].is_string()
             && self.git.repo["bare"] != true
             && !self.git_write_pending()
+            && self.git.index_refresh.is_none()
             && self.git.switching_path.is_none()
             && !self.project_dialog_open
             && self.git.sync_form.is_none();
@@ -46,7 +47,10 @@ impl Newport {
     }
 
     pub(super) fn git_watch_completed(&mut self) -> bool {
-        if self.page != Page::Projects || self.git_write_pending() {
+        if self.page != Page::Projects
+            || self.git_write_pending()
+            || self.git.index_refresh.is_some()
+        {
             return false;
         }
         let status = self.value("git-sync-status");

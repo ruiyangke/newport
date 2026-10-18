@@ -1,6 +1,7 @@
 //! One retained SSH PTY, its parser, and native text-input surface.
 #[path = "terminal_find.rs"]
 mod find;
+use crate::hover::HoverExt as _;
 use gpui_kit::component::{ActiveTheme, WindowExt};
 use gpui_kit::{prelude::*, *};
 use newport_gpui::{
@@ -1218,12 +1219,8 @@ impl Render for TerminalView {
             .cursor_text()
             .when_some(self.hovered_link.as_ref(), |view, link| {
                 let url = link.clone();
-                view.cursor_pointer().tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(format!(
-                        "Ctrl-click or Cmd-click to open: {url}"
-                    ))
-                    .build(window, cx)
-                })
+                view.cursor_pointer()
+                    .hover_path("Ctrl-click or Cmd-click to open", url)
             })
             .on_scroll_wheel(cx.listener(Self::mouse_scroll))
             .when_some(grid, |view, grid| view.child(grid))

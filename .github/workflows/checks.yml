@@ -275,7 +275,7 @@ jobs:
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
         with:
           platforms: arm64
-      - run: bash scripts/build-agent.sh
+      - run: npm run build:agent
       - run: cargo run --locked --manifest-path tools/test-harness/Cargo.toml -- runtime
       - run: node scripts/ci/artifact.mjs record resources/agents
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

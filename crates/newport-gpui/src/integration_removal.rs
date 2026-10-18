@@ -296,7 +296,7 @@ impl Newport {
             );
             content = content.child(div().id("needle-removal-target").role(Role::Paragraph).test_support().aria_label(target.clone())
                 .min_w_0().w_full().truncate().text_size(px(13.)).text_color(cx.theme().muted_foreground)
-                .tooltip({ let target = target.clone(); move |window, cx| gpui_kit::component::tooltip::Tooltip::new(target.clone()).build(window, cx) }).child(target))
+                .hover_hint(target.clone()).child(target))
                 .child(description("needle-removal-impact", "Metrics, Git, browser, and clipboard will stop. SSH terminals and port forwarding stay available.", cx))
                 .child(description("needle-removal-retention", "Newport-owned shell changes will be restored. The executable and backups are kept so you can restore Needle later.", cx));
             if stale {

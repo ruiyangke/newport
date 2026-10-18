@@ -451,7 +451,7 @@ mod tests {
         .unwrap()
     }
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh; runs a real Bash PTY in an isolated HOME"]
+    #[ignore = "Run with npm run test:ssh; runs a real Bash PTY in an isolated HOME"]
     async fn interactive_pty_input_resize_interrupt_exit_and_close() {
         let sessions = Sessions::default();
         let server = fixture();
@@ -546,7 +546,7 @@ mod tests {
         assert!(sessions.inner.entries.lock().unwrap().is_empty());
     }
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh terminal::tests"]
+    #[ignore = "Run with npm run test:ssh -- terminal::tests"]
     async fn terminals_share_transport_without_needle_and_close_only_their_shell() {
         let sessions = Sessions::default();
         let mut server = fixture();
@@ -605,7 +605,7 @@ mod tests {
         registry.shutdown().await;
     }
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh; runs a real Bash PTY in an isolated HOME"]
+    #[ignore = "Run with npm run test:ssh; runs a real Bash PTY in an isolated HOME"]
     async fn interrupted_terminal_reconnects_with_a_fresh_shell() {
         let sessions = Sessions::default();
         let server = fixture();

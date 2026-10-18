@@ -1665,8 +1665,8 @@ fn connections_toolbar_wraps_and_loading_replaces_the_list_in_place(cx: &mut Tes
         visual.update(|window, _| {
             let nodes = gpui_kit::base::test_support::snapshots(window);
             for name in [
-                "All",
-                "Saved",
+                "All (500)",
+                "Saved (0)",
                 "Projects view",
                 "Ports view",
                 "Discover ports",
@@ -2261,6 +2261,78 @@ fn git_refresh_waits_for_cache_invalidation_and_cannot_reload_a_replacement_chec
             requests.try_recv().is_err(),
             "old refresh must not reload new checkout"
         );
+    });
+}
+
+#[gpui::test]
+fn git_index_refresh_keeps_the_view_and_only_reloads_current_status_and_diff(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        theme::install(false, cx);
+    });
+    let (view, visual) = cx.add_window_view(owner);
+    let (work, requests) = std::sync::mpsc::sync_channel(64);
+    view.update(visual, |v, _| {
+        v.work = work.into();
+        v.page = Page::Projects;
+        v.git.repo = json!({"repoId":"repo","bare":false});
+        let entry = json!({"entryId":"old","path":{"bytesB64":"YQ=="},"unstaged":true});
+        let page = json!({"snapshot":"before","entries":[entry],"nextCursor":null,"metadata":{}});
+        let diff = json!({"snapshot":"old-diff"});
+        v.git.page = page.clone();
+        v.git.selected = entry.clone();
+        v.git.diff = diff.clone();
+        put(v, "git-list", page.clone());
+        put(v, "git-diff", diff.clone());
+        let old_read = v.resources.begin("git-list").unwrap();
+        v.git_refresh_index();
+        assert!(v.git_mutation_blocks_write());
+        assert_eq!(v.git.page, page);
+        assert_eq!(v.git.selected, entry);
+        assert_eq!(v.git.diff, diff);
+        assert!(!v.resources.complete("git-list", old_read, Ok(page.clone())));
+        let barrier = requests.try_recv().unwrap();
+        assert_eq!(barrier.method, "git_refresh_repository");
+        assert!(requests.try_recv().is_err());
+        v.resources.complete(
+            &barrier.key,
+            barrier.generation,
+            Ok(json!({"repoId":"repo"})),
+        );
+        v.git_completed(&barrier.key);
+        let status = requests.try_recv().unwrap();
+        assert_eq!(status.args["request"]["method"], "repo.status");
+        assert!(requests.try_recv().is_err());
+        assert_eq!(v.git.page, page);
+        assert_eq!(v.git.diff, diff);
+        let staged = json!({"entryId":"staged","path":{"bytesB64":"YQ=="},"staged":true});
+        v.resources.complete(
+            &status.key,
+            status.generation,
+            Ok(json!({"snapshot":"after","entries":[staged],"nextCursor":null,"metadata":{}})),
+        );
+        v.git_completed(&status.key);
+        assert!(!v.git_mutation_blocks_write());
+        assert_eq!(v.git.selected, staged);
+        assert!(v.git.diff_staged);
+        let reads: Vec<_> = requests.try_iter().collect();
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0].args["request"]["method"], "repo.diff_page");
+        assert_eq!(reads[0].args["request"]["params"]["snapshot"], "after");
+        assert_eq!(reads[0].args["request"]["params"]["side"], "head_to_index");
+
+        let visible = v.git.page.clone();
+        v.git_refresh_index();
+        let failed = requests.try_recv().unwrap();
+        v.resources
+            .complete(&failed.key, failed.generation, Err("Offline".into()));
+        v.git_completed(&failed.key);
+        assert_eq!(v.git.page, visible);
+        assert_eq!(v.git.error.as_deref(), Some("Offline"));
+        assert!(!v.git_can_change_index(false));
+        assert!(requests.try_recv().is_err());
     });
 }
 

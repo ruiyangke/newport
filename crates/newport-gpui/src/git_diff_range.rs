@@ -57,6 +57,14 @@ impl Selection {
         self.drag_epoch = self.drag_epoch.wrapping_add(1);
         self.pending_frame = None;
     }
+    /// Appending to the same immutable diff keeps anchors and the active drag,
+    /// but row geometry and indices must include the newly loaded lines.
+    pub(crate) fn page_extended(&mut self) {
+        self.invalidate_frame();
+        self.lanes.clear();
+        self.indices.clear();
+        self.display_rows = Default::default();
+    }
     pub(super) fn prepare(&mut self, rows: impl Iterator<Item = (String, bool)>) {
         if !self.lanes.is_empty() {
             return;
@@ -162,7 +170,7 @@ impl Selection {
 #[cfg(test)]
 mod tests {
     use super::{Gesture, Selection};
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, rc::Rc};
     fn fixture() -> Selection {
         let mut state = Selection::default();
         state.prepare(
@@ -197,6 +205,28 @@ mod tests {
         let pending = state.reserve_frame().unwrap();
         state.reset();
         assert!(!state.take_frame(pending));
+    }
+    #[test]
+    fn loading_more_keeps_drag_and_shift_anchor_but_rebuilds_geometry() {
+        let mut state = Selection::default();
+        state.prepare([("a".into(), true), ("b".into(), true)].into_iter());
+        let mut selected = set(&[]);
+        state.apply(0, "a", Gesture::Begin { shift: false }, &mut selected);
+        state.apply(0, "b", Gesture::Extend, &mut selected);
+        let old_frame = state.reserve_frame().unwrap();
+        state.display_rows[0]
+            .set(Rc::new(vec![(0, "a".into()), (1, "b".into())]))
+            .unwrap();
+        state.page_extended();
+        state.prepare([("a".into(), true), ("b".into(), true), ("c".into(), true)].into_iter());
+        assert!(!state.take_frame(old_frame));
+        assert!(state.display_rows[0].get().is_none());
+        state.apply(0, "c", Gesture::Extend, &mut selected);
+        assert_eq!(selected, set(&["a", "b", "c"]));
+        state.apply(0, "c", Gesture::End, &mut selected);
+        state.apply(0, "b", Gesture::Activate { shift: true }, &mut selected);
+        assert!(selected.contains("a"));
+        assert!(selected.contains("b"));
     }
     #[test]
     fn dragging_retracts_in_both_directions_and_preserves_other_selections() {

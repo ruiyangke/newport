@@ -5,8 +5,7 @@ pub(super) const LIST_WIDTH: f32 = 290.;
 pub(super) const MIN_LIST_WIDTH: f32 = 240.;
 pub(super) const MAX_LIST_WIDTH: f32 = 560.;
 
-/// The React GitPicker keeps the identity beside its icon and caret, with only
-/// the label giving way when space is tight.
+/// Keep the identity beside its icon and caret; only the label yields space.
 pub(super) fn picker(id: impl Into<ElementId>, icon: IconName, title: String) -> Button {
     let mut content = div()
         .text_size(px(13.))

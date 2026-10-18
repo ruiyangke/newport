@@ -304,7 +304,7 @@ impl Newport {
                                         div().h(px(28.)).w_full().min_w_0().px(px(6.)).child(
                                             crate::controls::button(("git-history-file", i))
                                                 .accessibility_label(description.clone())
-                                                .tooltip(description)
+                                                .hover_hint(description)
                                                 .custom(git_file_row::selection_style(selected, cx))
                                                 .selected(selected)
                                                 .w_full()

@@ -539,7 +539,7 @@ impl Newport {
                     git::head_label(&self.git.repo["head"]),
                 )
                 .w_full()
-                .tooltip(git::head_label(&self.git.repo["head"]))
+                .hover_hint(git::head_label(&self.git.repo["head"]))
                 .accessibility_label(format!(
                     "Branches: {}",
                     git::head_label(&self.git.repo["head"])
@@ -814,7 +814,7 @@ impl Newport {
                                         git_layout::picker_choice(("branch-choice", i), cx)
                                             .toggled(current)
                                             .accessibility_label(format!("{name} · {details}"))
-                                            .tooltip(format!("{name}\n{details}"))
+                                            .hover_detail(name.clone(), details.clone())
                                             .disabled(
                                                 !local
                                                     || !writable

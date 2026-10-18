@@ -1391,7 +1391,7 @@ mod creation_transport_tests {
 
     #[test]
     fn partial_index_write_keeps_the_reviewed_ids_and_snapshot() {
-        let page = json!({"nextCursor":null,"metadata":{"readOnly":false,"totalFiles":1,"sourceSnapshot":"reviewed","entryId":"file","side":"index_to_worktree","contextLines":3},"entries":[{"fileIndex":0,"status":"Modified","oldMode":33188,"newMode":33188,"oldPath":{"bytesB64":"Zg=="},"newPath":{"bytesB64":"Zg=="},"hunks":[{"id":"hunk","lines":[{"id":"line","origin":"+","lineComplete":true}]}]}]});
+        let page = json!({"nextCursor":"more","metadata":{"readOnly":false,"totalFiles":1,"sourceSnapshot":"reviewed","entryId":"file","side":"index_to_worktree","contextLines":3},"entries":[{"fileIndex":0,"status":"Modified","oldMode":33188,"newMode":33188,"oldPath":{"bytesB64":"Zg=="},"newPath":{"bytesB64":"Zg=="},"hunks":[{"id":"hunk","totalLines":2,"lines":[{"lineIndex":0,"id":"line","origin":"+","lineComplete":true}]}]}]});
         let review = crate::git_selection::Review::from_page(&page).unwrap();
         let host = Host::new();
         let backend = Backend::at_path(host.path.clone());

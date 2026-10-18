@@ -267,7 +267,7 @@ impl Newport {
         }
         let ids: Vec<String> = entries.iter().map(|entry| text(entry, "entryId")).collect();
         let snapshot = text(&self.git.page, "snapshot");
-        self.start_git_mutation(
+        self.start_git_index_mutation(
             self.git_repository_id(),
             format!(
                 "{} {} {}",
@@ -494,7 +494,7 @@ impl Newport {
                                                 .min_w_0()
                                                 .toggled(active)
                                                 .accessibility_label(accessible_description)
-                                                .tooltip(description)
+                                                .hover_hint(description)
                                                 .child(git_file_row::badge(group.mark(entry), cx))
                                                 .child(git_file_row::path(path.clone(), cx))
                                                 .when_some(
@@ -549,11 +549,7 @@ impl Newport {
                                                     "{} {path}",
                                                     if stage { "Stage" } else { "Unstage" }
                                                 ))
-                                                .tooltip(if stage {
-                                                    "Stage file"
-                                                } else {
-                                                    "Unstage file"
-                                                })
+                                                .hover_hint(index_action_label(stage, entry))
                                                 .disabled(!this.git_can_change_entry(stage, entry))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     this.change_entries(
@@ -764,5 +760,36 @@ mod tests {
             "loaded"
         );
         assert_eq!(scope(&json!({}), true), "shown");
+    }
+}
+
+/// Older agents may return collapsed untracked directories.
+pub(super) fn index_action_label(stage: bool, entry: &Value) -> &'static str {
+    match (stage, text(&entry["path"], "display").ends_with('/')) {
+        (true, true) => "Stage folder",
+        (false, true) => "Unstage folder",
+        (true, false) => "Stage file",
+        (false, false) => "Unstage file",
+    }
+}
+
+#[cfg(test)]
+mod action_label_tests {
+    use super::index_action_label;
+    use serde_json::json;
+    #[test]
+    fn folder_actions_name_their_actual_scope() {
+        assert_eq!(
+            index_action_label(true, &json!({"path":{"display":"docs/"}})),
+            "Stage folder"
+        );
+        assert_eq!(
+            index_action_label(false, &json!({"path":{"display":"docs/"}})),
+            "Unstage folder"
+        );
+        assert_eq!(
+            index_action_label(true, &json!({"path":{"display":"docs/a.md"}})),
+            "Stage file"
+        );
     }
 }

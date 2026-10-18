@@ -174,7 +174,7 @@ mod tests {
         assert!(!matches(&patterns, "[other.example.com]:2222"));
     }
     #[test]
-    #[ignore = "Uses the ephemeral key created by scripts/test-ssh.sh"]
+    #[ignore = "Uses the ephemeral key created by npm run test:ssh"]
     fn host_key_trust_and_revocation() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("known_hosts");

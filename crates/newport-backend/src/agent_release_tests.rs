@@ -53,23 +53,27 @@ fn signed_discovery_orders_versions_and_prevents_downgrade() {
         let status = parse_release_check(&output, &bundled, verify).unwrap();
         assert_eq!(status.build_relation, relation);
         assert_eq!(status.update_available, Some(update));
+        assert_eq!(status.automatic_update_available(), update);
         assert_eq!(status.installed_version.as_deref(), Some(version));
         assert_eq!(status.bundled_version.as_deref(), Some("1.10.0"));
         assert_eq!(require_ordered_replacement(&status).is_ok(), allowed);
         // A local unsigned build cannot replace an ordered release silently.
         let unsigned = parse_release_check(&output, &[], verify).unwrap();
         assert_eq!(unsigned.update_available, None);
+        assert!(!unsigned.automatic_update_available());
         assert!(require_ordered_replacement(&unsigned).is_err());
     }
     let unsigned_remote = format!("Linux\nx86_64\n{hash}\n");
     let status = parse_release_check(&unsigned_remote, &bundled, verify).unwrap();
     assert_eq!(status.build_relation, BuildRelation::Different);
     assert_eq!(status.update_available, None);
+    assert!(!status.automatic_update_available());
     // Explicit replacement of an unordered build remains available.
     assert!(require_ordered_replacement(&status).is_ok());
     let missing = parse_release_check("Linux\nx86_64\nmissing\n", &bundled, verify).unwrap();
     assert_eq!(missing.update_available, Some(false));
     assert_eq!(missing.installed, Some(false));
+    assert!(!missing.automatic_update_available());
 
     // Resuming an old deployment must compare its recorded candidate, even
     // when this desktop itself bundles a newer, eligible release.
@@ -86,6 +90,134 @@ fn signed_discovery_orders_versions_and_prevents_downgrade() {
     assert!(require_ordered_replacement(&resumed).is_err());
     let unordered = parse_candidate_check(&output, &[], Some(&old_hash), verify).unwrap();
     assert!(require_ordered_replacement(&unordered).is_err());
+}
+
+#[test]
+fn automatic_updates_reject_stale_evidence_and_throttle_reconnects() {
+    let state = State::default();
+    let known = Status {
+        installed: Some(true),
+        update_available: Some(true),
+        build_relation: BuildRelation::Older,
+        ..Status::default()
+    };
+    state.record(1, &Ok(known));
+    assert!(state.snapshot().automatic_update_available());
+    state.record(2, &Err("connection lost".into()));
+    assert!(!state.snapshot().automatic_update_available());
+    let now = Instant::now();
+    assert!(state.claim_automatic_update(now));
+    assert!(!state.claim_automatic_update(now));
+    assert!(!state.claim_automatic_update(now + Duration::from_secs(3599)));
+    assert!(state.claim_automatic_update(now + Duration::from_secs(3600)));
+}
+
+#[tokio::test]
+async fn automatic_updates_leave_unfinished_lifecycle_operations_for_explicit_recovery() {
+    use crate::lifecycle_receipts::{
+        Phase, Record, Store,
+        protocol::{Intent, Kind},
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let receipts = Arc::new(Store::new(directory.path().join("needle.json")));
+    let state = State::new(receipts.clone());
+    let mut server: crate::model::Server = serde_json::from_value(serde_json::json!({
+        "id": uuid::Uuid::new_v4(), "name": "Automatic update fixture", "sshHost": "127.0.0.1",
+        "sshPort": 22, "sshUser": "fixture", "agentInstallApproved": false
+    }))
+    .unwrap();
+    assert!(!state.automatic_update_unblocked(&server).unwrap());
+    server.agent_install_approved = true;
+    assert!(state.automatic_update_unblocked(&server).unwrap());
+    let id = uuid::Uuid::new_v4();
+    receipts
+        .begin(Record {
+            server_id: server.id,
+            connection: crate::lifecycle_receipts::scope(&server),
+            phase: Phase::Preparing,
+            error: None,
+            intent: Intent {
+                kind: Kind::Deployment,
+                operation_id: id,
+                candidate: "a".repeat(64),
+                previous: "b".repeat(64),
+                integrations: false,
+            },
+        })
+        .await
+        .unwrap();
+    for phase in [
+        Phase::Preparing,
+        Phase::Uploading,
+        Phase::Activating,
+        Phase::Handoff,
+        Phase::NeedsResolution,
+    ] {
+        receipts.update(id, Some(phase), None).await.unwrap();
+        assert!(!state.automatic_update_unblocked(&server).unwrap());
+        assert_eq!(receipts.get(id).unwrap().unwrap().phase, phase);
+    }
+    receipts.update(id, Some(Phase::Ready), None).await.unwrap();
+    assert!(state.automatic_update_unblocked(&server).unwrap());
+    let recovery = receipts
+        .begin_helper_recovery(
+            &server,
+            uuid::Uuid::new_v4(),
+            &"a".repeat(64),
+            &"c".repeat(64),
+        )
+        .await
+        .unwrap();
+    assert!(!state.automatic_update_unblocked(&server).unwrap());
+    receipts
+        .update_helper_recovery(&recovery, true, None)
+        .await
+        .unwrap();
+    assert!(state.automatic_update_unblocked(&server).unwrap());
+    receipts
+        .begin_removal(&server, uuid::Uuid::new_v4(), &"a".repeat(64))
+        .await
+        .unwrap();
+    assert!(!state.automatic_update_unblocked(&server).unwrap());
+}
+
+#[tokio::test]
+async fn automatic_update_defers_to_an_active_manual_operation() {
+    let state = Arc::new(State::default());
+    let server: crate::model::Server = serde_json::from_value(serde_json::json!({
+        "id": uuid::Uuid::new_v4(), "name": "fixture", "sshHost": "127.0.0.1",
+        "sshPort": 22, "sshUser": "fixture", "agentInstallApproved": true
+    }))
+    .unwrap();
+    let (_retire, retired) = tokio::sync::watch::channel(false);
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn({
+        let state = state.clone();
+        async move {
+            state
+                .tasks
+                .run(
+                    crate::lifecycle_task::Request {
+                        id: uuid::Uuid::new_v4(),
+                        generation: 1,
+                        action: crate::lifecycle_task::Action::Install {
+                            integrations: false,
+                        },
+                    },
+                    retired,
+                    async move {
+                        started.send(()).unwrap();
+                        std::future::pending().await
+                    },
+                )
+                .await
+        }
+    });
+    ready.await.unwrap();
+    assert!(!state.automatic_update_unblocked(&server).unwrap());
+    state.tasks.stop().await;
+    assert!(task.await.unwrap().is_err());
+    assert!(state.automatic_update_unblocked(&server).unwrap());
 }
 
 #[test]

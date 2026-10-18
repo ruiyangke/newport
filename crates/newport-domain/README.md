@@ -13,5 +13,3 @@ Do not put UI state, IO, persistence, SSH execution, runtime ownership, generic
 utilities, or transport contracts here. Desktop framing and SSH-agent relay
 contracts live in `newport-platform::ipc::{protocol, agent_relay}` alongside the
 local transport implementation.
-
-Previously named `newport-core`; no compatibility alias is retained.

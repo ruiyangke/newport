@@ -1,5 +1,5 @@
 use super::*;
-use gpui_kit::component::{input::Editor, tab::Tab, tooltip::Tooltip};
+use gpui_kit::component::{input::Editor, tab::Tab};
 impl ServicesPanel {
     pub(super) fn detail(&self, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.effective_selection(cx);
@@ -271,11 +271,7 @@ impl ServicesPanel {
                                         cx,
                                     )
                                     .id("service-since")
-                                    .tooltip(
-                                        move |window, cx| {
-                                            Tooltip::new(date(since)).build(window, cx)
-                                        },
-                                    ),
+                                    .hover_hint(date(since)),
                                 )
                             }),
                     ),
@@ -467,7 +463,7 @@ impl ServicesPanel {
                 .child(action(if running{ServiceVerb::Restart}else{ServiceVerb::Start},"service-primary",true,self,cx))
                 .when(verbs.stop,|v|v.child(action(ServiceVerb::Stop,"service-stop",false,self,cx)))
                 .when(!running&&verbs.restart&&unit.active=="failed",|v|v.child(action(ServiceVerb::Restart,"service-restart",false,self,cx)))
-                .when(verbs.reload,|v|v.child(action(ServiceVerb::Reload,"service-reload",false,self,cx).ghost().tooltip("Ask the service to reload its configuration without restarting")))
+                .when(verbs.reload,|v|v.child(action(ServiceVerb::Reload,"service-reload",false,self,cx).ghost().hover_hint("Ask the service to reload its configuration without restarting")))
                 .when(verbs.enable||verbs.disable,|v|{let name=unit.name.clone();let scope=unit.scope;let next=if unit.enabled.as_deref()==Some("enabled"){ServiceVerb::Disable}else{ServiceVerb::Enable};v.child(div().ml_auto().child(crate::controls::switch("service-at-boot").label("Start at boot").checked(unit.enabled.as_deref()==Some("enabled")).disabled(!self.client.can_action(&name,scope,next)).on_click(cx.listener(move|this,checked,_,cx|{let verb=if *checked{ServiceVerb::Enable}else{ServiceVerb::Disable};if verb==ServiceVerb::Disable{this.review=Some(Review{unit:name.clone(),scope,verb});cx.notify();}else{this.start_action(name.clone(),scope,verb,cx);}}))))}))
             .when_some(blocked,|v,reason|v.child(quiet(reason,cx)))
             .when(review.is_none(),|v|v.when_some(status.and_then(|s|s.error.clone()),|v,error|v.child(alert("service-action-error",error,cx))))
@@ -597,11 +593,7 @@ impl ServicesPanel {
                                         .min_w_0()
                                         .text_right()
                                         .truncate()
-                                        .tooltip(
-                                            move |window, cx| {
-                                                Tooltip::new(full_path.clone()).build(window, cx)
-                                            },
-                                        ),
+                                        .hover_path("Unit file", full_path.clone()),
                                     )
                                 },
                             ),

@@ -688,7 +688,7 @@ mod integration_tests {
         }
     }
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh"]
+    #[ignore = "Run with npm run test:ssh"]
     async fn remote_forward_relays_server_port_to_this_mac() {
         use crate::model::DestinationStatus;
         use tokio::io::AsyncWriteExt;
@@ -754,7 +754,7 @@ mod integration_tests {
         .expect("closing the SSH session releases the server listener");
     }
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh"]
+    #[ignore = "Run with npm run test:ssh"]
     async fn destination_checks_preserve_transport_and_release_ports() {
         use crate::model::DestinationStatus;
         for (remote, expected) in [
@@ -803,7 +803,7 @@ mod integration_tests {
         }
     }
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh"]
+    #[ignore = "Run with npm run test:ssh"]
     async fn embedded_auth_and_persistent_exec() {
         let _owner = crate::credentials::TEST_OWNER.lock().await;
         let mut s = server();

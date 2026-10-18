@@ -362,7 +362,7 @@ impl Render for FolderTree {
                                                         .accessibility_label(format!(
                                                             "Open {label} folder"
                                                         ))
-                                                        .tooltip(row.node.path.clone())
+                                                        .hover_path("Path", row.node.path.clone())
                                                         .disabled(!this.active)
                                                         .child(
                                                             div()
@@ -440,7 +440,7 @@ impl Render for FolderTree {
                                                         ))
                                                         .ghost()
                                                         .label("Retry")
-                                                        .tooltip(error.clone())
+                                                        .hover_hint(error.clone())
                                                         .on_click(cx.listener(
                                                             move |this, _, _, cx| {
                                                                 this.retry(&retry, revision, cx)

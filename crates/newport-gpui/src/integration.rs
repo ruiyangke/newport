@@ -1,6 +1,5 @@
 //! Native counterpart of IntegrationPanel, backed by the shared snapshot/commands.
 use crate::*;
-use gpui_kit::component::tooltip::Tooltip;
 
 #[path = "integration_shell.rs"]
 mod shell;
@@ -134,10 +133,12 @@ fn needle_status(state: &Value) -> &'static str {
         };
     }
     if state["updateAvailable"] == true {
-        return "An update is available. Update Needle below.";
+        return "A signed update is available. Newport installs it automatically while connected, unless an operation needs attention. You can also update now.";
     }
     match state["buildRelation"].as_str() {
-        Some("bundled") => "Needle matches this Newport build. Checked hourly while connected.",
+        Some("bundled") => {
+            "Needle matches this Newport build. Newer signed versions update automatically on connection and are checked hourly while connected."
+        }
         Some("different") => "A different Needle build is installed. Its release order is unknown.",
         Some("newer") => {
             "Needle is newer than this Newport release. Update Newport before replacing it."
@@ -463,10 +464,7 @@ impl Newport {
                                 .role(Role::Paragraph)
                                 .test_support()
                                 .aria_label(path.to_owned())
-                                .tooltip({
-                                    let path = path.to_owned();
-                                    move |window, cx| Tooltip::new(path.clone()).build(window, cx)
-                                })
+                                .hover_path("Configuration file", path.to_owned())
                                 .text_size(px(13.))
                                 .child(path.to_owned()),
                         )

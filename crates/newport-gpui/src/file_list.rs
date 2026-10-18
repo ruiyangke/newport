@@ -324,11 +324,10 @@ fn file_row(props: &FileRowProps, i: usize, view: &WeakEntity<Newport>, cx: &App
                         .min_w_0()
                         .px_0()
                         .justify_start()
-                        .tooltip(format!(
-                            "{}\nPermissions: {}",
+                        .hover_detail(
                             text(entry, "name"),
-                            text(entry, "permissions")
-                        ))
+                            format!("Permissions: {}", text(entry, "permissions")),
+                        )
                         // The row owns hover and selection; keep the name hit area clear.
                         .custom(gpui_kit::component::button::ButtonCustomVariant::new(cx))
                         .disabled(target.is_none())

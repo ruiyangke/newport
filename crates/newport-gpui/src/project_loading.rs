@@ -35,10 +35,7 @@ pub(super) fn picker_detail(name: &str, content: Option<String>, pending: bool) 
                         .id(SharedString::from(format!("{name}-detail")))
                         .role(accesskit::Role::Label)
                         .aria_label(content.clone())
-                        .tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(content.clone())
-                                .build(window, cx)
-                        })
+                        .hover_hint(content.clone())
                         .text_xs()
                         .truncate(),
                 )

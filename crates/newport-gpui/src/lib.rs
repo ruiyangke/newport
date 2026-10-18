@@ -28,6 +28,8 @@ mod connections_selector;
 mod containers;
 mod containers_host;
 mod controls;
+mod hover;
+use hover::HoverExt as _;
 mod display_preferences;
 mod file_icon;
 mod file_icon_assets;
@@ -60,6 +62,7 @@ mod git_discard;
 mod git_file_row;
 mod git_history;
 mod git_history_files;
+mod git_index_refresh;
 mod git_integration;
 mod git_layout;
 mod git_listing;
@@ -1697,11 +1700,6 @@ impl Render for Newport {
             })
     }
 }
-/// Run the UI against the configured backend, as a separate client.
-pub fn run() -> Result<(), String> {
-    run_with(|_| {})
-}
-
 /// Reveal the existing workspace. Used by native reopen and the application host.
 pub fn activate(cx: &mut App) -> Result<(), String> {
     let windows = cx.windows();
@@ -1736,24 +1734,11 @@ pub fn open_settings(cx: &mut App) -> Result<(), String> {
     Ok(())
 }
 
-/// Install application-owned desktop dispatch before opening the UI. Backend
-/// services and their runtime remain outside this crate.
-pub fn run_with(setup: impl FnOnce(&mut App) + 'static) -> Result<(), String> {
-    run_with_options(LaunchOptions::default(), setup)
-}
-
 /// Presentation options supplied by the application host. OS login registration
 /// and command-line policy remain outside the UI crate.
 #[derive(Clone, Copy, Default)]
 pub struct LaunchOptions {
     pub start_hidden: bool,
-}
-
-pub fn run_with_options(
-    options: LaunchOptions,
-    setup: impl FnOnce(&mut App) + 'static,
-) -> Result<(), String> {
-    run_with_options_and_ready(options, setup, || {})
 }
 
 /// Notify the host after the root window has been constructed and the event

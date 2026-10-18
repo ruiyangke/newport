@@ -750,7 +750,7 @@ mod integration_tests {
         .unwrap_or_else(|_| panic!("Timed out waiting for {status:?}"));
     }
     #[tokio::test]
-    #[ignore = "Run with scripts/test-ssh.sh and its ephemeral SSH fixture"]
+    #[ignore = "Run with npm run test:ssh and its ephemeral SSH fixture"]
     async fn real_ssh_forward_reconnect_and_cancel() {
         let dir = tempfile::tempdir().unwrap();
         let server = Server {

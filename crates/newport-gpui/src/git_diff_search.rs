@@ -304,7 +304,7 @@ impl Newport {
                         .selected(selected)
                         .toggled(selected)
                         .accessibility_label(name)
-                        .tooltip(name)
+                        .hover_hint(name)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let mut model = this.git.diff_text.search.borrow_mut();
                             match index {
@@ -343,7 +343,7 @@ impl Newport {
                     .icon(icon)
                     .ghost()
                     .accessibility_label(name)
-                    .tooltip(name)
+                    .hover_hint(name)
                     .disabled(disabled)
                     .on_click(cx.listener(move |this, _, _, cx| this.next_git_match(previous, cx)))
                 }),

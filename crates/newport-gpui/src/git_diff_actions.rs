@@ -32,6 +32,7 @@ impl Actions {
         if self.stage { "Stage" } else { "Unstage" }
     }
     pub(super) fn button(&self, hunk: &str, line: &str) -> AnyElement {
+        let enabled = self.enabled && self.review.hunk_complete(hunk);
         let apply = self.apply.clone();
         let hunk = hunk.to_owned();
         let discard_hunk = hunk.clone();
@@ -44,7 +45,10 @@ impl Actions {
             .max_h(px(22.))
             .label(format!("{} hunk", self.verb()))
             .accessibility_label(format!("{} hunk at line {line}", self.verb()))
-            .disabled(!self.enabled)
+            .disabled(!enabled)
+            .when(!self.review.hunk_complete(&discard_hunk), |button| {
+                button.hover_hint("Load the rest of this hunk to apply it as a whole. Loaded lines can be selected now.")
+            })
             .on_click(move |_, _, cx| apply(std::slice::from_ref(&hunk), None, cx));
         div()
             .flex()
@@ -64,7 +68,7 @@ impl Actions {
                     .icon(IconName::Undo2)
                     .accessibility_label(format!("Discard hunk at line {line}"))
                     .tooltip("Discard hunk…")
-                    .disabled(!self.enabled)
+                    .disabled(!enabled)
                     .on_click(move |_, window, cx| {
                         discard(std::slice::from_ref(&discard_hunk), None, window, cx)
                     }),
@@ -256,7 +260,7 @@ pub(super) fn current(
         && ["git-diff", "git-diff-more"].iter().all(|key| {
             this.resources
                 .get(key)
-                .is_none_or(|r| !r.pending && r.error.is_none())
+                .is_none_or(|r| (*key == "git-diff-more" || !r.pending) && r.error.is_none())
         })
 }
 impl Newport {
@@ -406,7 +410,7 @@ impl Newport {
                                 this.diff_title()
                             ),
                         };
-                        this.start_git_mutation(
+                        this.start_git_index_mutation(
                             this.git_repository_id(),
                             description,
                             move |backend, server, repo, id| {
@@ -598,8 +602,8 @@ mod tests {
     impl Render for View {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let review = Rc::new(Review::from_page(&json!({
-                "nextCursor":null,"metadata":{"readOnly":false,"totalFiles":1,"sourceSnapshot":"status","entryId":"entry","side":"index_to_worktree","contextLines":3},
-                "entries":[{"fileIndex":0,"status":"Modified","oldMode":33188,"newMode":33188,"oldPath":{"bytesB64":"Zg=="},"newPath":{"bytesB64":"Zg=="},"hunks":[{"id":"h","lines":[{"id":"a","origin":"-","lineComplete":true},{"id":"b","origin":"+","lineComplete":true}]}]}]
+                "nextCursor":"more","metadata":{"readOnly":false,"totalFiles":1,"sourceSnapshot":"status","entryId":"entry","side":"index_to_worktree","contextLines":3},
+                "entries":[{"fileIndex":0,"status":"Modified","oldMode":33188,"newMode":33188,"oldPath":{"bytesB64":"Zg=="},"newPath":{"bytesB64":"Zg=="},"hunks":[{"id":"h","totalLines":3,"lines":[{"lineIndex":0,"id":"a","origin":"-","lineComplete":true},{"lineIndex":1,"id":"b","origin":"+","lineComplete":true}]}]}]
             })).unwrap());
             let weak = cx.entity().downgrade();
             let toggle_review = review.clone();
@@ -628,7 +632,7 @@ mod tests {
                 review,
                 selection: self.selection.clone(),
                 run_states: Rc::default(),
-                apply: Rc::new(|_, _, _| {}),
+                apply: Rc::new(|_, _, _| panic!("Incomplete hunk must not dispatch an action")),
                 discard: None,
                 toggle: Rc::new(move |lines, cx: &mut App| {
                     let _ = weak.update(cx, |this, cx| {
@@ -677,6 +681,7 @@ mod tests {
                             .child(text.full_row(i))
                     }),
                 )))
+                .child(actions.button("h", "2"))
         }
     }
     fn draw(cx: &mut VisualTestContext) {
@@ -756,6 +761,16 @@ mod tests {
                     .expect("line number checkbox")
             })
         };
+        let hunk = cx.update(|window, _| {
+            snapshots(window)
+                .into_iter()
+                .find(|n| n.label() == Some("Stage hunk at line 2"))
+                .expect("hunk action")
+        });
+        cx.simulate_click(hunk.bounds().center(), Default::default());
+        draw(cx);
+        assert!(view.read_with(cx, |v, _| v.selection.borrow().is_empty()));
+        assert_ne!(number(cx).disabled(), Some(true));
         assert_eq!(number(cx).checked(), Some(false));
         let at = number(cx).bounds().center();
         cx.simulate_click(at, Default::default());

@@ -489,7 +489,7 @@ impl Newport {
                             }),
                     )
                     .accessibility_label(format!("Worktrees: {label}"))
-                    .tooltip(text(&self.git.repo["root"], "display"))
+                    .hover_path("Repository", text(&self.git.repo["root"], "display"))
                     .max_w(px(280.))
                     .dropdown_caret(true)
                     .disabled(
@@ -695,6 +695,7 @@ impl Newport {
                                 let available = this.git.checkouts.selected_path(&entry).is_some();
                                 let menu_entry = entry.clone();
                                 let context_entry = entry.clone();
+                                let hover_entry = entry.clone();
                                 let menu_owner = cx.weak_entity();
                                 let context_owner = cx.weak_entity();
                                 git_layout::picker_row(
@@ -706,16 +707,20 @@ impl Newport {
                                 .child(
                                     git_layout::picker_choice(("checkout", index), cx)
                                         .accessibility_label(format!("{title} · {subtitle}"))
-                                        .tooltip(format!(
-                                            "{title}\n{subtitle}\n{}",
-                                            text(&entry["path"], "display")
-                                        ))
                                         .toggled(current)
                                         .disabled(
                                             (!available && !current) || this.git_write_pending(),
                                         )
                                         .child(
                                             div()
+                                                .id(("checkout-hover", index))
+                                                .hoverable_tooltip(move |window, cx| {
+                                                    git_worktree_view::hover(
+                                                        &hover_entry,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                })
                                                 .flex_1()
                                                 .min_w_0()
                                                 .flex()

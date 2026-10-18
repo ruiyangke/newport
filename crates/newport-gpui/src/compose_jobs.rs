@@ -333,7 +333,7 @@ impl ContainersPanel {
             let project = project.clone();
             controls = controls.child(crate::controls::button("compose-up").label("Up").icon(IconName::ArrowUpFromLine)
                 .when(group.running < group.services.len() || missing, |b| b.primary())
-                .disabled(blocked).tooltip("Create missing containers and recreate what changed from the Compose files")
+                .disabled(blocked).hover_hint("Create missing containers and recreate what changed from the Compose files")
                 .on_click(cx.listener(move |this, _, _, cx| { if this.compose_project_selected(&project) {this.propose_compose(up(false,false,false)); cx.notify();} })));
         } else if group.running < group.services.len() {
             let action = action(ProjectVerb::Start);

@@ -178,7 +178,7 @@ impl Newport {
         if window.has_active_dialog(cx) || self.server.is_empty() {
             return;
         }
-        let value = value.unwrap_or_else(|| json!({"id":uuid::Uuid::new_v4(),"serverId":self.server,"name":"","localPort":8000,"remotePort":8000,"remoteHost":"127.0.0.1","direction":"local","autoConnect":false,"autoReconnect":true,"project":null}));
+        let value = value.unwrap_or_else(|| json!({"id":uuid::Uuid::new_v4(),"serverId":self.server,"name":"","localPort":8000,"remotePort":8000,"remoteHost":"127.0.0.1","direction":"local","autoConnect":false,"autoReconnect":false,"project":null}));
         let mut projects: Vec<_> = self
             .connection_projects()
             .into_iter()
@@ -244,10 +244,17 @@ impl Form {
             })
             .collect();
         subscriptions.push(cx.observe(&direction, |_, _, cx| cx.notify()));
-        let scroll = modal::FormScroll::new(7 + usize::from(!projects.is_empty()), window, cx);
+        let scroll = modal::FormScroll::new(6 + usize::from(!projects.is_empty()), window, cx);
+        let expected = existing.then(|| value.clone());
+        let mut value = value;
+        // Preserve the existing startup intent when consolidating legacy policies.
+        // Keep `expected` untouched for optimistic concurrency on save.
+        let always_on = value["autoConnect"] == true;
+        value["autoConnect"] = json!(always_on);
+        value["autoReconnect"] = json!(always_on);
         Self {
             owner,
-            expected: existing.then(|| value.clone()),
+            expected,
             value,
             fields,
             direction,
@@ -355,7 +362,7 @@ impl Form {
             self.fields[input].focus_handle(cx).focus(window, cx);
             self.scroll.reveal([0, 2, 2, 3][input]);
         } else {
-            self.scroll.reveal(self.row_index(7));
+            self.scroll.reveal(self.row_index(6));
         }
         cx.notify();
     }
@@ -715,35 +722,27 @@ impl Render for Form {
                     ),
                 ))
             })
-            .children(
-                [
-                    ("autoConnect", "Connect when Newport starts"),
-                    ("autoReconnect", "Reconnect if the connection drops"),
-                ]
-                .into_iter()
-                .enumerate()
-                .map(|(index, (key, title))| {
-                    self.section(5 + index, crate::controls::checkbox(key)
-                        .accessibility_label(title)
-                        .gap(px(9.))
-                        .line_height(relative(1.6))
-                        .checked(self.value[key] == true)
-                        .disabled(self.pending)
-                        .child(
-                            div().child(title).when(key == "autoReconnect", |view| {
-                                view.child(div().mt(px(3.)).child(hint("Retries up to 10 times.", cx)))
-                            }),
-                        )
-                        .on_click(cx.listener(move |this, value: &bool, _, cx| {
-                            if !this.pending {
-                                this.value[key] = json!(value);
-                                cx.notify();
-                            }
-                        })))
-                }),
-            )
+            .child(self.section(5, crate::controls::checkbox("always-on")
+                .accessibility_label("Always on")
+                .gap(px(9.))
+                .line_height(relative(1.6))
+                .checked(self.value["autoConnect"] == true)
+                .disabled(self.pending)
+                .child(
+                    div().child("Always on").child(div().mt(px(3.)).child(hint(
+                        "Connect when Newport starts and reconnect if the connection drops. Retries up to 10 times.",
+                        cx,
+                    ))),
+                )
+                .on_click(cx.listener(|this, value: &bool, _, cx| {
+                    if !this.pending {
+                        this.value["autoConnect"] = json!(value);
+                        this.value["autoReconnect"] = json!(value);
+                        cx.notify();
+                    }
+                }))))
             .when_some(self.error.clone().filter(|error| error.input.is_none()), |view, error| {
-                view.child(self.section(7, error_message(error.message, cx)))
+                view.child(self.section(6, error_message(error.message, cx)))
             })
             ;
         div()
@@ -780,6 +779,15 @@ mod tests {
     }
 
     fn editor(cx: &mut TestAppContext, projects: bool) -> (Entity<Form>, &mut VisualTestContext) {
+        editor_with_policy(cx, projects, false, true)
+    }
+
+    fn editor_with_policy(
+        cx: &mut TestAppContext,
+        projects: bool,
+        auto_connect: bool,
+        auto_reconnect: bool,
+    ) -> (Entity<Form>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::component::init(cx);
             crate::theme::install(false, cx);
@@ -796,7 +804,7 @@ mod tests {
                 "id":uuid::Uuid::new_v4(), "serverId":uuid::Uuid::new_v4(),
                 "name":"Application", "direction":"local", "localPort":8000,
                 "remotePort":8000, "remoteHost":"127.0.0.1",
-                "autoConnect":false, "autoReconnect":true, "project":null
+                "autoConnect":auto_connect, "autoReconnect":auto_reconnect, "project":null
             });
             let projects = if projects {
                 vec![("/app".into(), "Application".into())]
@@ -807,7 +815,7 @@ mod tests {
                 Form::new(
                     gpui::WeakEntity::new_invalid(),
                     value,
-                    false,
+                    true,
                     projects,
                     window,
                     cx,
@@ -880,6 +888,50 @@ mod tests {
     }
 
     #[gpui::test]
+    fn always_on_consolidates_legacy_policies_and_toggles_both_flags(cx: &mut TestAppContext) {
+        for (auto_connect, auto_reconnect) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let (form, cx) = editor_with_policy(cx, true, auto_connect, auto_reconnect);
+            cx.simulate_resize(gpui::size(px(1000.), px(900.)));
+            draw_editor(cx);
+            form.read_with(cx, |form, _| {
+                assert_eq!(form.value["autoConnect"], auto_connect);
+                assert_eq!(form.value["autoReconnect"], auto_connect);
+                let original = form.expected.as_ref().unwrap();
+                assert_eq!(original["autoConnect"], auto_connect);
+                assert_eq!(original["autoReconnect"], auto_reconnect);
+            });
+            let checkbox = cx.update(|window, _| {
+                let snapshots = gpui_kit::base::test_support::snapshots(window);
+                assert!(!snapshots.iter().any(|element| matches!(
+                    element.label(),
+                    Some("Connect when Newport starts" | "Reconnect if the connection drops")
+                )));
+                snapshots
+                    .iter()
+                    .find(|element| element.label() == Some("Always on"))
+                    .unwrap()
+                    .bounds()
+                    .center()
+            });
+            for enabled in [!auto_connect, auto_connect] {
+                cx.simulate_click(checkbox, Default::default());
+                draw_editor(cx);
+                form.read_with(cx, |form, _| {
+                    assert_eq!(form.value["autoConnect"], enabled);
+                    assert_eq!(form.value["autoReconnect"], enabled);
+                    assert_eq!(
+                        form.expected.as_ref().unwrap()["autoReconnect"],
+                        auto_reconnect
+                    );
+                });
+            }
+            key(cx, "escape");
+        }
+    }
+
+    #[gpui::test]
     fn compact_editor_reveals_fields_in_both_tab_directions_and_keeps_footer_fixed(
         cx: &mut TestAppContext,
     ) {
@@ -891,14 +943,14 @@ mod tests {
         assert!(viewport.bottom() <= footer.top());
         assert!(form.read_with(cx, |form, _| form.scroll.handle.max_offset().y) > px(0.));
         row_visible(&form, 0, cx);
-        // Name → Direction → Local → Remote → Host → Project → both checkboxes.
-        for row in [1, 2, 2, 3, 4, 5, 6] {
+        // Name → Direction → Local → Remote → Host → Project → Always on.
+        for row in [1, 2, 2, 3, 4, 5] {
             key(cx, "tab");
             draw_editor(cx);
             row_visible(&form, row, cx);
             assert_eq!(cx.debug_bounds("forward-editor-footer").unwrap(), footer);
         }
-        for row in [5, 4, 3, 2, 2, 1, 0] {
+        for row in [4, 3, 2, 2, 1, 0] {
             key(cx, "shift-tab");
             draw_editor(cx);
             row_visible(&form, row, cx);
@@ -934,7 +986,7 @@ mod tests {
             px(0.)
         );
         row_visible(&form, 0, cx);
-        row_visible(&form, 6, cx);
+        row_visible(&form, 5, cx);
     }
 
     #[gpui::test]
@@ -944,8 +996,8 @@ mod tests {
             let fields = form.read(cx).fields.clone();
             fields[1].update(cx, |input, cx| input.set_value("70000", window, cx));
         });
-        // With no project selector, both checkbox rows have earlier indices.
-        for row in [1, 2, 2, 3, 4, 5] {
+        // With no project selector, the Always on row has an earlier index.
+        for row in [1, 2, 2, 3, 4] {
             key(cx, "tab");
             draw_editor(cx);
             row_visible(&form, row, cx);
@@ -995,7 +1047,7 @@ mod tests {
             })
         });
         draw_editor(cx);
-        row_visible(&form, 7, cx);
+        row_visible(&form, 6, cx);
         let footer = cx.debug_bounds("forward-editor-footer").unwrap();
         form.update(cx, |form, cx| {
             form.pending = true;

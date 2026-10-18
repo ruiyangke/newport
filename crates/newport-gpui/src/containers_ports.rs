@@ -169,10 +169,7 @@ impl ContainersPanel {
                             return div()
                                 .id(("container-port-info", index))
                                 .aria_label(format!("Port {label}. {reason}"))
-                                .tooltip(move |window, cx| {
-                                    gpui_kit::component::tooltip::Tooltip::new(reason.clone())
-                                        .build(window, cx)
-                                })
+                                .hover_hint(reason.clone())
                                 .h(px(24.))
                                 .px(px(8.))
                                 .flex()
@@ -244,7 +241,7 @@ impl ContainersPanel {
                                 "{action} port {label}{}",
                                 if busy { ", connecting" } else { "" }
                             ))
-                            .tooltip(tooltip)
+                            .hover_hint(tooltip)
                             .child(
                                 div()
                                     .font_family(cx.theme().mono_font_family.clone())

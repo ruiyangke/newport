@@ -56,7 +56,7 @@ pub(super) fn capture(repo: &Repo) -> Result<Capture, Error> {
         "status",
         "--porcelain=v2",
         "-z",
-        "--untracked-files=normal",
+        "--untracked-files=all",
         "--ignore-submodules=none",
     ])?;
     let mut records = bytes.split(|b| *b == 0).filter(|r| !r.is_empty());

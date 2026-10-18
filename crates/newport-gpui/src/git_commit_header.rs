@@ -1,6 +1,5 @@
 //! Commit identity and message presentation shared by historical inspections.
 use super::*;
-use gpui_kit::component::tooltip::Tooltip;
 use std::{cell::Cell, rc::Rc};
 
 #[derive(Default)]
@@ -312,9 +311,7 @@ impl Newport {
                             .aria_label(format!("{} · {}", text(&detail["author"], "name"), email))
                             .text_color(cx.theme().foreground)
                             .child(text(&detail["author"], "name"))
-                            .tooltip(move |window, cx| {
-                                Tooltip::new(email.clone()).build(window, cx)
-                            }),
+                            .hover_hint(email.clone()),
                     )
                     .child(
                         div()
@@ -325,9 +322,7 @@ impl Newport {
                                 &detail["time"],
                                 chrono::Utc::now().timestamp(),
                             ))
-                            .tooltip(move |window, cx| {
-                                Tooltip::new(exact.clone()).build(window, cx)
-                            }),
+                            .hover_hint(exact.clone()),
                     )
                     .child(
                         div()
@@ -352,7 +347,14 @@ impl Newport {
                                     } else {
                                         "Copy commit ID"
                                     })
-                                    .tooltip(oid.clone())
+                                    .hover_path(
+                                        if copied {
+                                            "Commit ID copied"
+                                        } else {
+                                            "Copy commit ID"
+                                        },
+                                        oid.clone(),
+                                    )
                                     .disabled(oid.is_empty())
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(

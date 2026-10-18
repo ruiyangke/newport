@@ -15,10 +15,12 @@ if (process.env.NEWPORT_PREBUILT === "1") {
     }
   }
 } else {
-  const result = spawnSync("bash", ["scripts/build-agent.sh"], {
-    cwd: root,
-    stdio: "inherit",
-  });
+  // The Rust harness owns the Linux build; CI and local builds use this entry.
+  const result = spawnSync(
+    "cargo",
+    ["run", "--locked", "--manifest-path", "tools/test-harness/Cargo.toml", "--", "build-agents"],
+    { cwd: root, stdio: "inherit" },
+  );
   if (result.error) throw result.error;
   process.exit(result.status ?? 1);
 }

@@ -269,7 +269,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_COMMIT: ${{ needs.resolve.outputs.commit }}
         run: |
-          node scripts/test-update-manifests.mjs
+          node --test scripts/ci/update-manifests.test.mjs
           node scripts/merge-update-manifests.mjs release/latest.json release/windows-*.json --version "${RELEASE_TAG#v}" --output release/latest.json
           rm release/windows-*.json release/SHA256SUMS-windows-*
           test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$RELEASE_COMMIT"

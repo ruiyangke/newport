@@ -47,7 +47,7 @@ fn reference_button(index: usize, entry: &Value) -> Button {
         .h(px(ROW_HEIGHT))
         .min_h(px(ROW_HEIGHT))
         .max_h(px(ROW_HEIGHT))
-        .tooltip(name.clone())
+        .hover_hint(name.clone())
         .child(reference_columns(
             name,
             label(text(entry, "kind")).text_xs(),

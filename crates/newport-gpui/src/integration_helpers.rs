@@ -283,7 +283,7 @@ impl Newport {
                 .when(running, |r| r.child(gpui_kit::component::spinner::Spinner::new().small())).child(title))
                 .child(div().id("needle-helper-target").role(Role::Paragraph).test_support().aria_label(target.clone())
                     .min_w_0().w_full().truncate().text_size(px(13.)).text_color(cx.theme().muted_foreground)
-                    .tooltip({ let target = target.clone(); move |window, cx| gpui_kit::component::tooltip::Tooltip::new(target.clone()).build(window, cx) }).child(target))
+                    .hover_hint(target.clone()).child(target))
                 .child(note("needle-helper-impact", if running { "You can leave this page. Newport will keep the restoration running." } else { "Restore the files recorded by this shell setup. Changed files will need review. Shell commands may stop using Newport; Needle, metrics, and Git stay available." },false,cx));
             if stale {
                 content = content.child(note("needle-helper-stale", "The server or recorded ownership changed. Dismiss this review and inspect the history again.",true,cx));

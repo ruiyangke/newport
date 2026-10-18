@@ -9,6 +9,7 @@ type Outcome = Result<String, String>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
+    AutoUpdate,
     Install {
         integrations: bool,
     },
@@ -47,7 +48,6 @@ impl Drop for Running {
 #[derive(Default)]
 pub(crate) struct Slot(Mutex<Option<Running>>);
 impl Slot {
-    #[cfg(test)]
     pub fn active(&self) -> Option<Request> {
         self.0
             .lock()

@@ -11,8 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { merge, verifyPackages, writeChecksums } from "./merge-update-manifests.mjs";
-import { root, json } from "./tooling.mjs";
+import { merge, verifyPackages, writeChecksums } from "../merge-update-manifests.mjs";
+import { root, json } from "../tooling.mjs";
 function fixture(fn) {
   const temp = mkdtempSync(join(tmpdir(), "newport-manifests-"));
   try {

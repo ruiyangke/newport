@@ -94,13 +94,20 @@ impl Card {
     }
 
     pub fn build(self: std::rc::Rc<Self>, window: &mut Window, cx: &mut App) -> AnyView {
-        let width = (f32::from(window.viewport_size().width) - 48.).clamp(180., 360.);
-        gpui_kit::component::tooltip::Tooltip::element(move |_, cx| self.content(width - 28., cx))
-            .w(px(width))
-            .p(px(14.))
-            .rounded(px(8.))
-            .border_0()
-            .build(window, cx)
+        let width = crate::hover::width(window);
+        let height = crate::hover::height(window);
+        crate::hover::surface(gpui_kit::component::tooltip::Tooltip::element(
+            move |_, cx| {
+                div()
+                    .id("connection-hover-scroll")
+                    .max_h(px(height))
+                    .overflow_y_scroll()
+                    .child(self.content(width - 2. * crate::hover::PADDING, cx))
+            },
+        ))
+        .w(px(width))
+        .p(px(crate::hover::PADDING))
+        .build(window, cx)
     }
 
     fn content(&self, width: f32, cx: &App) -> AnyElement {
@@ -126,7 +133,7 @@ impl Card {
                             .min_w_0()
                             .text_size(px(14.))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .line_clamp(2)
+                            .whitespace_normal()
                             .child(self.title.clone()),
                     )
                     .when(self.docker, |v| {
@@ -184,7 +191,6 @@ impl Card {
                         .mt(px(10.))
                         .text_color(cx.theme().muted_foreground)
                         .whitespace_normal()
-                        .line_clamp(3)
                         .child(notice),
                 )
             })
@@ -210,9 +216,7 @@ fn fact(label: &str, value: &str, cx: &App) -> AnyElement {
             div()
                 .flex_1()
                 .min_w_0()
-                .overflow_hidden()
                 .whitespace_normal()
-                .line_clamp(3)
                 .child(value.to_owned()),
         )
         .into_any_element()
@@ -287,10 +291,10 @@ mod tests {
             let bounds = visual
                 .debug_bounds("connection-hover-card")
                 .expect("hover content rendered");
-            assert!(bounds.size.width <= px(332.) && bounds.right() <= px(width));
+            assert!(bounds.size.width <= px(356.) && bounds.right() <= px(width));
             assert!(
-                bounds.size.height < px(360.),
-                "long values must be line-clamped: {bounds:?}"
+                bounds.size.height < px(900.),
+                "long values must wrap: {bounds:?}"
             );
         }
     }

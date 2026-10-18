@@ -35,6 +35,70 @@ pub(super) fn row_labels(entry: &Value) -> (String, String) {
     }
     (title, labels.join(" · "))
 }
+
+/// Keep long remote checkout paths within the picker instead of expanding a
+/// plain-text tooltip across the window.
+pub(super) fn hover(entry: &Value, window: &mut Window, cx: &mut App) -> AnyView {
+    let (title, status) = row_labels(entry);
+    let path = text(&entry["path"], "display");
+    let width = crate::hover::width(window);
+    let height = crate::hover::height(window);
+    crate::hover::surface(gpui_kit::component::tooltip::Tooltip::element(
+        move |_, cx| {
+            div()
+                .id("worktree-hover-card")
+                .debug_selector(|| "worktree-hover-card".into())
+                .w(px(width - 24.))
+                .max_h(px(height))
+                .overflow_y_scroll()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .text_color(cx.theme().foreground)
+                .line_height(relative(1.45))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .whitespace_normal()
+                        .child(title.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .whitespace_normal()
+                        .child(status.clone()),
+                )
+                .when(!path.is_empty(), |card| {
+                    card.child(
+                        div()
+                            .mt(px(6.))
+                            .pt(px(8.))
+                            .border_t_1()
+                            .border_color(cx.theme().border)
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .text_size(px(11.))
+                            .child(label("Path").text_color(cx.theme().muted_foreground))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .whitespace_normal()
+                                    .child(path.clone()),
+                            ),
+                    )
+                })
+        },
+    ))
+    .w(px(width))
+    .p(px(12.))
+    .build(window, cx)
+}
 impl Newport {
     pub(super) fn git_worktree_review_open(&self) -> bool {
         self.git.worktree_create.is_some()
@@ -47,6 +111,45 @@ impl Newport {
 mod tests {
     use super::row_labels;
     use serde_json::json;
+
+    #[gpui_kit::test]
+    fn worktree_hover_wraps_long_paths_within_the_window(cx: &mut gpui_kit::TestAppContext) {
+        use super::*;
+        struct Host(Value);
+        impl Render for Host {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().child(hover(&self.0, window, cx))
+            }
+        }
+        cx.update(|cx| {
+            gpui_kit::component::init(cx);
+            crate::theme::install(false, cx);
+        });
+        let entry = json!({
+            "name":{"display":"custom-app-demo"},
+            "head":{"detached":true},
+            "state":"available",
+            "path":{"display":format!("/tmp/claude-1000/-home-user-Projects-marketplace-service/{}/scratchpad/custom-app-demo", "a".repeat(100))}
+        });
+        let (_, visual) = cx.add_window_view(|_, _| Host(entry));
+        for dark in [false, true] {
+            visual.update(|_, cx| crate::theme::install(dark, cx));
+            for width in [800., 320.] {
+                visual.simulate_resize(size(px(width), px(600.)));
+                crate::page_perf_tests::frame(visual);
+                let bounds = visual.debug_bounds("worktree-hover-card").unwrap();
+                assert!(bounds.size.width <= px(356.) && bounds.right() <= px(width));
+                assert!(
+                    bounds.size.height > px(100.),
+                    "the full path should wrap: {bounds:?}"
+                );
+                assert!(
+                    bounds.size.height < px(300.),
+                    "the hover should remain compact: {bounds:?}"
+                );
+            }
+        }
+    }
     #[test]
     fn rows_distinguish_main_detached_locked_and_missing_checkouts() {
         assert_eq!(
