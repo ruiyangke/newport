@@ -14,6 +14,74 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { root } from "../tooling.mjs";
 import { validate, profileEntitlements } from "../check-signing.mjs";
 import { notarizationAuth } from "../notarize.mjs";
+import { verifiedCiBuild } from "./verify-release.mjs";
+
+function ciFixture() {
+  const commit = "a".repeat(40);
+  const run = { id: 10, workflow_id: 2, head_sha: commit, head_branch: "main",
+    head_repository: { full_name: "owner/repo" }, event: "push",
+    status: "completed", conclusion: "success" };
+  const state = {
+    run, runs: [run],
+    jobs: [{ name: "checks / All checks passed", status: "completed", conclusion: "success" }],
+    artifacts: [{ id: 20, name: "linux-agents", expired: false, size_in_bytes: 100,
+      workflow_run: { id: run.id, head_sha: commit } }],
+  };
+  const api = (endpoint) => {
+    if (endpoint.endsWith("/workflows/ci.yml")) return { id: 2 };
+    if (endpoint.includes("/workflows/ci.yml/runs?")) return { workflow_runs: state.runs };
+    if (endpoint.includes("/jobs?filter=latest")) return { jobs: state.jobs };
+    if (endpoint.includes("/artifacts?")) return { artifacts: state.artifacts };
+    if (endpoint.endsWith(`/runs/${state.run.id}`)) return state.run;
+    throw new Error(`Unexpected API request: ${endpoint}`);
+  };
+  return { state, check: () => verifiedCiBuild("owner/repo", commit, api) };
+}
+
+test("release reuses successful exact-commit CI and its immutable artifact ID", () => {
+  const { state, check } = ciFixture();
+  assert.deepEqual(check(), { runId: 10, artifactId: 20 });
+  state.run.event = "workflow_dispatch";
+  assert.deepEqual(check(), { runId: 10, artifactId: 20 });
+});
+
+for (const [name, change, error] of [
+  ["no CI", (s) => { s.runs = []; }, /No main CI run/],
+  ["different commit", (s) => { s.run.head_sha = "b".repeat(40); }, /No main CI run/],
+  ["different workflow", (s) => { s.run.workflow_id = 3; }, /No main CI run/],
+  ["branch build", (s) => { s.run.head_branch = "feature"; }, /No main CI run/],
+  ["PR build", (s) => { s.run.event = "pull_request"; }, /No main CI run/],
+  ["fork build", (s) => { s.run.head_repository.full_name = "fork/repo"; }, /No main CI run/],
+  ["pending CI", (s) => { s.run.status = "in_progress"; }, /has not passed/],
+  ["failed CI", (s) => { s.run.conclusion = "failure"; }, /has not passed/],
+  ["skipped aggregate gate", (s) => { s.jobs[0].conclusion = "skipped"; }, /all-checks gate/],
+  ["missing aggregate gate", (s) => { s.jobs = []; }, /all-checks gate/],
+  ["expired artifact", (s) => { s.artifacts[0].expired = true; }, /no valid linux-agents/],
+  ["missing artifact", (s) => { s.artifacts = []; }, /no valid linux-agents/],
+  ["ambiguous artifacts", (s) => { s.artifacts.push({ ...s.artifacts[0], id: 21 }); }, /no valid linux-agents/],
+  ["empty artifact", (s) => { s.artifacts[0].size_in_bytes = 0; }, /no valid linux-agents/],
+  ["artifact from another commit", (s) => { s.artifacts[0].workflow_run.head_sha = "b".repeat(40); }, /no valid linux-agents/],
+  ["artifact from another run", (s) => { s.artifacts[0].workflow_run.id = 9; }, /no valid linux-agents/],
+]) {
+  test(`release rejects ${name}`, () => {
+    const { state, check } = ciFixture();
+    change(state);
+    assert.throws(check, error);
+  });
+}
+
+test("an older success cannot mask a newer failing CI run", () => {
+  const { state, check } = ciFixture();
+  state.runs.push({ ...state.run, id: 9 });
+  state.run.conclusion = "failure";
+  assert.throws(check, /CI 10 has not passed/);
+});
+
+test("a rerun started after listing invalidates the previous CI success", () => {
+  const { state, check } = ciFixture();
+  state.run = { ...state.run, status: "in_progress", conclusion: null };
+  assert.throws(check, /has not passed/);
+});
 
 test("native notarization supports local keychain and existing CI credentials", () => {
   assert.deepEqual(notarizationAuth({ NEWPORT_NOTARY_PROFILE: "release" }), [

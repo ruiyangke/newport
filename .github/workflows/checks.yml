@@ -283,7 +283,7 @@ jobs:
           name: linux-agents
           path: resources/agents/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
   remote:
     needs: agents
