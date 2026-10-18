@@ -211,7 +211,7 @@ impl Newport {
             .flex_shrink_0()
             .disabled(busy)
             .button(
-                crate::controls::button("git-sync-primary")
+                crate::project_ui::button("git-sync-primary")
                     .max_w(px(200.))
                     .label(format!("{} {remote}", kind.label()))
                     .icon(match kind {
@@ -236,7 +236,10 @@ impl Newport {
                     )
                     .disabled(disabled)
                     .when(count > 0, |button| {
-                        button.child(label(count.to_string()).text_xs())
+                        button.child(
+                            crate::project_ui::label(count.to_string())
+                                .text_size(px(crate::project_ui::FONT_SIZE)),
+                        )
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.begin_git_sync(kind, cx))),
             )
@@ -308,9 +311,9 @@ impl Newport {
             .gap_2()
             .px_4()
             .py_2()
-            .child(label(error).flex_1())
+            .child(crate::project_ui::label(error).flex_1())
             .child(
-                crate::controls::button("retry-git-sync")
+                crate::project_ui::button("retry-git-sync")
                     .label("Try again")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.git.sync_form = None;

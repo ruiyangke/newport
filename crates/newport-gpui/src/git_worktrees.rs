@@ -60,7 +60,7 @@ impl Newport {
             return None;
         };
         let body = div().flex().flex_col().gap_3()
-            .when(self.git_worktree_review_stale(), |view| view.child(label("Repository state changed. Cancel this review and select the worktree again.")
+            .when(self.git_worktree_review_stale(), |view| view.child(crate::project_ui::label("Repository state changed. Cancel this review and select the worktree again.")
                 .id("worktree-review-stale").role(accesskit::Role::Label).aria_label("Repository state changed. Cancel this review and select the worktree again.")))
             .child(controls);
         Some(git_listing::editor(title, body, cx))
@@ -149,7 +149,7 @@ impl Newport {
             .py_2()
             .when_some(self.git.worktree_lock.as_ref(), |view, form| {
                 view.child(
-                    label(format!(
+                    crate::project_ui::label(format!(
                         "{} {}",
                         if form.unlock {
                             "Allow removal and pruning of"
@@ -158,12 +158,12 @@ impl Newport {
                         },
                         form.path
                     ))
-                    .text_xs(),
+                    .text_size(px(crate::project_ui::FONT_SIZE)),
                 )
                 .when(!form.unlock, |view| {
                     view.child(
                         div().w_full().max_w(px(520.)).child(
-                            crate::controls::input(&form.reason)
+                            crate::project_ui::input(&form.reason)
                                 .aria_label("Worktree lock reason")
                                 .disabled(self.git_mutation_blocks_write()),
                         ),
@@ -178,19 +178,19 @@ impl Newport {
                     .err(),
                     |view, error| {
                         view.child(
-                            label(error.clone())
+                            crate::project_ui::label(error.clone())
                                 .id("worktree-lock-input-error")
                                 .role(accesskit::Role::Label)
                                 .aria_label(error)
                                 .text_color(cx.theme().danger)
-                                .text_xs(),
+                                .text_size(px(crate::project_ui::FONT_SIZE)),
                         )
                     },
                 )
                 .child(
                     project_dialog::actions()
                         .child(
-                            crate::controls::button("cancel-worktree-lock")
+                            crate::project_ui::button("cancel-worktree-lock")
                                 .label("Cancel")
                                 .disabled(self.git_mutation_blocks_write())
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -199,7 +199,7 @@ impl Newport {
                                 })),
                         )
                         .child(
-                            crate::controls::button("confirm-worktree-lock")
+                            crate::project_ui::button("confirm-worktree-lock")
                                 .label(if form.unlock {
                                     "Unlock worktree"
                                 } else {
@@ -308,12 +308,12 @@ impl Newport {
         }
         div().flex().flex_col().items_start().gap_2().py_2()
             .when_some(self.git.worktree_repair.as_ref(),|view,form| {
-                view.child(label(format!("Reconnect {}",form.original_path)).text_xs())
-                    .child(div().w_full().max_w(px(520.)).child(crate::controls::input(&form.path).aria_label("Moved worktree path").disabled(self.git_mutation_blocks_write())))
-                    .child(label("Select the directory this checkout was moved to. Its files will stay in place.").text_xs())
+                view.child(crate::project_ui::label(format!("Reconnect {}",form.original_path)).text_size(px(crate::project_ui::FONT_SIZE)))
+                    .child(div().w_full().max_w(px(520.)).child(crate::project_ui::input(&form.path).aria_label("Moved worktree path").disabled(self.git_mutation_blocks_write())))
+                    .child(crate::project_ui::label("Select the directory this checkout was moved to. Its files will stay in place.").text_size(px(crate::project_ui::FONT_SIZE)))
                     .child(project_dialog::actions()
-                        .child(crate::controls::button("cancel-worktree-repair").label("Cancel").disabled(self.git_mutation_blocks_write()).on_click(cx.listener(|this,_,_,cx|{this.git.worktree_repair=None;cx.notify();})))
-                        .child(crate::controls::button("confirm-worktree-repair").loading(self.git_write_pending()).label("Repair worktree")
+                        .child(crate::project_ui::button("cancel-worktree-repair").label("Cancel").disabled(self.git_mutation_blocks_write()).on_click(cx.listener(|this,_,_,cx|{this.git.worktree_repair=None;cx.notify();})))
+                        .child(crate::project_ui::button("confirm-worktree-repair").loading(self.git_write_pending()).label("Repair worktree")
                             .disabled(!self.can_repair_worktree() || !self.worktree_review_current(&form.name, &form.snapshot) || !repair_path_valid(&form.draft(cx).1))
                             .on_click(cx.listener(|this,_,_,cx|this.repair_worktree(cx)))))
             }).into_any_element()
@@ -385,11 +385,11 @@ impl Newport {
             return div().into_any_element();
         };
         div().flex().flex_col().items_start().gap_2().py_2()
-            .child(label(format!("Remove {}?",review.path)))
-            .child(label(if review.missing {"Remove only this missing worktree’s registration. Its branch is kept. Locate it instead if the directory was moved."}else{"Delete this checkout directory. Its branch is kept. Git will refuse if the checkout contains local changes or is locked. This cannot be undone in Newport."}).text_xs())
+            .child(crate::project_ui::label(format!("Remove {}?",review.path)))
+            .child(crate::project_ui::label(if review.missing {"Remove only this missing worktree’s registration. Its branch is kept. Locate it instead if the directory was moved."}else{"Delete this checkout directory. Its branch is kept. Git will refuse if the checkout contains local changes or is locked. This cannot be undone in Newport."}).text_size(px(crate::project_ui::FONT_SIZE)))
             .child(project_dialog::actions()
-                .child(crate::controls::button("cancel-worktree-removal").label("Cancel").disabled(self.git_mutation_blocks_write()).on_click(cx.listener(|this,_,_,cx|{this.git.worktree_remove=None;cx.notify();})))
-                .child(crate::controls::button("confirm-worktree-removal").loading(self.git_write_pending()).when(!review.missing, |button|button.danger()).label(if review.missing {"Remove registration"}else{"Remove worktree"}).disabled(!self.can_remove_worktree() || !self.worktree_review_current(&review.name, &review.snapshot)).on_click(cx.listener(|this,_,_,cx|this.remove_worktree(cx)))))
+                .child(crate::project_ui::button("cancel-worktree-removal").label("Cancel").disabled(self.git_mutation_blocks_write()).on_click(cx.listener(|this,_,_,cx|{this.git.worktree_remove=None;cx.notify();})))
+                .child(crate::project_ui::button("confirm-worktree-removal").loading(self.git_write_pending()).when(!review.missing, |button|button.danger()).label(if review.missing {"Remove registration"}else{"Remove worktree"}).disabled(!self.can_remove_worktree() || !self.worktree_review_current(&review.name, &review.snapshot)).on_click(cx.listener(|this,_,_,cx|this.remove_worktree(cx)))))
             .into_any_element()
     }
 }

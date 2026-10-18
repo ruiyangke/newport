@@ -2,7 +2,7 @@
 //! Terminal opens retain their connection as an explicit lifetime lease.
 use newport_platform::ipc::Stream;
 use newport_platform::ipc::protocol;
-use protocol::{MAX_REQUEST, MAX_RESPONSE, Request, ResponseFrame, VERSION};
+use protocol::{MAX_RESPONSE, Request, ResponseFrame, VERSION};
 use serde_json::Value;
 use std::{
     io::{Read, Write},
@@ -877,7 +877,7 @@ impl Backend {
             args,
         })
         .map_err(|e| e.to_string())?;
-        if data.len() > MAX_REQUEST {
+        if data.len() > protocol::request_limit(method) {
             return Err("Request is too large".into());
         }
         // Once any bytes have been sent, a disconnected write may have completed.

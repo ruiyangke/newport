@@ -47,20 +47,40 @@ impl Command {
                 .await
                 .map_err(error)?,
             ),
-            Self::GitRequest => encode(
-                crate::git::git_request(
-                    services.events.clone(),
-                    services.identity,
-                    services.manager,
-                    services.sessions,
-                    services.pending,
-                    argument(args, "serverId")?,
-                    argument(args, "request")?,
-                    argument(args, "readId")?,
+            Self::GitRequest => {
+                let server_id = argument(args, "serverId")?;
+                let request = argument(args, "request")?;
+                let read_id = argument(args, "readId")?;
+                if argument::<Option<bool>>(args, "retryConnection")?.unwrap_or(false) {
+                    if !matches!(request, crate::git::protocol::Request::Open { .. }) {
+                        return Err(error(
+                            "Connection retry is only supported when opening a checkout",
+                        ));
+                    }
+                    // The checkout's explicit Retry must release transport backoff
+                    // before acquiring a lease, otherwise it returns the cached
+                    // agent failure without making a new authentication attempt.
+                    services
+                        .manager
+                        .owner(server_id)
+                        .map_err(error)?
+                        .retry_transport_fresh();
+                }
+                encode(
+                    crate::git::git_request(
+                        services.events.clone(),
+                        services.identity,
+                        services.manager,
+                        services.sessions,
+                        services.pending,
+                        server_id,
+                        request,
+                        read_id,
+                    )
+                    .await
+                    .map_err(error)?,
                 )
-                .await
-                .map_err(error)?,
-            ),
+            }
             Self::GitRefreshRepository => crate::git::git_refresh_repository(
                 services.manager,
                 argument(args, "serverId")?,

@@ -104,7 +104,10 @@ impl Logs {
             .update(cx, |find, cx| find.set_value(query, window, cx));
     }
     pub(super) fn sync(&mut self, client: &Services, cx: &mut Context<ServicesPanel>) {
-        let source = client.logs().map(|p| p.entries.clone()).unwrap_or_default();
+        let source = client
+            .logs()
+            .map(|p| p.entries.as_slice())
+            .unwrap_or_default();
         if source == self.source {
             return;
         }
@@ -118,7 +121,7 @@ impl Logs {
         if self.initialized && !pinned {
             self.unseen += added;
         }
-        self.source = source;
+        self.source = source.to_vec();
         self.initialized = true;
         self.rebuild(cx, false);
     }

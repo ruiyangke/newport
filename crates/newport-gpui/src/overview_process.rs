@@ -49,21 +49,30 @@ fn ordered(mut rows: Vec<Value>, query: &str, sort: usize, ascending: bool) -> V
             .iter()
             .any(|key| text(row, key).to_lowercase().contains(&query))
     });
-    rows.sort_by(|a, b| {
-        let key = ["cpu", "memory", "name", "pid", "user", "elapsed"][sort.min(5)];
-        let order = if matches!(key, "name" | "user") {
-            text(a, key)
-                .to_lowercase()
-                .cmp(&text(b, key).to_lowercase())
+    let key = ["cpu", "memory", "name", "pid", "user", "elapsed"][sort.min(5)];
+    if matches!(key, "name" | "user") {
+        // Normalize once per row, not once per comparison. PID remains an
+        // ascending tie-breaker even when the primary sort is descending.
+        if ascending {
+            rows.sort_by_cached_key(|row| (text(row, key).to_lowercase(), row["pid"].as_u64()));
         } else {
-            a[key]
+            rows.sort_by_cached_key(|row| {
+                (
+                    std::cmp::Reverse(text(row, key).to_lowercase()),
+                    row["pid"].as_u64(),
+                )
+            });
+        }
+    } else {
+        rows.sort_by(|a, b| {
+            let order = a[key]
                 .as_f64()
                 .unwrap_or(-1.)
-                .total_cmp(&b[key].as_f64().unwrap_or(-1.))
-        };
-        (if ascending { order } else { order.reverse() })
-            .then_with(|| a["pid"].as_u64().cmp(&b["pid"].as_u64()))
-    });
+                .total_cmp(&b[key].as_f64().unwrap_or(-1.));
+            (if ascending { order } else { order.reverse() })
+                .then_with(|| a["pid"].as_u64().cmp(&b["pid"].as_u64()))
+        });
+    }
     rows
 }
 fn elapsed(value: &Value) -> String {
@@ -671,6 +680,26 @@ mod tests {
         );
         assert_eq!(ordered(rows, "", 3, true)[2]["pid"], 10);
     }
+    #[test]
+    fn text_sort_normalizes_case_and_keeps_pid_ties_ascending_in_both_directions() {
+        let rows = vec![
+            json!({"pid":4,"name":"Beta","user":"Beta"}),
+            json!({"pid":2,"name":"alpha","user":"alpha"}),
+            json!({"pid":1,"name":"ALPHA","user":"ALPHA"}),
+            json!({"pid":3,"name":"beta","user":"beta"}),
+        ];
+        for column in [2, 4] {
+            for (ascending, expected) in [(true, vec![1, 2, 3, 4]), (false, vec![3, 4, 1, 2])] {
+                let actual: Vec<_> = ordered(rows.clone(), "", column, ascending)
+                    .iter()
+                    .map(|row| row["pid"].as_u64().unwrap())
+                    .collect();
+                assert_eq!(actual, expected);
+            }
+        }
+        assert_eq!(ordered(rows, "ALPHA", 2, false).len(), 2);
+    }
+
     #[test]
     fn process_search_sort_and_missing_elapsed() {
         let rows = vec![

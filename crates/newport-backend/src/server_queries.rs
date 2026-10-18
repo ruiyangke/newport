@@ -56,14 +56,12 @@ impl Read {
 pub(crate) struct Queries {
     services: Registry<Read, Value>,
     containers: Registry<Read, Value>,
-    pub files: Registry<String, Arc<crate::files::Listing>>,
 }
 impl Default for Queries {
     fn default() -> Self {
         Self {
             services: Registry::new(40),
             containers: Registry::new(40),
-            files: Registry::new(16),
         }
     }
 }
@@ -71,7 +69,6 @@ impl Queries {
     pub fn close(&self) {
         self.services.close();
         self.containers.close();
-        self.files.close();
     }
     pub fn invalidate_services(&self) {
         self.services.invalidate(|_| true);

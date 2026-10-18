@@ -229,13 +229,13 @@ impl<K: 'static> Render for RetainedRow<K> {
     }
 }
 fn retained_row<K: PartialEq + Clone + 'static>(
-    index: usize,
+    identity: impl Into<ElementId>,
     props: K,
     render: impl Fn(&K, &mut Window, &mut App) -> AnyElement + 'static,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let row = window.use_keyed_state(("retained-file-row", index), cx, |_, _| RetainedRow {
+    let row = window.use_keyed_state(identity, cx, |_, _| RetainedRow {
         props: props.clone(),
         render: Box::new(render),
     });
@@ -257,8 +257,15 @@ fn retained_row<K: PartialEq + Clone + 'static>(
     }
 }
 
+// A row owns focus and menus. Its identity follows the remote file, while
+// its ordinal position remains a prop so accessibility indices stay current.
+fn file_row_identity(server: &str, path: &str) -> SharedString {
+    SharedString::from(serde_json::to_string(&("file-row", server, path)).expect("string tuple"))
+}
+
 #[derive(Clone, PartialEq)]
 struct FileRowProps {
+    index: usize,
     entry: Value,
     target: Option<FileTarget>,
     selected: bool,
@@ -278,7 +285,7 @@ fn file_listener(
     }
 }
 
-fn file_row(props: &FileRowProps, i: usize, view: &WeakEntity<Newport>, cx: &App) -> AnyElement {
+fn file_row(props: &FileRowProps, view: &WeakEntity<Newport>, cx: &App) -> AnyElement {
     let entry = &props.entry;
     let path = text(entry, "path");
     let directory = entry["kind"] == "directory";
@@ -291,9 +298,9 @@ fn file_row(props: &FileRowProps, i: usize, view: &WeakEntity<Newport>, cx: &App
     let action_target = target.clone();
     let menu_view = view.clone();
     div()
-        .id(("file-row", i))
+        .id("file-row")
         .role(Role::Row)
-        .aria_row_index(i + 2)
+        .aria_row_index(props.index + 2)
         .h(px(36.))
         .w_full()
         .px_3()
@@ -311,23 +318,23 @@ fn file_row(props: &FileRowProps, i: usize, view: &WeakEntity<Newport>, cx: &App
         })
         .child(
             div()
-                .id(("file-name-cell", i))
+                .id("file-name-cell")
                 .role(Role::Cell)
                 .aria_label(file_name_label(entry))
                 .flex_1()
                 .min_w_0()
                 .child(
-                    crate::controls::button(("file-entry", i))
+                    crate::controls::button("file-entry")
                         .accessibility_label(file_name_label(entry))
                         .child(file_name(entry))
                         .w_full()
                         .min_w_0()
                         .px_0()
                         .justify_start()
-                        .hover_detail(
-                            text(entry, "name"),
-                            format!("Permissions: {}", text(entry, "permissions")),
-                        )
+                        .when(!text(entry, "permissions").trim().is_empty(), |button| {
+                            button
+                                .hover_hint(format!("Permissions: {}", text(entry, "permissions")))
+                        })
                         // The row owns hover and selection; keep the name hit area clear.
                         .custom(gpui_kit::component::button::ButtonCustomVariant::new(cx))
                         .disabled(target.is_none())
@@ -348,7 +355,7 @@ fn file_row(props: &FileRowProps, i: usize, view: &WeakEntity<Newport>, cx: &App
         )
         .child(
             metadata_cell(
-                ("file-size", i),
+                "file-size",
                 if directory || entry["size"].is_null() {
                     "—".into()
                 } else {
@@ -362,7 +369,7 @@ fn file_row(props: &FileRowProps, i: usize, view: &WeakEntity<Newport>, cx: &App
         )
         .when(show_modified, |row| {
             row.child(
-                metadata_cell(("file-modified", i), modified_date(&entry["modified"]))
+                metadata_cell("file-modified", modified_date(&entry["modified"]))
                     .w(px(94.))
                     .flex_shrink_0()
                     .text_size(px(11.)),
@@ -370,14 +377,14 @@ fn file_row(props: &FileRowProps, i: usize, view: &WeakEntity<Newport>, cx: &App
         })
         .child(
             div()
-                .id(("file-actions-cell", i))
+                .id("file-actions-cell")
                 .role(Role::Cell)
                 .flex()
                 .items_center()
                 .gap_2()
                 .flex_shrink_0()
                 .child(if directory {
-                    crate::controls::compact_icon_button(("file-project", i))
+                    crate::controls::compact_icon_button("file-project")
                         .ghost()
                         .flex_shrink_0()
                         .icon(IconName::FolderGit2)
@@ -394,7 +401,7 @@ fn file_row(props: &FileRowProps, i: usize, view: &WeakEntity<Newport>, cx: &App
                     .as_ref()
                     .is_some_and(|target| target.supports_transfer(Direction::Download))
                 {
-                    crate::controls::compact_icon_button(("file-download", i))
+                    crate::controls::compact_icon_button("file-download")
                         .ghost()
                         .flex_shrink_0()
                         .icon(IconName::Download)
@@ -410,7 +417,7 @@ fn file_row(props: &FileRowProps, i: usize, view: &WeakEntity<Newport>, cx: &App
                     div().w(px(24.)).flex_shrink_0().into_any_element()
                 })
                 .child(
-                    crate::controls::compact_icon_button(("file-actions", i))
+                    crate::controls::compact_icon_button("file-actions")
                         .icon(IconName::Ellipsis)
                         .flex_shrink_0()
                         .ghost()
@@ -468,6 +475,7 @@ impl Newport {
                     let entry = &entries[i];
                     let path = text(entry, "path");
                     let props = FileRowProps {
+                        index: i,
                         entry: entry.clone(),
                         target: directory_target
                             .as_ref()
@@ -482,9 +490,9 @@ impl Newport {
                     };
                     let view = view.clone();
                     retained_row(
-                        i,
+                        file_row_identity(&self.server, path.as_str()),
                         props,
-                        move |props, _, cx| file_row(props, i, &view, cx),
+                        move |props, _, cx| file_row(props, &view, cx),
                         window,
                         cx,
                     )

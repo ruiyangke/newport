@@ -246,7 +246,7 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<(), String>>,
 {
-    recover_service(attempt, cancel, retrying, delay, changes, None).await
+    recover_service(attempt, cancel, retrying, delay, changes, None, |_| {}).await
 }
 async fn recover_service<F, Fut>(
     mut attempt: F,
@@ -255,6 +255,7 @@ async fn recover_service<F, Fut>(
     delay: Duration,
     mut changes: Option<watch::Receiver<Option<isize>>>,
     owner: Option<&crate::server_session::ServerSession>,
+    blocked: impl Fn(String),
 ) -> Result<(), String>
 where
     F: FnMut() -> Fut,
@@ -271,6 +272,17 @@ where
             _ = cancel.changed() => return Ok(()),
             _ = recovery.ready() => {},
         }
+        if let Some(owner) = owner {
+            tokio::select! {
+                biased;
+                _ = cancel.changed() => return Ok(()),
+                result = owner.follow_transport(|error| match error {
+                    Some(error) => blocked(error),
+                    None => retrying(),
+                }) => result?,
+            }
+        }
+        let generation = owner.map(|owner| owner.transport_snapshot().generation);
         let started = tokio::time::Instant::now();
         if let Some(changes) = &mut changes {
             changes.borrow_and_update();
@@ -286,14 +298,12 @@ where
             continue;
         }
         if let Some(owner) = owner
-            && !owner.has_transport()
+            && (!owner.has_transport() || Some(owner.transport_snapshot().generation) != generation)
         {
+            // Transport recovery is owned by the server session. Retain this
+            // service's demand, including when approval needs explicit Retry.
+            // A newer transport also supersedes a late error from the old one.
             retrying();
-            tokio::select! {
-                biased;
-                _ = cancel.changed() => return Ok(()),
-                result = owner.wait_for_transport() => result?,
-            }
             continue;
         }
         if let Some(owner) = owner {
@@ -355,7 +365,7 @@ pub async fn run(
     app: crate::desktop_integration::Desktop,
     cancel: watch::Receiver<bool>,
     ready: impl Fn(String, bool),
-    retrying: impl Fn(),
+    waiting: impl Fn(Option<String>),
 ) -> Result<(), String> {
     let initial = if owner.permissions.clipboard_enabled() {
         revision(&app).await
@@ -375,10 +385,11 @@ pub async fn run(
             )
         },
         cancel.clone(),
-        retrying,
+        || waiting(None),
         Duration::from_secs(2),
         Some(receive),
         Some(&owner),
+        |error| waiting(Some(error)),
     );
     // Observe only the cheap revision counter; actual contents are read by
     // run_once after reconnecting. Keep this scoped to the integration session.
@@ -689,6 +700,84 @@ mod tests {
         );
         assert!(!owner.permissions.browser_enabled());
         registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "Run with npm run test:ssh -- clipboard::tests::sharing_resumes"]
+    async fn sharing_resumes_after_another_feature_recovers_failed_authentication() {
+        let directory = tempfile::tempdir().unwrap();
+        let identity = directory.path().join("identity");
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::new_v4(), "name": "Sharing recovery fixture",
+            "sshUser": "fixture", "sshHost": "127.0.0.1", "browserEnabled": true,
+            "sshPort": std::env::var("NEWPORT_TEST_SSH_PORT").unwrap().parse::<u16>().unwrap(),
+            "identityFile": identity
+        }))
+        .unwrap();
+        let mut manager =
+            crate::manager::Manager::new(crate::profile::Store::for_test(directory.path().into()));
+        manager.config.servers.push(server.clone());
+        let owner = manager.sessions.session(&server, 0);
+        let connection_updates = manager.sessions.connections.subscribe();
+        manager
+            .prepare_integration(server.id)
+            .unwrap()
+            .run(Arc::new(TestDesktop::default()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while owner.transport_snapshot().status != "failed" {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!owner.transport_snapshot().retryable);
+        assert_eq!(
+            connection_updates.borrow().servers[&server.id].phase,
+            newport_domain::connectivity::Phase::Failed
+        );
+        assert!(!owner.permissions.browser_enabled());
+        assert!(
+            owner
+                .integration
+                .snapshot()
+                .unwrap()
+                .connection
+                .error_message
+                .is_none(),
+            "sharing must not retain a second copy of the global SSH error"
+        );
+
+        // Restore authentication, then retry from a different SSH consumer.
+        // Sharing must recover without a preference toggle or its own restart.
+        std::fs::copy(std::env::var("NEWPORT_TEST_IDENTITY").unwrap(), &identity).unwrap();
+        owner.retry_transport_fresh();
+        let lease = owner.acquire(&server).await.unwrap();
+        assert_eq!(
+            connection_updates.borrow().servers[&server.id].phase,
+            newport_domain::connectivity::Phase::Connected
+        );
+        assert_eq!(lease.execute("printf ok", None).await.unwrap(), "ok");
+        let recovered = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let snapshot = manager.snapshot();
+                if snapshot.runtime.clipboard[&server.id].status == crate::model::Status::Connected
+                    && owner.permissions.browser_enabled()
+                {
+                    assert!(
+                        snapshot.runtime.clipboard[&server.id]
+                            .error_message
+                            .is_none()
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        manager.shutdown().await;
+        recovered.expect("sharing must follow shared SSH recovery after a permanent auth failure");
     }
 
     #[tokio::test]

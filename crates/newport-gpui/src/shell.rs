@@ -154,11 +154,10 @@ impl Newport {
         }
         cx.notify();
     }
-    pub(super) fn selected_server(&self) -> Option<Value> {
+    pub(super) fn selected_server(&self) -> Option<&Value> {
         self.snapshot["config"]["servers"]
             .as_array()
             .and_then(|servers| servers.iter().find(|server| server["id"] == self.server))
-            .cloned()
     }
     pub(super) fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
         if self.server_form.is_some() || self.modal_open || self.page == page {
@@ -288,7 +287,7 @@ impl Newport {
                             .disabled(disabled)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if let Some(server) = this.selected_server() {
-                                    this.edit_server(Some(server), window, cx);
+                                    this.edit_server(Some(server.clone()), window, cx);
                                 }
                             })),
                     )

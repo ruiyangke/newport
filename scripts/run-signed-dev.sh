@@ -31,6 +31,8 @@ if [[ "$(basename "$binary")" == newport ]]; then
   /usr/bin/codesign --force --sign "$NEWPORT_SIGNING_IDENTITY" \
     --entitlements "$NEWPORT_SIGNING_ENTITLEMENTS" --timestamp=none "$bundle"
   /usr/bin/codesign --verify --strict "$bundle"
-  binary="$bundle/Contents/MacOS/newport"
+  # LaunchServices gives Newport its own responsible application. Direct exec
+  # inherits the IDE/terminal identity, hiding 1Password SSH consent on Retry.
+  exec node "$script_dir/launch-macos-dev.mjs" "$bundle" "$@"
 fi
 exec "$binary" "$@"

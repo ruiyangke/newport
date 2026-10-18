@@ -600,6 +600,7 @@ fn handle_bound(
     cancellation: &crate::transport::Cancellation,
 ) -> io::Result<()> {
     let mut input = input;
+    let mut file_watches: Option<crate::file_watch::Watches> = None;
     loop {
         cancellation.check()?;
         let mut line = String::new();
@@ -614,6 +615,9 @@ fn handle_bound(
         let request: Value = serde_json::from_str(line.trim()).unwrap_or(Value::Null);
         let reply = match request.get("op").and_then(Value::as_str) {
             Some("snapshot") => snapshot(),
+            Some("files_watch") => file_watches
+                .get_or_insert_with(crate::file_watch::Watches::new)
+                .handle(&request),
             // The desktop gives each feature its own channel. Non-metrics
             // channels never start the CPU/process sampling thread.
             Some(op) => services

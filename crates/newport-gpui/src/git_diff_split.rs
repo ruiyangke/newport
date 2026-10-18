@@ -176,10 +176,10 @@ pub(super) fn render<T: 'static>(
                     view.border_l_1().border_color(cx.theme().border)
                 })
                 .child(
-                    label(if new { "New version" } else { "Old version" })
+                    crate::project_ui::label(if new { "New version" } else { "Old version" })
                         .px_3()
                         .py_1()
-                        .text_xs()
+                        .text_size(px(crate::project_ui::FONT_SIZE))
                         .border_b_1()
                         .border_color(cx.theme().border),
                 )
@@ -208,7 +208,7 @@ pub(super) fn render<T: 'static>(
                                         .flex()
                                         .items_center()
                                         .font_family(cx.theme().mono_font_family.clone())
-                                        .text_size(px(12.))
+                                        .text_size(px(crate::project_ui::FONT_SIZE))
                                         .bg(match row {
                                             Some(row) if row.heading => {
                                                 theme::diff_hunk(cx.theme().is_dark())

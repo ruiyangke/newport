@@ -222,7 +222,7 @@ impl Newport {
                         .aria_label(count_label(page))
                         .px_3()
                         .py_2()
-                        .text_size(px(12.))
+                        .text_size(px(crate::project_ui::FONT_SIZE))
                         .text_color(cx.theme().muted_foreground)
                         .child(count_label(page)),
                 )
@@ -235,9 +235,11 @@ impl Newport {
             })
             .when(truncated, |view| {
                 view.child(
-                    label("The file list exceeds the agent’s limit. Some files are not listed.")
-                        .p_3()
-                        .text_xs(),
+                    crate::project_ui::label(
+                        "The file list exceeds the agent’s limit. Some files are not listed.",
+                    )
+                    .p_3()
+                    .text_size(px(crate::project_ui::FONT_SIZE)),
                 )
             })
             .when(loading && !has_page, |view| {
@@ -302,7 +304,7 @@ impl Newport {
                                             && path["bytesB64"]
                                                 == this.git.history.path["bytesB64"];
                                         div().h(px(28.)).w_full().min_w_0().px(px(6.)).child(
-                                            crate::controls::button(("git-history-file", i))
+                                            crate::project_ui::button(("git-history-file", i))
                                                 .accessibility_label(description.clone())
                                                 .hover_hint(description)
                                                 .custom(git_file_row::selection_style(selected, cx))
@@ -332,7 +334,7 @@ impl Newport {
             })
             .when(first_failed || more_failed, |view| {
                 view.child(
-                    crate::controls::compact_button("git-more-commit-files")
+                    crate::project_ui::compact_button("git-more-commit-files")
                         .label(if first_failed {
                             "Reload commit files"
                         } else {

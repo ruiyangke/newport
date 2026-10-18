@@ -38,7 +38,7 @@ impl Newport {
         if self.page != Page::Overview {
             return false;
         }
-        let Some(server) = self.selected_server() else {
+        let Some(server) = self.selected_server().cloned() else {
             return false;
         };
         let connection = identity(&server);
@@ -108,7 +108,7 @@ impl Newport {
         true
     }
     fn setup_request(&mut self, cx: &mut Context<Self>) {
-        let Some(server) = self.selected_server() else {
+        let Some(server) = self.selected_server().cloned() else {
             return;
         };
         let Some(flow) = self.setup_flow.as_mut() else {
@@ -410,7 +410,7 @@ impl Newport {
                                         .label("Edit connection")
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             if let Some(server) = this.selected_server() {
-                                                this.edit_server(Some(server), window, cx);
+                                                this.edit_server(Some(server.clone()), window, cx);
                                             }
                                         })),
                                 )

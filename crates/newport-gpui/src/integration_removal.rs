@@ -50,7 +50,7 @@ impl Newport {
         {
             return;
         }
-        let Some(server) = self.selected_server() else {
+        let Some(server) = self.selected_server().cloned() else {
             return;
         };
         let state = &self.snapshot["runtime"]["agentOperations"][&self.server];
@@ -151,7 +151,7 @@ impl Newport {
     }
 
     pub(super) fn needle_management(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(server) = self.selected_server() else {
+        let Some(server) = self.selected_server().cloned() else {
             return div().into_any_element();
         };
         let state = &self.snapshot["runtime"]["agentOperations"][&self.server];
@@ -295,8 +295,8 @@ impl Newport {
                 text(&review.server, "sshHost")
             );
             content = content.child(div().id("needle-removal-target").role(Role::Paragraph).test_support().aria_label(target.clone())
-                .min_w_0().w_full().truncate().text_size(px(13.)).text_color(cx.theme().muted_foreground)
-                .hover_hint(target.clone()).child(target))
+                .min_w_0().w_full().whitespace_normal().text_size(px(13.)).text_color(cx.theme().muted_foreground)
+                .child(target))
                 .child(description("needle-removal-impact", "Metrics, Git, browser, and clipboard will stop. SSH terminals and port forwarding stay available.", cx))
                 .child(description("needle-removal-retention", "Newport-owned shell changes will be restored. The executable and backups are kept so you can restore Needle later.", cx));
             if stale {

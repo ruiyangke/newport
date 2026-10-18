@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use std::time::Instant;
 
 pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
+    Newport::observe_connectivity(cx);
     let restored = workspace_state::Selection::default();
     let window_state = window_state::WindowState::load(cx);
     let (sidebar_layout, _) = sidebar_layout::SidebarLayout::new(cx);
@@ -73,7 +74,6 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
         work: work.into(),
         replies,
         last_refresh: Instant::now(),
-        terminal_observers: Default::default(),
         window_visible: window.is_visible(),
         focus: cx.focus_handle(),
         sidebar_focus: cx.focus_handle(),
@@ -104,6 +104,7 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
         project_libraries: Default::default(),
         project_preferences: restored.project_preferences,
         git: git::Workspace::default(),
+        code_workspaces: Vec::new(),
         git_diff_layouts: Default::default(),
         git_mutation: None,
         git_notice_clear: false,
@@ -147,6 +148,109 @@ fn put(view: &mut Newport, key: &str, value: Value) {
 pub(super) fn frame(cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.update(|window, cx| window.draw(cx).clear(cx));
+}
+
+#[gpui::test]
+fn header_and_sharing_follow_global_failure_even_with_a_stale_connected_page_snapshot(
+    cx: &mut TestAppContext,
+) {
+    use crate::connectivity::{self, Phase, ServerState, Snapshot};
+    let id = uuid::Uuid::new_v4();
+    let instance = uuid::Uuid::new_v4();
+    cx.update(|cx| {
+        gpui::component::init(cx);
+        theme::install(false, cx);
+    });
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            let mut view = owner(window, cx);
+            view.page = Page::Integration;
+            view.server = id.to_string();
+            view.snapshot["instanceId"] = json!(instance);
+            view.snapshot["config"]["servers"][0]["id"] = json!(id);
+            view.snapshot["runtime"]["health"][id.to_string()] = json!("reachable");
+            view.snapshot["runtime"]["clipboard"][id.to_string()] = json!({"status":"connected"});
+            view
+        });
+        gpui::base::Root::new(view, window, cx)
+    });
+    frame(visual);
+    visual.update(|_, cx| {
+        connectivity::publish(
+            Snapshot {
+                instance_id: instance,
+                revision: 1,
+                servers: [(
+                    id,
+                    ServerState {
+                        phase: Phase::Failed,
+                        error: Some("Approval was not completed".into()),
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+            },
+            cx,
+        )
+    });
+    frame(visual);
+    let labels = visual.update(|window, _| {
+        gpui::base::test_support::snapshots(window)
+            .into_iter()
+            .filter_map(|node| node.label().map(str::to_owned))
+            .collect::<Vec<_>>()
+    });
+    for label in [
+        "Connection failed",
+        "Sharing connection: Connection failed",
+        "Clipboard access: Connection failed",
+        "Browser links: Connection failed",
+        "Approval was not completed",
+    ] {
+        assert!(
+            labels.iter().any(|actual| actual == label),
+            "missing {label}: {labels:?}"
+        );
+    }
+    // Keep the page snapshot unchanged: retry and recovery must arrive through
+    // the shared subscription, including clearing the previous SSH error.
+    for (revision, phase) in [(2, Phase::AwaitingApproval), (3, Phase::Connected)] {
+        visual.update(|_, cx| {
+            connectivity::publish(
+                Snapshot {
+                    instance_id: instance,
+                    revision,
+                    servers: [(
+                        id,
+                        ServerState {
+                            phase,
+                            ..Default::default()
+                        },
+                    )]
+                    .into(),
+                },
+                cx,
+            )
+        });
+        frame(visual);
+        let labels = visual.update(|window, _| {
+            gpui::base::test_support::snapshots(window)
+                .into_iter()
+                .filter_map(|node| node.label().map(str::to_owned))
+                .collect::<Vec<_>>()
+        });
+        assert!(labels.iter().any(|label| label == phase.label()));
+        assert!(
+            !labels
+                .iter()
+                .any(|label| label == "Approval was not completed")
+        );
+        assert!(
+            !labels
+                .iter()
+                .any(|label| label.contains("Connection failed"))
+        );
+    }
 }
 
 pub(super) fn settle_update_check(view: &Entity<Newport>, visual: &mut VisualTestContext) {
@@ -1284,7 +1388,7 @@ fn benchmark_server_lookup_and_idle_panel_ownership(cx: &mut TestAppContext) {
     let view = view.unwrap();
     for count in [1, 100, 1000] {
         view.update(visual, |view, cx| {
-            let server = view.selected_server().unwrap();
+            let server = view.selected_server().unwrap().clone();
             let mut servers: Vec<_> = (1..count)
                 .map(|index| {
                     let mut other = server.clone();

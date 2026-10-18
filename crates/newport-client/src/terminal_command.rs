@@ -1,10 +1,11 @@
 //! Single-use command handovers for a fresh terminal's initial connection.
 //! Service/permission commands remain review-only. Only an app-generated
-//! container shell opts into execution, and neither mode survives connection loss.
+//! container shell or project directory opts into execution, and neither mode survives connection loss.
 #[derive(Debug, PartialEq, Eq)]
 pub enum CommandDelivery {
     Review(String),
     ContainerShell(String),
+    ProjectDirectory(String),
 }
 
 #[derive(Default)]
@@ -22,6 +23,18 @@ impl CommandDraft {
     pub fn container_shell(command: String) -> Result<Self, String> {
         validate(&command)?;
         Ok(Self(Some(CommandDelivery::ContainerShell(command))))
+    }
+
+    /// Enter an app-selected worktree in a fresh shell. Never replay into a running program.
+    pub fn project_directory(path: &str) -> Result<Self, String> {
+        if !path.starts_with('/') {
+            return Err("The project directory must be absolute.".into());
+        }
+        validate(path)?;
+        let quoted = path.replace('\'', "'\"'\"'");
+        Ok(Self(Some(CommandDelivery::ProjectDirectory(format!(
+            "cd -- '{quoted}'"
+        )))))
     }
 
     pub fn take(&mut self) -> Option<CommandDelivery> {
@@ -46,6 +59,24 @@ fn validate(command: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_directory_is_quoted_and_delivered_only_once() {
+        let mut draft = CommandDraft::project_directory("/tmp/it's $(touch bad)").unwrap();
+        assert_eq!(
+            draft.take(),
+            Some(CommandDelivery::ProjectDirectory(
+                "cd -- '/tmp/it'\"'\"'s $(touch bad)'".into()
+            ))
+        );
+        assert_eq!(draft.take(), None);
+        let mut canceled = CommandDraft::project_directory("/project").unwrap();
+        canceled.discard();
+        assert_eq!(canceled.take(), None);
+        for path in ["relative", "/tmp/a\nb", "/tmp/a\0b"] {
+            assert!(CommandDraft::project_directory(path).is_err());
+        }
+    }
 
     #[test]
     fn service_draft_is_delivered_once_for_review_only() {

@@ -20,14 +20,9 @@ struct Rename {
     _blur: Subscription,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct ConnectionState {
-    pub connected: bool,
-    pub pending: bool,
-}
-
 pub struct Workspace {
     endpoint: String,
+    project_root: Option<String>,
     immersive: bool,
     server: String,
     connection: Value,
@@ -39,27 +34,32 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub(super) fn connection_state(&self, scope: &Value, cx: &App) -> ConnectionState {
-        if &self.connection != scope {
-            return ConnectionState::default();
-        }
-        self.connection_state_unscoped(cx)
+    pub(super) fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.tabs.iter().any(|tab| {
+            tab.focus.contains_focused(window, cx)
+                || tab.view.read(cx).focus.contains_focused(window, cx)
+        }) || self.rename.as_ref().is_some_and(|rename| {
+            rename
+                .input
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+        })
     }
-
-    pub(super) fn connection_state_unscoped(&self, cx: &App) -> ConnectionState {
-        let mut state = ConnectionState::default();
-        for tab in &self.tabs {
-            let view = tab.view.read(cx);
-            state.connected |= view.ready();
-            state.pending |= matches!(
-                view.status.phase,
-                crate::terminal_status::Phase::Connecting
-                    | crate::terminal_status::Phase::Reconnecting { .. }
-            );
+    pub(super) fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get(self.active) {
+            tab.view.read(cx).focus.clone().focus(window, cx);
         }
-        state
     }
-
+    pub(super) fn cycle_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.is_empty() || self.rename.is_some() {
+            return;
+        }
+        let count = self.tabs.len();
+        self.active = (self.active + if forward { 1 } else { count - 1 }) % count;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
     pub fn deactivate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for tab in &self.tabs {
             tab.view.update(cx, |view, cx| view.deactivate(window, cx));
@@ -207,9 +207,22 @@ impl Workspace {
         endpoint: String,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut workspace = Self::empty(server, connection, endpoint);
+        let mut workspace = Self::empty(server, connection, endpoint, cx);
         workspace.add(cx);
         workspace
+    }
+
+    pub(super) fn for_project(
+        server: String,
+        connection: Value,
+        root: String,
+        cx: &mut Context<Self>,
+    ) -> Result<Self, String> {
+        CommandDraft::project_directory(&root)?;
+        let mut workspace = Self::empty(server, connection, root.clone(), cx);
+        workspace.project_root = Some(root);
+        workspace.add(cx);
+        Ok(workspace)
     }
 
     /// A first handover is the initial tab, not an extra tab beside a blank shell.
@@ -220,7 +233,7 @@ impl Workspace {
         draft: CommandDraft,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut workspace = Self::empty(server, connection, endpoint);
+        let mut workspace = Self::empty(server, connection, endpoint, cx);
         workspace.add_command(draft, cx);
         workspace
     }
@@ -233,7 +246,7 @@ impl Workspace {
         title: String,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut workspace = Self::empty(server, connection, endpoint);
+        let mut workspace = Self::empty(server, connection, endpoint, cx);
         workspace.add_shell(draft, title, cx);
         workspace
     }
@@ -259,9 +272,11 @@ impl Workspace {
         cx.notify();
     }
 
-    fn empty(server: String, connection: Value, endpoint: String) -> Self {
+    fn empty(server: String, connection: Value, endpoint: String, cx: &mut Context<Self>) -> Self {
+        crate::connectivity::observe(cx, |this: &Self| &this.server, |_, cx| cx.notify()).detach();
         Self {
             endpoint,
+            project_root: None,
             immersive: false,
             server,
             connection,
@@ -278,6 +293,12 @@ impl Workspace {
             return;
         }
         let view = cx.new(|cx| TerminalView::new(self.server.clone(), cx));
+        if let Some(root) = &self.project_root {
+            let draft = CommandDraft::project_directory(root).expect("validated project directory");
+            view.update(cx, |view, _| {
+                view.prepare_command(draft);
+            });
+        }
         // Output, selection and pointer changes repaint the terminal itself.
         // Only presentation changes need to rebuild the surrounding tab bar.
         let mut previous = view.read(cx).tab_presentation();
@@ -440,13 +461,26 @@ impl Render for Workspace {
         }
         let current = self.tabs.get(self.active).map(|tab| tab.view.clone());
         let state = current.as_ref().map(|view| view.read(cx).status.clone());
-        let error = current.as_ref().and_then(|view| {
-            let view = view.read(cx);
-            view.status
-                .error()
-                .map(str::to_owned)
-                .or_else(|| view.input_error.clone())
-        });
+        let transport_wait = crate::connectivity::for_scope(&self.connection, cx)
+            .filter(|connection| connection.phase != crate::connectivity::Phase::Connected)
+            .filter(|_| {
+                state
+                    .as_ref()
+                    .is_some_and(|state| state.connected() || state.cancel_label().is_some())
+            })
+            .cloned();
+        let error = transport_wait
+            .as_ref()
+            .map(|connection| connection.error.clone())
+            .unwrap_or_else(|| {
+                current.as_ref().and_then(|view| {
+                    let view = view.read(cx);
+                    view.status
+                        .error()
+                        .map(str::to_owned)
+                        .or_else(|| view.input_error.clone())
+                })
+            });
         let menu_view = cx.entity().downgrade();
         div()
             .size_full()
@@ -479,7 +513,7 @@ impl Render for Workspace {
                         div()
                             .debug_selector(|| "terminal-tab-bar".into())
                             .min_w_0()
-                            .child(crate::controls::tabs("terminal-tabs")
+                            .child(crate::project_ui::tabs("terminal-tabs")
                             .subtle()
                             // Kit's subtle bar defaults to 38px. Leave the
                             // row's bottom border outside its painted bounds.
@@ -499,7 +533,7 @@ impl Render for Workspace {
                                     return Tab::new().quiet()
                                         .debug_selector(move || format!("terminal-tab-{id}"))
                                         .child(
-                                            Styled::h(crate::controls::input(&rename.input), px(26.))
+                                            Styled::h(crate::project_ui::input(&rename.input), px(26.))
                                                 .min_h(px(26.))
                                                 .max_h(px(26.))
                                                 .w(px(132.))
@@ -647,20 +681,20 @@ impl Render for Workspace {
                             div()
                                 .id("terminal-state")
                                 .role(Role::Status)
-                                .aria_label(state.label())
-                                .text_size(px(11.))
-                                .text_color(if state.error().is_some() {
+                                .aria_label(transport_wait.as_ref().map(|connection| connection.phase.label().to_owned()).unwrap_or_else(|| state.label()))
+                                .text_size(px(crate::project_ui::FONT_SIZE))
+                                .text_color(if error.is_some() {
                                     cx.theme().danger
                                 } else {
                                     cx.theme().muted_foreground
                                 })
-                                .when(state.steady() || state.cancel_label().is_some(), |status| {
+                                .when(transport_wait.is_none() && (state.steady() || state.cancel_label().is_some()), |status| {
                                     status.w_0().h_0().overflow_hidden()
                                 })
-                                .child(state.label()),
+                                .child(transport_wait.as_ref().map(|connection| connection.phase.label().to_owned()).unwrap_or_else(|| state.label())),
                         )
                     })
-                    .child(
+                    .when(self.project_root.is_none(), |bar| bar.child(
                         crate::controls::icon_button("terminal-immersive")
                             .icon(Icon::new(if self.immersive {
                                 gpui_kit::assets::IconName::Minimize2
@@ -676,7 +710,7 @@ impl Render for Workspace {
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(ToggleTerminalImmersive), cx);
                             }),
-                    )
+                    ))
                     .context_menu(move |menu, _, cx| {
                         let id = menu_view
                             .upgrade()
@@ -701,7 +735,7 @@ impl Render for Workspace {
                         .aria_label(error.clone())
                         .px(px(12.))
                         .py(px(9.))
-                        .text_size(px(12.))
+                        .text_size(px(crate::project_ui::FONT_SIZE))
                         .text_color(cx.theme().danger)
                         .bg(cx.theme().danger.opacity(0.06))
                         .border_b_1()
@@ -761,7 +795,7 @@ impl Render for Workspace {
                                         .child(
                                             div()
                                                 .font_family(cx.theme().mono_font_family.clone())
-                                                .text_size(px(12.))
+                                                .text_size(px(crate::project_ui::FONT_SIZE))
                                                 .text_color(cx.theme().muted_foreground)
                                                 .child(self.endpoint.clone()),
                                         ),
@@ -798,6 +832,33 @@ mod tests {
         cx.update(|cx| {
             gpui::component::init(cx);
             crate::theme::install(false, cx);
+        });
+    }
+
+    #[gpui::test]
+    fn project_shells_are_lazy_and_keep_their_worktree_scope(cx: &mut TestAppContext) {
+        init(cx);
+        cx.update(|cx| {
+            let workspace = cx.new(|cx| {
+                Workspace::for_project(
+                    "fixture".into(),
+                    json!(["scope"]),
+                    "/repo/worktree".into(),
+                    cx,
+                )
+                .unwrap()
+            });
+            assert!(workspace.read(cx).session_ids(cx).is_empty());
+            workspace.update(cx, |workspace, cx| workspace.add(cx));
+            let workspace = workspace.read(cx);
+            assert_eq!(workspace.project_root.as_deref(), Some("/repo/worktree"));
+            assert_eq!(workspace.tabs.len(), 2);
+            assert!(
+                workspace
+                    .tabs
+                    .iter()
+                    .all(|t| !t.view.read(cx).status.started)
+            );
         });
     }
 
@@ -1136,69 +1197,101 @@ mod tests {
     }
 
     #[gpui::test]
-    fn lifecycle_subscription_invalidates_owner_without_polling_or_output_redraws(
+    fn workspace_focus_includes_tab_headers_and_renaming(cx: &mut TestAppContext) {
+        let (workspace, cx) = visual_fixture(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            assert!(
+                w.contains_focus(window, cx),
+                "a tab header belongs to the terminal workspace"
+            );
+            w.cycle_tab(false, window, cx);
+            assert_eq!(w.active, 2);
+            assert!(w.contains_focus(window, cx));
+            w.cycle_tab(true, window, cx);
+            assert_eq!(w.active, 0);
+            let id = w.tabs[0].id;
+            w.rename(id, window, cx);
+        });
+        draw(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            assert!(w.rename.is_some());
+            assert!(
+                w.contains_focus(window, cx),
+                "rename input belongs to the terminal workspace"
+            );
+        });
+    }
+    #[gpui::test]
+    fn global_connectivity_notifies_every_page_without_polling_or_terminal_overrides(
         cx: &mut TestAppContext,
     ) {
+        use crate::connectivity::{self, Phase, ServerState, Snapshot};
         use std::{cell::Cell, rc::Rc};
         let (workspace, cx) = visual_fixture(cx);
-        workspace.update(cx, |workspace, cx| {
-            for tab in &workspace.tabs {
-                tab.view.update(cx, |view, _| {
-                    view.status.phase = crate::terminal_status::Phase::Connecting
-                });
-            }
-        });
+        let id = uuid::Uuid::new_v4();
+        let instance = uuid::Uuid::new_v4();
         let owner = cx.update(|window, cx| cx.new(|cx| crate::page_perf_tests::owner(window, cx)));
-        owner.update(cx, |owner, cx| {
-            owner.server = "selected".into();
-            owner.terminals.insert("selected".into(), workspace.clone());
-            owner.observe_terminal_connections(cx);
-            owner.observe_terminal_connections(cx);
-            assert_eq!(owner.terminal_observers.len(), 1);
-        });
+        owner.update(cx, |owner, _| owner.server = id.to_string());
+        draw(cx);
         let count = Rc::new(Cell::new(0));
         let observed = count.clone();
         let _subscription =
             cx.update(|_, cx| cx.observe(&owner, move |_, _| observed.set(observed.get() + 1)));
-        let views = workspace.read_with(cx, |workspace, _| {
-            workspace
-                .tabs
-                .iter()
-                .map(|tab| tab.view.clone())
-                .collect::<Vec<_>>()
-        });
-        for view in &views {
-            view.update(cx, |view, cx| {
-                view.status.failed("fixture offline");
-                cx.notify();
+        let pages = [
+            crate::Page::Overview,
+            crate::Page::Ports,
+            crate::Page::Services,
+            crate::Page::Containers,
+            crate::Page::Files,
+            crate::Page::Projects,
+            crate::Page::Terminal,
+            crate::Page::Integration,
+        ];
+        for (index, page) in pages.into_iter().enumerate() {
+            owner.update(cx, |owner, _| owner.page = page);
+            let phase = if index % 2 == 0 {
+                Phase::AwaitingApproval
+            } else {
+                Phase::Failed
+            };
+            cx.update(|_, cx| {
+                connectivity::publish(
+                    Snapshot {
+                        instance_id: instance,
+                        revision: index as u64 + 1,
+                        servers: [(
+                            id,
+                            ServerState {
+                                phase,
+                                ..Default::default()
+                            },
+                        )]
+                        .into(),
+                    },
+                    cx,
+                )
             });
+            draw(cx);
+            assert_eq!(
+                count.get(),
+                index + 1,
+                "every page must observe the singleton without owner.tick"
+            );
         }
-        draw(cx);
-        assert_eq!(
-            count.get(),
-            1,
-            "lifecycle invalidates parent without owner.tick"
-        );
-        views[0].update(cx, |view, cx| {
-            view.title = "new title".into();
-            cx.notify();
+        workspace.update(cx, |workspace, cx| {
+            for tab in &workspace.tabs {
+                tab.view.update(cx, |view, cx| {
+                    view.status.ready();
+                    view.title = "live shell".into();
+                    cx.notify();
+                });
+            }
         });
         draw(cx);
         assert_eq!(
             count.get(),
-            1,
-            "titles and output must not invalidate header"
-        );
-        owner.update(cx, |owner, _| owner.server = "other".into());
-        views[0].update(cx, |view, cx| {
-            view.status.phase = crate::terminal_status::Phase::Connecting;
-            cx.notify();
-        });
-        draw(cx);
-        assert_eq!(
-            count.get(),
-            1,
-            "another server's terminal cannot invalidate selected header"
+            8,
+            "terminal events cannot override server connectivity"
         );
     }
 

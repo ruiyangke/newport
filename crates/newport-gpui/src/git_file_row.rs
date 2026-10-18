@@ -54,7 +54,8 @@ pub(super) fn badge(mark: &'static str, cx: &App) -> Div {
         _ => cx.theme().primary,
     };
     div()
-        .size(px(16.))
+        .size(px(18.))
+        .line_height(px(crate::project_ui::FONT_SIZE))
         .flex_shrink_0()
         .flex()
         .items_center()
@@ -62,7 +63,7 @@ pub(super) fn badge(mark: &'static str, cx: &App) -> Div {
         .rounded(px(4.))
         .font_family(cx.theme().mono_font_family.clone())
         .font_weight(FontWeight::BOLD)
-        .text_size(px(10.))
+        .text_size(px(crate::project_ui::FONT_SIZE))
         .bg(if mark == "!" {
             color
         } else {
@@ -83,6 +84,7 @@ fn split_path(path: &str) -> (&str, &str) {
 pub(super) fn path(path: String, cx: &App) -> Div {
     let (dir, base) = split_path(&path);
     div()
+        .text_size(px(crate::project_ui::FONT_SIZE))
         .flex()
         .flex_1()
         .min_w_0()
@@ -106,6 +108,41 @@ pub(super) fn path(path: String, cx: &App) -> Div {
                 .child(base.to_owned()),
         )
 }
+/// Changes navigator: identify the filename first; let the parent path yield
+/// space before truncating the name. Preserve a trailing slash for directory
+/// entries returned by older agents.
+pub(super) fn filename_first(path: &str, cx: &App) -> Div {
+    let directory = path.ends_with('/');
+    let (parent, name) = split_path(path.trim_end_matches('/'));
+    let name = format!("{name}{}", if directory { "/" } else { "" });
+    div()
+        .flex()
+        .items_center()
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .gap(px(6.))
+        .whitespace_nowrap()
+        .child(
+            div()
+                .min_w_0()
+                .max_w_full()
+                .truncate()
+                .flex_shrink(0.0001)
+                .child(name),
+        )
+        .when(!parent.is_empty(), |row| {
+            row.child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(crate::project_ui::FONT_SIZE))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(parent.trim_end_matches('/').to_owned()),
+            )
+        })
+}
+
 pub(super) fn description(entry: &Value, title: &str, status: &str) -> String {
     if let Some(origin) = origin(entry) {
         format!("{title} · {status}\nfrom {origin}")

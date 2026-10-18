@@ -8,10 +8,10 @@ pub(super) const MAX_LIST_WIDTH: f32 = 560.;
 /// Keep the identity beside its icon and caret; only the label yields space.
 pub(super) fn picker(id: impl Into<ElementId>, icon: IconName, title: String) -> Button {
     let mut content = div()
-        .text_size(px(13.))
+        .text_size(px(crate::project_ui::FONT_SIZE))
         .font_weight(FontWeight::SEMIBOLD)
         .gap(px(6.));
-    crate::controls::button(id)
+    crate::project_ui::button(id)
         .ghost()
         .icon(icon)
         .label(title)
@@ -67,7 +67,7 @@ pub(super) fn picker_row(
 }
 
 pub(super) fn picker_choice(id: impl Into<ElementId>, cx: &App) -> Button {
-    crate::controls::button(id)
+    crate::project_ui::button(id)
         .custom(gpui_kit::component::button::ButtonCustomVariant::new(cx))
         .h_full()
         .min_h_0()
@@ -87,7 +87,7 @@ pub(super) fn picker_container() -> StyleRefinement {
 
 pub(super) fn toolbar(
     navigation: [AnyElement; 3],
-    actions: [AnyElement; 3],
+    actions: impl IntoIterator<Item = AnyElement>,
     width: f32,
     cx: &App,
 ) -> Div {
@@ -180,7 +180,7 @@ impl Newport {
         };
         resume_bar(
             title,
-            crate::controls::button("git-resume-detail")
+            crate::project_ui::button("git-resume-detail")
                 .label(if matches!(self.git.tab, 0 | 1 | 3) {
                     "Show diff"
                 } else {
@@ -190,6 +190,7 @@ impl Newport {
                     // Returning to an inspection must retain its comparison,
                     // loaded pages, scroll and selection. No read is started.
                     this.git.resume_detail();
+                    this.project_show_review(cx);
                     cx.notify();
                 })),
             cx,
@@ -214,7 +215,7 @@ fn resume_bar(title: String, button: Button, cx: &App) -> Div {
                 .min_w_0()
                 .flex_1()
                 .truncate()
-                .text_size(px(12.))
+                .text_size(px(crate::project_ui::FONT_SIZE))
                 .font_weight(FontWeight::MEDIUM)
                 .child(title),
         )
@@ -352,7 +353,7 @@ mod tests {
                             .flex()
                             .gap(px(4.))
                             .child(
-                                crate::controls::button("transfer")
+                                crate::project_ui::button("transfer")
                                     .max_w(px(200.))
                                     .label(format!("Fetch {name}"))
                                     .debug_selector(|| "transfer".into()),
@@ -452,7 +453,7 @@ mod tests {
                 .justify_end()
                 .child(resume_bar(
                     "a/very/long/directory/and/a-long-selected-file-name.rs".into(),
-                    crate::controls::button("show-diff-test")
+                    crate::project_ui::button("show-diff-test")
                         .label("Show diff")
                         .debug_selector(|| "resume-button".into()),
                     cx,

@@ -97,6 +97,9 @@ impl Drop for Connection {
     }
 }
 pub fn is_transient_connection_error(error: &anyhow::Error) -> bool {
+    if error.is::<auth::AgentApprovalRequired>() {
+        return false;
+    }
     if error.is::<auth::SelectedAgentUnavailable>() {
         return true;
     }
@@ -978,6 +981,24 @@ mod integration_tests {
 #[cfg(test)]
 mod connection_retry_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn agent_approval_eof_requires_user_retry_even_with_transient_io_cause() {
+        let mut attempts = 0;
+        let result: Result<()> = retry_connection(
+            || {
+                attempts += 1;
+                std::future::ready(Err(anyhow::Error::new(std::io::Error::from(
+                    std::io::ErrorKind::UnexpectedEof,
+                ))
+                .context(auth::AgentApprovalRequired)))
+            },
+            Duration::ZERO,
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+    }
 
     #[test]
     fn wrapped_io_errors_keep_their_retry_classification() {

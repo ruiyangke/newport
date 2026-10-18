@@ -19,7 +19,11 @@ pub struct Services<'a> {
 #[serde(rename_all = "snake_case")]
 pub enum Command {
     FilesList,
+    FilesWatch,
     FilesPreview,
+    FilesReadText,
+    FilesProjectIndex,
+    FilesWriteText,
     FilesCancel,
     FilesProgress,
     #[serde(rename = "native.files_upload")]
@@ -88,6 +92,8 @@ impl Command {
             }
         }
         match self {
+            Self::FilesWatch => encode(crate::files::vfs::dispatch(services.manager, services.files,
+                serde_json::from_value(args.clone()).map_err(|e| error(e.to_string()))?).await.map_err(error)?),
             Self::FilesList => encode(
                 crate::files::files_list_query(
                     services.manager,
@@ -97,6 +103,26 @@ impl Command {
                     argument(args, "path")?,
                     argument(args, "expectedConnection")?,
                     argument::<Option<bool>>(args, "refresh")?.unwrap_or(false),
+                    argument::<Option<String>>(args,"projectRoot")?,
+                )
+                .await
+                .map_err(error)?,
+            ),
+            Self::FilesProjectIndex => encode(
+                crate::files::project_index::dispatch(
+                    services.manager,
+                    services.files,
+                    serde_json::from_value(args.clone()).map_err(|e| error(e.to_string()))?,
+                )
+                .await
+                .map_err(error)?,
+            ),
+            Self::FilesReadText | Self::FilesWriteText => encode(
+                crate::files::editor::dispatch(
+                    services.manager,
+                    services.files,
+                    serde_json::from_value(args.clone()).map_err(|e| error(e.to_string()))?,
+                    matches!(self, Self::FilesWriteText),
                 )
                 .await
                 .map_err(error)?,

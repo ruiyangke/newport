@@ -81,6 +81,7 @@ impl Drop for LocalTemp {
 impl Operations {
     pub fn persistent(profile_directory: &Path) -> Self {
         Self {
+            editor_writes: Default::default(),
             registry: Arc::new(Mutex::new(Registry::default())),
             uploads: Arc::new(Owners::open(profile_directory.join("upload-recovery.json"))),
             downloads: Arc::new(Owners::open(

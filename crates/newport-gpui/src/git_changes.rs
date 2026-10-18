@@ -180,14 +180,18 @@ impl Newport {
             .px_3()
             .gap_2()
             .child(
-                label(group.title())
-                    .text_xs()
+                crate::project_ui::label(group.title())
+                    .text_size(px(crate::project_ui::FONT_SIZE))
                     .font_weight(FontWeight::SEMIBOLD),
             )
-            .child(label(count).text_xs().flex_1())
+            .child(
+                crate::project_ui::label(count)
+                    .text_size(px(crate::project_ui::FONT_SIZE))
+                    .flex_1(),
+            )
             .when(group != Group::Conflicted, |view| {
                 view.child(
-                    crate::controls::compact_button(("change-group-action", index))
+                    crate::project_ui::compact_button(("change-group-action", index))
                         .ghost()
                         .label(format!(
                             "{} {scope}",
@@ -327,7 +331,7 @@ impl Newport {
                         .pt(px(8.))
                         .pb(px(6.))
                         .child(
-                            crate::controls::input(input)
+                            crate::project_ui::input(input)
                                 .aria_label("Filter changed files")
                                 .prefix(
                                     Icon::new(IconName::Search)
@@ -406,7 +410,7 @@ impl Newport {
             )
             .when(self.git.changes.filtering(), |view| {
                 view.child(
-                    label(format!(
+                    crate::project_ui::label(format!(
                         "{} · {}",
                         self.git
                             .changes
@@ -424,7 +428,7 @@ impl Newport {
                         }
                     ))
                     .px_3()
-                    .text_xs(),
+                    .text_size(px(crate::project_ui::FONT_SIZE)),
                 )
             })
             .when(empty && !pending && !failed, |view| {
@@ -484,7 +488,7 @@ impl Newport {
                                             view.bg(theme::git_selection(cx.theme().is_dark()))
                                         })
                                         .child(
-                                            crate::controls::button(("change-file", index))
+                                            crate::project_ui::button(("change-file", index))
                                                 .custom(git_file_row::selection_style(active, cx))
                                                 .selected(active)
                                                 .h_full()
@@ -505,7 +509,9 @@ impl Newport {
                                                                 .min_w_0()
                                                                 .flex_shrink(1000.)
                                                                 .truncate()
-                                                                .text_size(px(11.))
+                                                                .text_size(px(
+                                                                    crate::project_ui::FONT_SIZE,
+                                                                ))
                                                                 .text_color(
                                                                     cx.theme().muted_foreground,
                                                                 )
@@ -522,6 +528,7 @@ impl Newport {
                                                     this.git.selected = selected.clone();
                                                     this.git.detail_open = true;
                                                     this.git_select_side(!stage);
+                                                    this.project_show_review(cx);
                                                     cx.notify();
                                                 })),
                                         )

@@ -591,6 +591,7 @@ impl Containers {
     pub fn refresh(&mut self) {
         self.request(Kind::Snapshot, true);
     }
+    pub fn server_id(&self) -> &str { &self.server }
     pub fn retry_inspect(&mut self) {
         self.request(Kind::Inspect, true);
     }

@@ -155,8 +155,8 @@ impl Render for Confirmation {
         div().flex().flex_col().gap_3().pt_3()
             .child(div().font_weight(FontWeight::MEDIUM).child(self.path.clone()))
             .when(!self.review.partial(), |view| view
-                .child(label("Restore from"))
-                .child(crate::controls::tabs("discard-restore-source").segmented()
+                .child(crate::project_ui::label("Restore from"))
+                .child(crate::project_ui::tabs("discard-restore-source").segmented()
                     .selected_index(usize::from(self.source == Source::Head))
                     .child(Tab::new().label("Staged version").disabled(!self.review.supports_index()))
                     .child(Tab::new().label("Last commit"))
@@ -164,18 +164,18 @@ impl Render for Confirmation {
                         let source = if *index == 0 {Source::Index} else {Source::Head};
                         if *index <= 1 && this.review.action(source).is_ok() { this.source = source; cx.notify(); }
                     }))))
-            .child(label(if self.review.partial() {
+            .child(crate::project_ui::label(if self.review.partial() {
                 "The selected changes will be removed from the working file on the server. Other changes and the index are kept. There is no automatic undo."
             } else if self.source == Source::Index {
                 "Discard this file’s unstaged changes and keep its staged changes. Files absent from the staged version will be deleted. There is no automatic undo."
             } else {
                 "Discard this file’s staged and unstaged changes, restoring the last commit. Files absent from that commit will be deleted. There is no automatic undo."
             }))
-            .when(!current, |view| view.child(label("The selection or repository state changed. Cancel and review the file again.").text_color(cx.theme().danger)))
+            .when(!current, |view| view.child(crate::project_ui::label("The selection or repository state changed. Cancel and review the file again.").text_color(cx.theme().danger)))
             .child(project_dialog::actions()
-                .child(crate::controls::form_button("cancel-discard-changes").label("Cancel")
+                .child(crate::project_ui::form_button("cancel-discard-changes").label("Cancel")
                     .on_click(|_,window,cx| window.close_dialog(cx)))
-                .child(crate::controls::form_button("confirm-discard-changes").danger().label("Discard")
+                .child(crate::project_ui::form_button("confirm-discard-changes").danger().label("Discard")
                     .disabled(!current).on_click(cx.listener(|this,_,window,cx| this.submit(window,cx)))))
     }
 }

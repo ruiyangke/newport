@@ -221,22 +221,38 @@ fn poll_hidden(
 }
 
 #[gpui::test]
-fn terminal_ready_and_reconnect_events_drive_header_despite_stale_snapshot(
-    cx: &mut TestAppContext,
-) {
+fn terminal_events_cannot_overwrite_global_connectivity(cx: &mut TestAppContext) {
+    use crate::connectivity::{self, Phase, ServerState, Snapshot};
     let peer = Peer::new();
     let (view, cx) = connect(&peer, cx);
-    let snapshot = json!({"runtime":{"awaitingAgent":["server"]}});
-    let health = |view: &TerminalView| {
-        crate::snapshot_presentation::connection_health(&snapshot, "server", view.ready())
+    let id = uuid::Uuid::new_v4();
+    let state = Snapshot {
+        instance_id: uuid::Uuid::new_v4(),
+        revision: 1,
+        servers: [(
+            id,
+            ServerState {
+                phase: Phase::AwaitingApproval,
+                ..Default::default()
+            },
+        )]
+        .into(),
     };
-    assert_eq!(view.read_with(cx, |view, _| health(view)), "reachable");
+    cx.update(|_, cx| connectivity::publish(state, cx));
+    let phase = |cx: &gpui_kit::App| connectivity::server(&id.to_string(), cx).unwrap().phase;
+    assert!(view.read_with(cx, |view, _| view.ready()));
+    assert_eq!(
+        view.read_with(cx, |_, cx| phase(cx)),
+        Phase::AwaitingApproval
+    );
     peer.event(json!({"type":"reconnecting", "data":{"attempt":1,"message":"fixture reconnect"}}));
     wait(&view, cx, |view| !view.ready() && view.observed_epoch == 1);
-    assert_eq!(view.read_with(cx, |view, _| health(view)), "awaiting-agent");
     peer.event(json!({"type":"ready"}));
     wait(&view, cx, |view| view.ready());
-    assert_eq!(view.read_with(cx, |view, _| health(view)), "reachable");
+    assert_eq!(
+        view.read_with(cx, |_, cx| phase(cx)),
+        Phase::AwaitingApproval
+    );
     view.update(cx, |view, _| view.close());
 }
 

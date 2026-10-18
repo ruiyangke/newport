@@ -100,7 +100,7 @@ impl Form {
 impl Newport {
     pub(super) fn repository_settings_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
         let feedback = read_feedback(&self.resources, self.git.error.as_deref());
-        let retry = crate::controls::button("retry-modal-repository-settings")
+        let retry = crate::project_ui::button("retry-modal-repository-settings")
             .label("Retry settings")
             .on_click(cx.listener(|this, _, _, cx| {
                 // Refresh every prerequisite, retaining any existing form draft.
@@ -253,7 +253,7 @@ impl Newport {
         cx.notify();
     }
     pub(super) fn repository_settings_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        crate::controls::button("repository-settings")
+        crate::project_ui::button("repository-settings")
             .label("Repository settings")
             .disabled(
                 self.git_mutation_blocks_write()
@@ -320,7 +320,7 @@ impl Newport {
                         .flex_wrap()
                         .gap_2()
                         .child(
-                            crate::controls::button("refresh-settings-review")
+                            crate::project_ui::button("refresh-settings-review")
                                 .label("Refresh settings")
                                 .disabled(busy)
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -329,7 +329,7 @@ impl Newport {
                                 })),
                         )
                         .child(
-                            crate::controls::button("accept-settings-review")
+                            crate::project_ui::button("accept-settings-review")
                                 .label("Use reviewed settings")
                                 .disabled(!self.can_configure_repository())
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -338,28 +338,36 @@ impl Newport {
                         ),
                 )
             })
-            .child(label("Commit author"))
+            .child(crate::project_ui::label("Commit author"))
             .child(
                 div()
                     .flex()
                     .gap_2()
                     .child(
-                        div().flex_1().min_w_0().child(label("Name")).child(
-                            crate::controls::input(&form.name)
-                                .aria_label("Git author name")
-                                .disabled(busy),
-                        ),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(crate::project_ui::label("Name"))
+                            .child(
+                                crate::project_ui::input(&form.name)
+                                    .aria_label("Git author name")
+                                    .disabled(busy),
+                            ),
                     )
                     .child(
-                        div().flex_1().min_w_0().child(label("Email")).child(
-                            crate::controls::input(&form.email)
-                                .aria_label("Git author email")
-                                .disabled(busy),
-                        ),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(crate::project_ui::label("Email"))
+                            .child(
+                                crate::project_ui::input(&form.email)
+                                    .aria_label("Git author email")
+                                    .disabled(busy),
+                            ),
                     ),
             )
             .child(
-                crate::controls::checkbox("git-fetch-prune")
+                crate::project_ui::checkbox("git-fetch-prune")
                     .label("Prune deleted branches on fetch")
                     .checked(form.prune)
                     .disabled(busy)
@@ -375,12 +383,12 @@ impl Newport {
                     "repository-settings-prune-description",
                     "Removes remote-tracking branches that no longer exist upstream when fetching.",
                 )
-                .text_xs(),
+                .text_size(px(crate::project_ui::FONT_SIZE)),
             )
             .child(
                 project_dialog::actions()
                     .child(
-                        crate::controls::button("cancel-repository-settings")
+                        crate::project_ui::button("cancel-repository-settings")
                             .label("Cancel")
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -389,7 +397,7 @@ impl Newport {
                             })),
                     )
                     .child(
-                        crate::controls::button("save-repository-settings")
+                        crate::project_ui::button("save-repository-settings")
                             .loading(self.git_write_pending())
                             .label("Save settings")
                             .disabled(
@@ -459,11 +467,11 @@ mod tests {
                 .child(read_feedback_view(
                     &read_feedback(&self.resources, None),
                     self.has_form,
-                    crate::controls::button("retry-settings-test").label("Retry settings"),
+                    crate::project_ui::button("retry-settings-test").label("Retry settings"),
                     cx,
                 ))
                 .when(self.has_form, |view| {
-                    view.child(crate::controls::input(&self.draft).aria_label("Git author name"))
+                    view.child(crate::project_ui::input(&self.draft).aria_label("Git author name"))
                 })
         }
     }

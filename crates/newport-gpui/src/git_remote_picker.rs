@@ -32,7 +32,7 @@ impl ListDelegate for Delegate {
         self.entries.get(ix.row).map(|name| {
             ListItem::new(ix.row)
                 .h(px(28.))
-                .text_size(px(12.))
+                .text_size(px(crate::project_ui::FONT_SIZE))
                 .child(name.clone())
         })
     }
@@ -374,19 +374,19 @@ impl RemotePicker {
                     .px_2()
                     .flex()
                     .items_center()
-                    .text_size(px(11.))
+                    .text_size(px(crate::project_ui::FONT_SIZE))
                     .text_color(cx.theme().muted_foreground)
                     .child(message)
             })
             .when_some(self.names_error.as_ref(), |view, error| {
                 view.child(
-                    label(error.clone())
+                    crate::project_ui::label(error.clone())
                         .p_2()
-                        .text_xs()
+                        .text_size(px(crate::project_ui::FONT_SIZE))
                         .text_color(cx.theme().danger),
                 )
                 .child(
-                    crate::controls::button("retry-remote-names")
+                    crate::project_ui::button("retry-remote-names")
                         .label("Reload remotes")
                         .on_click(cx.listener(|this, _, _, cx| this.read_names(false, false, cx))),
                 )
@@ -409,7 +409,7 @@ impl Render for RemotePicker {
                     .p_0()
                     .offset(px(4.))
                     .trigger(
-                        crate::controls::button("remote-picker-trigger")
+                        crate::project_ui::button("remote-picker-trigger")
                             .child(
                                 div()
                                     .flex()
@@ -467,13 +467,17 @@ impl Render for RemotePicker {
                 self.detail_pending || (self.names_pending && self.name.is_empty()),
             ))
             .when_some(self.detail_error.as_ref(), |view, error| {
-                view.child(label(error.clone()).text_xs().text_color(cx.theme().danger))
-                    .child(
-                        crate::controls::button("retry-remote-detail")
-                            .label("Retry remote")
-                            .disabled(!self.enabled)
-                            .on_click(cx.listener(|this, _, _, cx| this.read_detail(cx))),
-                    )
+                view.child(
+                    crate::project_ui::label(error.clone())
+                        .text_size(px(crate::project_ui::FONT_SIZE))
+                        .text_color(cx.theme().danger),
+                )
+                .child(
+                    crate::project_ui::button("retry-remote-detail")
+                        .label("Retry remote")
+                        .disabled(!self.enabled)
+                        .on_click(cx.listener(|this, _, _, cx| this.read_detail(cx))),
+                )
             })
             .when(
                 self.query.is_empty() && self.page.as_ref().is_some_and(|p| p.total == 0),

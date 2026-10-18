@@ -105,7 +105,7 @@ impl Newport {
         if self.helper_actions_blocked() {
             return;
         }
-        let Some(server) = self.selected_server() else {
+        let Some(server) = self.selected_server().cloned() else {
             return;
         };
         let state = &self.snapshot["runtime"]["agentOperations"][&self.server];
@@ -209,7 +209,7 @@ impl Newport {
         cx.notify();
     }
     pub(super) fn standalone_helper_history(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(server) = self.selected_server() else {
+        let Some(server) = self.selected_server().cloned() else {
             return div().into_any_element();
         };
         let state = &self.snapshot["runtime"]["agentOperations"][&self.server];
@@ -282,8 +282,8 @@ impl Newport {
             content = content.child(div().id("needle-helper-state").role(Role::Status).test_support().aria_label(title).flex().items_center().gap_2().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD)
                 .when(running, |r| r.child(gpui_kit::component::spinner::Spinner::new().small())).child(title))
                 .child(div().id("needle-helper-target").role(Role::Paragraph).test_support().aria_label(target.clone())
-                    .min_w_0().w_full().truncate().text_size(px(13.)).text_color(cx.theme().muted_foreground)
-                    .hover_hint(target.clone()).child(target))
+                    .min_w_0().w_full().whitespace_normal().text_size(px(13.)).text_color(cx.theme().muted_foreground)
+                    .child(target))
                 .child(note("needle-helper-impact", if running { "You can leave this page. Newport will keep the restoration running." } else { "Restore the files recorded by this shell setup. Changed files will need review. Shell commands may stop using Newport; Needle, metrics, and Git stay available." },false,cx));
             if stale {
                 content = content.child(note("needle-helper-stale", "The server or recorded ownership changed. Dismiss this review and inspect the history again.",true,cx));

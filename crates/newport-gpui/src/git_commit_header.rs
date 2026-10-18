@@ -79,8 +79,8 @@ pub(super) fn history_row_identity(entry: &Value, cx: &App) -> Div {
         .w_full()
         .min_w_0()
         .gap(px(5.))
-        .text_size(px(11.))
-        .line_height(px(15.))
+        .text_size(px(crate::project_ui::FONT_SIZE))
+        .line_height(px(17.))
         .text_color(cx.theme().muted_foreground)
         .child(
             div()
@@ -100,7 +100,7 @@ pub(super) fn history_row_identity(entry: &Value, cx: &App) -> Div {
                 .pl(px(6.))
                 .flex_shrink_0()
                 .font_family(cx.theme().mono_font_family.clone())
-                .text_size(px(10.5))
+                .text_size(px(crate::project_ui::FONT_SIZE))
                 .child(short_oid(&text(&entry["oid"], "hex"))),
         )
 }
@@ -130,7 +130,7 @@ fn message_body(body: String, state: &State, background: Hsla) -> Div {
                 .aria_label(body.clone())
                 .flex_shrink_0()
                 .w_full()
-                .text_size(px(12.))
+                .text_size(px(crate::project_ui::FONT_SIZE))
                 .line_height(px(18.))
                 .child(body),
         )
@@ -162,6 +162,7 @@ impl Newport {
         parent: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let workspace = self.code_workspace().is_some();
         let message = text(&detail["message"], "display");
         let (subject, body) = split_message(&message);
         let oid = text(&detail["oid"], "hex");
@@ -191,9 +192,9 @@ impl Newport {
             .flex_col()
             .flex_shrink_0()
             .min_w_0()
-            .px_4()
-            .py_3()
-            .gap_2()
+            .px_3()
+            .py_2()
+            .gap_1()
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
@@ -234,33 +235,36 @@ impl Newport {
                                     ),
                             )
                             .when(!body.is_empty(), |view| {
-                                view.child(
-                                    div()
-                                        .id("git-commit-body-scroll")
-                                        .max_h(px(240.))
-                                        .overflow_y_scroll()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(message_body(
-                                            body.to_owned(),
-                                            &self.git.history.header,
-                                            cx.theme().background,
-                                        )),
-                                )
+                                view.when(!workspace || self.git.history.header.expanded, |view| {
+                                    view.child(
+                                        div()
+                                            .id("git-commit-body-scroll")
+                                            .max_h(px(240.))
+                                            .overflow_y_scroll()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(message_body(
+                                                body.to_owned(),
+                                                &self.git.history.header,
+                                                cx.theme().background,
+                                            )),
+                                    )
+                                })
                                 .when(
-                                    self.git.history.header.overflow.get()
+                                    workspace
+                                        || self.git.history.header.overflow.get()
                                         || self.git.history.header.expanded,
                                     |view| {
                                         view.child(
-                                            crate::controls::compact_button("git-commit-expand")
+                                            crate::project_ui::compact_button("git-commit-expand")
                                                 .link()
                                                 .expanded(self.git.history.header.expanded)
                                                 .self_start()
                                                 .text_color(cx.theme().primary)
                                                 .px_0()
                                                 .label(if self.git.history.header.expanded {
-                                                    "Show less"
+                                                    "Hide message"
                                                 } else {
-                                                    "Show more"
+                                                    "Show message"
                                                 })
                                                 .accessibility_label(
                                                     if self.git.history.header.expanded {
@@ -278,15 +282,19 @@ impl Newport {
                                     },
                                 )
                             })
-                            .when(detail["messageTruncated"] == true, |view| {
-                                view.child(project_loading::picker_detail(
-                                    "full commit message",
-                                    Some("The commit message is truncated.".into()),
-                                    self.resources
-                                        .get("git-history-detail")
-                                        .is_some_and(|read| read.pending),
-                                ))
-                            }),
+                            .when(
+                                detail["messageTruncated"] == true
+                                    && (!workspace || self.git.history.header.expanded),
+                                |view| {
+                                    view.child(project_loading::picker_detail(
+                                        "full commit message",
+                                        Some("The commit message is truncated.".into()),
+                                        self.resources
+                                            .get("git-history-detail")
+                                            .is_some_and(|read| read.pending),
+                                    ))
+                                },
+                            ),
                     )
                     .when(self.git.tab == 3, |view| {
                         view.child(self.git_stash_selected_actions(cx))
@@ -302,7 +310,7 @@ impl Newport {
                     .items_center()
                     .gap_x_3()
                     .gap_y_1()
-                    .text_size(px(11.))
+                    .text_size(px(crate::project_ui::FONT_SIZE))
                     .text_color(cx.theme().muted_foreground)
                     .child(
                         div()
@@ -382,7 +390,7 @@ impl Newport {
                     )
                     .when(multiple_parents, |view| {
                         view.child(
-                            crate::controls::compact_button("git-history-parent")
+                            crate::project_ui::compact_button("git-history-parent")
                                 .label(format!("Parent {} · {}", parent + 1, selected_parent))
                                 .accessibility_label("Compare with parent")
                                 .dropdown_menu({

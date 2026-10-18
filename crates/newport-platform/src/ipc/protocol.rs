@@ -3,7 +3,17 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub const VERSION: u32 = 2;
-pub const MAX_REQUEST: usize = 1024 * 1024;
+pub const DEFAULT_MAX_REQUEST: usize = 1024 * 1024;
+// Whole-document saves need room for 16 MiB of UTF-8 plus the request envelope.
+// All other methods keep the original admission limit on both ends.
+pub const MAX_REQUEST: usize = 17 * 1024 * 1024;
+pub fn request_limit(method: &str) -> usize {
+    if method == "files_write_text" {
+        MAX_REQUEST
+    } else {
+        DEFAULT_MAX_REQUEST
+    }
+}
 pub const MAX_RESPONSE: usize = 32 * 1024 * 1024;
 /// Successful open keeps this socket alive as the PTY's ownership lease.
 /// EOF releases the PTY; terminal data still uses the ordinary read/write RPCs.

@@ -20,6 +20,17 @@ impl std::fmt::Display for SelectedAgentUnavailable {
 }
 impl std::error::Error for SelectedAgentUnavailable {}
 
+#[derive(Debug)]
+pub(super) struct AgentApprovalRequired;
+impl std::fmt::Display for AgentApprovalRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "SSH key approval was not completed. Retry and approve the request in your SSH agent.",
+        )
+    }
+}
+impl std::error::Error for AgentApprovalRequired {}
+
 fn agent_error(server: &Server, error: anyhow::Error) -> anyhow::Error {
     if server.agent_key_fingerprint.is_some() {
         error.context(SelectedAgentUnavailable)
@@ -51,7 +62,10 @@ where
         self.approval.send_replace(true);
         let result = self.inner.auth_sign(key, hash, data).await;
         self.approval.send_replace(false);
-        result.map_err(|error| error.into().context(SelectedAgentUnavailable))
+        // Retrying a declined/expired sign request in the background can hide
+        // the next prompt and trigger the agent's repeated-denial throttling.
+        // Keep the cause for diagnostics, but require an explicit user retry.
+        result.map_err(|error| error.into().context(AgentApprovalRequired))
     }
 }
 
@@ -432,14 +446,14 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(error.is::<SelectedAgentUnavailable>(), "{error:#}");
+        assert!(error.is::<AgentApprovalRequired>(), "{error:#}");
         assert!(started.elapsed() >= Duration::from_secs(60));
-        assert!(super::super::is_transient_connection_error(&error));
+        assert!(!super::super::is_transient_connection_error(&error));
         task.abort();
     }
 
     #[tokio::test(start_paused = true)]
-    async fn request_policy_waits_for_agent_approval_and_bounds_retries() {
+    async fn request_policy_waits_for_agent_approval_without_repeating_denied_requests() {
         use std::cell::Cell;
 
         let attempts = Cell::new(0);
@@ -466,9 +480,9 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error.is::<SelectedAgentUnavailable>(), "{error:#}");
-        assert_eq!(attempts.get(), 3);
-        assert!(started.elapsed() >= Duration::from_secs(186));
+        assert!(error.is::<AgentApprovalRequired>(), "{error:#}");
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(started.elapsed(), Duration::from_secs(60));
     }
 
     #[tokio::test(start_paused = true)]

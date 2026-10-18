@@ -93,6 +93,13 @@ impl Card {
         }
     }
 
+    pub fn has_details(&self) -> bool {
+        !self.facts.is_empty()
+            || self.process.is_some()
+            || self.forward.is_some()
+            || self.notice.is_some()
+    }
+
     pub fn build(self: std::rc::Rc<Self>, window: &mut Window, cx: &mut App) -> AnyView {
         let width = crate::hover::width(window);
         let height = crate::hover::height(window);

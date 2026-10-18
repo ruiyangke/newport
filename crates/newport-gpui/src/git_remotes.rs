@@ -13,8 +13,13 @@ fn remote_url(id: &'static str, title: &'static str, url: Option<&str>) -> impl 
         .flex()
         .flex_col()
         .gap_3()
-        .child(label(title).text_xs())
-        .child(div().min_w_0().text_size(px(12.)).child(value.to_owned()))
+        .child(crate::project_ui::label(title).text_size(px(crate::project_ui::FONT_SIZE)))
+        .child(
+            div()
+                .min_w_0()
+                .text_size(px(crate::project_ui::FONT_SIZE))
+                .child(value.to_owned()),
+        )
 }
 
 pub(super) fn selected_detail(selected: &Value, detail: &Value) -> Option<Value> {
@@ -36,7 +41,7 @@ impl Newport {
             &self.git.page,
             "remote",
             "remotes",
-            crate::controls::compact_button("add-git-remote")
+            crate::project_ui::compact_button("add-git-remote")
                 .label("Add remote")
                 .disabled(
                     !self.can_edit_remote()
@@ -102,7 +107,7 @@ impl Newport {
                             .is_some_and(|resource| resource.error.is_some()),
                         |view| {
                             view.child(
-                                crate::controls::button("retry-remote-status")
+                                crate::project_ui::button("retry-remote-status")
                                     .label("Retry repository status")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.resources.invalidate("git-remote-status");
@@ -122,7 +127,7 @@ impl Newport {
                             .is_some_and(|r| r.error.is_some()),
                         |view| {
                             view.child(
-                                crate::controls::button("retry-remote-detail")
+                                crate::project_ui::button("retry-remote-detail")
                                     .label("Retry remote")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.git_select_remote();
@@ -146,7 +151,7 @@ impl Newport {
                                         .is_some_and(|r| r.error.is_some()),
                                     |view| {
                                         view.child(
-                                            crate::controls::button("retry-repository-settings")
+                                            crate::project_ui::button("retry-repository-settings")
                                                 .label("Retry settings")
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.resources
@@ -158,7 +163,7 @@ impl Newport {
                                     },
                                 )
                                 .child(
-                                    crate::controls::button("cancel-settings-loading")
+                                    crate::project_ui::button("cancel-settings-loading")
                                         .label("Cancel")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.git.settings_open = false;

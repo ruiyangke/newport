@@ -4,6 +4,7 @@
 //! Desktop IPC contracts live in `newport_platform::ipc`.
 pub mod compose;
 pub mod connection_scope;
+pub mod connectivity;
 pub mod container_status;
 pub mod containers;
 pub mod containers_log;
@@ -15,3 +16,4 @@ pub mod model;
 pub mod port_context;
 pub mod port_grouping;
 pub mod services;
+pub mod text_file;

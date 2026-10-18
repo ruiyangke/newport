@@ -17,6 +17,28 @@ Cached server data and refresh coordination belong in the
 [backend query layer](../newport-backend/src/query/README.md). OS operations belong
 in [newport-platform](../newport-platform/README.md).
 
+## Shared connectivity
+
+`connectivity::Connectivity` is the application-wide GPUI global, keyed by server
+ID. The application host subscribes once to `Application::connections()` and
+pushes updates into this store. SSH connection state and approval changes do not
+wait for page polling. Pages and retained components use `connectivity::observe`
+and read the store; they never infer server connectivity from terminal events,
+feature request errors, or cached health probes.
+
+The backend registry owns the canonical store. Its current server session
+publishes transport transitions, fenced by an owner token. The UI rejects older
+revisions and retired backend instances. Components also check the connection
+scope before refreshing a retained read after recovery. Server deletion removes
+the entry, and replacement immediately invalidates the old connection state.
+
+Service readiness remains distinct: an installed agent, an open shell, and
+acknowledged sharing permissions describe their own resources. They cannot
+declare the server connected. Enabled sharing follows the shared transport
+through explicit authentication retries; it does not cache another SSH error or
+initiate repeated consent requests. Recovery may refresh reads, but never replays
+a service action, Git mutation, or terminal command.
+
 ## Run and verify
 
 Run from the repository root with an isolated development profile:

@@ -80,13 +80,11 @@ impl Newport {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .child(div().flex_1().min_w_0().child(
+                        crate::project_ui::input(&search.input).aria_label("Filter branches"),
+                    ))
                     .child(
-                        div().flex_1().min_w_0().child(
-                            crate::controls::input(&search.input).aria_label("Filter branches"),
-                        ),
-                    )
-                    .child(
-                        crate::controls::button("branch-picker-new")
+                        crate::project_ui::button("branch-picker-new")
                             .label("New branch")
                             .disabled(!self.git_can_write_branch())
                             .on_click(
@@ -95,7 +93,7 @@ impl Newport {
                     ),
             )
             .child(
-                crate::controls::tabs("branch-kind")
+                crate::project_ui::tabs("branch-kind")
                     .segmented()
                     .selected_index(search.kind)
                     .children(

@@ -178,12 +178,15 @@ fn parent(path: &str) -> &str {
 
 fn visible_entries(listing: &Value, query: &str, hidden: bool) -> Vec<Value> {
     let query = query.to_lowercase();
-    let mut entries: Vec<_> = rows(&listing["entries"])
+    let mut entries: Vec<_> = listing["entries"]
+        .as_array()
         .into_iter()
+        .flatten()
         .filter(|entry| {
             let name = text(entry, "name");
             (hidden || !name.starts_with('.')) && name.to_lowercase().contains(&query)
         })
+        .cloned()
         .collect();
     entries.sort_by_cached_key(|entry| {
         let name = text(entry, "name");
@@ -230,7 +233,7 @@ impl Newport {
         let browser = self.file_browsers.get(&self.server)?;
         if !browser.active
             || browser.connection
-                != terminal_scope::connection(&self.selected_server()?, &self.snapshot)
+                != terminal_scope::connection(self.selected_server()?, &self.snapshot)
         {
             return None;
         }

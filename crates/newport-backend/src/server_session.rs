@@ -16,6 +16,7 @@ const STALE: &str = "Server session changed. Reconnect before retrying.";
 
 #[derive(Default)]
 pub struct Registry {
+    pub(crate) connections: crate::connection_state::Store,
     routing_namespace: Option<Uuid>,
     receipts: Arc<crate::lifecycle_receipts::Store>,
     entries: StdMutex<HashMap<Uuid, Published>>,
@@ -37,7 +38,11 @@ impl std::ops::Deref for Published {
 
 impl Registry {
     pub fn new(directory: &std::path::Path) -> Self {
+        Self::with_instance(directory, Uuid::new_v4())
+    }
+    pub(crate) fn with_instance(directory: &std::path::Path, instance: Uuid) -> Self {
         let mut registry = Self::default();
+        registry.connections = crate::connection_state::Store::new(instance);
         registry.routing_namespace = match crate::clipboard::routing_identity(directory) {
             Ok(identity) => Some(identity),
             Err(error) => {
@@ -170,6 +175,7 @@ impl Registry {
                 revision,
                 self.connected.clone(),
                 self.receipts.clone(),
+                None,
             ));
             stopped.cancelled.send_replace(true);
             return stopped;
@@ -191,6 +197,7 @@ impl Registry {
             revision,
             self.connected.clone(),
             self.receipts.clone(),
+            Some(self.connections.register(server.id, revision)),
         ));
         if let Some(previous) = entries.insert(
             server.id,
@@ -222,6 +229,7 @@ impl Registry {
 
     pub fn invalidate(&self, id: Uuid) {
         if let Some(session) = self.entries.lock().expect("server sessions").remove(&id) {
+            self.connections.remove(id);
             self.retire(session.owner);
         }
     }
@@ -246,6 +254,7 @@ impl Registry {
     pub(crate) fn request_shutdown(&self) {
         let entries = self.entries.lock().expect("server sessions");
         self.stopped.store(true, Ordering::Release);
+        self.connections.clear();
         for session in entries.values() {
             session.permissions.disconnected(None);
             session.cancelled.send_replace(true);
@@ -265,6 +274,7 @@ impl Registry {
 
 impl Drop for Registry {
     fn drop(&mut self) {
+        self.connections.clear();
         // Tasks may temporarily retain an owner; dropping the registry must
         // still release demand rather than keeping those owners alive forever.
         for owner in self.entries.get_mut().expect("server sessions").values() {
@@ -292,6 +302,7 @@ pub struct ServerSession {
     pub(crate) git: crate::git::Slot,
     pub(crate) integration: crate::integration_service::Slot,
     pub(crate) queries: crate::server_queries::Queries,
+    pub(crate) files: crate::files::vfs::Vfs,
     pub(crate) ports: std::sync::OnceLock<crate::query::Query<Vec<crate::ports::DiscoveredPort>>>,
 }
 
@@ -322,6 +333,7 @@ impl ServerSession {
         revision: u64,
         connected: Arc<tokio::sync::Notify>,
         receipts: Arc<crate::lifecycle_receipts::Store>,
+        publication: Option<crate::connection_state::Publisher>,
     ) -> Self {
         let permissions = Arc::new(crate::integration_permissions::Gate::new(
             server.clipboard_enabled,
@@ -335,6 +347,7 @@ impl ServerSession {
             generation.clone(),
             connected,
             permissions.clone(),
+            publication,
         );
         Self {
             session_id,
@@ -354,6 +367,7 @@ impl ServerSession {
             integration: Default::default(),
             ports: Default::default(),
             queries: Default::default(),
+            files: Default::default(),
         }
     }
     pub(crate) fn transport_demand(&self) -> crate::session_transport::Demand {
@@ -365,8 +379,17 @@ impl ServerSession {
     pub(crate) async fn wait_for_transport(&self) -> Result<(), String> {
         self.transport.ready().await
     }
+    pub(crate) async fn follow_transport(
+        &self,
+        waiting: impl Fn(Option<String>),
+    ) -> Result<(), String> {
+        self.transport.follow_ready(waiting).await
+    }
     pub fn retry_transport(&self) {
         self.transport.retry();
+    }
+    pub(crate) fn retry_transport_fresh(&self) {
+        self.transport.retry_fresh();
     }
     pub(crate) fn has_transport(&self) -> bool {
         self.transport.observe().is_some()
@@ -391,6 +414,7 @@ impl ServerSession {
     fn close_queries(&self) {
         self.metrics.clear();
         self.queries.close();
+        self.files.listings.close();
         if let Some(ports) = self.ports.get() {
             ports.close();
         }
@@ -475,6 +499,12 @@ pub struct Lease {
     generation: u64,
 }
 impl Lease {
+    pub(crate) async fn sftp(&self) -> anyhow::Result<russh_sftp::client::RawSftpSession> {
+        self.validate().map_err(anyhow::Error::msg)?;
+        let session = self.connection.sftp().await?;
+        self.validate().map_err(anyhow::Error::msg)?;
+        Ok(session)
+    }
     pub(crate) async fn terminal(
         &self,
         size: &mut (u32, u32),

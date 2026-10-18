@@ -35,7 +35,7 @@ impl ListDelegate for Delegate {
         self.entries.get(ix.row).map(|branch| {
             ListItem::new(ix.row)
                 .h(px(28.))
-                .text_size(px(12.))
+                .text_size(px(crate::project_ui::FONT_SIZE))
                 .child(choice_label(branch, self.purpose))
         })
     }
@@ -411,19 +411,19 @@ impl WorktreeBranchPicker {
                     .px_2()
                     .flex()
                     .items_center()
-                    .text_size(px(11.))
+                    .text_size(px(crate::project_ui::FONT_SIZE))
                     .text_color(cx.theme().muted_foreground)
                     .child(message)
             })
             .when_some(self.names_error.as_ref(), |view, error| {
                 view.child(
-                    label(error.clone())
+                    crate::project_ui::label(error.clone())
                         .p_2()
-                        .text_xs()
+                        .text_size(px(crate::project_ui::FONT_SIZE))
                         .text_color(cx.theme().danger),
                 )
                 .child(
-                    crate::controls::button("retry-worktree-branch-names")
+                    crate::project_ui::button("retry-worktree-branch-names")
                         .label("Reload branches")
                         .on_click(cx.listener(|this, _, _, cx| this.read_names(false, false, cx))),
                 )
@@ -446,7 +446,7 @@ impl Render for WorktreeBranchPicker {
                     .p_0()
                     .offset(px(4.))
                     .trigger(
-                        crate::controls::button("worktree-branch-picker-trigger")
+                        crate::project_ui::button("worktree-branch-picker-trigger")
                             .child(
                                 div()
                                     .flex()
@@ -501,24 +501,28 @@ impl Render for WorktreeBranchPicker {
                     }),
             )
             .when_some(self.detail_error.as_ref(), |view, error| {
-                view.child(label(error.clone()).text_xs().text_color(cx.theme().danger))
-                    .child(
-                        crate::controls::button("retry-worktree-branch-detail")
-                            .label("Check branch again")
-                            .disabled(!self.enabled)
-                            .on_click(cx.listener(|this, _, _, cx| this.read_detail(cx))),
-                    )
+                view.child(
+                    crate::project_ui::label(error.clone())
+                        .text_size(px(crate::project_ui::FONT_SIZE))
+                        .text_color(cx.theme().danger),
+                )
+                .child(
+                    crate::project_ui::button("retry-worktree-branch-detail")
+                        .label("Check branch again")
+                        .disabled(!self.enabled)
+                        .on_click(cx.listener(|this, _, _, cx| this.read_detail(cx))),
+                )
             })
             .when_some(self.owner.as_ref(), |view, path| {
                 let message = format!("Already checked out in {path}. Choose another branch.");
                 view.child(
-                    label(message.clone())
+                    crate::project_ui::label(message.clone())
                         .id("worktree-branch-occupied")
                         .role(accesskit::Role::Label)
                         .aria_label(message)
                         .w_full()
                         .whitespace_normal()
-                        .text_xs(),
+                        .text_size(px(crate::project_ui::FONT_SIZE)),
                 )
             })
     }

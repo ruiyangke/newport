@@ -25,6 +25,7 @@ mod connections_hover;
 mod connections_process_icon;
 mod connections_rows;
 mod connections_selector;
+pub mod connectivity;
 mod containers;
 mod containers_host;
 mod controls;
@@ -114,12 +115,17 @@ mod project_add;
 mod project_checks;
 mod project_create;
 mod project_dialog;
+mod project_documents;
+mod project_editor;
 mod project_folder;
 mod project_library;
 mod project_library_rows;
 mod project_library_state;
 mod project_loading;
 mod project_preferences;
+mod project_quick_open;
+mod project_ui;
+mod project_workspace;
 mod quiet_action;
 mod screens;
 mod selectable_log;
@@ -261,7 +267,6 @@ struct Newport {
     work: request_dispatch::Dispatcher,
     replies: mpsc::Receiver<Completion>,
     last_refresh: Instant,
-    terminal_observers: std::collections::HashMap<String, (gpui::EntityId, Subscription)>,
     window_visible: bool,
     focus: FocusHandle,
     navigation_focus: Vec<FocusHandle>,
@@ -289,6 +294,7 @@ struct Newport {
     project_libraries: std::collections::BTreeMap<String, project_library_state::State>,
     project_preferences: std::collections::BTreeMap<String, project_preferences::Preferences>,
     git: git::Workspace,
+    code_workspaces: Vec<project_editor::Retained>,
     git_diff_layouts: std::collections::HashMap<String, git_diff_split::Layout>,
     git_mutation: Option<git_mutation::Mutation>,
     git_notice_clear: bool,
@@ -370,6 +376,7 @@ impl Newport {
         window_state: window_state::WindowState,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::observe_connectivity(cx);
         Self::observe_modal_visibility(window, cx);
         cx.observe_window_bounds(window, |this, window, cx| {
             this.window_state.capture(window, cx)
@@ -384,6 +391,7 @@ impl Newport {
                 .terminals
                 .values()
                 .flat_map(|workspace| workspace.read(cx).session_ids(cx))
+                .chain(this.project_terminal_sessions(cx))
                 .collect();
             let tasks: Vec<_> = ids
                 .into_iter()
@@ -500,7 +508,6 @@ impl Newport {
             work,
             replies,
             last_refresh: Instant::now(),
-            terminal_observers: Default::default(),
             window_visible: window.is_visible(),
             focus: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
@@ -531,6 +538,7 @@ impl Newport {
             project_libraries: Default::default(),
             project_preferences: restored.project_preferences,
             git: git::Workspace::default(),
+            code_workspaces: Vec::new(),
             git_diff_layouts: Default::default(),
             git_mutation: None,
             git_notice_clear: false,
@@ -599,49 +607,22 @@ impl Newport {
             cx.notify();
         }
     }
-    fn terminal_connection_state(&self, cx: &App) -> terminal_workspace::ConnectionState {
-        if !self.configuration_available() {
-            return Default::default();
-        }
-        let Some(server) = self.selected_server() else {
-            return Default::default();
-        };
-        let scope = terminal_scope::connection(&server, &self.snapshot);
-        self.terminals
-            .get(&self.server)
-            .map(|workspace| workspace.read(cx).connection_state(&scope, cx))
-            .unwrap_or_default()
-    }
-
-    fn observe_terminal_connections(&mut self, cx: &mut Context<Self>) {
-        self.terminal_observers
-            .retain(|id, _| self.terminals.contains_key(id));
-        for (server, workspace) in &self.terminals {
-            if self
-                .terminal_observers
-                .get(server)
-                .is_some_and(|(id, _)| *id == workspace.entity_id())
-            {
-                continue;
-            }
-            let observed_server = server.clone();
-            let mut previous = workspace.read(cx).connection_state_unscoped(cx);
-            let subscription = cx.observe(workspace, move |this, workspace, cx| {
-                let next = workspace.read(cx).connection_state_unscoped(cx);
-                if next == previous {
-                    return;
+    fn observe_connectivity(cx: &mut Context<Self>) {
+        connectivity::observe(
+            cx,
+            |this: &Self| &this.server,
+            |this, cx| {
+                this.request("snapshot", "snapshot", json!({}));
+                if connectivity::scoped(&this.server, &this.snapshot, cx)
+                    .is_some_and(|state| state.phase == connectivity::Phase::Connected)
+                    && this.configuration_available()
+                {
+                    this.refresh();
                 }
-                previous = next;
-                if this.server == observed_server {
-                    // Lifecycle changes invalidate the header immediately. Output,
-                    // titles and selection never refresh the application snapshot.
-                    this.request("snapshot", "snapshot", json!({}));
-                    cx.notify();
-                }
-            });
-            self.terminal_observers
-                .insert(server.clone(), (workspace.entity_id(), subscription));
-        }
+                cx.notify();
+            },
+        )
+        .detach();
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
@@ -661,7 +642,9 @@ impl Newport {
         changed |= changes_search_changed;
         changed |= remote_refs_changed;
         changed |= remote_search_changed;
-        changed |= self.poll_git_diff_scroll();
+        if !self.project_editor_active(cx) {
+            changed |= self.poll_git_diff_scroll();
+        }
         changed |= self.poll_git_mutation(cx);
         changed |= self.poll_tunnel_actions();
         let settings = self.settings_state.poll(self.page == Page::Settings);
@@ -1002,8 +985,16 @@ impl Newport {
             }
         }
         changed |= self.poll_connections(Instant::now());
-        self.git_listing_scroll();
-        self.git_history_files_scroll();
+        let editor = self.code_workspace();
+        if editor.as_ref().is_none_or(|e| {
+            let e = e.read(cx);
+            !e.files || e.reviewing
+        }) {
+            self.git_listing_scroll();
+        }
+        if !self.project_editor_active(cx) {
+            self.git_history_files_scroll();
+        }
         if changed {
             cx.notify();
         }
@@ -1292,6 +1283,7 @@ impl Render for Newport {
         self.sync_settings_ui(window, cx);
         self.sync_overview_processes(window, cx);
         self.sync_connections(window, cx);
+        self.sync_code_workspace(window, cx);
         self.sync_git_drafts(window, cx);
         self.sync_git_changes(window, cx);
         self.sync_git_listing_filter(window, cx);
@@ -1327,7 +1319,7 @@ impl Render for Newport {
                 .new(|cx| terminal_workspace::Workspace::new(server.clone(), scope, endpoint, cx));
             self.terminals.insert(server, workspace);
         }
-        self.observe_terminal_connections(cx);
+        self.deactivate_project_terminals(window, cx);
         let viewport = f32::from(window.viewport_size().width);
         for (server, workspace) in &self.terminals {
             if self.page != Page::Terminal || server != &self.server || self.server_form.is_some() {
@@ -1365,23 +1357,14 @@ impl Render for Newport {
                 )
             })
             .unwrap_or_else(|| "Connect to Newport".into());
-        let terminal = self.terminal_connection_state(cx);
-        let health = snapshot_presentation::connection_health(
-            &self.snapshot,
-            &self.server,
-            terminal.connected,
-        );
-        let health_label = match health {
-            "awaiting-agent" => "Waiting for SSH approval",
-            "reachable" => "Reachable",
-            "unreachable" => "Unreachable",
-            "error" => "Connection failed",
-            "checking" => "Checking",
-            _ => "Connection unknown",
-        };
+        let connection = connectivity::scoped(&self.server, &self.snapshot, cx);
+        let health = connection.map(|state| state.phase);
+        let health_label = health
+            .map(connectivity::Phase::label)
+            .unwrap_or("Connection unknown");
         let health_color = match health {
-            "reachable" => theme::success(cx.theme().is_dark()),
-            "unreachable" | "error" => theme::error(cx.theme().is_dark()),
+            Some(connectivity::Phase::Connected) => theme::success(cx.theme().is_dark()),
+            Some(connectivity::Phase::Failed) => theme::error(cx.theme().is_dark()),
             _ => cx.theme().muted_foreground,
         };
         let title = if self.page == Page::Settings {
@@ -1490,6 +1473,7 @@ impl Render for Newport {
                                                         div()
                                                             .id("server-connection-status")
                                                             .role(accesskit::Role::Status)
+                                                            .test_support()
                                                             .aria_label(health_label)
                                                             .flex()
                                                             .flex_shrink_0()
@@ -1578,8 +1562,42 @@ impl Render for Newport {
                 }))
             })
             .on_action(
+                cx.listener(|this, _: &project_editor::FocusExplorer, window, cx| {
+                    if this.page == Page::Projects
+                        && !window.has_active_dialog(cx)
+                        && let Some(editor) = this.code_workspace()
+                    {
+                        editor.update(cx, |e, cx| e.navigate(0, window, cx));
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &project_editor::QuickOpen, window, cx| {
+                    if this.page == Page::Projects
+                        && let Some(editor) = this.code_workspace()
+                    {
+                        editor.update(cx, |e, cx| e.open_quick(window, cx));
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &project_editor::CloseTab, window, cx| {
+                    if window.has_active_dialog(cx) {
+                        return;
+                    }
+                    if this.page == Page::Projects
+                        && let Some(editor) = this.code_workspace()
+                    {
+                        editor.update(cx, |e, cx| e.close_active_tab(window, cx));
+                    } else {
+                        window_activation::hide(window, cx);
+                    }
+                }),
+            )
+            .on_action(
                 cx.listener(|_, _: &CloseWindow, window, cx| window_activation::hide(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &Quit, window, cx| this.editor_quit(window, cx)))
             .on_action(cx.listener(|_, _: &MinimizeWindow, window, _| window.minimize_window()))
             .on_action(cx.listener(|_, _: &ZoomWindow, window, _| window.zoom_window()))
             .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| window.toggle_fullscreen()))
@@ -1621,6 +1639,7 @@ impl Render for Newport {
             }))
             .on_action(cx.listener(|this, _: &FindInView, window, cx| {
                 if this.page == Page::Projects
+                    && !this.project_editor_active(cx)
                     && this.server_form.is_none()
                     && !window.has_active_dialog(cx)
                 {
@@ -1655,7 +1674,7 @@ impl Render for Newport {
             }))
             .on_action(cx.listener(|this, _: &EditServer, window, cx| {
                 if let Some(server) = this.selected_server() {
-                    this.edit_server(Some(server), window, cx);
+                    this.edit_server(Some(server.clone()), window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &TestServer, window, cx| {
@@ -1718,6 +1737,57 @@ pub fn activate(cx: &mut App) -> Result<(), String> {
     }
     Ok(())
 }
+/// Host-driven exits must honor the same unsaved-buffer guard as the app menu.
+pub fn request_quit(cx: &mut App) -> Result<(), String> {
+    for handle in cx.windows() {
+        let handled = handle
+            .update(cx, |_, window, cx| {
+                let Some(root) = window.root::<gpui_kit::base::Root>().flatten() else {
+                    return false;
+                };
+                let Ok(owner) = root.read(cx).view().clone().downcast::<Newport>() else {
+                    return false;
+                };
+                let _ = window_activation::restore(window);
+                window.activate_window();
+                owner.update(cx, |this, cx| this.editor_quit(window, cx));
+                true
+            })
+            .map_err(|error| error.to_string())?;
+        if handled {
+            return Ok(());
+        }
+    }
+    cx.quit();
+    Ok(())
+}
+
+/// An installer cannot silently discard an editor buffer or interrupt a save.
+/// Refusal happens before accepting the installation handoff, so retry stays available.
+pub fn ensure_editors_saved(cx: &mut App) -> Result<(), String> {
+    for handle in cx.windows() {
+        let dirty = handle
+            .update(cx, |_, window, cx| {
+                let Some(root) = window.root::<gpui_kit::base::Root>().flatten() else {
+                    return false;
+                };
+                let Ok(owner) = root.read(cx).view().clone().downcast::<Newport>() else {
+                    return false;
+                };
+                owner
+                    .read(cx)
+                    .code_workspaces
+                    .iter()
+                    .any(|workspace| workspace.editor.read(cx).dirty(cx))
+            })
+            .map_err(|error| error.to_string())?;
+        if dirty {
+            return Err("Save or close unsaved code files, and wait for saves to finish before installing the update.".into());
+        }
+    }
+    Ok(())
+}
+
 mod window_activation;
 
 /// Application-owned entry points (for example, the tray) use the same Settings
@@ -1771,7 +1841,10 @@ pub fn run_with_options_and_ready(
             ),
             cx,
         );
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        project_editor::install_shortcuts(cx);
+        cx.on_action(|_: &Quit, cx| {
+            let _ = request_quit(cx);
+        });
         navigation::install_desktop_commands(cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {

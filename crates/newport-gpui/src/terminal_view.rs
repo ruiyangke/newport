@@ -449,7 +449,8 @@ impl TerminalView {
             use newport_client::terminal_command::CommandDelivery;
             let (command, execute) = match delivery {
                 CommandDelivery::Review(command) => (command, false),
-                CommandDelivery::ContainerShell(command) => (command, true),
+                CommandDelivery::ContainerShell(command)
+                | CommandDelivery::ProjectDirectory(command) => (command, true),
             };
             let result = self.engine.encode_paste(&command);
             let Some(mut input) = self.engine_result(result) else {

@@ -40,17 +40,28 @@ impl Newport {
         let enabled = clipboard || browser;
         let state = &self.snapshot["runtime"]["clipboard"][&server_id];
         let permissions = &self.snapshot["runtime"]["agentPermissions"][&server_id];
+        let transport = crate::connectivity::scoped(&server_id, &self.snapshot, cx);
+        let transport_wait =
+            transport.filter(|state| state.phase != crate::connectivity::Phase::Connected);
         let status = state["status"].as_str().unwrap_or("disconnected");
         let muted = cx.theme().muted_foreground;
         let connection_status = if removal.is_some() {
             "Paused".into()
         } else if enabled {
-            connection_label(state)
+            transport_wait
+                .map(|state| state.phase.label().into())
+                .unwrap_or_else(|| connection_label(state))
         } else {
             "Off".into()
         };
         let tone = if !enabled || removal.is_some() {
             muted
+        } else if let Some(transport) = transport_wait {
+            if transport.phase == crate::connectivity::Phase::Failed {
+                cx.theme().danger
+            } else {
+                muted
+            }
         } else {
             match status {
                 "connected" => theme::success(cx.theme().is_dark()),
@@ -97,6 +108,8 @@ impl Newport {
                 "Off"
             } else if removal.is_some() {
                 "Paused until Needle is restored"
+            } else if let Some(transport) = transport_wait {
+                transport.phase.label()
             } else {
                 feature_status(feature, checked, permissions, status == "connected")
             }
@@ -199,7 +212,10 @@ impl Newport {
         // A matching switch already communicates the healthy on/off state.
         // Reserve the connection row for progress and problems requiring action.
         let show_connection = removal.is_some()
-            || (enabled && (status != "connected" || permissions["error"].is_string()));
+            || (enabled
+                && (transport_wait.is_some()
+                    || status != "connected"
+                    || permissions["error"].is_string()));
         let mut connection = div()
             .id("integration-connection")
             .role(Role::Region)
@@ -225,8 +241,9 @@ impl Newport {
                 cx,
             ));
         } else if enabled {
-            if let Some(error) = state["errorMessage"]
-                .as_str()
+            if let Some(error) = transport_wait
+                .map(|state| state.error.as_deref())
+                .unwrap_or_else(|| state["errorMessage"].as_str())
                 .filter(|error| !error.is_empty())
             {
                 connection = connection.child(

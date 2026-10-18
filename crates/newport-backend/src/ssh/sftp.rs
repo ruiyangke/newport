@@ -12,9 +12,33 @@ pub struct Sftp {
     /// a different endpoint, user, authentication profile or server record.
     cleanup_scope: serde_json::Value,
     server: uuid::Uuid,
-    _connection: Connection,
+    _connection: Option<Connection>,
+    _lease: Option<crate::server_session::Lease>,
 }
 impl Sftp {
+    /// Reuse the application's authenticated transport for background VFS work.
+    pub(crate) async fn shared(
+        owner: &std::sync::Arc<crate::server_session::ServerSession>,
+    ) -> Result<Self> {
+        let server = owner.server();
+        let lease = owner.acquire(server).await.map_err(anyhow::Error::msg)?;
+        let session = tokio::time::timeout(Duration::from_secs(20), lease.sftp())
+            .await
+            .context("SFTP setup timed out")??;
+        Ok(Self {
+            session,
+            server: server.id,
+            cleanup_scope: newport_domain::connection_scope::connection(
+                &serde_json::to_value(server)?,
+                &serde_json::Value::Null,
+            ),
+            _connection: None,
+            _lease: Some(lease),
+        })
+    }
+    pub(crate) fn is_stale(&self) -> bool {
+        self._lease.as_ref().is_some_and(|lease| lease.is_closed())
+    }
     pub fn server_id(&self) -> uuid::Uuid {
         self.server
     }
@@ -42,7 +66,8 @@ impl Sftp {
                 &serde_json::to_value(server)?,
                 &serde_json::Value::Null,
             ),
-            _connection: connection,
+            _connection: Some(connection),
+            _lease: None,
         })
     }
 }

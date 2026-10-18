@@ -293,7 +293,7 @@ impl Newport {
     pub(super) fn git_history_actions(&self, cx: &mut Context<Self>) -> AnyElement {
         let can_modify = self.history_commit_action("cherry_pick").is_some();
         let can_tag = self.can_create_tag() && self.git.tag_form.is_none();
-        crate::controls::button("history-commit-actions")
+        crate::project_ui::button("history-commit-actions")
             .label("Commit actions")
             .disabled(!can_modify && !can_tag)
             .dropdown_menu({
@@ -564,7 +564,7 @@ impl Newport {
         div().flex().flex_col().flex_shrink_0().min_w_0()
             .child(self.status("git-history-tag", cx))
             .when(failed, |view| view.child(
-                crate::controls::compact_button("retry-tag-detail")
+                crate::project_ui::compact_button("retry-tag-detail")
                     .label("Retry annotation").self_start().m_3()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.page == Page::Projects && this.git.tab == 4
@@ -583,7 +583,7 @@ impl Newport {
                         .child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD)
                             .child(text(&self.git.selected["name"], "display")))
                         .child(self.git_tag_push_trigger(cx)).child(self.git_tag_delete_trigger(cx)))
-                    .child(label(if tag["annotated"] == true {"Annotated tag"} else {"Lightweight tag"}).text_xs())
+                    .child(crate::project_ui::label(if tag["annotated"] == true {"Annotated tag"} else {"Lightweight tag"}).text_size(px(crate::project_ui::FONT_SIZE)))
                     .child(tag_metadata("object", format!("Object: {}", text(&tag["oid"], "hex"))))
                     .when(tag["peeledOid"]["hex"].is_string(), |view| view.child(tag_metadata(
                         "target", format!("Target: {} ({})", text(&tag["peeledOid"], "hex"), text(tag, "peeledType")))))
@@ -592,13 +592,13 @@ impl Newport {
                     .when(tag["message"]["display"].is_string(), |view| view.child(
                         div().id("git-tag-message").role(accesskit::Role::Paragraph)
                             .aria_label(text(&tag["message"], "display"))
-                            .min_w_0().text_size(px(12.))
+                            .min_w_0().text_size(px(crate::project_ui::FONT_SIZE))
                             .child(text(&tag["message"], "display"))))
                     .when(tag["messageTruncated"] == true, |view| view.child(project_loading::picker_detail(
                         "full tag annotation", Some("The annotation is truncated.".into()), pending)))
-                    .when(tag["detailsOmitted"] == true, |view| view.child(label("Some tag details could not be loaded.").text_xs()))
-                    .when(self.git.history.oid.is_empty() && tag["detailsOmitted"] != true, |view| view.child(label(
-                        "This tag points to a non-commit object; no commit diff is available.").text_xs()))
+                    .when(tag["detailsOmitted"] == true, |view| view.child(crate::project_ui::label("Some tag details could not be loaded.").text_size(px(crate::project_ui::FONT_SIZE))))
+                    .when(self.git.history.oid.is_empty() && tag["detailsOmitted"] != true, |view| view.child(crate::project_ui::label(
+                        "This tag points to a non-commit object; no commit diff is available.").text_size(px(crate::project_ui::FONT_SIZE))))
             )).into_any_element()
     }
     pub(super) fn git_history_view(
@@ -628,7 +628,7 @@ impl Newport {
                         .is_some_and(|read| read.error.is_some() && !read.pending),
                 |view| {
                     view.child(
-                        crate::controls::compact_button("retry-commit-detail")
+                        crate::project_ui::compact_button("retry-commit-detail")
                             .label("Retry commit details")
                             .self_start()
                             .m_3()
@@ -651,7 +651,7 @@ impl Newport {
                         kinds.push("Untracked files");
                     }
                     view.child(
-                        crate::controls::tabs("stash-files-kind")
+                        crate::project_ui::tabs("stash-files-kind")
                             .segmented()
                             .selected_index(self.git.history.stash_view)
                             .children(
@@ -671,11 +671,11 @@ impl Newport {
                 |view| view.child(empty_inspection(self.git.tab, cx)),
             )
             .when_some(self.git.history.error.clone(), |view, error| {
-                view.child(label(error).p_3())
+                view.child(crate::project_ui::label(error).p_3())
             })
             .when(selected, |view| {
                 view.child(inspection_panels(
-                    window.viewport_size().width <= px(1100.),
+                    self.project_history_stacked(window.viewport_size().width <= px(1100.), cx),
                     self.git_history_file_height(),
                     self.git_history_file_list(cx),
                     self.git_diff_view(window, cx),
@@ -687,13 +687,12 @@ impl Newport {
 }
 
 fn tag_metadata(id: &'static str, content: String) -> AnyElement {
-    label(content.clone())
+    crate::project_ui::label(content.clone())
         .id(SharedString::from(format!("git-tag-{id}")))
         .role(accesskit::Role::Label)
         .aria_label(content.clone())
-        .text_xs()
-        .truncate()
-        .hover_hint(content.clone())
+        .text_size(px(crate::project_ui::FONT_SIZE))
+        .whitespace_normal()
         .into_any_element()
 }
 

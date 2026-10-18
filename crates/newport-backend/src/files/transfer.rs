@@ -13,7 +13,8 @@ use uuid::Uuid;
 struct ListingInvalidation(Arc<crate::server_session::ServerSession>);
 impl Drop for ListingInvalidation {
     fn drop(&mut self) {
-        self.0.queries.files.invalidate(|_| true);
+        self.0.files.listings.invalidate(|_| true);
+        self.0.files.documents.invalidate(|_, _| true);
     }
 }
 
@@ -89,11 +90,11 @@ pub async fn native_transfer(
 
 // Cancellation drops the operation future. Keep its transport alive just long
 // enough to remove the staging file; never publish an incomplete upload.
-struct RemoteTemp<'a> {
-    operations: &'a Operations,
-    sftp: Arc<Sftp>,
-    record: Option<super::operations::recovery::Upload>,
-    created: bool,
+pub(super) struct RemoteTemp<'a> {
+    pub(super) operations: &'a Operations,
+    pub(super) sftp: Arc<Sftp>,
+    pub(super) record: Option<super::operations::recovery::Upload>,
+    pub(super) created: bool,
 }
 impl Drop for RemoteTemp<'_> {
     fn drop(&mut self) {

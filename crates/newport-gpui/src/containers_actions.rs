@@ -94,10 +94,8 @@ impl ContainersPanel {
                 crate::controls::button("container-shell")
                     .icon(IconName::Terminal)
                     .label("Shell")
-                    .hover_hint(if c.state == domain::ContainerState::Running {
-                        "Open a shell inside this container in the Terminal"
-                    } else {
-                        "Start the container to open a shell in it"
+                    .when(c.state != domain::ContainerState::Running, |button| {
+                        button.hover_hint("Start the container to open a shell in it")
                     })
                     .disabled(self.client.shell_command(&id, &name).is_err())
                     .on_click(cx.listener(move |this, _, _, cx| {

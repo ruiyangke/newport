@@ -123,6 +123,7 @@ struct Review {
 }
 
 pub(super) struct ServicesPanel {
+    connection: Value,
     client: Services,
     search: Entity<InputState>,
     selected: Option<Selection>,
@@ -150,21 +151,36 @@ impl EventEmitter<ServicesEvent> for ServicesPanel {}
 impl ServicesPanel {
     pub(super) fn new(
         server: String,
-        _connection: Value,
+        connection: Value,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::with_client(
+        let mut panel = Self::with_client(
             Services::new(backend::Backend::discover(), server),
             window,
             cx,
-        )
+        );
+        panel.connection = connection;
+        panel
     }
     pub(crate) fn with_client(
         mut client: Services,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let connection_subscription = crate::connectivity::observe(
+            cx,
+            |this: &Self| this.client.server_id(),
+            |this, cx| {
+                if !this.retired
+                    && crate::connectivity::for_scope(&this.connection, cx)
+                        .is_some_and(|state| state.phase == crate::connectivity::Phase::Connected)
+                {
+                    this.client.refresh();
+                }
+                cx.notify();
+            },
+        );
         let search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Find a service or timer"));
         let subscription = cx.subscribe(&search, |this, _, event, cx| {
@@ -176,6 +192,7 @@ impl ServicesPanel {
         });
         client.refresh();
         Self {
+            connection: Value::Null,
             client,
             search,
             selected: None,
@@ -196,7 +213,7 @@ impl ServicesPanel {
             clock: Default::default(),
             retired: false,
             active_data: ActiveData::None,
-            _subscriptions: vec![subscription],
+            _subscriptions: vec![subscription, connection_subscription],
         }
     }
     pub(super) fn has_pending(&self) -> bool {

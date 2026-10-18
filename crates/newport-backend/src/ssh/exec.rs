@@ -182,7 +182,9 @@ impl Connection {
 // Preserve retryable setup failures before turning errors into UI strings.
 fn session_error(error: anyhow::Error) -> String {
     let transient = super::is_transient_connection_error(&error);
-    if error.is::<super::auth::SelectedAgentUnavailable>() {
+    if error.is::<super::auth::AgentApprovalRequired>() {
+        format!("SSH approval required: {error:#}")
+    } else if error.is::<super::auth::SelectedAgentUnavailable>() {
         format!("SSH agent unavailable: {error:#}")
     } else if transient {
         format!("SSH transport interrupted: {error:#}")
@@ -198,6 +200,13 @@ pub(crate) struct ConnectFailure {
     pub retryable: bool,
 }
 impl ExecSession {
+    pub(crate) async fn sftp(&self) -> Result<russh_sftp::client::RawSftpSession> {
+        let channel = self.0.handle.channel_open_session().await?;
+        channel.request_subsystem(true, "sftp").await?;
+        let session = russh_sftp::client::RawSftpSession::new(channel.into_stream());
+        session.init().await?;
+        Ok(session)
+    }
     pub(crate) async fn terminal(
         &self,
         size: &mut (u32, u32),

@@ -279,7 +279,7 @@ fn refresh_rejects_a_callback_from_a_replaced_connection(cx: &mut TestAppContext
     let (work, requests) = std::sync::mpsc::sync_channel(8);
     view.update(visual, |v, cx| {
         v.work = work.into();
-        let server = v.selected_server().unwrap();
+        let server = v.selected_server().unwrap().clone();
         let scope = crate::terminal_scope::connection(&server, &v.snapshot);
         v.snapshot["config"]["servers"][0]["sshHost"] = json!("replacement");
         v.inspect_helper_history(server, scope, cx);

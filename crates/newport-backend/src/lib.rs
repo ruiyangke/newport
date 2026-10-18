@@ -12,6 +12,7 @@ pub mod rpc;
 use newport_domain::model;
 pub mod agent_keys;
 pub mod connectivity;
+mod connection_state;
 pub mod credentials;
 pub mod known_hosts;
 pub mod recovery;

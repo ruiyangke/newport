@@ -127,6 +127,10 @@ fn run() -> Result<(), String> {
         updates::recovery::Acceptance::start(transaction, initialized, endpoint.clone())
     });
     let update_background = runtime.spawn(updates.clone().background());
+    // One backend subscription for the whole UI, independent of visible pages
+    // and the slower configuration/feature snapshot refresh.
+    let mut connections = backend.connections();
+    let initial_connections = connections.borrow_and_update().clone();
     let failed_desktop = desktop.clone();
     let services = runtime.spawn(async move {
         tokio::select! {
@@ -161,6 +165,14 @@ fn run() -> Result<(), String> {
             start_hidden: launch.autostart,
         },
         move |cx| {
+            newport_gpui::connectivity::publish(initial_connections, cx);
+            cx.spawn(async move |cx| {
+                while connections.changed().await.is_ok() {
+                    let snapshot = connections.borrow_and_update().clone();
+                    cx.update(|cx| newport_gpui::connectivity::publish(snapshot, cx));
+                }
+            })
+            .detach();
             if let Err(error) = newport_platform::events::install(newport_backend::recovery::report)
             {
                 eprintln!("System event monitoring unavailable; using timed recovery: {error}");
@@ -185,7 +197,15 @@ fn run() -> Result<(), String> {
                     while let Ok(action) = requests.recv().await {
                         match action {
                             #[cfg(any(target_os = "macos", windows))]
-                            desktop::Action::Install(request) => {
+                            desktop::Action::Install(request, reply) => {
+                                if let Err(error) = cx.update(newport_gpui::ensure_editors_saved) {
+                                    let _ = reply.send(Err(error));
+                                    continue;
+                                }
+                                // A timed-out/cancelled requester must never arm an install.
+                                if reply.send(Ok(())).is_err() {
+                                    continue;
+                                }
                                 *requested_install
                                     .lock()
                                     .unwrap_or_else(|error| error.into_inner()) = Some(*request);
@@ -200,8 +220,7 @@ fn run() -> Result<(), String> {
                                 }
                             }
                             desktop::Action::Quit => {
-                                cx.update(|cx| cx.quit());
-                                break;
+                                let _ = cx.update(newport_gpui::request_quit);
                             }
                             #[cfg(any(target_os = "macos", windows))]
                             desktop::Action::Tray(action) => {
@@ -209,16 +228,10 @@ fn run() -> Result<(), String> {
                                 let result = cx.update(|cx| match action {
                                     Action::Open => newport_gpui::activate(cx),
                                     Action::Settings => newport_gpui::open_settings(cx),
-                                    Action::Quit => {
-                                        cx.quit();
-                                        Ok(())
-                                    }
+                                    Action::Quit => newport_gpui::request_quit(cx),
                                 });
                                 if let Err(error) = result {
                                     eprintln!("Tray action failed: {error}");
-                                }
-                                if action == Action::Quit {
-                                    break;
                                 }
                             }
                             #[cfg(any(target_os = "macos", windows))]

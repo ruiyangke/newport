@@ -455,7 +455,8 @@ pub async fn git_request(
     if mutation {
         session.queries.invalidate(&invalidation);
         if let Ok(owner) = server_session::resolve(state, server_id).await {
-            owner.queries.files.invalidate(|_| true);
+            owner.files.listings.invalidate(|_| true);
+            owner.files.documents.invalidate(|_, _| true);
         }
     }
     result

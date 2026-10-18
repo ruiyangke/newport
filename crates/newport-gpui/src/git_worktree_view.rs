@@ -39,7 +39,6 @@ pub(super) fn row_labels(entry: &Value) -> (String, String) {
 /// Keep long remote checkout paths within the picker instead of expanding a
 /// plain-text tooltip across the window.
 pub(super) fn hover(entry: &Value, window: &mut Window, cx: &mut App) -> AnyView {
-    let (title, status) = row_labels(entry);
     let path = text(&entry["path"], "display");
     let width = crate::hover::width(window);
     let height = crate::hover::height(window);
@@ -57,32 +56,17 @@ pub(super) fn hover(entry: &Value, window: &mut Window, cx: &mut App) -> AnyView
                 .gap(px(4.))
                 .text_color(cx.theme().foreground)
                 .line_height(relative(1.45))
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .whitespace_normal()
-                        .child(title.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(cx.theme().muted_foreground)
-                        .whitespace_normal()
-                        .child(status.clone()),
-                )
                 .when(!path.is_empty(), |card| {
                     card.child(
                         div()
-                            .mt(px(6.))
-                            .pt(px(8.))
-                            .border_t_1()
-                            .border_color(cx.theme().border)
                             .flex()
                             .flex_col()
                             .gap(px(4.))
-                            .text_size(px(11.))
-                            .child(label("Path").text_color(cx.theme().muted_foreground))
+                            .text_size(px(crate::project_ui::FONT_SIZE))
+                            .child(
+                                crate::project_ui::label("Path")
+                                    .text_color(cx.theme().muted_foreground),
+                            )
                             .child(
                                 div()
                                     .w_full()
@@ -140,7 +124,7 @@ mod tests {
                 let bounds = visual.debug_bounds("worktree-hover-card").unwrap();
                 assert!(bounds.size.width <= px(356.) && bounds.right() <= px(width));
                 assert!(
-                    bounds.size.height > px(100.),
+                    bounds.size.height > px(60.),
                     "the full path should wrap: {bounds:?}"
                 );
                 assert!(

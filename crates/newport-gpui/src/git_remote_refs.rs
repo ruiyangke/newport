@@ -39,7 +39,7 @@ fn pending_reference(index: usize) -> AnyElement {
 }
 fn reference_button(index: usize, entry: &Value) -> Button {
     let name = text(&entry["reference"], "display");
-    crate::controls::button(("remote-ref", index))
+    crate::project_ui::button(("remote-ref", index))
         .accessibility_label(name.clone())
         .ghost()
         .w_full()
@@ -50,14 +50,15 @@ fn reference_button(index: usize, entry: &Value) -> Button {
         .hover_hint(name.clone())
         .child(reference_columns(
             name,
-            label(text(entry, "kind")).text_xs(),
-            label(
+            crate::project_ui::label(text(entry, "kind"))
+                .text_size(px(crate::project_ui::FONT_SIZE)),
+            crate::project_ui::label(
                 text(&entry["oid"], "hex")
                     .chars()
                     .take(8)
                     .collect::<String>(),
             )
-            .text_xs(),
+            .text_size(px(crate::project_ui::FONT_SIZE)),
         ))
 }
 pub(super) struct Browser {
@@ -74,7 +75,7 @@ pub(super) struct Browser {
 }
 impl Newport {
     pub(super) fn remote_refs_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        crate::controls::button("browse-remote-refs")
+        crate::project_ui::button("browse-remote-refs")
             .label("Branches and tags…")
             .disabled(
                 self.git_selected_remote().is_none()
@@ -290,7 +291,7 @@ impl Newport {
                     .px_4()
                     .py_2()
                     .child(
-                        crate::controls::button("back-from-remote-refs")
+                        crate::project_ui::button("back-from-remote-refs")
                             .label("Remotes")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.reset_remote_refs();
@@ -310,7 +311,7 @@ impl Newport {
                             )),
                     )
                     .child(
-                        crate::controls::button("refresh-remote-refs")
+                        crate::project_ui::button("refresh-remote-refs")
                             .label("Refresh remote references")
                             .disabled(loading)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -321,7 +322,7 @@ impl Newport {
                     ),
             )
             .child(
-                label(format!(
+                crate::project_ui::label(format!(
                     "Remote destination: {}",
                     browser.remote["pushUrl"]
                         .as_str()
@@ -329,11 +330,11 @@ impl Newport {
                         .unwrap_or("Unavailable")
                 ))
                 .px_4()
-                .text_xs(),
+                .text_size(px(crate::project_ui::FONT_SIZE)),
             )
             .child(
                 div().px_4().py_2().child(
-                    crate::controls::input(&browser.input)
+                    crate::project_ui::input(&browser.input)
                         .aria_label("Filter remote branches and tags"),
                 ),
             )
@@ -382,7 +383,7 @@ impl Newport {
                 .min_h_0(),
             )
             .when(browser.selected["oid"].is_object(), |view| {
-                view.child(div().px_4().py_2().child(label(format!(
+                view.child(div().px_4().py_2().child(crate::project_ui::label(format!(
                     "{} · {}",
                     text(&browser.selected["reference"], "display"),
                     text(&browser.selected["oid"], "hex")
@@ -398,7 +399,11 @@ impl Newport {
                     .gap_2()
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .child(label(summary).text_xs().flex_1()),
+                    .child(
+                        crate::project_ui::label(summary)
+                            .text_size(px(crate::project_ui::FONT_SIZE))
+                            .flex_1(),
+                    ),
             )
             .into_any_element()
     }

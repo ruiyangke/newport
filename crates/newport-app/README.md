@@ -117,6 +117,14 @@ They should stay separate from OS-specific installers and release credentials.
 `scripts/run-signed-dev.sh` is an optional local Cargo runner for a provisioned
 macOS development app. It is not a production signing shortcut. Protected-Keychain
 acceptance uses `scripts/test-macos-keychain.mjs` with explicit test configuration.
+The runner launches the GUI through LaunchServices so 1Password attributes SSH
+approval to Newport. Do not launch `Newport.app/Contents/MacOS/newport` directly
+from an IDE or terminal for interactive SSH testing: macOS can attribute those
+requests to the parent application and 1Password suppresses its background prompts.
+The runner preserves `NEWPORT_DATA_DIR` (including relative paths), the legacy
+`PORTHOP_DATA_DIR`, `SSH_AUTH_SOCK`, and Rust logging settings. GUI output goes to
+`newport-dev.log` beside the bundle; Cargo waits until the app quits. Headless
+`--check-*` probes and `--build-info` keep direct stdout and exit status.
 On an interactive Windows desktop, run
 `./scripts/test-windows-activation.ps1 -BinaryPath C:\path\to\newport.exe`
 to check close-to-tray and second-instance activation using a disposable profile.

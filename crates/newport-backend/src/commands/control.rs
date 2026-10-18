@@ -465,7 +465,7 @@ pub(crate) async fn probe_connection(state: &Shared, id: Uuid, retry: bool) -> R
     // succeed while their shared transport was still awaiting agent consent.
     // Explicit tests may release backoff; background health probes must not.
     if retry {
-        owner.retry_transport();
+        owner.retry_transport_fresh();
     }
     let result = async {
         let lease = owner.acquire(&server).await?;

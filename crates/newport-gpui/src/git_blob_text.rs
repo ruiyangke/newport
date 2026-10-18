@@ -117,7 +117,7 @@ impl Render for BlobText {
                     .aria_label("Recorded Git content")
                     .h_full()
                     .font_family(cx.theme().mono_font_family.clone())
-                    .text_size(px(12.))
+                    .text_size(px(crate::project_ui::FONT_SIZE))
                     .line_height(relative(1.67))
                     .p(px(12.)),
             )

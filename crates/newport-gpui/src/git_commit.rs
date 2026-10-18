@@ -17,7 +17,10 @@ fn compose(summary: &str, description: &str) -> String {
 }
 fn commit_counts(status: &Value) -> (u64, u64, bool) {
     let counts = &status["metadata"]["groupCounts"];
-    let entries = rows(&status["entries"]);
+    let entries = status["entries"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     let staged = counts["staged"].as_u64().unwrap_or_else(|| {
         entries
             .iter()
@@ -126,27 +129,46 @@ impl Newport {
             },
         );
     }
-    fn can_git_commit(&self, summary: &str) -> bool {
-        let (staged, conflicts, partial) = commit_counts(&self.git.page);
+    fn project_commit_status<'a>(&'a self, cx: &'a App) -> (&'a Value, bool) {
+        if let Some(editor) = self.code_workspace() {
+            let e = editor.read(cx);
+            if e.navigator.panel == 1 {
+                let status = &e.navigator.collections[0];
+                return (
+                    status.page().as_ref(),
+                    e.navigator.writable
+                        && !status.loading
+                        && status.error.is_none()
+                        && !e.navigator.invalidated
+                        && e.navigator.filter_changed.is_none(),
+                );
+            }
+        }
+        (
+            &self.git.page,
+            self.git.tab == 0
+                && self.git.error.is_none()
+                && !self
+                    .resources
+                    .get("git-list")
+                    .is_some_and(|r| r.pending || r.error.is_some()),
+        )
+    }
+    fn can_git_commit(&self, summary: &str, cx: &App) -> bool {
+        let (status, current) = self.project_commit_status(cx);
+        let (staged, conflicts, partial) = commit_counts(&status);
         self.page == Page::Projects
-            && self.git.tab == 0
+            && current
             && !self.project_dialog_open
             && !self.modal_open
             && !self.git_mutation_blocks_write()
             && !summary.trim().is_empty()
-            && (staged > 0 || (partial && self.git.page["metadata"]["groupCounts"].is_null()))
+            && (staged > 0 || (partial && status["metadata"]["groupCounts"].is_null()))
             && conflicts == 0
-            && self.git.page["metadata"]["integration"].is_null()
+            && status["metadata"]["integration"].is_null()
             && self.git.repo["capabilities"]["readOnly"] == false
             && self.git.repo["bare"] == false
-            && self.git.page["snapshot"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty())
-            && self.git.error.is_none()
-            && !self
-                .resources
-                .get("git-list")
-                .is_some_and(|r| r.pending || r.error.is_some())
+            && status["snapshot"].as_str().is_some_and(|s| !s.is_empty())
     }
     fn git_commit(&mut self, cx: &mut Context<Self>) {
         let Some(key) = self.git_draft_key() else {
@@ -157,11 +179,11 @@ impl Newport {
         };
         let summary = draft.summary.read(cx).value().to_string();
         let description = draft.description.read(cx).value().to_string();
-        if !self.can_git_commit(&summary) {
+        if !self.can_git_commit(&summary, cx) {
             return;
         }
         let message = compose(&summary, &description);
-        let snapshot = text(&self.git.page, "snapshot");
+        let snapshot = text(&self.project_commit_status(cx).0, "snapshot");
         self.start_git_mutation(
             self.git_repository_id(),
             "Commit staged changes".into(),
@@ -173,22 +195,23 @@ impl Newport {
         }
     }
     pub(super) fn git_commit_composer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (status, _) = self.project_commit_status(cx);
         let Some(draft) = self
             .git_draft_key()
             .and_then(|key| self.git_drafts.get(&key))
         else {
             return div().into_any_element();
         };
-        if !self.git.page["metadata"]["integration"].is_null() {
+        if !status["metadata"]["integration"].is_null() {
             return div().into_any_element();
         }
         let summary = draft.summary.read(cx).value();
-        let (_, _, partial) = commit_counts(&self.git.page);
-        let head = self.git.page["metadata"]
+        let (_, _, partial) = commit_counts(&status);
+        let head = status["metadata"]
             .get("head")
             .unwrap_or(&self.git.repo["head"]);
-        let title = commit_title(&self.git.page, head);
-        let enabled = self.can_git_commit(summary.as_str());
+        let title = commit_title(&status, head);
+        let enabled = self.can_git_commit(summary.as_str(), cx);
         let busy = self.git_mutation_blocks_write();
         div()
             .flex()
@@ -199,26 +222,25 @@ impl Newport {
             .p(px(10.))
             .border_t_1()
             .border_color(cx.theme().border)
-            .child(crate::controls::input(&draft.summary).aria_label("Commit summary").disabled(busy))
+            .child(crate::project_ui::input(&draft.summary).aria_label("Commit summary").disabled(busy))
             .when(long_summary(summary.as_str()), |view| {
-                view.child(label("Summaries under 50 characters read best in logs. Put the detail in the description.").text_size(px(11.)))
+                view.child(crate::project_ui::label("Summaries under 50 characters read best in logs. Put the detail in the description.").text_size(px(crate::project_ui::FONT_SIZE)))
             })
             .child(
-                crate::controls::textarea(&draft.description)
+                crate::project_ui::textarea(&draft.description)
                     .h(px(66.))
                     .disabled(busy)
                     .aria_label("Commit description"),
             )
             .when(partial, |view| {
                 view.child(
-                    label("Commits all staged changes, including files not loaded here.")
-                        .text_size(px(11.)),
+                    crate::project_ui::label("Commits all staged changes, including files not loaded here.")
+                        .text_size(px(crate::project_ui::FONT_SIZE)),
                 )
             })
             .child(
-                crate::controls::button("git-commit")
+                crate::project_ui::button("git-commit")
                     .label(title)
-                    .hover_hint(commit_title(&self.git.page, head))
                     .when(enabled, |button| button.primary())
                     .when(!enabled, |button| button.bg(cx.theme().background).text_color(cx.theme().muted_foreground).border_color(cx.theme().border))
                     .disabled(!enabled)

@@ -414,7 +414,9 @@ impl ContainersPanel {
                             .px_0()
                             .w_full()
                             .justify_start()
-                            .hover_hint(tooltip)
+                            .when(row.orphaned || container.name != row.service, |button| {
+                                button.hover_hint(tooltip)
+                            })
                             .accessibility_label(format!("Open container {}", container.name))
                             .child(name)
                             .on_click(cx.listener(move |this, _, window, cx| {

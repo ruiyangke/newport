@@ -40,6 +40,19 @@ pub(super) fn icon(name: &str, kind: &str) -> AnyElement {
     }
 }
 
+/// Explorer icons use shape for file type; Git status owns the color channel.
+pub(super) fn tree_icon(name: &str, kind: &str, color: Hsla) -> AnyElement {
+    let icon = if let Some(path) = asset(name, kind) {
+        Icon::default().path(path)
+    } else {
+        Icon::new(IconName::File)
+    };
+    icon.size(px(16.))
+        .text_color(color)
+        .flex_shrink_0()
+        .into_any_element()
+}
+
 #[cfg(test)]
 mod tests {
     use super::asset;

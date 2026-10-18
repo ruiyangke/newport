@@ -229,7 +229,7 @@ impl Newport {
         }
     }
     pub(super) fn git_tag_trigger(&self, cx: &mut Context<Self>) -> Button {
-        crate::controls::button("new-tag")
+        crate::project_ui::button("new-tag")
             .icon(IconName::Plus)
             .label(if self.git.tab == 1 {
                 "Tag this commit…"
@@ -248,7 +248,7 @@ impl Newport {
         crate::git_listing::toolbar(&self.git.page, "tag", "tags", self.git_tag_trigger(cx), cx)
     }
     pub(super) fn git_tag_delete_trigger(&self, cx: &mut Context<Self>) -> Button {
-        crate::controls::button("review-delete-tag")
+        crate::project_ui::button("review-delete-tag")
             .label("Delete local tag…")
             .disabled(
                 !self.can_modify_tag()
@@ -263,24 +263,24 @@ impl Newport {
             .when_some(self.git.tag_delete.as_ref(),|view,review|view
                 .child(project_dialog::description("tag-delete-description", format!("Delete local tag {} at {}? This cannot be undone in Newport. Remote tags are unchanged.",review.name,review.oid.chars().take(8).collect::<String>())))
                 .child(project_dialog::actions()
-                    .child(crate::controls::button("cancel-delete-tag").label("Cancel").disabled(self.git_write_pending()).on_click(cx.listener(|this,_,_,cx|{if this.git_write_pending() { return; } this.git.tag_delete=None;cx.notify();})))
-                    .child(crate::controls::button("confirm-delete-tag").loading(self.git_write_pending()).danger().label("Delete local tag").disabled(!self.can_modify_tag()).on_click(cx.listener(|this,_,_,cx|this.delete_tag(cx))))))
+                    .child(crate::project_ui::button("cancel-delete-tag").label("Cancel").disabled(self.git_write_pending()).on_click(cx.listener(|this,_,_,cx|{if this.git_write_pending() { return; } this.git.tag_delete=None;cx.notify();})))
+                    .child(crate::project_ui::button("confirm-delete-tag").loading(self.git_write_pending()).danger().label("Delete local tag").disabled(!self.can_modify_tag()).on_click(cx.listener(|this,_,_,cx|this.delete_tag(cx))))))
             .when_some(self.git.tag_form.as_ref(), |view, form| {
                 let busy = self.git_mutation_blocks_write();
                 view.child(project_dialog::description("tag-create-description", "Creates a local tag. Push it separately to share it with a remote."))
-                .child(div().flex().flex_col().gap_1().child(label("Tag name").text_xs())
-                    .child(crate::controls::input(&form.name).aria_label("Tag name").disabled(busy)))
-                .child(div().flex().flex_col().gap_1().child(label("Target object ID").text_xs())
-                    .child(crate::controls::input(&form.target).aria_label("Target object ID").disabled(busy))
+                .child(div().flex().flex_col().gap_1().child(crate::project_ui::label("Tag name").text_size(px(crate::project_ui::FONT_SIZE)))
+                    .child(crate::project_ui::input(&form.name).aria_label("Tag name").disabled(busy)))
+                .child(div().flex().flex_col().gap_1().child(crate::project_ui::label("Target object ID").text_size(px(crate::project_ui::FONT_SIZE)))
+                    .child(crate::project_ui::input(&form.target).aria_label("Target object ID").disabled(busy))
                     .child(project_dialog::description("tag-target-description", "Enter a full 40-character Git object ID.")))
-                .child(div().flex().flex_col().gap_1().child(label("Tag type").text_xs())
-                    .child(crate::controls::select(&form.kind).title_prefix("Tag type: ").disabled(busy)))
+                .child(div().flex().flex_col().gap_1().child(crate::project_ui::label("Tag type").text_size(px(crate::project_ui::FONT_SIZE)))
+                    .child(crate::project_ui::select(&form.kind).title_prefix("Tag type: ").disabled(busy)))
                 .when(form.annotated, |view| view.child(div().flex().flex_col().gap_1()
-                    .child(label("Tag message").text_xs())
-                    .child(crate::controls::textarea(&form.message).h(px(100.)).aria_label("Tag message").disabled(busy))
+                    .child(crate::project_ui::label("Tag message").text_size(px(crate::project_ui::FONT_SIZE)))
+                    .child(crate::project_ui::textarea(&form.message).h(px(100.)).aria_label("Tag message").disabled(busy))
                     .child(project_dialog::description("tag-identity-description", "Uses the Git identity configured on the server."))))
                 .child(project_dialog::actions()
-                    .child(crate::controls::button("cancel-tag").label("Cancel").disabled(self.git_write_pending()).on_click(
+                    .child(crate::project_ui::button("cancel-tag").label("Cancel").disabled(self.git_write_pending()).on_click(
                             cx.listener(|this, _, _, cx| {
                                 if this.git_write_pending() { return; }
                                 this.git.tag_form = None;
@@ -288,7 +288,7 @@ impl Newport {
                                 cx.notify();
                             }),
                         ))
-                    .child(crate::controls::button("create-tag").loading(self.git_write_pending())
+                    .child(crate::project_ui::button("create-tag").loading(self.git_write_pending())
                                 .label("Create tag")
                                 .disabled(
                                     !self.can_create_tag()

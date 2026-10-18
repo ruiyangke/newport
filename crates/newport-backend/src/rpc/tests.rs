@@ -22,6 +22,7 @@ impl Host for TestHost {
         self.dispatched.fetch_add(1, Ordering::SeqCst);
         match method {
             "fixture.echo" => Ok(args),
+            "files_write_text" => Ok(json!({"bytes":args["content"].as_str().unwrap().len()})),
             "fixture.large" => Ok(json!("x".repeat(MAX_RESPONSE))),
             "set_integration_enabled" | "set_clipboard_enabled" => {
                 if args["hold"] == true {
@@ -450,5 +451,40 @@ async fn oversized_response_returns_an_error_without_closing_before_the_header()
     assert!(!error.message.contains("interrupted"));
     assert_eq!(fixture.call("fixture.echo", json!(42)).await.unwrap(), 42);
     assert_eq!(fixture.host.dispatched.load(Ordering::SeqCst), 2);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn only_file_saves_accept_large_native_payloads() {
+    let fixture = Fixture::start();
+    let content = "x".repeat(12 * 1024 * 1024);
+    let result = fixture
+        .call("files_write_text", json!({"content":content}))
+        .await
+        .unwrap();
+    assert_eq!(result["bytes"], 12 * 1024 * 1024);
+    let result = fixture
+        .call(
+            "fixture.echo",
+            json!({"content":"x".repeat(protocol::DEFAULT_MAX_REQUEST)}),
+        )
+        .await;
+    assert!(result.unwrap_err().contains("too large"));
+    // A client bypassing its local guard is also rejected before dispatch.
+    let endpoint = fixture.endpoint.clone();
+    let before = fixture.host.dispatched.load(Ordering::SeqCst);
+    tokio::task::spawn_blocking(move || {
+        let mut stream = connection(endpoint);
+        request(
+            &mut stream,
+            "fixture.echo",
+            json!({"content":"x".repeat(protocol::DEFAULT_MAX_REQUEST)}),
+        );
+        let mut byte = [0];
+        assert!(!matches!(stream.read(&mut byte), Ok(n) if n > 0));
+    })
+    .await
+    .unwrap();
+    assert_eq!(fixture.host.dispatched.load(Ordering::SeqCst), before);
     fixture.stop().await;
 }

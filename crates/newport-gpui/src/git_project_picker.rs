@@ -61,7 +61,6 @@ impl Newport {
         let owner = cx.weak_entity();
         git_layout::picker("git-project-picker", IconName::FolderGit2, name.clone())
             .accessibility_label(format!("Current repository: {name}"))
-            .hover_hint(name)
             .disabled(busy)
             .dropdown_menu(move |mut menu, _, cx| {
                 let Some(entity) = owner.upgrade() else {

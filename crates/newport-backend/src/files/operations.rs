@@ -23,6 +23,7 @@ struct Operation {
 }
 #[derive(Clone, Default)]
 pub struct Operations {
+    pub(super) editor_writes: Arc<tokio::sync::Mutex<()>>,
     registry: Arc<Mutex<Registry>>,
     uploads: Arc<super::recovery_storage::Owners<super::cleanup::UploadCleanup>>,
     downloads: Arc<super::recovery_storage::Owners<super::download_cleanup::DownloadCleanup>>,

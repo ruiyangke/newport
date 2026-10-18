@@ -460,11 +460,10 @@ impl Newport {
                                 .id(("needle-review-path", index))
                                 .w_full()
                                 .min_w_0()
-                                .truncate()
+                                .whitespace_normal()
                                 .role(Role::Paragraph)
                                 .test_support()
                                 .aria_label(path.to_owned())
-                                .hover_path("Configuration file", path.to_owned())
                                 .text_size(px(13.))
                                 .child(path.to_owned()),
                         )

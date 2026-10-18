@@ -1120,16 +1120,6 @@ impl Newport {
                     let folded =
                         query.is_empty() && state.collapsed_worktrees.contains(&disclosure_key);
                     let server = self.server.clone();
-                    let tooltip = format!(
-                        "{}{}\n{}",
-                        checkout.branch.as_deref().unwrap_or("Detached HEAD"),
-                        if kind_label.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" · {kind_label}")
-                        },
-                        path
-                    );
                     let scope = connection_batches::Scope {
                         project: key.clone(),
                         worktree: Some(path.to_owned()),
@@ -1191,7 +1181,7 @@ impl Newport {
                                             inset: false,
                                         }])
                                     })
-                                    .hover_path(title.clone(), tooltip.clone())
+                                    .hover_path("Worktree path", path.to_owned())
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         if this.server != server {
                                             return;

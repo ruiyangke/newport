@@ -110,6 +110,7 @@ impl Server {
         let slots = Arc::new(Semaphore::new(64));
         let commands = Arc::new(Semaphore::new(32));
         let revocations = Arc::new(Semaphore::new(4));
+        let large_payloads = Arc::new(Semaphore::new(2));
         let mut connections = tokio::task::JoinSet::new();
         tokio::pin!(shutdown);
         let result = loop {
@@ -129,9 +130,12 @@ impl Server {
             let events = self.events.clone();
             let commands = commands.clone();
             let revocations = revocations.clone();
+            let large_payloads = large_payloads.clone();
             connections.spawn(async move {
                 let _permit = permit;
-                if let Err(error) = serve(stream, host, events, commands, revocations).await {
+                if let Err(error) =
+                    serve(stream, host, events, commands, revocations, large_payloads).await
+                {
                     log::debug!("Native client disconnected: {error}");
                 }
             });
@@ -147,16 +151,25 @@ async fn serve<H: Host>(
     events: EventLog,
     commands: Arc<Semaphore>,
     revocations: Arc<Semaphore>,
+    large_payloads: Arc<Semaphore>,
 ) -> anyhow::Result<()> {
+    let mut _large_permit = None;
     let request = tokio::time::timeout(Duration::from_secs(10), async {
         let len = stream.read_u32().await? as usize;
         anyhow::ensure!(
             (1..=MAX_REQUEST).contains(&len),
             "Invalid native request size"
         );
+        if len > protocol::DEFAULT_MAX_REQUEST {
+            _large_permit = Some(large_payloads.clone().try_acquire_owned()?);
+        }
         let mut data = vec![0; len];
         stream.read_exact(&mut data).await?;
         let request: Request = rmp_serde::from_slice(&data)?;
+        anyhow::ensure!(
+            len <= protocol::request_limit(&request.method),
+            "Native request exceeds method size limit"
+        );
         anyhow::ensure!(
             request.version == VERSION,
             "Unsupported native protocol version"

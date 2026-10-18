@@ -4,7 +4,10 @@ use serde_json::{Value, json};
 
 pub enum Action {
     #[cfg(any(target_os = "macos", windows))]
-    Install(Box<crate::updates::install::Request>),
+    Install(
+        Box<crate::updates::install::Request>,
+        std::sync::mpsc::SyncSender<Result<(), String>>,
+    ),
     Run(Box<dyn FnOnce() + Send>),
     Activate(tokio::sync::oneshot::Sender<Result<(), String>>),
     #[cfg(any(target_os = "macos", windows))]
@@ -25,9 +28,16 @@ impl Integration {
     }
     #[cfg(any(target_os = "macos", windows))]
     pub fn install(&self, request: crate::updates::install::Request) -> Result<(), String> {
+        // Called by the updater's blocking preparation worker. Keep ownership
+        // there until the UI has checked unsaved buffers, rather than arming a
+        // restart that might be rejected later.
+        let (reply, accepted) = std::sync::mpsc::sync_channel(1);
         self.0
-            .try_send(Action::Install(Box::new(request)))
-            .map_err(|_| "The application cannot restart right now. Try again.".into())
+            .try_send(Action::Install(Box::new(request), reply))
+            .map_err(|_| "The application cannot restart right now. Try again.".to_owned())?;
+        accepted
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|_| "The application did not accept the restart. Try again.".to_owned())?
     }
     pub async fn quit(&self) {
         let _ = self.0.send(Action::Quit).await;

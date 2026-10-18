@@ -3,7 +3,6 @@ use super::*;
 use base64::Engine as _;
 use gpui_kit::base::Selectable;
 use gpui_kit::component::resizable::resizable_panel;
-use gpui_kit::component::tab::Tab;
 use newport_client::git_page::merge as merge_page;
 use newport_client::resources::{ResourceGroup, Resources};
 #[derive(Default)]
@@ -42,6 +41,7 @@ pub(super) struct Workspace {
     pub(super) returned_from_missing_checkout: Option<String>,
     server: String,
     pub(super) repo: Value,
+    pub(super) restore_document: bool,
     pub(super) tab: usize,
     pub(super) history: git_history::History,
     pub(super) page: Value,
@@ -547,7 +547,7 @@ impl Newport {
             .py_2()
             .child(div().font_weight(FontWeight::SEMIBOLD).child(form.title()))
             .child(
-                label(format!(
+                crate::project_ui::label(format!(
                     "{} {} · {}",
                     if form.rename {
                         "Rename"
@@ -557,11 +557,11 @@ impl Newport {
                     form.source,
                     form.oid.chars().take(8).collect::<String>()
                 ))
-                .text_xs(),
+                .text_size(px(crate::project_ui::FONT_SIZE)),
             )
             .child(
                 div().w_full().min_w_0().child(
-                    crate::controls::input(&form.name)
+                    crate::project_ui::input(&form.name)
                         .aria_label(if form.rename {
                             "Branch name"
                         } else {
@@ -573,7 +573,7 @@ impl Newport {
             .child(
                 project_dialog::actions()
                     .child(
-                        crate::controls::button("create-branch-cancel")
+                        crate::project_ui::button("create-branch-cancel")
                             .label("Cancel")
                             .disabled(self.git_write_pending())
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -582,7 +582,7 @@ impl Newport {
                             })),
                     )
                     .child(
-                        crate::controls::button("create-branch-submit")
+                        crate::project_ui::button("create-branch-submit")
                             .loading(self.git_write_pending())
                             .label(if form.rename {
                                 "Rename branch"
@@ -1160,6 +1160,7 @@ impl Newport {
     fn git_repository_opened(&mut self, repo: Value) {
         self.git.server = self.server.clone();
         self.git.repo = repo;
+        self.git.restore_document = true;
         self.load_checkout_summary();
         if let Some(path) = self.git.returned_from_missing_checkout.take() {
             self.notification = Some(Notification::info(format!(
@@ -1279,6 +1280,16 @@ impl Newport {
         );
     }
     pub(super) fn git_navigate(&mut self, tab: usize, cx: &mut Context<Self>) {
+        self.project_show_review(cx);
+        if let Some(editor) = self.code_workspace() {
+            editor.update(cx, |e, cx| {
+                if tab > 1 {
+                    e.files = false;
+                    e.navigator.panel = 3;
+                }
+                cx.notify();
+            });
+        }
         self.git_branch_picker_close();
         let Some(reload) = self.git.switch_view(tab, &mut self.resources) else {
             return;
@@ -1289,56 +1300,7 @@ impl Newport {
         self.save_workspace_selection();
         cx.notify();
     }
-    fn git_primary_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
-        // The status listing owns the displayed changes. A background sync
-        // summary may predate it and must not override its count.
-        let total = (self.git.tab == 0)
-            .then(|| self.git.page["metadata"]["totalEntries"].as_u64())
-            .flatten()
-            .or_else(|| self.value("git-sync-status")["metadata"]["totalEntries"].as_u64());
-        div()
-            .h(px(46.))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .px_2()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(
-                crate::controls::tabs("git-primary-tabs")
-                    .segmented()
-                    .w_full()
-                    .selected_index(self.git.tab.min(1))
-                    .children(["Changes", "History"].into_iter().map(|name| {
-                        Tab::new()
-                            .label(name)
-                            .disabled(
-                                self.git.switching_path.is_some()
-                                    || (name == "Changes" && self.git.repo["bare"] == true),
-                            )
-                            .flex_1()
-                            .when(name == "Changes", |tab| {
-                                tab.when_some(total.filter(|n| *n > 0), |tab, count| {
-                                    tab.child(
-                                        div()
-                                            .ml_2()
-                                            .px(px(6.))
-                                            .rounded_full()
-                                            .bg(cx.theme().muted)
-                                            .text_size(px(11.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(count.to_string()),
-                                    )
-                                })
-                            })
-                    }))
-                    .on_click(
-                        cx.listener(|this, index: &usize, _, cx| this.git_navigate(*index, cx)),
-                    ),
-            )
-            .into_any_element()
-    }
-    fn git_read_feedback(&self) -> String {
+    pub(super) fn git_read_feedback(&self) -> String {
         if let Some(path) = &self.git.switching_path {
             return format!("Opening {}…", text(path, "display"));
         }
@@ -1364,7 +1326,7 @@ impl Newport {
             age
         }
     }
-    fn git_tools_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn git_tools_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         crate::controls::icon_button("git-tools")
             .icon(IconName::Ellipsis)
             .accessibility_label("Repository tools")
@@ -1418,21 +1380,12 @@ impl Newport {
             })
             .into_any_element()
     }
-    pub(super) fn git_screen(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.git.remote_refs.is_some() {
-            return self.remote_refs_view(cx);
-        }
-        if !self.git.repo["repoId"].is_string() {
-            return self.git_open_screen(cx);
-        }
+    pub(super) fn git_workspace_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let tab = self.git.tab;
-        let Some((title, _)) = tab_info(tab) else {
+        let Some((_, _)) = tab_info(tab) else {
             return div().into_any_element();
         };
-        let compact = git_layout::compact(self.content_width, tab);
-        let clean_detail = compact && self.git_is_clean();
-        let show_list = !compact || (!self.git.detail_open && !clean_detail);
-        let show_detail = !compact || self.git.detail_open || clean_detail;
+        let compact = self.project_review_compact(cx);
         let entries = self.git_visible_entries();
         let scroll_key = git_page_demand::identity(&self.git.page);
         let empty = self.git.page["entries"]
@@ -1460,29 +1413,7 @@ impl Newport {
             6 if !self.git.listing.remote_query().is_empty() => "No matching remotes.",
             _ => "No remotes configured.",
         };
-        div().flex().flex_col().flex_1().min_h_0()
-            .child(git_layout::toolbar(
-                [self.git_project_picker(cx), self.checkout_picker_trigger(cx), self.git_branch_picker_trigger(cx)],
-                [self.git_sync_control(cx),
-                 crate::controls::icon_button("git-refresh-status").icon(IconName::RefreshCw).accessibility_label("Refresh repository").tooltip("Refresh repository")
-                    .disabled(self.git.switching_path.is_some() || ["git-list", "git-refresh"].iter().any(|key| self.resources.get(key).is_some_and(|r| r.pending)))
-                    .on_click(cx.listener(|this, _, _, cx| { this.git_refresh(); this.reshow_git_failure(cx); cx.notify(); })).into_any_element(),
-                 self.git_tools_menu(cx)],
-                self.content_width, cx))
-            .when(tab>1,|view|view.child(div().h(px(46.)).flex_shrink_0().px_3().flex().items_center().gap_3().border_b_1().border_color(cx.theme().border)
-                .child(crate::controls::button("git-back-to-changes").icon(IconName::ArrowLeft).label(if self.git.repo["bare"] == true {"History"} else {"Changes"}).ghost().on_click(cx.listener(|this,_,_,cx|this.git_navigate(usize::from(this.git.repo["bare"] == true),cx))))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(title))))
-            .child(self.status("repository",cx))
-            .when(matches!(tab, 0..=2), |view|view.child(self.git_integration_view(cx)))
-            .when_some(self.git.error.clone(),|s,error|s.child(div().p_3().text_color(rgb(0x9f3026)).child(error)))
-
-            .when(tab == 1, |view| view.child(self.status("git-tag-status", cx)))
-
-
-            .when(clean_detail, |view| view.child(self.git_primary_tabs(cx)))
-            .when(compact && show_detail && !clean_detail, |view| view.child(div().flex().items_center().px_2().py_1().child(crate::controls::compact_button("git-back-to-list").icon(IconName::ArrowLeft).label(format!("All {}", title.to_lowercase())).ghost().on_click(cx.listener(|this,_,_,cx|{this.git.detail_open=false;cx.notify();})))))
-            .child(div().flex_1().min_h_0().child(git_split::group(if compact {if show_detail {"git-compact-detail"} else {"git-compact-list"}} else {"git-workspace-split"}, "Resize the file list", if matches!(tab,1|3|4) {390.} else {240.}).when(show_list,|view|view.child(resizable_panel().when(!compact && matches!(tab,0|1|3|4|6),|panel|panel.size(px(git_layout::LIST_WIDTH)).size_range(px(git_layout::MIN_LIST_WIDTH)..px(git_layout::MAX_LIST_WIDTH)).flex_none()).child(div().flex().flex_col().flex_1().min_w_0().min_h_0()
-                .when(tab<=1,|column|column.child(self.git_primary_tabs(cx)))
+        div().size_full().flex().flex_col().flex_1().min_w_0().min_h_0()
                 .when(tab==3, |column| column.child(self.status("git-stash-status",cx)).child(self.git_stash_toolbar(cx)))
                 .when(tab==4, |column| column.child(self.status("git-tag-status",cx)).child(self.git_tag_toolbar(cx)))
                 .when(tab==6, |column| column.child(self.git_remote_toolbar(cx)).when(compact, |column| column.child(div().px_2().pb_2().child(self.repository_settings_button(cx)))))
@@ -1503,15 +1434,16 @@ impl Newport {
                 };
                 let entry=e.clone();
                 div().h(px(git_listing::row_height(tab))).w_full().min_w_0().px(px(6.)).flex().items_center()
-                    .child(Button::new(("git-entry",i)).accessibility_label(if subtitle.is_empty() {title.clone()} else {format!("{title} · {subtitle}")}).hover_detail(title.clone(), subtitle.clone()).custom(git_file_row::selection_style(this.git.selected==*e,cx)).selected(this.git.selected==*e).w_full().h_full().min_w_0().toggled(this.git.selected==*e)
+                    .child(Button::new(("git-entry",i)).accessibility_label(if subtitle.is_empty() {title.clone()} else {format!("{title} · {subtitle}")}).custom(git_file_row::selection_style(this.git.selected==*e,cx)).selected(this.git.selected==*e).w_full().h_full().min_w_0().toggled(this.git.selected==*e)
                         .when(matches!(tab,3|4), |button|button.child(Icon::new(if tab==3 {gpui_kit::assets::IconName::Archive} else {gpui_kit::assets::IconName::Tag}).size(px(14.)).text_color(cx.theme().muted_foreground)))
                         .child(div().flex_1().min_w_0().flex().when(tab!=0,|row|row.flex_col().items_start()).when(tab==0,|row|row.items_center()).gap(px(if tab==1 {2.} else if matches!(tab,3|4) {3.} else {6.}))
-                            .when(tab==0,|row|row.child(div().text_size(px(11.)).text_color(cx.theme().muted_foreground).w(px(16.)).flex_shrink_0().child(change_mark(e))))
-                            .child(div().w_full().min_w_0().truncate().when(matches!(tab,1|3|4), |text|text.text_size(px(12.))).when(tab==1, |text|text.line_height(px(17.))).font_weight(FontWeight::MEDIUM).child(title))
+                            .when(tab==0,|row|row.child(div().text_size(px(crate::project_ui::FONT_SIZE)).text_color(cx.theme().muted_foreground).w(px(16.)).flex_shrink_0().child(change_mark(e))))
+                            .child(div().w_full().min_w_0().truncate().when(matches!(tab,1|3|4), |text|text.text_size(px(crate::project_ui::FONT_SIZE))).when(tab==1, |text|text.line_height(px(17.))).font_weight(FontWeight::MEDIUM).child(title))
                             .when(tab==1,|row|row.child(git_commit_header::history_row_identity(e,cx)))
-                            .when(tab!=0 && tab!=1 && tab!=6,|row|row.child(label(subtitle).text_size(px(if matches!(tab,3|4) {11.} else {12.})).w_full().truncate())))
+                            .when(tab!=0 && tab!=1 && tab!=6,|row|row.child(crate::project_ui::label(subtitle).text_size(px(crate::project_ui::FONT_SIZE)).w_full().truncate())))
                         .on_click(cx.listener(move |this,_,_,cx| {
                         if this.git.tab != tab || !this.git_visible_entries().contains(&entry) { return; }
+                        this.project_show_review(cx);
                         this.git.selected=entry.clone();
                         this.git.detail_open=true;
                         this.git.stash_apply=None;
@@ -1531,16 +1463,231 @@ impl Newport {
             }).collect())).on_scroll_wheel(cx.listener(move |this,event:&ScrollWheelEvent,_,_| {
                 if event.delta.pixel_delta(px(20.)).y < px(0.) {this.git.listing.demand.arm(scroll_key.clone());}
             })).track_scroll(&self.git.scroll).flex_1().min_w_0())).when(tab==0 && !self.git_is_clean(),|column|column.child(self.git_commit_composer(cx)))
-                .when(compact, |column| column.child(self.git_resume_detail(cx))))))
-            .when(show_detail && tab==0,|view|view.child(resizable_panel().size_range(px(240.)..Pixels::MAX).child(self.git_diff_view(window, cx))))
-            .when(show_detail && tab==6,|view|view.child(resizable_panel().size_range(px(300.)..Pixels::MAX).child(self.git_remote_view(cx))))
-            .when(show_detail && matches!(tab,1|3|4),|view|view.child(resizable_panel().size_range(px(390.)..Pixels::MAX).child(self.git_history_view(window, cx))))))
-            .child(self.status("git-detail",cx))
+                .when(compact, |column| column.child(self.git_resume_detail(cx))).into_any_element()
+    }
+    pub(super) fn git_screen(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.git.remote_refs.is_some() {
+            return self.remote_refs_view(cx);
+        }
+        if !self.git.repo["repoId"].is_string() {
+            return self.git_open_screen(cx);
+        }
+        if self.git.repo["bare"] != true && self.code_workspace().is_some() {
+            return self.project_workspace_view(window, cx);
+        }
+        let tab = self.git.tab;
+        let Some((title, _)) = tab_info(tab) else {
+            return div().into_any_element();
+        };
+        let compact = git_layout::compact(self.content_width, tab);
+        let clean_detail = compact && self.git_is_clean();
+        let show_list = !compact || (!self.git.detail_open && !clean_detail);
+        let show_detail = !compact || self.git.detail_open || clean_detail;
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(git_layout::toolbar(
+                [
+                    self.git_project_picker(cx),
+                    self.checkout_picker_trigger(cx),
+                    self.git_branch_picker_trigger(cx),
+                ],
+                [
+                    self.git_sync_control(cx),
+                    crate::controls::icon_button("git-refresh-status")
+                        .icon(IconName::RefreshCw)
+                        .accessibility_label("Refresh repository")
+                        .tooltip("Refresh repository")
+                        .disabled(
+                            self.git.switching_path.is_some()
+                                || ["git-list", "git-refresh"]
+                                    .iter()
+                                    .any(|key| self.resources.get(key).is_some_and(|r| r.pending)),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.git_refresh();
+                            this.reshow_git_failure(cx);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                    self.git_tools_menu(cx),
+                ],
+                self.content_width,
+                cx,
+            ))
+            .when(tab > 1, |view| {
+                view.child(
+                    div()
+                        .h(px(46.))
+                        .flex_shrink_0()
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            crate::project_ui::button("git-back-to-changes")
+                                .icon(IconName::ArrowLeft)
+                                .label(if self.git.repo["bare"] == true {
+                                    "History"
+                                } else {
+                                    "Changes"
+                                })
+                                .ghost()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.git_navigate(
+                                        usize::from(this.git.repo["bare"] == true),
+                                        cx,
+                                    )
+                                })),
+                        )
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(title)),
+                )
+            })
+            .child(self.status("repository", cx))
+            .when(matches!(tab, 0..=2), |view| {
+                view.child(self.git_integration_view(cx))
+            })
+            .when_some(self.git.error.clone(), |s, error| {
+                s.child(div().p_3().text_color(rgb(0x9f3026)).child(error))
+            })
+            .when(tab == 1, |view| {
+                view.child(self.status("git-tag-status", cx))
+            })
+            .when(clean_detail, |view| {
+                view.child(div().h(px(34.)).px_3().child("History").into_any_element())
+            })
+            .when(compact && show_detail && !clean_detail, |view| {
+                view.child(
+                    div().flex().items_center().px_2().py_1().child(
+                        crate::project_ui::compact_button("git-back-to-list")
+                            .icon(IconName::ArrowLeft)
+                            .label(format!("All {}", title.to_lowercase()))
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.git.detail_open = false;
+                                cx.notify();
+                            })),
+                    ),
+                )
+            })
+            .child(
+                div().flex_1().min_h_0().child(
+                    git_split::group(
+                        if compact {
+                            if show_detail {
+                                "git-compact-detail"
+                            } else {
+                                "git-compact-list"
+                            }
+                        } else {
+                            "git-workspace-split"
+                        },
+                        "Resize the file list",
+                        if matches!(tab, 1 | 3 | 4) { 390. } else { 240. },
+                    )
+                    .when(show_list, |view| {
+                        view.child(
+                            resizable_panel()
+                                .when(!compact && matches!(tab, 0 | 1 | 3 | 4 | 6), |panel| {
+                                    panel
+                                        .size(px(git_layout::LIST_WIDTH))
+                                        .size_range(
+                                            px(git_layout::MIN_LIST_WIDTH)
+                                                ..px(git_layout::MAX_LIST_WIDTH),
+                                        )
+                                        .flex_none()
+                                })
+                                .child(self.git_workspace_sidebar(cx)),
+                        )
+                    })
+                    .when(show_detail && tab == 0, |view| {
+                        view.child(
+                            resizable_panel()
+                                .size_range(px(240.)..Pixels::MAX)
+                                .child(self.git_diff_view(window, cx)),
+                        )
+                    })
+                    .when(show_detail && tab == 6, |view| {
+                        view.child(
+                            resizable_panel()
+                                .size_range(px(300.)..Pixels::MAX)
+                                .child(self.git_remote_view(cx)),
+                        )
+                    })
+                    .when(show_detail && matches!(tab, 1 | 3 | 4), |view| {
+                        view.child(
+                            resizable_panel()
+                                .size_range(px(390.)..Pixels::MAX)
+                                .child(self.git_history_view(window, cx)),
+                        )
+                    }),
+                ),
+            )
+            .child(self.status("git-detail", cx))
             .child(self.git_log_panel(window, cx))
-            .child(div().px_3().h(px(32.)).flex_shrink_0().flex().gap_2().items_center().border_t_1().border_color(cx.theme().border)
-                .child(label(self.git_read_feedback()).text_xs().flex_1())
-                .when(self.git.page["nextCursor"].is_string() && self.resources.get("git-more").is_some_and(|r|r.error.is_some()),|view|view.child(crate::controls::compact_button("git-load-more").label("Retry loading more").disabled(self.git.error.is_some() || self.resources.get("git-more").is_some_and(|r|r.pending)).on_click(cx.listener(|this,_,_,cx|{this.resources.invalidate("git-more");this.git.continuation=None;this.git_more();cx.notify();}))))
-                .child(crate::controls::compact_button("git-log-toggle").ghost().icon(IconName::ScrollText).label("Log").track_focus(&self.git_log.view.trigger(cx)).expanded(self.git_log.open).on_click(cx.listener(|this,_,window,cx|{this.git_log.open = !this.git_log.open;if this.git_log.open { this.git_log_follow_tail(); } else { this.git_log_close(window,cx); }cx.notify();}))))
+            .child(
+                div()
+                    .px_3()
+                    .h(px(32.))
+                    .flex_shrink_0()
+                    .flex()
+                    .gap_2()
+                    .items_center()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        crate::project_ui::label(self.git_read_feedback())
+                            .text_size(px(crate::project_ui::FONT_SIZE))
+                            .flex_1(),
+                    )
+                    .when(
+                        self.git.page["nextCursor"].is_string()
+                            && self
+                                .resources
+                                .get("git-more")
+                                .is_some_and(|r| r.error.is_some()),
+                        |view| {
+                            view.child(
+                                crate::project_ui::compact_button("git-load-more")
+                                    .label("Retry loading more")
+                                    .disabled(
+                                        self.git.error.is_some()
+                                            || self
+                                                .resources
+                                                .get("git-more")
+                                                .is_some_and(|r| r.pending),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.resources.invalidate("git-more");
+                                        this.git.continuation = None;
+                                        this.git_more();
+                                        cx.notify();
+                                    })),
+                            )
+                        },
+                    )
+                    .child(
+                        crate::project_ui::compact_button("git-log-toggle")
+                            .ghost()
+                            .icon(IconName::ScrollText)
+                            .label("Log")
+                            .track_focus(&self.git_log.view.trigger(cx))
+                            .expanded(self.git_log.open)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.git_log.open = !this.git_log.open;
+                                if this.git_log.open {
+                                    this.git_log_follow_tail();
+                                } else {
+                                    this.git_log_close(window, cx);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            )
             .into_any_element()
     }
 }

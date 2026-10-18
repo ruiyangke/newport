@@ -15,6 +15,7 @@ impl Workers {
     /// Call inside the application's Tokio runtime, once per owned profile.
     pub fn start(manager: Shared, metrics: MetricsDb, desktop: Desktop) -> Self {
         let mut tasks = JoinSet::new();
+        tasks.spawn(manager.sessions.connections.clone().observe_approvals());
         tasks.spawn(manager::connection_events(
             manager.clone(),
             connectivity::subscribe(),

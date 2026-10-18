@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -201,6 +201,57 @@ impl russh_sftp::server::Handler for Sftp {
     async fn remove(&mut self, id: u32, filename: String) -> Result<Status, StatusCode> {
         fs::remove_file(self.path(&filename)?).map_err(error)?;
         Ok(ok(id))
+    }
+    async fn fsetstat(
+        &mut self,
+        id: u32,
+        handle: String,
+        attrs: FileAttributes,
+    ) -> Result<Status, StatusCode> {
+        let file = self.files.get_mut(&handle).ok_or(StatusCode::Failure)?;
+        let metadata = file.metadata().map_err(error)?;
+        if attrs.uid.is_some_and(|uid| uid != metadata.uid())
+            || attrs.gid.is_some_and(|gid| gid != metadata.gid())
+        {
+            return Err(StatusCode::PermissionDenied);
+        }
+        if let Some(mode) = attrs.permissions {
+            file.set_permissions(fs::Permissions::from_mode(mode))
+                .map_err(error)?;
+        }
+        Ok(ok(id))
+    }
+    async fn extended(
+        &mut self,
+        id: u32,
+        request: String,
+        data: Vec<u8>,
+    ) -> Result<Packet, StatusCode> {
+        if request != "posix-rename@openssh.com" {
+            return Err(StatusCode::OpUnsupported);
+        }
+        let mut bytes = data.as_slice();
+        let mut read_path = || -> Result<String, StatusCode> {
+            let size = u32::from_be_bytes(
+                bytes
+                    .get(..4)
+                    .ok_or(StatusCode::BadMessage)?
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            let path = std::str::from_utf8(bytes.get(4..4 + size).ok_or(StatusCode::BadMessage)?)
+                .map_err(|_| StatusCode::BadMessage)?
+                .to_owned();
+            bytes = &bytes[4 + size..];
+            Ok(path)
+        };
+        let from = read_path()?;
+        let to = read_path()?;
+        if !bytes.is_empty() {
+            return Err(StatusCode::BadMessage);
+        }
+        fs::rename(self.path(&from)?, self.path(&to)?).map_err(error)?;
+        Ok(Packet::Status(ok(id)))
     }
     async fn rename(
         &mut self,

@@ -32,22 +32,6 @@ pub(crate) trait HoverExt: InteractiveElement + Sized {
         self
     }
 
-    fn hover_detail(
-        mut self,
-        title: impl Into<SharedString>,
-        body: impl Into<SharedString>,
-    ) -> Self {
-        let title = title.into();
-        let body = body.into();
-        if body.trim().is_empty() {
-            return self.hover_hint(title);
-        }
-        self.interactivity().hoverable_tooltip(move |window, cx| {
-            detail(title.clone(), body.clone(), false, window, cx)
-        });
-        self
-    }
-
     fn hover_path(mut self, title: impl Into<SharedString>, path: impl Into<SharedString>) -> Self {
         let title = title.into();
         let path = path.into();

@@ -166,7 +166,7 @@ impl Newport {
             && self.git.remote_edit.is_none()
             && self.git.pull_form.is_none();
         let selected = enabled && self.git_selected_remote().is_some();
-        let actions = crate::controls::button("remote-config-actions")
+        let actions = crate::project_ui::button("remote-config-actions")
             .label("Remote actions")
             .disabled(!selected)
             .dropdown_menu({
@@ -208,13 +208,13 @@ impl Newport {
                         None => "Current configuration is not available. Refresh to check again.".into(),
                     })))
                     .child(div().flex().flex_wrap().gap_2()
-                        .child(crate::controls::button("refresh-remote-review").label("Refresh configuration").disabled(busy).on_click(cx.listener(|this,_,_,cx|{this.git_refresh();cx.notify();})))
-                        .child(crate::controls::button("accept-remote-review").label("Use reviewed configuration").disabled(!self.can_edit_remote() || latest.is_none()).on_click(cx.listener(|this,_,_,cx|this.review_remote_edit(cx))))))
-                .when(matches!(form.kind,Kind::Add|Kind::Rename),|view|view.child(label("Remote name")).child(crate::controls::input(&form.name).aria_label("Remote name").disabled(busy)))
-                .when(matches!(form.kind,Kind::Add|Kind::Url),|view|view.child(label("Remote URL")).child(crate::controls::input(&form.url).aria_label("Repository URL or server path").disabled(busy)))
+                        .child(crate::project_ui::button("refresh-remote-review").label("Refresh configuration").disabled(busy).on_click(cx.listener(|this,_,_,cx|{this.git_refresh();cx.notify();})))
+                        .child(crate::project_ui::button("accept-remote-review").label("Use reviewed configuration").disabled(!self.can_edit_remote() || latest.is_none()).on_click(cx.listener(|this,_,_,cx|this.review_remote_edit(cx))))))
+                .when(matches!(form.kind,Kind::Add|Kind::Rename),|view|view.child(crate::project_ui::label("Remote name")).child(crate::project_ui::input(&form.name).aria_label("Remote name").disabled(busy)))
+                .when(matches!(form.kind,Kind::Add|Kind::Url),|view|view.child(crate::project_ui::label("Remote URL")).child(crate::project_ui::input(&form.url).aria_label("Repository URL or server path").disabled(busy)))
                 .child(project_dialog::actions()
-                    .child(crate::controls::button("cancel-git-remote").label("Cancel").disabled(busy).on_click(cx.listener(|this,_,_,cx|{this.git.remote_edit=None;cx.notify();})))
-                    .child(crate::controls::button("save-git-remote").loading(self.git_write_pending()).when(form.kind == Kind::Remove, |button| button.danger()).label(title(form.kind)).disabled(form.needs_review || !self.can_edit_remote() || action(form.kind,&form.remote,&draft.1,&draft.2).is_none()).on_click(cx.listener(|this,_,_,cx|this.submit_remote_edit(cx)))));
+                    .child(crate::project_ui::button("cancel-git-remote").label("Cancel").disabled(busy).on_click(cx.listener(|this,_,_,cx|{this.git.remote_edit=None;cx.notify();})))
+                    .child(crate::project_ui::button("save-git-remote").loading(self.git_write_pending()).when(form.kind == Kind::Remove, |button| button.danger()).label(title(form.kind)).disabled(form.needs_review || !self.can_edit_remote() || action(form.kind,&form.remote,&draft.1,&draft.2).is_none()).on_click(cx.listener(|this,_,_,cx|this.submit_remote_edit(cx)))));
         }
         view.into_any_element()
     }

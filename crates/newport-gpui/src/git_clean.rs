@@ -54,7 +54,11 @@ impl Newport {
             cx,
         )
         .when(head["unborn"] == true, |view| {
-            view.child(label("No commits yet").text_size(px(12.)).text_center())
+            view.child(
+                crate::project_ui::label("No commits yet")
+                    .text_size(px(crate::project_ui::FONT_SIZE))
+                    .text_center(),
+            )
         })
         .when_some(oid, |view, oid| {
             view.child(
@@ -72,9 +76,9 @@ impl Newport {
                     .px(px(10.))
                     .py(px(6.))
                     .child(
-                        label(oid.chars().take(7).collect::<String>())
+                        crate::project_ui::label(oid.chars().take(7).collect::<String>())
                             .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(12.))
+                            .text_size(px(crate::project_ui::FONT_SIZE))
                             .flex_shrink_0(),
                     )
                     .when(pending, |view| {
@@ -86,7 +90,7 @@ impl Newport {
                                 .min_w_0()
                                 .flex_1()
                                 .truncate()
-                                .text_size(px(12.))
+                                .text_size(px(crate::project_ui::FONT_SIZE))
                                 .child(
                                     text(&commit["message"], "display")
                                         .lines()
@@ -96,25 +100,28 @@ impl Newport {
                                 ),
                         )
                         .child(
-                            label(git_commit_header::relative_time(
+                            crate::project_ui::label(git_commit_header::relative_time(
                                 &commit["time"],
                                 chrono::Utc::now().timestamp(),
                             ))
-                            .text_size(px(11.))
+                            .text_size(px(crate::project_ui::FONT_SIZE))
                             .flex_shrink_0(),
                         )
                     })
                     .when(failed, |view| {
-                        view.child(label("Commit details unavailable").text_xs())
-                            .child(
-                                crate::controls::compact_button("clean-commit-retry")
-                                    .label("Retry")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.resources.invalidate(COMMIT);
-                                        this.load_clean_commit();
-                                        cx.notify();
-                                    })),
-                            )
+                        view.child(
+                            crate::project_ui::label("Commit details unavailable")
+                                .text_size(px(crate::project_ui::FONT_SIZE)),
+                        )
+                        .child(
+                            crate::project_ui::compact_button("clean-commit-retry")
+                                .label("Retry")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.resources.invalidate(COMMIT);
+                                    this.load_clean_commit();
+                                    cx.notify();
+                                })),
+                        )
                     }),
             )
         })
@@ -126,13 +133,13 @@ impl Newport {
                 .justify_center()
                 .gap(px(8.))
                 .child(
-                    crate::controls::button("clean-view-history")
+                    crate::project_ui::button("clean-view-history")
                         .label("View history")
                         .disabled(self.git_write_pending())
                         .on_click(cx.listener(|this, _, _, cx| this.git_navigate(1, cx))),
                 )
                 .child(
-                    crate::controls::button("clean-open-files")
+                    crate::project_ui::button("clean-open-files")
                         .label("Open in Files")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.git_open_files(window, cx);

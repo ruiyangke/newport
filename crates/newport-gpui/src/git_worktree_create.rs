@@ -24,14 +24,14 @@ fn review_hint(
         })
         .when_some(review.error().filter(|_| !pending), |view, error| {
             view.child(
-                label(error.to_owned())
+                crate::project_ui::label(error.to_owned())
                     .id(SharedString::from(format!("{name}-error")))
                     .role(accesskit::Role::Alert)
                     .aria_label(error.to_owned())
                     .test_support()
                     .flex_1()
                     .min_w_0()
-                    .text_xs()
+                    .text_size(px(crate::project_ui::FONT_SIZE))
                     .opacity(1.)
                     .text_color(cx.theme().danger),
             )
@@ -226,14 +226,14 @@ impl Newport {
             .child(self.status("git-branch-worktree-owner", cx))
             .when_some(owner, |view, owner| {
                 view.child(
-                    label(format!(
+                    crate::project_ui::label(format!(
                         "Already checked out in {}",
                         text(&owner["path"], "display")
                     ))
-                    .text_xs(),
+                    .text_size(px(crate::project_ui::FONT_SIZE)),
                 )
                 .child(
-                    crate::controls::button("open-branch-worktree")
+                    crate::project_ui::button("open-branch-worktree")
                         .label("Open existing worktree")
                         .disabled(self.branch_owner_path().is_none())
                         .on_click(cx.listener(|this, _, _, cx| this.open_branch_worktree(cx))),
@@ -557,14 +557,14 @@ impl Newport {
             })
             .py_2()
             .when_some(form.existing_branch.as_ref(), |view, branch| {
-                view.child(label(format!(
+                view.child(crate::project_ui::label(format!(
                     "Check out {branch} · {}",
                     form.oid.chars().take(8).collect::<String>()
                 )))
             })
             .when(form.existing_branch.is_none(), |view| {
                 view.child(
-                    crate::controls::tabs("worktree-branch-source")
+                    crate::project_ui::tabs("worktree-branch-source")
                         .segmented()
                         .selected_index(usize::from(!form.new_branch))
                         .child(Tab::new().label("New branch").disabled(busy))
@@ -588,7 +588,7 @@ impl Newport {
                     view.child(
                         project_dialog::field("New branch name")
                             .child(
-                                crate::controls::input(&form.branch)
+                                crate::project_ui::input(&form.branch)
                                     .aria_label("New worktree branch")
                                     .disabled(busy),
                             )
@@ -596,7 +596,7 @@ impl Newport {
                                 "worktree branch name",
                                 &form.branch_review,
                                 &draft.branch,
-                                crate::controls::compact_button("retry-worktree-branch")
+                                crate::project_ui::compact_button("retry-worktree-branch")
                                     .label("Check again")
                                     .disabled(busy)
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -621,7 +621,7 @@ impl Newport {
             .child(
                 project_dialog::field("Name")
                     .child(
-                        crate::controls::input(&form.name)
+                        crate::project_ui::input(&form.name)
                             .aria_label("New worktree name")
                             .disabled(busy),
                     )
@@ -629,7 +629,7 @@ impl Newport {
                         "worktree name",
                         &form.name_review,
                         &draft.name,
-                        crate::controls::compact_button("retry-worktree-name")
+                        crate::project_ui::compact_button("retry-worktree-name")
                             .label("Check again")
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -652,13 +652,13 @@ impl Newport {
                             .gap_2()
                             .child(
                                 div().flex_1().min_w_0().child(
-                                    crate::controls::input(&form.path)
+                                    crate::project_ui::input(&form.path)
                                         .aria_label("New worktree path")
                                         .disabled(busy),
                                 ),
                             )
                             .child(
-                                crate::controls::button("browse-worktree-destination")
+                                crate::project_ui::button("browse-worktree-destination")
                                     .label("Browse…")
                                     .disabled(busy)
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -675,7 +675,10 @@ impl Newport {
                                     })),
                             ),
                     )
-                    .child(label("Use a new directory under an existing parent.").text_xs()),
+                    .child(
+                        crate::project_ui::label("Use a new directory under an existing parent.")
+                            .text_size(px(crate::project_ui::FONT_SIZE)),
+                    ),
             )
             .child(
                 div()
@@ -683,7 +686,7 @@ impl Newport {
                     .flex_col()
                     .gap(px(8.))
                     .child(
-                        crate::controls::checkbox("open-new-worktree")
+                        crate::project_ui::checkbox("open-new-worktree")
                             .label("Open worktree after creation")
                             .checked(form.open_after)
                             .disabled(busy)
@@ -697,7 +700,7 @@ impl Newport {
                             })),
                     )
                     .child(
-                        crate::controls::checkbox("lock-new-worktree")
+                        crate::project_ui::checkbox("lock-new-worktree")
                             .label("Lock worktree to protect it from removal")
                             .checked(form.locked)
                             .disabled(busy)
@@ -713,12 +716,14 @@ impl Newport {
                     ),
             )
             .when(stale, |view| {
-                view.child(label("Repository state changed. Cancel and review again."))
+                view.child(crate::project_ui::label(
+                    "Repository state changed. Cancel and review again.",
+                ))
             })
             .child(
                 project_dialog::actions()
                     .child(
-                        crate::controls::button("cancel-create-worktree")
+                        crate::project_ui::button("cancel-create-worktree")
                             .label("Cancel")
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -729,7 +734,7 @@ impl Newport {
                             })),
                     )
                     .child(
-                        crate::controls::button("create-worktree")
+                        crate::project_ui::button("create-worktree")
                             .primary()
                             .loading(self.git_write_pending())
                             .label("Create worktree")
@@ -780,7 +785,7 @@ mod tests {
                     "worktree branch name",
                     &self.review,
                     "main",
-                    crate::controls::compact_button("retry-hint").label("Check again"),
+                    crate::project_ui::compact_button("retry-hint").label("Check again"),
                     cx,
                 ))
                 .child(

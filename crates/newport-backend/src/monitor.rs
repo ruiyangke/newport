@@ -25,10 +25,11 @@ const MAX_REPLY: u64 = 4 << 20;
 type Channel = crate::agent_runtime::WorkerStream;
 
 #[derive(Default)]
-pub(crate) struct Channels([Arc<Mutex<Slot>>; 5]);
+pub(crate) struct Channels([Arc<Mutex<Slot>>; 6]);
 impl Channels {
     pub(crate) fn for_request(&self, request: &Value) -> Arc<Mutex<Slot>> {
         let lane = match request["op"].as_str() {
+            Some("files_watch") => 5,
             Some("snapshot") => 0,
             Some("services" | "logs" | "unit" | "action") => 1,
             Some(

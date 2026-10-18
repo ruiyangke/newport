@@ -84,6 +84,10 @@ impl Slot {
         *self.resume.lock().unwrap() = Some((server.clone(), client, app.clone()));
         owner.require_agent_available()?;
         if running.as_ref().is_some_and(|r| !r.task.is_finished()) {
+            // An explicit start may find the enabled service suspended on an
+            // authentication failure. Wake the shared transport, not a second
+            // integration task or a second signing request.
+            owner.retry_transport();
             if owner.permissions.snapshot().error.is_some() {
                 owner.permissions.retry();
             }
@@ -122,12 +126,13 @@ impl Slot {
                         path_needed,
                     });
                 },
-                || {
-                    state
-                        .lock()
-                        .unwrap()
-                        .get_or_insert_with(Snapshot::default)
-                        .connection = ConnectionState::new(Status::Reconnecting);
+                |_error| {
+                    *state.lock().unwrap() = Some(Snapshot {
+                        // SSH failures belong to the global connection owner.
+                        // Sharing only reports its own service readiness.
+                        connection: ConnectionState::new(Status::Reconnecting),
+                        ..Snapshot::default()
+                    });
                 },
             );
             tokio::pin!(run);

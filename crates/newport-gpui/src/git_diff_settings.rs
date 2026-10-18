@@ -132,7 +132,7 @@ impl Render for Panel {
             .flex()
             .flex_col()
             .gap(px(12.))
-            .text_size(px(12.))
+            .text_size(px(crate::project_ui::FONT_SIZE))
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
@@ -143,7 +143,10 @@ impl Render for Panel {
                     .flex()
                     .flex_col()
                     .gap(px(6.))
-                    .child(label("Diff display").text_size(px(11.)))
+                    .child(
+                        crate::project_ui::label("Diff display")
+                            .text_size(px(crate::project_ui::FONT_SIZE)),
+                    )
                     .child(
                         gpui_kit::base::RadioGroup::new("diff-layout")
                             .aria_label("Diff display")
@@ -222,9 +225,12 @@ impl Render for Panel {
                         .flex()
                         .flex_col()
                         .gap(px(6.))
-                        .child(label("Context").text_size(px(11.)))
                         .child(
-                            crate::controls::select(&self.context)
+                            crate::project_ui::label("Context")
+                                .text_size(px(crate::project_ui::FONT_SIZE)),
+                        )
+                        .child(
+                            crate::project_ui::select(&self.context)
                                 .w_full()
                                 .accessibility_label("Context lines"),
                         ),

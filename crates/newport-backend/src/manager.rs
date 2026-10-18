@@ -219,7 +219,10 @@ impl Manager {
         let runtime = Arc::new(Mutex::new(Runtime::default()));
         let instance_id = Uuid::new_v4();
         let manager = Self {
-            sessions: Arc::new(crate::server_session::Registry::new(&store.directory)),
+            sessions: Arc::new(crate::server_session::Registry::with_instance(
+                &store.directory,
+                instance_id,
+            )),
             store: Arc::new(store),
             config,
             load_error,

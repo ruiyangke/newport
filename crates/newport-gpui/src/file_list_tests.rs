@@ -44,6 +44,110 @@ fn draw(cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
+struct ReorderedFiles {
+    paths: Vec<&'static str>,
+    activated: Option<(String, usize)>,
+}
+impl Render for ReorderedFiles {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .children(self.paths.iter().enumerate().map(|(index, path)| {
+                let owner = cx.entity().downgrade();
+                super::retained_row(
+                    super::file_row_identity("server", path),
+                    (path.to_string(), index),
+                    move |(path, index), _, _| {
+                        let path = path.clone();
+                        let index = *index;
+                        let owner = owner.clone();
+                        crate::controls::button("file-entry")
+                            .label(path.clone())
+                            .debug_selector({
+                                let path = path.clone();
+                                move || path.clone()
+                            })
+                            .on_click(move |_, _, cx| {
+                                let _ = owner.update(cx, |this, _| {
+                                    this.activated = Some((path.clone(), index))
+                                });
+                            })
+                            .into_any_element()
+                    },
+                    window,
+                    cx,
+                )
+            }))
+    }
+}
+
+#[gpui::test]
+fn file_focus_follows_identity_after_insertion_and_reordering(cx: &mut TestAppContext) {
+    use gpui::AppContext;
+    cx.update(|cx| gpui::component::init(cx));
+    let mut host = None;
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|_| ReorderedFiles {
+            paths: vec!["b.txt", "c.txt"],
+            activated: None,
+        });
+        host = Some(view.clone());
+        gpui::base::Root::new(view, window, cx)
+    });
+    let host = host.unwrap();
+    cx.update(|window, _| window.activate_window());
+    draw(cx);
+    let focused = cx.update(|window, cx| {
+        window.blur(cx);
+        window.focus_next(cx);
+        window.focused(cx).expect("file row has a tab stop")
+    });
+    draw(cx);
+    for (paths, expected_index) in [
+        (vec!["a.txt", "b.txt", "c.txt"], 1),
+        (vec!["c.txt", "b.txt", "a.txt"], 1),
+        (vec!["b.txt", "c.txt"], 0),
+    ] {
+        host.update(cx, |host, cx| {
+            host.paths = paths;
+            host.activated = None;
+            cx.notify();
+        });
+        draw(cx);
+        cx.update(|window, _| {
+            assert!(focused.is_focused(window), "row focus must survive reorder")
+        });
+        let keystroke = gpui::Keystroke::parse("enter").unwrap();
+        cx.simulate_event(gpui::KeyDownEvent {
+            physical_key: None,
+            key_metadata: None,
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui::KeyUpEvent {
+            physical_key: None,
+            key_metadata: None,
+            keystroke,
+        });
+        draw(cx);
+        assert_eq!(
+            host.read_with(cx, |host, _| host.activated.clone()),
+            Some(("b.txt".into(), expected_index))
+        );
+    }
+    assert_ne!(
+        super::file_row_identity("one", "/b.txt"),
+        super::file_row_identity("two", "/b.txt")
+    );
+    assert_ne!(
+        super::file_row_identity("a:b", "c"),
+        super::file_row_identity("a", "b:c")
+    );
+}
+
 #[gpui::test]
 fn loading_and_empty_states_occupy_rows_without_moving_column_header(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -182,7 +286,7 @@ impl Render for KeyboardListingHost {
                             .into_any_element()
                     };
                     if self.cached {
-                        super::retained_row(row, props, render, window, cx)
+                        super::retained_row(("test-retained-row", row), props, render, window, cx)
                     } else {
                         render(&props, window, cx)
                     }

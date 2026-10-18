@@ -1,9 +1,14 @@
 //! Remote file operations. Local paths come exclusively from native dialogs.
 mod cleanup;
 mod download_cleanup;
+pub mod editor;
 pub mod operations;
+pub mod project_index;
 mod recovery_storage;
 pub mod transfer;
+pub(crate) mod vfs;
+mod vfs_documents;
+mod vfs_prefetch;
 use crate::{manager::Shared, ssh::sftp::Sftp};
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
@@ -274,6 +279,7 @@ pub async fn files_list(
         path,
         expected_connection,
         false,
+        None,
     )
     .await
 }
@@ -287,12 +293,13 @@ pub(crate) async fn files_list_query(
     path: String,
     expected_connection: Option<serde_json::Value>,
     force: bool,
+    project_root: Option<String>,
 ) -> Result<Listing, String> {
     let owner = crate::server_session::resolve(state, id).await?;
     operations.run_with_connection(state, id, operation, expected_connection.as_ref(), async |_server| {
         let weak = std::sync::Arc::downgrade(&owner);
         let cleanup = operations.clone();
-        let query = owner.queries.files.get_or_insert(path.clone(), crate::query::Policy {
+        let query = owner.files.listings.get_or_insert(path.clone(), crate::query::Policy {
             stale_after: std::time::Duration::from_secs(5),
             retry_after: std::time::Duration::from_secs(2),
             timeout: std::time::Duration::from_secs(65),
@@ -307,7 +314,7 @@ pub(crate) async fn files_list_query(
                     biased;
                     _ = cancel.changed() => Err("Server session closed.".into()),
                     result = async {
-                        let sftp = std::sync::Arc::new(Sftp::connect(owner.server()).await.map_err(|e| e.to_string())?);
+                        let sftp = std::sync::Arc::new(Sftp::shared(&owner).await.map_err(|e| e.to_string())?);
                         cleanup.retry_upload_cleanup(sftp.clone());
                         list(&sftp, &path).await.map(std::sync::Arc::new).map_err(|e| e.to_string())
                     } => result,
@@ -316,7 +323,10 @@ pub(crate) async fn files_list_query(
         }).map_err(anyhow::Error::msg)?;
         if owner.is_revoked() { query.close(); }
         let result = if force { query.refresh().await } else { query.read().await };
-        result.map(|listing| (*listing).clone()).map_err(anyhow::Error::msg)
+        result.map(|listing| {
+            if let Some(root)=project_root.as_deref() { owner.files.documents.prefetch(&owner,root,&listing); }
+            (*listing).clone()
+        }).map_err(anyhow::Error::msg)
     }).await
 }
 pub async fn files_preview(
@@ -374,8 +384,8 @@ mod tests {
         .unwrap();
         assert!(first.entries.iter().any(|entry| entry.name == "Documents"));
         let query = owner
-            .queries
             .files
+            .listings
             .get_or_insert(
                 "/".into(),
                 crate::query::Policy {
@@ -419,6 +429,7 @@ mod tests {
             "/".into(),
             None,
             true,
+            None,
         )
         .await
         .unwrap();

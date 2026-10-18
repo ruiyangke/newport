@@ -437,7 +437,6 @@ impl Newport {
                     .id(("project-status", index))
                     .role(accesskit::Role::Status)
                     .aria_label(format!("Status for {name}: {summary}"))
-                    .hover_detail("Project status", summary.clone())
                     .flex()
                     .gap(px(12.))
                     .min_w_0()

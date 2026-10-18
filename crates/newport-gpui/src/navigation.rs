@@ -59,7 +59,8 @@ pub(super) fn install_desktop_commands(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-h", HideApp, None),
         KeyBinding::new("cmd-alt-h", HideOthers, None),
-        KeyBinding::new("cmd-w", CloseWindow, None),
+        KeyBinding::new("cmd-w", crate::project_editor::CloseTab, None),
+        KeyBinding::new("cmd-shift-w", CloseWindow, None),
         KeyBinding::new("cmd-m", MinimizeWindow, None),
         KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
     ]);
@@ -73,6 +74,16 @@ pub(super) fn install_desktop_commands(cx: &mut App) {
     }
     items.push(MenuItem::separator());
     items.push(MenuItem::action("Show/Hide Sidebar", ToggleSidebar));
+    items.push(MenuItem::separator());
+    items.push(MenuItem::action("Next Tab", crate::project_editor::NextTab));
+    items.push(MenuItem::action(
+        "Previous Tab",
+        crate::project_editor::PreviousTab,
+    ));
+    items.push(MenuItem::action(
+        "Show/Hide Project Terminal",
+        crate::project_editor::ToggleTerminal,
+    ));
     let mut app_items = vec![
         MenuItem::action("About Newport", About),
         MenuItem::separator(),
@@ -98,7 +109,14 @@ pub(super) fn install_desktop_commands(cx: &mut App) {
         Menu {
             name: "File".into(),
             disabled: false,
-            items: vec![MenuItem::action("Close Window", CloseWindow)],
+            items: vec![
+                MenuItem::action("Open File…", crate::project_editor::QuickOpen),
+                MenuItem::action("Focus File Explorer", crate::project_editor::FocusExplorer),
+                MenuItem::action("Save File", crate::project_editor::SaveFile),
+                MenuItem::action("Close Tab", crate::project_editor::CloseTab),
+                MenuItem::separator(),
+                MenuItem::action("Close Window", CloseWindow),
+            ],
         },
         Menu {
             name: "Server".into(),
@@ -161,7 +179,11 @@ pub(super) fn install_workspace_shortcuts(cx: &mut App) {
         KeyBinding::new(&format!("{primary}-f"), FindInView, None),
         KeyBinding::new(&format!("{primary}-,"), OpenSettings, None),
         KeyBinding::new(&format!("{primary}-n"), NewServer, None),
-        KeyBinding::new(&format!("{primary}-shift-e"), EditServer, None),
+        KeyBinding::new(
+            &format!("{primary}-shift-e"),
+            EditServer,
+            Some("!ProjectEditor"),
+        ),
         KeyBinding::new(&format!("{primary}-shift-t"), TestServer, None),
         KeyBinding::new(&format!("{primary}-shift-l"), ToggleSidebar, None),
     ]);

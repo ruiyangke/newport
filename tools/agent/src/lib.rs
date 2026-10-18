@@ -43,3 +43,5 @@ mod clipboard_wire;
 mod demand;
 
 mod shell_setup;
+
+mod file_watch;

@@ -123,7 +123,7 @@ impl Newport {
         if let Some(input) = &self.git.listing.input {
             let name = listing_name(self.git.tab);
             view = view.child(
-                crate::controls::input(input).aria_label(if self.git.tab == 6 {
+                crate::project_ui::input(input).aria_label(if self.git.tab == 6 {
                     "Find remotes".to_owned()
                 } else {
                     format!("Filter loaded {name}")
@@ -142,7 +142,7 @@ impl Newport {
                         .role(accesskit::Role::Label)
                         .aria_label(message.clone())
                         .child(message)
-                        .text_xs()
+                        .text_size(px(crate::project_ui::FONT_SIZE))
                         .text_color(cx.theme().muted_foreground),
                 );
             }
@@ -194,7 +194,7 @@ pub(super) fn toolbar(
         .child(
             div()
                 .flex_1()
-                .text_size(px(11.))
+                .text_size(px(crate::project_ui::FONT_SIZE))
                 .text_color(cx.theme().muted_foreground)
                 .child(caption),
         )

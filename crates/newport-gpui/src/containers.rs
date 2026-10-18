@@ -112,6 +112,7 @@ struct ListCache {
     fallback: Option<String>,
 }
 pub(super) struct ContainersPanel {
+    connection: Value,
     pub(super) client: Containers,
     compose_state: compose_jobs::ComposeState,
     activity: activity::Activity,
@@ -155,21 +156,36 @@ impl EventEmitter<ContainersEvent> for ContainersPanel {}
 impl ContainersPanel {
     pub(super) fn new(
         server: String,
-        _: Value,
+        connection: Value,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::with_client(
+        let mut panel = Self::with_client(
             Containers::new(backend::Backend::discover(), server),
             window,
             cx,
-        )
+        );
+        panel.connection = connection;
+        panel
     }
     pub(crate) fn with_client(
         mut client: Containers,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let connection_subscription = crate::connectivity::observe(
+            cx,
+            |this: &Self| this.client.server_id(),
+            |this, cx| {
+                if !this.retired
+                    && crate::connectivity::for_scope(&this.connection, cx)
+                        .is_some_and(|state| state.phase == crate::connectivity::Phase::Connected)
+                {
+                    this.client.refresh();
+                }
+                cx.notify();
+            },
+        );
         let search = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Find a container, project or image")
         });
@@ -182,6 +198,7 @@ impl ContainersPanel {
         });
         client.refresh();
         Self {
+            connection: Value::Null,
             client,
             compose_state: compose_jobs::ComposeState::new(window, cx),
             activity: activity::Activity::new(window, cx),
@@ -219,7 +236,7 @@ impl ContainersPanel {
             disk_view: disk::DiskView::new(cx),
             ports: Default::default(),
             retired: false,
-            _subscriptions: vec![subscription],
+            _subscriptions: vec![subscription, connection_subscription],
         }
     }
     pub(super) fn preferences(&self, cx: &App) -> Preferences {

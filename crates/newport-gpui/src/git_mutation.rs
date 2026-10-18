@@ -485,6 +485,19 @@ impl Newport {
         if let Some(path) = created_checkout {
             self.git_open_worktree_path(path, cx);
         } else if refresh && !current_repo.is_empty() {
+            if let Some(editor) = self.code_workspace() {
+                editor.update(cx, |e, _| e.navigator.invalidate());
+            }
+            if self.git.tab == 1
+                && self
+                    .git_mutation
+                    .as_ref()
+                    .is_some_and(|state| state.index_only)
+            {
+                // An index write cannot change an immutable commit document.
+                self.resources.invalidate("git-tag-status");
+                return true;
+            }
             if self.git.tab == 0
                 && self.git_mutation.as_ref().is_some_and(|state| {
                     state.index_only
@@ -552,7 +565,7 @@ impl Newport {
             let owner = cx.weak_entity();
             notification = notification.action(move |_, _, cx| {
                 let owner = owner.clone();
-                crate::controls::button("recover-git-command")
+                crate::project_ui::button("recover-git-command")
                     .label(if reviewed {
                         "I've inspected the repository"
                     } else {

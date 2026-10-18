@@ -54,8 +54,28 @@ pub fn install(dark: bool, cx: &mut App) {
         c.popover_foreground = c.foreground;
         c.secondary = c.background;
         c.secondary_foreground = c.foreground;
+        // Flat native tabs join the panel; these resolved colors do not follow
+        // background/foreground automatically when the app palette changes.
+        c.tab_active = c.background;
+        c.tab_active_foreground = c.foreground;
+        c.tab_foreground = c.muted_foreground;
         // Match the Tauri dialog backdrop in both appearances.
         c.overlay = gpui_kit::hsla(0., 0., 0., if dark { 0.42 } else { 0.22 });
+
+        // Syntax themes supply token colors, not a separate editor surface.
+        // Keep the fixed gutter opaque for horizontal scrolling, but match it
+        // to the code canvas so its existing spacing reads as one workspace.
+        let editor = &mut std::sync::Arc::make_mut(&mut theme.highlight_theme).style;
+        editor.editor_background = Some(c.background);
+        editor.editor_gutter_background = Some(c.background);
+        editor.editor_foreground = Some(c.foreground);
+        editor.editor_line_number = Some(c.muted_foreground);
+        editor.editor_active_line_number = Some(c.foreground);
+        editor.editor_active_line =
+            Some(
+                c.background
+                    .blend(c.foreground.opacity(if dark { 0.04 } else { 0.035 })),
+            );
     });
 }
 

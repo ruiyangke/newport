@@ -29,6 +29,7 @@ pub trait DesktopCommands: Send + Sync + 'static {
 /// Dropping the handle requests graceful shutdown. Keep the Tokio runtime alive
 /// and call `stop` to wait for cleanup before exiting or restarting the process.
 pub struct Application {
+    connections: tokio::sync::watch::Receiver<newport_domain::connectivity::Snapshot>,
     endpoint: PathBuf,
     shutdown: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<std::io::Result<()>>,
@@ -117,6 +118,7 @@ impl Application {
             }
         };
         let events = listener.events();
+        let connections = state.manager.sessions.connections.subscribe();
         let workers = Workers::start(
             state.manager.clone(),
             state.metrics.clone(),
@@ -146,6 +148,7 @@ impl Application {
             result
         });
         Ok(Self {
+            connections,
             endpoint,
             shutdown: Some(shutdown),
             task,
@@ -155,6 +158,14 @@ impl Application {
 
     pub fn endpoint(&self) -> &Path {
         &self.endpoint
+    }
+
+    /// Live application-wide connectivity. Consumers observe; only the shared
+    /// server session owner can change a server's state.
+    pub fn connections(
+        &self,
+    ) -> tokio::sync::watch::Receiver<newport_domain::connectivity::Snapshot> {
+        self.connections.clone()
     }
 
     /// Resolves after cleanup; also exposes unexpected listener failure to the host.

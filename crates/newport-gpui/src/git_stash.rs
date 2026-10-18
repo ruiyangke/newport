@@ -170,7 +170,7 @@ impl Newport {
             ]
             .into_iter()
             .map(|mode| {
-                crate::controls::button(format!("stash-{}", mode.label()))
+                crate::project_ui::button(format!("stash-{}", mode.label()))
                     .label(format!("{}…", mode.label()))
                     .disabled(
                         !self.can_apply_stash()
@@ -183,7 +183,7 @@ impl Newport {
         actions.into_any_element()
     }
     pub(super) fn git_stash_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let action = crate::controls::button("new-stash")
+        let action = crate::project_ui::button("new-stash")
             .icon(IconName::Plus)
             .label("Save changes…")
             .disabled(
@@ -209,15 +209,18 @@ impl Newport {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .child(label("Stash message").text_xs())
                         .child(
-                            crate::controls::input(&form.message)
+                            crate::project_ui::label("Stash message")
+                                .text_size(px(crate::project_ui::FONT_SIZE)),
+                        )
+                        .child(
+                            crate::project_ui::input(&form.message)
                                 .aria_label("Stash message")
                                 .disabled(busy),
                         ),
                 )
                 .child(
-                    crate::controls::checkbox("stash-include-untracked")
+                    crate::project_ui::checkbox("stash-include-untracked")
                         .label("Include untracked files")
                         .checked(form.include_untracked)
                         .disabled(busy)
@@ -231,7 +234,7 @@ impl Newport {
                         })),
                 )
                 .child(
-                    crate::controls::checkbox("stash-keep-index")
+                    crate::project_ui::checkbox("stash-keep-index")
                         .label("Keep staged changes in the working tree")
                         .checked(form.keep_index)
                         .disabled(busy)
@@ -247,7 +250,7 @@ impl Newport {
                 .child(
                     project_dialog::actions()
                         .child(
-                            crate::controls::button("save-stash-cancel")
+                            crate::project_ui::button("save-stash-cancel")
                                 .label("Cancel")
                                 .disabled(self.git_write_pending())
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -260,7 +263,7 @@ impl Newport {
                                 })),
                         )
                         .child(
-                            crate::controls::button("save-stash-confirm")
+                            crate::project_ui::button("save-stash-confirm")
                                 .loading(self.git_write_pending())
                                 .label("Save stash")
                                 .disabled(!self.can_save_stash())
@@ -272,7 +275,7 @@ impl Newport {
                 view.child(review_description(review))
                     .when(review.mode != backend::StashMode::Drop, |view| {
                         view.child(
-                            crate::controls::checkbox("stash-reinstate-index")
+                            crate::project_ui::checkbox("stash-reinstate-index")
                                 .label("Restore staged changes too")
                                 .checked(review.reinstate)
                                 .disabled(busy)
@@ -289,7 +292,7 @@ impl Newport {
                     .child(
                         project_dialog::actions()
                             .child(
-                                crate::controls::button("apply-stash-cancel")
+                                crate::project_ui::button("apply-stash-cancel")
                                     .label("Cancel")
                                     .disabled(self.git_write_pending())
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -301,7 +304,7 @@ impl Newport {
                                     })),
                             )
                             .child(
-                                crate::controls::button("apply-stash-confirm")
+                                crate::project_ui::button("apply-stash-confirm")
                                     .loading(self.git_write_pending())
                                     .when(review.mode == backend::StashMode::Drop, |button| {
                                         button.danger()

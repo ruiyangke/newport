@@ -206,22 +206,25 @@ impl Actions {
                 .py_2()
                 .border_b_1()
                 .border_color(cx.theme().border)
-                .child(label(format!("{} {noun} selected", lines.len())))
+                .child(crate::project_ui::label(format!(
+                    "{} {noun} selected",
+                    lines.len()
+                )))
                 .child(
-                    crate::controls::compact_button("apply-selected-diff-lines")
+                    crate::project_ui::compact_button("apply-selected-diff-lines")
                         .label(format!("{} {} {noun}", self.verb(), lines.len()))
                         .disabled(!enabled)
                         .on_click(move |_, _, cx| apply(&hunks, Some(&lines), cx)),
                 )
                 .child(
-                    crate::controls::compact_button("clear-selected-diff-lines")
+                    crate::project_ui::compact_button("clear-selected-diff-lines")
                         .label("Clear")
                         .disabled(!enabled)
                         .on_click(move |_, _, cx| toggle(None, cx)),
                 )
                 .when_some(self.discard.clone(), |view, discard| {
                     view.child(
-                        crate::controls::compact_button("discard-selected-diff-lines")
+                        crate::project_ui::compact_button("discard-selected-diff-lines")
                             .danger()
                             .label(format!("Discard {} {noun}…", discard_lines.len()))
                             .disabled(!enabled)
@@ -231,7 +234,10 @@ impl Actions {
                     )
                 })
                 .when(mixed, |view| {
-                    view.child(label("Deletions you did not select stay in the file.").text_xs())
+                    view.child(
+                        crate::project_ui::label("Deletions you did not select stay in the file.")
+                            .text_size(px(crate::project_ui::FONT_SIZE)),
+                    )
                 })
                 .into_any_element(),
         )

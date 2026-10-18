@@ -131,6 +131,37 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn explicit_checkout_retry_clears_cached_transport_failure_through_rpc() {
+    let fixture = Fixture::offline();
+    let owner = fixture.manager.owner(fixture.server.id).unwrap();
+    assert!(owner.acquire(&fixture.server).await.is_err());
+    let failure = owner.transport_snapshot().error;
+    assert!(failure.is_some());
+    let mut args = json!({
+        "serverId":fixture.server.id,
+        "request":{"method":"repo.open","params":{"path":{
+            "bytesB64":"L3Nydi9hcHA=","display":"/srv/app"
+        }}}
+    });
+    assert!(fixture.call("git_request", args.clone()).await.is_err());
+    assert_eq!(owner.transport_snapshot().error, failure);
+    args["retryConnection"] = json!(true);
+    let mut invalid = args.clone();
+    invalid["readId"] = json!("not-a-read-id");
+    assert!(fixture.call("git_request", invalid).await.is_err());
+    let mut other = args.clone();
+    other["request"] = json!({"method":"repo.close","params":{"repoId":"checkout"}});
+    assert!(fixture.call("git_request", other).await.is_err());
+    assert_eq!(owner.transport_snapshot().error, failure);
+    // Identity persistence is deliberately refused by this fixture, so we can
+    // observe the reset before a new connection has a chance to fail again.
+    let error = fixture.call("git_request", args).await.unwrap_err();
+    assert!(error.contains("Identity could not be persisted"), "{error}");
+    assert!(owner.transport_snapshot().error.is_none());
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn repository_refresh_is_local_and_does_not_wait_for_configuration_storage() {
     let fixture = Fixture::offline();
     let writer = fixture.manager.lock().await;

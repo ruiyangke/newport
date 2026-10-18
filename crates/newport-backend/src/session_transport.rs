@@ -54,18 +54,30 @@ struct State {
     connection: Option<Arc<ExecSession>>,
     retry_at: Option<Instant>,
 }
+#[derive(Clone, Copy, Default)]
+struct Retry {
+    version: u64,
+    fresh: u64,
+}
 struct Shared {
+    publication: Option<crate::connection_state::Publisher>,
     state: Mutex<State>,
     demand: watch::Sender<usize>,
     changes: watch::Sender<u64>,
-    retry: watch::Sender<u64>,
+    retry: watch::Sender<Retry>,
     generation: Arc<AtomicU64>,
     connected: Arc<Notify>,
     permissions: Arc<crate::integration_permissions::Gate>,
 }
 impl Shared {
     fn update(&self, change: impl FnOnce(&mut State)) {
-        change(&mut self.state.lock().unwrap());
+        {
+            let mut state = self.state.lock().unwrap();
+            change(&mut state);
+            if let Some(publication) = &self.publication {
+                publication.transport(state.snapshot.clone());
+            }
+        }
         self.changes
             .send_modify(|version| *version = version.wrapping_add(1));
     }
@@ -96,6 +108,7 @@ impl Transport {
         generation: Arc<AtomicU64>,
         connected: Arc<Notify>,
         permissions: Arc<crate::integration_permissions::Gate>,
+        publication: Option<crate::connection_state::Publisher>,
     ) -> Self {
         let dial: Dial = Arc::new(move || {
             let server = server.clone();
@@ -103,10 +116,11 @@ impl Transport {
         });
         Self {
             shared: Arc::new(Shared {
+                publication,
                 state: Mutex::default(),
                 demand: watch::channel(0).0,
                 changes: watch::channel(0).0,
-                retry: watch::channel(0).0,
+                retry: watch::channel(Retry::default()).0,
                 generation,
                 connected,
                 permissions,
@@ -176,9 +190,21 @@ impl Transport {
             }
         }
     }
-    /// A persistent service waits for shared transport recovery, without adding
-    /// its own SSH backoff. Service-channel recovery remains independent.
+    /// Request-oriented consumers report a blocked authentication attempt.
     pub async fn ready(&self) -> Result<(), String> {
+        self.wait_ready(false, |_| {}).await
+    }
+    /// Keep enabled services subscribed through authentication failures. This
+    /// observes the shared retry policy; it never clears a failure or retries
+    /// authentication. Only an explicit retry can unblock a permanent error.
+    pub async fn follow_ready(&self, waiting: impl Fn(Option<String>)) -> Result<(), String> {
+        self.wait_ready(true, waiting).await
+    }
+    async fn wait_ready(
+        &self,
+        persistent: bool,
+        waiting: impl Fn(Option<String>),
+    ) -> Result<(), String> {
         let _demand = self.demand();
         let mut changes = self.shared.changes.subscribe();
         let mut retired = self.retired.clone();
@@ -194,7 +220,12 @@ impl Transport {
             if !snapshot.retryable
                 && let Some(error) = snapshot.error
             {
-                return Err(error);
+                if !persistent {
+                    return Err(error);
+                }
+                waiting(Some(error));
+            } else {
+                waiting(None);
             }
             tokio::select! {
                 _ = retired.changed() => return Err(RETIRED.into()),
@@ -203,6 +234,14 @@ impl Transport {
         }
     }
     pub fn retry(&self) {
+        self.request_retry(false);
+    }
+    /// A user explicitly retrying a failed checkout needs a new foreground
+    /// signing request, not an older background approval that may be hidden.
+    pub fn retry_fresh(&self) {
+        self.request_retry(true);
+    }
+    fn request_retry(&self, fresh: bool) {
         if self.observe().is_some() {
             return;
         }
@@ -210,9 +249,12 @@ impl Transport {
             state.snapshot.error = None;
             state.retry_at = None;
         });
-        self.shared
-            .retry
-            .send_modify(|version| *version = version.wrapping_add(1));
+        self.shared.retry.send_modify(|retry| {
+            retry.version = retry.version.wrapping_add(1);
+            if fresh {
+                retry.fresh = retry.version;
+            }
+        });
     }
     pub async fn close(&self) {
         self.shared.permissions.disconnected(None);
@@ -385,10 +427,11 @@ async fn run(
             s.snapshot.error = None;
             s.retry_at = None;
         });
-        // This dial satisfies retry requests received before it started. A
-        // later request must survive a failure of this older attempt, but must
-        // not interrupt an approval prompt that may still succeed.
-        retry.borrow_and_update();
+        // This dial satisfies retry requests received before it started.
+        // Routine retries preserve pending approval. Explicit checkout Retry
+        // replaces it so a suppressed background request can prompt again.
+        let fresh = retry.borrow_and_update().fresh;
+        let mut restart = retry.clone();
         let sleep_epoch = recovery.sleep_epoch();
         let attempt = dial();
         tokio::pin!(attempt);
@@ -396,6 +439,11 @@ async fn run(
             tokio::select! {
                 biased;
                 _ = retired.changed() => return,
+                _ = restart.changed() => {
+                    if restart.borrow_and_update().fresh != fresh {
+                        break None;
+                    }
+                },
                 _ = demand.changed() => { if *demand.borrow() == 0 { break None; } },
                 _ = recovery.changed() => {
                     // Approval may legitimately take a long time, but an attempt
@@ -467,6 +515,7 @@ mod tests {
             Arc::default(),
             Arc::default(),
             Arc::new(crate::integration_permissions::Gate::new(false, false)),
+            None,
         );
         transport.dial = dial;
         (Arc::new(transport), stop)
@@ -639,6 +688,60 @@ mod tests {
         transport.close().await;
     }
     #[tokio::test(start_paused = true)]
+    async fn persistent_service_observes_failure_and_retry_without_redialing_itself() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (transport, stop) = fixture({
+            let attempts = attempts.clone();
+            Arc::new(move || {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if attempt > 0 {
+                        return std::future::pending().await;
+                    }
+                    Err(ConnectFailure {
+                        message: "SSH approval required".into(),
+                        retryable: false,
+                    })
+                })
+            })
+        });
+        let observed = Arc::new(Mutex::new(None));
+        let service = {
+            let transport = transport.clone();
+            let observed = observed.clone();
+            tokio::spawn(async move {
+                transport
+                    .follow_ready(|error| *observed.lock().unwrap() = error)
+                    .await
+            })
+        };
+        until(|| observed.lock().unwrap().is_some()).await;
+        assert_eq!(
+            transport.acquire().await.err().unwrap(),
+            "SSH approval required"
+        );
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !service.is_finished(),
+            "enabled service must retain its subscription"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "no automatic consent retry"
+        );
+
+        transport.retry_fresh();
+        until(|| attempts.load(Ordering::SeqCst) == 2 && observed.lock().unwrap().is_none()).await;
+        assert!(!service.is_finished());
+        stop.send_replace(true);
+        assert_eq!(service.await.unwrap().unwrap_err(), RETIRED);
+        assert_eq!(transport.snapshot().demand, 0);
+        transport.close().await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn explicit_retry_bypasses_shared_backoff_immediately() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let (transport, _stop) = fixture({
@@ -668,6 +771,43 @@ mod tests {
         );
         assert_eq!(transport.snapshot().attempt, 1);
         transport.close().await;
+    }
+
+    #[tokio::test]
+    async fn explicit_fresh_retry_withdraws_background_approval_before_new_dial() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        struct PendingApproval(Arc<AtomicUsize>);
+        impl Drop for PendingApproval {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let (transport, _stop) = fixture({
+            let attempts = attempts.clone();
+            let cancelled = cancelled.clone();
+            Arc::new(move || {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                if attempt > 0 {
+                    assert_eq!(cancelled.load(Ordering::SeqCst), attempt);
+                }
+                let approval = PendingApproval(cancelled.clone());
+                Box::pin(async move {
+                    let _approval = approval;
+                    std::future::pending().await
+                })
+            })
+        });
+        let _persistent = transport.demand();
+        until(|| attempts.load(Ordering::SeqCst) == 1).await;
+        transport.retry_fresh();
+        transport.retry_fresh();
+        until(|| attempts.load(Ordering::SeqCst) == 2).await;
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+        assert!(transport.snapshot().error.is_none());
+        assert_eq!(transport.snapshot().attempt, 1);
+        transport.close().await;
+        assert_eq!(cancelled.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
