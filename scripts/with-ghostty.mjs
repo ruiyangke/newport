@@ -13,7 +13,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { isMain, root } from "./tooling.mjs";
 import { prepareGhosttySource } from "./prepare-ghostty-source.mjs";
 import { prepareZigStandardLibrary } from "./prepare-zig-stdlib.mjs";
@@ -174,7 +174,9 @@ export async function ghosttyBuildEnv(source = process.env) {
     );
     if (!lib) throw new Error("Cannot locate the pinned Zig standard library");
     env.ZIG_LIB_DIR = prepareZigStandardLibrary({
-      lib: JSON.parse(lib[1]),
+      // `zig env` may shorten an inherited ZIG_LIB_DIR to a relative path.
+      // Cargo runs Zig from the Ghostty source directory, not our repo root.
+      lib: resolve(root, JSON.parse(lib[1])),
       cache,
     });
   }

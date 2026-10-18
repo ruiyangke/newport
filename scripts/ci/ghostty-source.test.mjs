@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -15,6 +16,51 @@ import { join, relative, isAbsolute, sep } from "node:path";
 import { prepareGhosttySource } from "../prepare-ghostty-source.mjs";
 import { GHOSTTY_CACHE, installZigDirectory, ZIG_VERSION } from "../with-ghostty.mjs";
 import { root } from "../tooling.mjs";
+
+test("nested Windows bootstrap keeps Zig's relative lib_dir usable from Cargo's build directory", () => {
+  const directory = mkdtempSync(join(tmpdir(), "newport-zig nested-"));
+  try {
+    mkdirSync(join(directory, "scripts"));
+    for (const file of ["with-ghostty.mjs", "tooling.mjs"])
+      copyFileSync(join(root, "scripts", file), join(directory, "scripts", file));
+    // A nested packaging wrapper sees the already patched library. Its fast
+    // path returns the supplied path, just as prepareZigStandardLibrary does.
+    writeFileSync(join(directory, "scripts/prepare-zig-stdlib.mjs"),
+      "export const prepareZigStandardLibrary = ({ lib }) => lib;");
+    writeFileSync(join(directory, "scripts/prepare-ghostty-source.mjs"),
+      "export const prepareGhosttySource = ({ source }) => source;");
+    const script = `
+      import assert from "node:assert/strict";
+      import childProcess from "node:child_process";
+      import { syncBuiltinESMExports } from "node:module";
+      import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
+      import { join, isAbsolute } from "node:path";
+      Object.defineProperty(process, "platform", { value: "win32" });
+      Object.defineProperty(process, "arch", { value: "x64" });
+      const base = process.cwd();
+      const lib = ".cache/newport/ghostty/prepared stdlib";
+      mkdirSync(lib, { recursive: true });
+      writeFileSync(join(lib, "sentinel"), "stdlib");
+      const source = join(base, "source");
+      mkdirSync(source);
+      childProcess.spawnSync = (command, args) => {
+        if (command === "rustc") return { status: 0, stdout: "host: x86_64-pc-windows-msvc" };
+        if (command === "zig" && args[0] === "version") return { status: 0, stdout: "0.16.0" };
+        if (command === "zig" && args[0] === "env") return { status: 0, stdout: '.lib_dir = ' + JSON.stringify(lib) + ',' };
+        throw new Error("Unexpected build/download command: " + command);
+      };
+      syncBuiltinESMExports();
+      const { ghosttyBuildEnv } = await import("./scripts/with-ghostty.mjs");
+      const env = await ghosttyBuildEnv({ PATH: "", GHOSTTY_SOURCE_DIR: source, ZIG_LIB_DIR: join(base, lib) });
+      assert.ok(isAbsolute(env.ZIG_LIB_DIR), "Zig library path must survive Cargo changing cwd");
+      process.chdir(source);
+      assert.equal(readFileSync(join(env.ZIG_LIB_DIR, "sentinel"), "utf8"), "stdlib");
+    `;
+    writeFileSync(join(directory, "check.mjs"), script);
+    const result = spawnSync(process.execPath, ["check.mjs"], { cwd: directory, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
 
 test("build prerequisites stay outside Cargo's recursively pruned target cache", () => {
   const fromTarget = relative(join(root, "target"), GHOSTTY_CACHE);
