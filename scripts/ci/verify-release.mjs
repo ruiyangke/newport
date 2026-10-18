@@ -2,6 +2,30 @@ import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { root, json, capture, isMain } from "../tooling.mjs";
 
+export function verifyReleaseOnlyChanges(baseline, commit, git = (...args) => capture("git", args)) {
+  if (!/^[0-9a-f]{40}$/.test(baseline) || !/^[0-9a-f]{40}$/.test(commit))
+    throw new Error("Expected exact CI and release commits");
+  git("merge-base", "--is-ancestor", baseline, commit);
+  const packaging = new Set([
+    ".github/workflows/release.yml",
+    "scripts/with-ghostty.mjs",
+    "scripts/ci/ghostty-source.test.mjs",
+    "scripts/ci/release.test.mjs",
+    "scripts/ci/verify-release.mjs",
+  ]);
+  const changed = git("diff", "--no-renames", "--name-only", "-z", baseline, commit)
+    .split("\0").filter(Boolean);
+  for (const path of changed) {
+    if (packaging.has(path)) continue;
+    if (path === ".github/workflows/checks.yml") {
+      const withoutRetention = (ref) => git("show", `${ref}:${path}`)
+        .replace(/^(\s*retention-days:)\s*\d+\s*$/gm, "$1");
+      if (withoutRetention(baseline) === withoutRetention(commit)) continue;
+    }
+    throw new Error(`Cannot reuse older CI: ${path} changed; run CI for the release commit`);
+  }
+}
+
 // Release consumes a successful CI build, never a PR artifact or an older
 // passing run that hides a newer failed/pending validation of the same commit.
 export function verifiedCiBuild(repository, commit, api) {
@@ -54,10 +78,12 @@ if (isMain(import.meta.url)) {
     throw new Error("Checkout must match the release tag");
   let output = `commit=${commit}\n`;
   if (process.argv.includes("--ci")) {
-    const build = verifiedCiBuild(process.env.GITHUB_REPOSITORY || "", commit,
+    const ciCommit = process.env.RELEASE_CI_COMMIT || commit;
+    if (ciCommit !== commit) verifyReleaseOnlyChanges(ciCommit, commit);
+    const build = verifiedCiBuild(process.env.GITHUB_REPOSITORY || "", ciCommit,
       (endpoint) => JSON.parse(capture("gh", ["api", endpoint])));
-    output += `ci_run_id=${build.runId}\nagents_artifact_id=${build.artifactId}\n`;
-    console.log(`Reusing successful CI ${build.runId} for ${commit}`);
+    output += `ci_commit=${ciCommit}\nci_run_id=${build.runId}\nagents_artifact_id=${build.artifactId}\n`;
+    console.log(`Release ${commit} uses successful CI ${build.runId} at ${ciCommit}`);
   }
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, output);
 }

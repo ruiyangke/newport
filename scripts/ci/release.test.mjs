@@ -14,7 +14,42 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { root } from "../tooling.mjs";
 import { validate, profileEntitlements } from "../check-signing.mjs";
 import { notarizationAuth } from "../notarize.mjs";
-import { verifiedCiBuild } from "./verify-release.mjs";
+import { verifiedCiBuild, verifyReleaseOnlyChanges } from "./verify-release.mjs";
+
+test("older CI is reusable only for release tooling, never changed application or CI tests", () => {
+  const temp = mkdtempSync(join(tmpdir(), "newport-release-baseline-"));
+  const git = (...args) => execFileSync("git", [
+    "-c", "commit.gpgsign=false", "-c", "user.name=Test",
+    "-c", "user.email=test@example.invalid", ...args,
+  ], { cwd: temp, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  const write = (path, contents) => {
+    mkdirSync(join(temp, path, ".."), { recursive: true });
+    writeFileSync(join(temp, path), contents);
+  };
+  const commit = () => { git("add", "."); git("commit", "-m", "fixture"); return git("rev-parse", "HEAD"); };
+  try {
+    git("init");
+    write("scripts/with-ghostty.mjs", "original");
+    write(".github/workflows/checks.yml", "run: tests\nretention-days: 7\n");
+    write("tools/agent/src/main.rs", "original");
+    const baseline = commit();
+    write("scripts/with-ghostty.mjs", "fixed build path");
+    write(".github/workflows/checks.yml", "run: tests\nretention-days: 30\n");
+    const release = commit();
+    verifyReleaseOnlyChanges(baseline, release, git);
+    assert.throws(() => verifyReleaseOnlyChanges(release, baseline, git));
+    write(".github/workflows/checks.yml", "run: skip tests\nretention-days: 30\n");
+    assert.throws(() => verifyReleaseOnlyChanges(baseline, commit(), git), /checks.yml changed/);
+    git("checkout", release, "--", ".github/workflows/checks.yml");
+    write("tools/agent/src/main.rs", "changed");
+    assert.throws(() => verifyReleaseOnlyChanges(baseline, commit(), git), /main.rs changed/);
+    git("checkout", baseline, "--", "tools/agent/src/main.rs");
+    commit();
+    mkdirSync(join(temp, "scripts/ci"));
+    git("mv", "tools/agent/src/main.rs", "scripts/ci/verify-release.mjs");
+    assert.throws(() => verifyReleaseOnlyChanges(baseline, commit(), git), /main.rs changed/);
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});
 
 function ciFixture() {
   const commit = "a".repeat(40);

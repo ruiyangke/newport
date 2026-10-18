@@ -6,6 +6,10 @@ on:
         description: Existing version tag (for example v0.3.0)
         required: true
         type: string
+      ci_commit:
+        description: Optional passing CI commit for release-tooling-only changes (full SHA)
+        required: false
+        type: string
 permissions:
   contents: read
   actions: read
@@ -18,6 +22,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       commit: ${{ steps.version.outputs.commit }}
+      ci_commit: ${{ steps.version.outputs.ci_commit }}
       ci_run_id: ${{ steps.version.outputs.ci_run_id }}
       agents_artifact_id: ${{ steps.version.outputs.agents_artifact_id }}
     steps:
@@ -29,6 +34,7 @@ jobs:
       - id: version
         env:
           RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_CI_COMMIT: ${{ inputs.ci_commit }}
           GH_TOKEN: ${{ github.token }}
         run: node scripts/ci/verify-release.mjs --ci
 
@@ -40,6 +46,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve.outputs.commit }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -51,7 +58,15 @@ jobs:
           github-token: ${{ github.token }}
           path: resources/agents
           merge-multiple: true
-      - run: node scripts/ci/artifact.mjs verify resources/agents
+      - name: Verify CI artifact and bind unchanged Needle source to release
+        env:
+          CI_COMMIT: ${{ needs.resolve.outputs.ci_commit }}
+          RELEASE_COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          git checkout --detach "$CI_COMMIT"
+          node scripts/ci/artifact.mjs verify resources/agents
+          git checkout --detach "$RELEASE_COMMIT"
+          node scripts/ci/artifact.mjs record resources/agents
       - name: Sign exact Needle release payloads
         env:
           NEWPORT_SIGNING_PRIVATE_KEY: ${{ secrets.NEWPORT_SIGNING_PRIVATE_KEY }}
