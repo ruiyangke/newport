@@ -1,6 +1,5 @@
 //! Local project bookmarks; these controls never mutate a remote repository.
 use super::*;
-use gpui_kit::component::tab::Tab;
 use newport_client::project_bookmark::files_path;
 
 pub(super) struct Edit {
@@ -337,34 +336,125 @@ impl Newport {
         let form_open = self.project_add.is_some()
             || self.project_create.is_some()
             || self.project_edit.is_some();
-        div().id("projects-scroll").flex_1().min_h_0().max_w(px(1240.)).p(px(crate::controls::PAGE_PADDING)).flex().flex_col().gap_3()
-            .when(!empty_library, |v| v.child(div().flex().flex_wrap().items_center().gap_2().child(div().w(px(260.)).max_w_full().min_w(px(120.)).child(crate::controls::input(&filter).aria_label("Search projects").prefix(Icon::new(IconName::Search).size(px(14.)))))
-                .child(crate::controls::tabs("project-library-filter").gap_0().selected_index(usize::from(preferences.favorites_only)).children(["All","Favorites"].into_iter().map(|name|Tab::new().label(name))).on_click(cx.listener(|this,index:&usize,_,cx|{this.project_preferences.entry(this.server.clone()).or_default().favorites_only=*index==1;this.project_preferences_changed();cx.notify();})))
-                .child(div().ml_auto().min_w_0().max_w_full().flex().flex_wrap().gap_2()
-                .child(crate::controls::button("refresh-project-library").label("Refresh").icon(IconName::RefreshCw)
-                    .disabled(self.resources.get("page").is_some_and(|r|r.pending))
-                    .on_click(cx.listener(|this,_,_,cx|{this.refresh();cx.notify();})))
-                .child(crate::controls::button("project-add-menu").label("Add project").icon(IconName::Plus).dropdown_caret(true)
-                    .disabled(busy || form_open).dropdown_menu({
-                        let weak=cx.entity().downgrade();move |menu,_,_| {
-                            let add=weak.clone();let clone_repo=weak.clone();let create=weak.clone();
-                            menu.item(PopupMenuItem::new("Add existing repository…").on_click(move |_,window,cx|{let _=add.update(cx,|this,cx|this.begin_project_add(window,cx));}))
-                                .item(PopupMenuItem::new("Clone repository…").on_click(move |_,window,cx|{let _=clone_repo.update(cx,|this,cx|this.begin_project_create(true,window,cx));}))
-                                .item(PopupMenuItem::new("New repository…").on_click(move |_,window,cx|{let _=create.update(cx,|this,cx|this.begin_project_create(false,window,cx));}))
-                        }
-                    }))
+        let (total, favorites) = self
+            .resources
+            .get("page")
+            .and_then(|page| page.value.as_array())
+            .map_or((0, 0), |projects| {
+                (
+                    projects.len(),
+                    projects
+                        .iter()
+                        .filter(|p| {
+                            p["id"]
+                                .as_str()
+                                .is_some_and(|id| preferences.favorites.contains(id))
+                        })
+                        .count(),
                 )
+            });
+        let show_owner = cx.weak_entity();
+        let toolbar = crate::controls::page_toolbar(cx)
+            .id("projects-toolbar")
+            .debug_selector(|| "projects-toolbar".into())
+            .child(
+                div()
+                    .w(px(crate::controls::SEARCH_WIDTH))
+                    .min_w(px(120.))
+                    .flex_shrink(1.)
+                    .child(crate::controls::search_input(&filter, cx).aria_label("Find a project")),
+            )
+            .child(crate::connections_selector::Selector::new(
+                "project-library-filter",
+                "Show",
+                usize::from(preferences.favorites_only),
+                vec![
+                    crate::connections_selector::Choice {
+                        count: Some(total),
+                        ..crate::connections_selector::Choice::text(0, "All")
+                    },
+                    crate::connections_selector::Choice {
+                        count: Some(favorites),
+                        tooltip: Some("Projects you starred"),
+                        ..crate::connections_selector::Choice::text(1, "Favorites")
+                    },
+                ],
+                move |index, _, cx| {
+                    let _ = show_owner.update(cx, |this, cx| {
+                        this.project_preferences
+                            .entry(this.server.clone())
+                            .or_default()
+                            .favorites_only = index == 1;
+                        this.project_preferences_changed();
+                        cx.notify();
+                    });
+                },
             ))
-            .when(self.project_create.is_none() && self.project_creation_save_owner.as_ref().is_some_and(|(_,server)| server == &self.server) && self.resources.get("project-created-save").is_some_and(|r|r.error.is_some()), |v|v.child(label("Repository created, but its bookmark could not be saved. Add the existing repository; do not repeat creation.")).child(self.status("project-created-save",cx)))
+            .child(div().flex_1())
+            .child(
+                crate::controls::icon_button("refresh-project-library")
+                    .ghost()
+                    .icon(IconName::RefreshCw)
+                    .tooltip("Refresh")
+                    .accessibility_label("Refresh projects")
+                    .loading(self.resources.get("page").is_some_and(|r| r.pending))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.refresh();
+                        cx.notify();
+                    })),
+            )
+            .child(
+                crate::controls::button("project-add-menu")
+                    .label("Add project")
+                    .icon(IconName::Plus)
+                    .dropdown_caret(true)
+                    .disabled(busy || form_open)
+                    .dropdown_menu({
+                        let weak = cx.entity().downgrade();
+                        move |menu, _, _| {
+                            let add = weak.clone();
+                            let clone_repo = weak.clone();
+                            let create = weak.clone();
+                            menu.item(PopupMenuItem::new("Add existing repository…").on_click(
+                                move |_, window, cx| {
+                                    let _ = add
+                                        .update(cx, |this, cx| this.begin_project_add(window, cx));
+                                },
+                            ))
+                            .item(PopupMenuItem::new("Clone repository…").on_click(
+                                move |_, window, cx| {
+                                    let _ = clone_repo.update(cx, |this, cx| {
+                                        this.begin_project_create(true, window, cx)
+                                    });
+                                },
+                            ))
+                            .item(
+                                PopupMenuItem::new("New repository…").on_click(
+                                    move |_, window, cx| {
+                                        let _ = create.update(cx, |this, cx| {
+                                            this.begin_project_create(false, window, cx)
+                                        });
+                                    },
+                                ),
+                            )
+                        }
+                    }),
+            );
+        // The toolbar spans the page like the other list pages; the library
+        // below keeps its padding for notices and empty states.
+        div().id("projects-page").flex_1().min_h_0().flex().flex_col()
+            .when(!empty_library, |v| v.child(toolbar))
+            .child(div().id("projects-scroll").flex_1().min_h_0().flex().flex_col().gap_3()
+            .when(self.project_create.is_none() && self.project_creation_save_owner.as_ref().is_some_and(|(_,server)| server == &self.server) && self.resources.get("project-created-save").is_some_and(|r|r.error.is_some()), |v|v.child(div().px(px(crate::controls::PAGE_PADDING)).pt(px(8.)).flex().flex_col().gap_2().child(label("Repository created, but its bookmark could not be saved. Add the existing repository; do not repeat creation.")).child(self.status("project-created-save",cx))))
             .when(empty_library, |view| view.child(self.empty_library(busy || form_open, cx)))
-            .when_some(notice.filter(|notice| *notice != LibraryNotice::Loading && !empty_library), |view, notice| view.child(library_feedback(notice,cx)))
-            .when(loading,|view|view.child(project_loading::library(self.content_width.min(1240.) - crate::controls::PAGE_PADDING * 2.,cx)))
+            .when_some(notice.filter(|notice| *notice != LibraryNotice::Loading && !empty_library), |view, notice| view.child(div().flex_1().flex().flex_col().px(px(crate::controls::PAGE_PADDING)).pt(px(8.)).child(library_feedback(notice,cx))))
+            .when(loading,|view|view.child(div().px(px(crate::controls::PAGE_PADDING)).pt(px(8.)).child(project_loading::library(self.content_width.min(1240.) - crate::controls::PAGE_PADDING * 2.,cx))))
             .when(!loading && count > 0,|view|view.child(div().flex().flex_col().min_h_0().overflow_hidden()
                 .flex_1()
-                .child(self.project_library_caption(count,columns,cx))
+                .child(self.project_library_caption(columns,cx))
                 .child(list(scroll,cx.processor(move |this,index:usize,_,cx| {
-                    this.project_library_row(&projects[index],index,columns,busy || this.project_edit.is_some(),index + 1 == count,cx)
-                })).flex_1().min_h_0())))
+                    this.project_library_row(&projects[index],index,columns,busy || this.project_edit.is_some(),cx)
+                })).flex_1().min_h_0()))))
             .into_any_element()
     }
 }
@@ -476,8 +566,9 @@ impl Newport {
             .id("projects-empty")
             .debug_selector(|| "projects-empty".into())
             .w_full()
-            .max_w(px(640.))
+            .max_w(px(640. + crate::controls::PAGE_PADDING * 2.))
             .mx_auto()
+            .px(px(crate::controls::PAGE_PADDING))
             .pt(px(32.))
             .flex()
             .flex_col()

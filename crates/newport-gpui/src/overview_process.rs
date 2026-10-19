@@ -299,7 +299,7 @@ impl Newport {
         if state.input.is_none() {
             let input = cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder("Filter processes…")
+                    .placeholder("Find a process")
                     .default_value(preferences.process_filter)
             });
             state.subscription = Some(cx.subscribe(&input, move |this, input, event, cx| {

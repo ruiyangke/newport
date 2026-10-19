@@ -226,7 +226,8 @@ impl DetailLayout {
     fn new(_viewport: f32) -> Self {
         Self {
             horizontal: crate::controls::PAGE_PADDING,
-            top: crate::controls::PAGE_PADDING,
+            // The toolbar starts at the top edge, like the other list pages.
+            top: 0.,
             bottom: crate::controls::PAGE_PADDING,
         }
     }
@@ -772,6 +773,8 @@ impl Newport {
                 )
             })
             .child(
+                // The shared page toolbar's height, inset and rule, inside the
+                // page's padding; it may wrap to a second row when narrow.
                 div()
                     .flex()
                     .flex_wrap()
@@ -780,27 +783,37 @@ impl Newport {
                     .debug_selector(|| "connections-toolbar".into())
                     .relative()
                     .gap(px(8.))
-                    .pb(px(13.))
+                    .min_h(px(crate::controls::TOOLBAR_HEIGHT))
+                    .py(px((crate::controls::TOOLBAR_HEIGHT
+                        - crate::controls::CONTROL_HEIGHT)
+                        / 2.))
+                    .mx(px(
+                        crate::controls::TOOLBAR_INSET - crate::controls::PAGE_PADDING
+                    ))
                     .mb(px(6.))
                     .flex_shrink_0()
                     .child(
                         div()
                             .absolute()
                             .bottom_0()
-                            .left(px(-toolbar_gutter))
-                            .right(px(-toolbar_gutter))
+                            .left(px(crate::controls::PAGE_PADDING
+                                - crate::controls::TOOLBAR_INSET
+                                - toolbar_gutter))
+                            .right(px(crate::controls::PAGE_PADDING
+                                - crate::controls::TOOLBAR_INSET
+                                - toolbar_gutter))
                             .h(px(1.))
                             .bg(cx.theme().border),
                     )
                     .child(
-                        div().flex_1().min_w(px(160.)).max_w(px(260.)).child(
-                            crate::controls::input(input)
-                                .prefix(
-                                    Icon::new(IconName::Search)
-                                        .size(px(crate::controls::ICON_SIZE)),
-                                )
-                                .aria_label("Filter ports"),
-                        ),
+                        div()
+                            .flex_1()
+                            .min_w(px(160.))
+                            .max_w(px(crate::controls::SEARCH_WIDTH))
+                            .child(
+                                crate::controls::search_input(input, cx)
+                                    .aria_label("Find a connection"),
+                            ),
                     )
                     .child(Selector::new(
                         format!("port-filter:{}", self.server),
@@ -1898,16 +1911,17 @@ mod tests {
     #[gpui::test]
     fn detail_padding_is_uniform_and_wide_pages_center_without_stretching(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|_, _| LayoutHarness { sidebar: 204. });
-        // Padding stays constant across window sizes and sidebar states.
+        // Padding stays constant across window sizes and sidebar states; the
+        // toolbar starts at the top edge like the other list pages.
         // The 1500px max width includes padding.
         for (viewport, sidebar, horizontal, top, bottom) in [
-            (699., 204., 16., 16., 16.),
-            (700., 204., 16., 16., 16.),
-            (800., 204., 16., 16., 16.),
-            (699., 0., 16., 16., 16.),
-            (1700., 204., 16., 16., 16.),
-            (1900., 204., 16., 16., 16.),
-            (1900., 0., 16., 16., 16.),
+            (699., 204., 16., 0., 16.),
+            (700., 204., 16., 0., 16.),
+            (800., 204., 16., 0., 16.),
+            (699., 0., 16., 0., 16.),
+            (1700., 204., 16., 0., 16.),
+            (1900., 204., 16., 0., 16.),
+            (1900., 0., 16., 0., 16.),
         ] {
             view.update(cx, |view, cx| {
                 view.sidebar = sidebar;

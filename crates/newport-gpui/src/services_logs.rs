@@ -310,10 +310,7 @@ impl ServicesPanel {
                     .flex_shrink_0()
                     .h(px(crate::controls::CONTROL_HEIGHT))
                     .child(
-                        crate::controls::input(&self.logs.find)
-                            .prefix(
-                                Icon::new(IconName::Search).size(px(crate::controls::ICON_SIZE)),
-                            )
+                        crate::controls::search_input(&self.logs.find, cx)
                             .aria_label("Search logs"),
                     ),
             )

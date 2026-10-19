@@ -471,7 +471,7 @@ impl Newport {
             });
             let filter = cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder("Filter")
+                    .placeholder("Find in this folder")
                     .default_value(query)
             });
             let server = self.server.clone();
@@ -915,17 +915,11 @@ impl Newport {
                 .selected(on)
                 .toggled(on)
         };
-        div()
+        crate::controls::page_toolbar(cx)
             .id("files-toolbar")
             .debug_selector(|| "files-toolbar".into())
-            .flex()
-            .items_center()
+            // Icon buttons sit closer together than labelled controls.
             .gap(px(4.))
-            .h(px(44.))
-            .px(px(crate::controls::PAGE_PADDING - 6.))
-            .flex_shrink_0()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(
                 toggle(
                     "files-places",
@@ -979,10 +973,8 @@ impl Newport {
                     .w(px(220_f32.min(self.content_width * 0.28)))
                     .min_w(px(120.))
                     .child(
-                        crate::controls::input(&browser.filter)
-                            .aria_label("Filter files")
-                            .prefix(Icon::new(IconName::Search).size(px(14.)))
-                            .cleanable(true),
+                        crate::controls::search_input(&browser.filter, cx)
+                            .aria_label("Filter files"),
                     ),
             )
             .child(

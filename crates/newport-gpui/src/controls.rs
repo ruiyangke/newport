@@ -27,6 +27,24 @@ pub const COMPACT_HEIGHT: f32 = 24.;
 pub const FORM_HEIGHT: f32 = 34.;
 pub const FONT_SIZE: f32 = crate::ui::FONT_SIZE;
 pub const ICON_SIZE: f32 = 16.;
+/// The bar across the top of a list page: search, filters, then actions.
+pub const TOOLBAR_HEIGHT: f32 = 44.;
+pub const TOOLBAR_INSET: f32 = 12.;
+pub const SEARCH_WIDTH: f32 = 260.;
+
+/// A list page's toolbar. Connections, Services, Containers and Files share
+/// its height, inset and full-width rule so switching pages doesn't shift it.
+pub fn page_toolbar(cx: &App) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .h(px(TOOLBAR_HEIGHT))
+        .px(px(TOOLBAR_INSET))
+        .flex_shrink_0()
+        .border_b_1()
+        .border_color(cx.theme().border)
+}
 
 /// Hand off after the editor has mounted and the menu's dismissal frame has
 /// finished, without keeping a cancelled editor alive just to focus it.
@@ -84,6 +102,18 @@ fn sized_input(state: &Entity<InputState>, height: f32) -> Input {
 }
 pub fn input(state: &Entity<InputState>) -> Input {
     sized_input(state, CONTROL_HEIGHT)
+}
+/// A search field: the shared input with a muted 14px search icon and a
+/// clear button, so every page's search reads the same.
+pub fn search_input(state: &Entity<InputState>, cx: &App) -> Input {
+    use gpui_kit::component::Icon;
+    input(state)
+        .prefix(
+            Icon::new(gpui_kit::assets::IconName::Search)
+                .size(px(14.))
+                .text_color(cx.theme().muted_foreground),
+        )
+        .cleanable(true)
 }
 pub fn form_input(state: &Entity<InputState>) -> Input {
     sized_input(state, FORM_HEIGHT)

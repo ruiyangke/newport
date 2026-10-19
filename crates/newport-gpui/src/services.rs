@@ -533,24 +533,18 @@ impl ServicesPanel {
         });
         let owner = cx.weak_entity();
         let journal = self.effective_selection(cx) == Selection::Journal;
-        div()
+        crate::controls::page_toolbar(cx)
             .id("services-toolbar")
             .debug_selector(|| "services-toolbar".into())
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .h(px(44.))
-            .px(px(crate::controls::PAGE_PADDING - 4.))
-            .flex_shrink_0()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(
-                div().w(px(260.)).min_w(px(120.)).flex_shrink(1.).child(
-                    crate::controls::input(&self.search)
-                        .prefix(Icon::new(IconName::Search).size(px(14.)))
-                        .cleanable(true)
-                        .aria_label("Find a service"),
-                ),
+                div()
+                    .w(px(crate::controls::SEARCH_WIDTH))
+                    .min_w(px(120.))
+                    .flex_shrink(1.)
+                    .child(
+                        crate::controls::search_input(&self.search, cx)
+                            .aria_label("Find a service"),
+                    ),
             )
             .child(Selector::new(
                 "services-filter",

@@ -110,7 +110,6 @@ fn column() -> Div {
 impl Newport {
     pub(super) fn project_library_caption(
         &self,
-        count: usize,
         columns: Columns,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -119,6 +118,8 @@ impl Newport {
             .get(&self.server)
             .cloned()
             .unwrap_or_default();
+        // Column headers read like the Files list: muted labels, the active
+        // one in full colour with its direction arrow.
         let headers = [(false, "Project"), (true, "Path")]
             .into_iter()
             .map(|(path, title)| {
@@ -128,50 +129,64 @@ impl Newport {
                 } else {
                     "ascending"
                 };
-                crate::controls::compact_button(if path {
-                    "sort-project-path"
-                } else {
-                    "sort-project-name"
-                })
-                .ghost()
-                .label(title)
-                .accessibility_label(format!(
-                    "Sort by {title}{}",
-                    if active {
-                        format!(", {direction}")
+                div()
+                    .id(if path {
+                        "sort-project-path"
                     } else {
-                        String::new()
-                    }
-                ))
-                .when(active, |button| {
-                    button.icon(if preferences.sort_descending {
-                        IconName::ArrowDown
-                    } else {
-                        IconName::ArrowUp
+                        "sort-project-name"
                     })
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let prefs = this
-                        .project_preferences
-                        .entry(this.server.clone())
-                        .or_default();
-                    prefs.sort_descending = prefs.sort_path == path && !prefs.sort_descending;
-                    prefs.sort_path = path;
-                    this.project_preferences_changed();
-                    cx.notify();
-                }))
+                    .role(accesskit::Role::Button)
+                    .aria_label(format!(
+                        "Sort by {title}{}",
+                        if active {
+                            format!(", {direction}")
+                        } else {
+                            String::new()
+                        }
+                    ))
+                    .test_support()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .cursor_pointer()
+                    .text_color(if active {
+                        cx.theme().foreground
+                    } else {
+                        cx.theme().muted_foreground
+                    })
+                    .hover(|style| style.text_color(cx.theme().foreground))
+                    .child(title)
+                    .when(active, |header| {
+                        header.child(
+                            Icon::new(if preferences.sort_descending {
+                                IconName::ArrowDown
+                            } else {
+                                IconName::ArrowUp
+                            })
+                            .size(px(12.)),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let prefs = this
+                            .project_preferences
+                            .entry(this.server.clone())
+                            .or_default();
+                        prefs.sort_descending = prefs.sort_path == path && !prefs.sort_descending;
+                        prefs.sort_path = path;
+                        this.project_preferences_changed();
+                        cx.notify();
+                    }))
             });
         div()
-            .h(px(30.))
+            .h(px(28.))
             .flex_shrink_0()
             .flex()
             .items_center()
             .gap(px(12.))
-            .px(px(12.))
-            .border_1()
-            .rounded_t(px(crate::ui::RADIUS))
+            .pl(px(crate::controls::PAGE_PADDING))
+            .pr(px(12.))
+            .border_b_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().sidebar)
             .text_size(px(crate::ui::FONT_SIZE))
             .text_color(cx.theme().muted_foreground)
             .child(div().w(px(18.)).flex_shrink_0())
@@ -181,9 +196,8 @@ impl Newport {
                     .min_w_0()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .children(headers)
-                    .child(format!("({count})")),
+                    .gap(px(12.))
+                    .children(headers),
             )
             .when(columns.branch, |v| {
                 v.child(column().text_size(px(crate::ui::FONT_SIZE)).child("Branch"))
@@ -230,7 +244,6 @@ impl Newport {
         index: usize,
         columns: Columns,
         busy: bool,
-        last: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let group = SharedString::from(format!("project-row:{}", status_key(project)));
@@ -412,12 +425,10 @@ impl Newport {
             .flex()
             .items_center()
             .gap(px(12.))
-            .px(px(12.))
+            .pl(px(crate::controls::PAGE_PADDING))
+            .pr(px(12.))
             .py(px(9.))
             .border_b_1()
-            .border_l_1()
-            .border_r_1()
-            .when(last, |v| v.rounded_b(px(crate::ui::RADIUS)))
             .border_color(cx.theme().border)
             .hover(|v| v.bg(theme::row_hover(cx)))
             .child(

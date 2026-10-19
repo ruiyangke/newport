@@ -114,7 +114,7 @@ impl Picker {
         cx: &mut Context<Self>,
     ) -> Self {
         let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Find a file by name or path…"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Find a file by name or path"));
         let subscription =
             cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
                 InputEvent::Change => this.search(window, cx),

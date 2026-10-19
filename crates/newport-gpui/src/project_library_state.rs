@@ -51,7 +51,7 @@ impl Newport {
         if state.input.is_some() {
             return;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find a project"));
         state.subscription = Some(cx.subscribe(&input, move |this, _, event, cx| {
             if !matches!(event, gpui_kit::component::input::InputEvent::Change)
                 || this.server != server

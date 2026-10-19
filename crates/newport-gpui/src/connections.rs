@@ -275,7 +275,7 @@ impl Newport {
             .entry(self.server.clone())
             .or_default();
         if state.input.is_none() {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find a connection…"));
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find a connection"));
             state.subscription = Some(cx.subscribe(&input, move |this, _, event, cx| {
                 if matches!(event, InputEvent::Change)
                     && this.page == Page::Ports

@@ -1878,8 +1878,9 @@ fn connections_toolbar_wraps_and_loading_replaces_the_list_in_place(cx: &mut Tes
         assert!(first.top() >= toolbar.bottom());
         assert!(first.bottom() < footer.top());
         if width == 1100. {
-            assert!(
-                toolbar.size.height <= px(42.),
+            assert_eq!(
+                toolbar.size.height,
+                px(crate::controls::TOOLBAR_HEIGHT),
                 "wide toolbar should use one control row: {toolbar:?}"
             );
         }
@@ -2689,7 +2690,7 @@ fn empty_project_library_offers_the_add_choices_in_place(cx: &mut TestAppContext
         assert!(shown.iter().any(|l| l == label), "missing {label}");
     }
     assert!(
-        !shown.iter().any(|l| l == "Search projects"),
+        !shown.iter().any(|l| l == "Find a project"),
         "nothing to filter in an empty library"
     );
     let (add, clone) = (
