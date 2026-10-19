@@ -374,11 +374,76 @@ impl DockerTotals {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DockerDisk {
     pub images: Vec<DockerImage>,
     pub volumes: Vec<DockerVolume>,
     pub totals: DockerTotals,
+    /// False for the quick reading, whose volumes are listed but not yet
+    /// sized. Full readings (and agents that predate the split) measure them.
+    #[serde(default = "measured")]
+    pub volumes_measured: bool,
+}
+fn measured() -> bool {
+    true
+}
+impl Default for DockerDisk {
+    fn default() -> Self {
+        Self {
+            images: Vec::new(),
+            volumes: Vec::new(),
+            totals: DockerTotals::default(),
+            volumes_measured: true,
+        }
+    }
+}
+impl DockerDisk {
+    /// Fill a quick reading's volumes from a separate volume measurement. The
+    /// quick reading stays the source of truth for which volumes exist; the
+    /// measurement only lends sizes by name, so a volume removed since is
+    /// dropped and one created since stays unmeasured.
+    pub fn with_volumes(mut self, measured: &DockerDisk) -> Self {
+        if self.volumes_measured || !measured.volumes_measured {
+            return self;
+        }
+        let sizes: BTreeMap<&str, Option<u64>> = measured
+            .volumes
+            .iter()
+            .map(|volume| (volume.name.as_str(), volume.size))
+            .collect();
+        // A truncated measurement lists only the largest volumes; the rest
+        // were measured too, just too small to list.
+        let truncated = (measured.volumes.len() as u64) < measured.totals.volumes.count;
+        let mut complete = true;
+        for volume in &mut self.volumes {
+            match sizes.get(volume.name.as_str()) {
+                Some(size) => volume.size = *size,
+                None => complete &= truncated,
+            }
+        }
+        if (self.volumes.len() as u64) < self.totals.volumes.count {
+            // Totals cover volumes the truncated list omits.
+            self.totals.volumes.size = measured.totals.volumes.size;
+            self.totals.volumes.reclaimable = measured.totals.volumes.reclaimable;
+        } else {
+            let size = self
+                .volumes
+                .iter()
+                .filter_map(|volume| volume.size)
+                .fold(0_u64, u64::saturating_add);
+            let unused = self
+                .volumes
+                .iter()
+                .filter(|volume| volume.ref_count == Some(0))
+                .filter_map(|volume| volume.size)
+                .fold(0_u64, u64::saturating_add);
+            self.totals.volumes.size = size;
+            self.totals.volumes.reclaimable = unused.min(size);
+        }
+        self.volumes_measured = complete;
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -922,6 +987,104 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn disk_readings_default_to_measured_and_merge_only_unmeasured_volumes() {
+        let old: DockerDisk = serde_json::from_value(json!({"images":[],"volumes":[],
+            "totals":{"images":{"count":0,"size":0,"reclaimable":0},"containers":{"count":0,"size":0,"reclaimable":0},
+            "volumes":{"count":0,"size":0,"reclaimable":0},"buildCache":{"count":0,"size":0,"reclaimable":0}}}))
+        .unwrap();
+        assert!(
+            old.volumes_measured,
+            "agents before the split measure everything"
+        );
+        let volume = |size| DockerVolume {
+            name: "data".into(),
+            size,
+            ..Default::default()
+        };
+        let quick = DockerDisk {
+            volumes: vec![volume(None)],
+            volumes_measured: false,
+            ..Default::default()
+        };
+        let mut measured = DockerDisk {
+            volumes: vec![volume(Some(9))],
+            ..Default::default()
+        };
+        measured.totals.volumes.size = 9;
+        let merged = quick.clone().with_volumes(&measured);
+        assert!(merged.volumes_measured);
+        assert_eq!(merged.volumes[0].size, Some(9));
+        assert_eq!(merged.totals.volumes.size, 9);
+        // A measured reading is never overwritten by another one.
+        let full = DockerDisk::default();
+        assert_eq!(full.clone().with_volumes(&measured), full);
+        let pending = DockerDisk {
+            volumes_measured: false,
+            ..Default::default()
+        };
+        assert!(!quick.with_volumes(&pending).volumes_measured);
+    }
+
+    #[test]
+    fn merged_volumes_follow_the_quick_list_and_lend_only_sizes() {
+        let volume = |name: &str, size, refs| DockerVolume {
+            name: name.into(),
+            size,
+            ref_count: Some(refs),
+            ..Default::default()
+        };
+        let mut quick = DockerDisk {
+            volumes: vec![volume("data", None, 1), volume("cache", None, 0)],
+            volumes_measured: false,
+            ..Default::default()
+        };
+        quick.totals.volumes.count = 2;
+        let mut measured = DockerDisk {
+            volumes: vec![
+                volume("data", Some(700), 1),
+                volume("cache", Some(50), 0),
+                volume("removed", Some(4000), 0),
+            ],
+            ..Default::default()
+        };
+        measured.totals.volumes = DiskTotals {
+            count: 3,
+            size: 4750,
+            reclaimable: 4050,
+        };
+        let merged = quick.clone().with_volumes(&measured);
+        assert!(merged.volumes_measured);
+        assert_eq!(
+            merged
+                .volumes
+                .iter()
+                .map(|v| (v.name.as_str(), v.size))
+                .collect::<Vec<_>>(),
+            [("data", Some(700)), ("cache", Some(50))],
+            "a volume removed since the measurement is not shown"
+        );
+        assert_eq!(
+            merged.totals.volumes,
+            DiskTotals {
+                count: 2,
+                size: 750,
+                reclaimable: 50
+            }
+        );
+        // A volume created since the measurement stays unmeasured.
+        quick.volumes.push(volume("new", None, 0));
+        quick.totals.volumes.count = 3;
+        let merged = quick.clone().with_volumes(&measured);
+        assert!(!merged.volumes_measured);
+        assert_eq!(merged.volumes[2].size, None);
+        assert_eq!(merged.totals.volumes.size, 750);
+        // Unless the measurement was truncated: unlisted volumes were measured
+        // too, just smaller than every listed one.
+        measured.totals.volumes.count = 10;
+        assert!(quick.with_volumes(&measured).volumes_measured);
+    }
+
     fn container(name: &str) -> Container {
         Container {
             id: format!("{name:0<64}"),
@@ -1072,7 +1235,10 @@ mod tests {
             "totals":{"images":total,"containers":total,"volumes":total,"buildCache":total}
         });
         let disk: DockerDisk = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&disk).unwrap(), value);
+        // Readings without the flag come from full scans: volumes are measured.
+        let mut measured = value.clone();
+        measured["volumesMeasured"] = json!(true);
+        assert_eq!(serde_json::to_value(&disk).unwrap(), measured);
         assert_eq!(disk.volumes[0].size, None);
         assert_eq!(disk.volumes[0].ref_count, None);
         for encoded in [
@@ -1088,9 +1254,18 @@ mod tests {
             json!([
                 [["sha256:1", ["web:latest"], 20, 3, 11, 2, false]],
                 [["app_data", "local", null, null, false, "app"]],
-                [[1, 20, 10], [1, 20, 10], [1, 20, 10], [1, 20, 10]]
+                [[1, 20, 10], [1, 20, 10], [1, 20, 10], [1, 20, 10]],
+                true
             ])
         );
+        // The positional form from before the flag still decodes, measured.
+        let legacy = rmp_serde::to_vec(&json!([
+            [["sha256:1", ["web:latest"], 20, 3, 11, 2, false]],
+            [["app_data", "local", null, null, false, "app"]],
+            [[1, 20, 10], [1, 20, 10], [1, 20, 10], [1, 20, 10]]
+        ]))
+        .unwrap();
+        assert_eq!(rmp_serde::from_slice::<DockerDisk>(&legacy).unwrap(), disk);
         for pointer in [
             "/images/0/size",
             "/images/0/containers",

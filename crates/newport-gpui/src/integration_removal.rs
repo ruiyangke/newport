@@ -39,7 +39,7 @@ impl Newport {
     fn removal_scope_matches(&self, review: &Review) -> bool {
         self.selected_server().is_some_and(|s| {
             s["id"] == review.server["id"]
-                && newport_domain::connection_scope::connection(&s, &self.snapshot) == review.scope
+                && newport_domain::connection_scope::connection(s, &self.snapshot) == review.scope
         })
     }
 
@@ -295,7 +295,7 @@ impl Newport {
                 text(&review.server, "sshHost")
             );
             content = content.child(div().id("needle-removal-target").role(Role::Paragraph).test_support().aria_label(target.clone())
-                .min_w_0().w_full().whitespace_normal().text_size(px(13.)).text_color(cx.theme().muted_foreground)
+                .min_w_0().w_full().whitespace_normal().text_size(px(crate::ui::FONT_SIZE)).text_color(cx.theme().muted_foreground)
                 .child(target))
                 .child(description("needle-removal-impact", "Metrics, Git, browser, and clipboard will stop. SSH terminals and port forwarding stay available.", cx))
                 .child(description("needle-removal-retention", "Newport-owned shell changes will be restored. The executable and backups are kept so you can restore Needle later.", cx));
@@ -392,7 +392,7 @@ fn status_line(title: &str, pending: bool, cx: &App) -> AnyElement {
         .flex()
         .items_center()
         .gap_2()
-        .text_size(px(13.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .font_weight(FontWeight::SEMIBOLD)
         .when(pending, |row| {
             row.child(gpui_kit::component::spinner::Spinner::new().small())
@@ -408,7 +408,7 @@ fn error_line(error: &str, cx: &App) -> AnyElement {
         .role(Role::Alert)
         .test_support()
         .aria_label(error.to_owned())
-        .text_size(px(13.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .line_height(relative(1.6))
         .text_color(cx.theme().danger)
         .child(error.to_owned())

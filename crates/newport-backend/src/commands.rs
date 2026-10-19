@@ -27,6 +27,12 @@ pub async fn ssh_agent_keys() -> crate::agent_keys::KeyList {
     crate::agent_keys::list().await
 }
 
+pub async fn ssh_config_hosts() -> Result<crate::ssh_config_import::ConfigHosts, String> {
+    tokio::task::spawn_blocking(crate::ssh_config_import::read)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 pub async fn cockpit_history(
     state: &Shared,
     db: &crate::metrics_db::MetricsDb,
@@ -195,9 +201,14 @@ pub async fn containers_remove(
     result
 }
 
-pub async fn docker_disk(state: &Shared, id: Uuid) -> Result<serde_json::Value, String> {
+pub async fn docker_disk(
+    state: &Shared,
+    id: Uuid,
+    part: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let part = server_queries::DiskPart::parse(part.as_deref())?;
     let server = crate::server_session::resolve(state, id).await?;
-    server_queries::read(&server, Read::Disk, false).await
+    server_queries::read(&server, Read::Disk(part), false).await
 }
 
 pub async fn docker_prune(

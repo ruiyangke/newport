@@ -179,7 +179,7 @@ impl Selector {
         let focused = state.read(cx).focused;
         let navigation = state.clone();
         let count = self.choices.len();
-        let selected_background: Hsla = cx.theme().tokens.background.into();
+        let selected_background = crate::theme::selected_fill(cx.theme().is_dark());
         RadioGroup::new(self.id.clone())
             .axis(Axis::Horizontal)
             .aria_label(self.label)
@@ -187,8 +187,10 @@ impl Selector {
             .items_center()
             .flex_shrink_0()
             .h(px(crate::controls::CONTROL_HEIGHT))
-            .p(px(3.))
-            .gap(px(2.))
+            .p_0()
+            .gap_0()
+            .border_1()
+            .border_color(cx.theme().border)
             .rounded(cx.theme().radius)
             .bg(cx.theme().tokens.tab_bar_segmented)
             .on_key_down(move |event, window, cx| {
@@ -215,9 +217,9 @@ impl Selector {
                     .justify_center()
                     .flex_shrink_0()
                     .cursor_default()
-                    .h(px(crate::controls::CONTROL_HEIGHT - 6.))
-                    .min_h(px(crate::controls::CONTROL_HEIGHT - 6.))
-                    .max_h(px(crate::controls::CONTROL_HEIGHT - 6.))
+                    .h(px(crate::controls::CONTROL_HEIGHT - 2.))
+                    .min_h(px(crate::controls::CONTROL_HEIGHT - 2.))
+                    .max_h(px(crate::controls::CONTROL_HEIGHT - 2.))
                     .px(px(9.))
                     .when(icon_only, |item| {
                         item.w(px(crate::controls::CONTROL_HEIGHT))
@@ -228,8 +230,10 @@ impl Selector {
                     .text_size(px(crate::controls::FONT_SIZE))
                     .font_weight(FontWeight::MEDIUM)
                     .line_height(relative(1.25))
-                    .rounded(px(5.))
-                    .when(checked, |item| item.shadow_sm())
+                    .rounded(px(crate::ui::RADIUS))
+                    .when(index > 0, |item| {
+                        item.border_l_1().border_color(cx.theme().border)
+                    })
                     .bg(if checked {
                         selected_background
                     } else {
@@ -479,8 +483,8 @@ mod tests {
             assert_eq!(node.selected(), Some(checked));
             assert_eq!(
                 node.bounds().size.height,
-                px(crate::controls::CONTROL_HEIGHT - 6.),
-                "the selected segment fits inside the 28px toolbar frame with 3px inset"
+                px(crate::controls::CONTROL_HEIGHT - 2.),
+                "the selected segment fits inside the 28px control frame and its 1px border"
             );
             if id.starts_with("view-") {
                 assert_eq!(

@@ -542,7 +542,7 @@ mod tests {
                 .flex_col()
                 .track_focus(&self.focus)
                 .font_family(cx.theme().mono_font_family.clone())
-                .text_size(px(12.))
+                .text_size(px(crate::ui::FONT_SIZE))
                 .line_height(px(20.))
                 .children(self.input.as_ref().map(gpui::component::input::Input::new))
                 .child(

@@ -252,20 +252,20 @@ impl Newport {
                     .border_color(cx.theme().border)
                     .child(
                         div()
-                            .text_size(px(crate::project_ui::FONT_SIZE))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .font_weight(FontWeight::MEDIUM)
                             .flex_shrink_0()
                             .child("Git output"),
                     )
                     .child(
-                        crate::project_ui::label("Latest 100 commands · this session")
-                            .text_size(px(crate::project_ui::FONT_SIZE))
+                        crate::label("Latest 100 commands · this session")
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .min_w_0()
                             .flex_1()
                             .truncate(),
                     )
                     .child(
-                        crate::project_ui::compact_button("git-log-follow")
+                        crate::controls::compact_button("git-log-follow")
                             .label(if self.git_log.follow {
                                 "Auto-scroll on"
                             } else {
@@ -322,19 +322,17 @@ impl Newport {
             )
             .child(self.status("git-log-events", cx))
             .when_some(self.git_log.reflow_error.clone(), |view, error| {
-                view.child(crate::project_ui::label(error))
+                view.child(crate::label(error))
             })
             .when(self.git_log.gap, |view| {
-                view.child(crate::project_ui::label(
+                view.child(crate::label(
                     "Some older output was omitted from the bounded log.",
                 ))
             })
             .when(rows.is_empty(), |view| {
                 view.child(
-                    crate::project_ui::label(
-                        "Refresh this repository or run a Git action to see output.",
-                    )
-                    .p_3(),
+                    crate::label("Refresh this repository or run a Git action to see output.")
+                        .p_3(),
                 )
             })
             .child(

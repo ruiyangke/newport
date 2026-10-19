@@ -9,7 +9,7 @@ use newport_domain::{
 };
 
 pub(super) fn new_lines_button(id: &'static str, count: u64, cx: &App) -> Button {
-    let mut content = div().text_size(px(11.5)).gap(px(5.));
+    let mut content = div().text_size(px(crate::ui::FONT_SIZE)).gap(px(5.));
     crate::controls::button(id)
         .label(format!(
             "{count} new {}",
@@ -20,7 +20,7 @@ pub(super) fn new_lines_button(id: &'static str, count: u64, cx: &App) -> Button
             content.style().clone(),
             gpui_kit::component::Size::Size(px(12.)),
         )
-        .rounded(px(999.))
+        .rounded(px(crate::ui::RADIUS))
         .px(px(11.))
         .font_weight(FontWeight::MEDIUM)
         .bg(cx.theme().background)
@@ -39,6 +39,7 @@ enum Row {
         entry: ContainerLogEntry,
         time: String,
         source: String,
+        styles: log_line::Styles,
         tone: log_line::Tone,
     },
 }
@@ -70,7 +71,10 @@ pub(super) struct Logs {
     focus: FocusHandle,
     selection: SelectableLog,
     rows: Rc<Vec<Row>>,
+    /// Retained entries with escapes stripped; `styles` holds their colours.
     source: Vec<ContainerLogEntry>,
+    styles: Vec<log_line::Styles>,
+    ansi: log_line::Ansi,
     epoch: Option<u64>,
     first: u64,
     end: u64,
@@ -106,6 +110,8 @@ impl Logs {
             level: Level::All,
             rows: Rc::new(vec![]),
             source: vec![],
+            styles: vec![],
+            ansi: log_line::Ansi::default(),
             epoch: None,
             first: 0,
             end: 0,
@@ -122,6 +128,7 @@ impl Logs {
             self.end = 0;
             self.unseen = 0;
             self.source.clear();
+            self.styles.clear();
             self.rows = Rc::new(vec![]);
             self.selection.clear(cx);
             self.selection.set_rows(vec![], cx);
@@ -143,6 +150,12 @@ impl Logs {
         self.first = window.first;
         self.end = window.end;
         self.source = window.entries.to_vec();
+        let ansi = &mut self.ansi;
+        self.styles = self
+            .source
+            .iter_mut()
+            .map(|entry| ansi.strip(&mut entry.message))
+            .collect();
         if evicted {
             self.selection.clear(cx);
         }
@@ -151,7 +164,7 @@ impl Logs {
 
     pub(super) fn rebuild(&mut self, cx: &mut App, filter_changed: bool) {
         let filter = Filter::new(self.level, self.find.read(cx).value().as_ref());
-        let rows = rows(&self.source, self.first, &filter);
+        let rows = rows(&self.source, &self.styles, self.first, &filter);
         if filter_changed {
             self.selection.clear(cx);
         }
@@ -284,17 +297,6 @@ impl ContainersPanel {
                             .aria_label("Search logs"),
                     ),
             )
-            .child(
-                crate::controls::compact_icon_button("container-log-refresh")
-                    .icon(IconName::RefreshCw)
-                    .accessibility_label("Refresh container logs")
-                    .loading(self.pending("container-logs"))
-                    .disabled(self.pending("container-logs"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.client.retry_logs();
-                        cx.notify();
-                    })),
-            )
             .into_any_element()
     }
 
@@ -394,7 +396,7 @@ impl ContainersPanel {
                     .border_1()
                     .border_color(cx.theme().border)
                     .focus_visible(|style| style.border_color(cx.theme().ring))
-                    .rounded(px(8.))
+                    .rounded(px(crate::ui::RADIUS))
                     .bg(cx.theme().muted.opacity(0.35))
                     .overflow_hidden()
                     .when(pending, |v| v.child(loading::lines("container-logs", 12)))
@@ -424,6 +426,7 @@ impl ContainersPanel {
                                                 entry,
                                                 time,
                                                 source,
+                                                styles,
                                                 tone,
                                                 ..
                                             } => log_line::render(
@@ -434,6 +437,7 @@ impl ContainersPanel {
                                                     time: Some(time),
                                                     source,
                                                     message: &entry.message,
+                                                    styles: styles.as_deref(),
                                                     tone: *tone,
                                                 },
                                                 &query,
@@ -484,40 +488,44 @@ impl ContainersPanel {
                     .id("container-log-footer")
                     .debug_selector(|| "container-log-footer".into())
                     .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
                     .child(
-                        quiet(footer.clone(), cx)
-                            .flex_1()
-                            .text_size(px(11.))
-                            .id("container-log-status")
-                            .role(accesskit::Role::Status)
-                            .aria_label(footer),
-                    )
-                    .child(
-                        crate::controls::compact_icon_button("container-log-copy")
-                            .ghost()
-                            .icon(IconName::Copy)
-                            .accessibility_label("Copy visible logs")
-                            .disabled(count == 0 || pending)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let text = this
-                                    .logs
-                                    .rows
-                                    .iter()
-                                    .filter_map(Row::text)
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                            })),
+                        crate::controls::pane_status_bar(cx)
+                            .left(
+                                quiet(footer.clone(), cx)
+                                    .text_size(px(crate::ui::FONT_SIZE))
+                                    .id("container-log-status")
+                                    .role(accesskit::Role::Status)
+                                    .aria_label(footer),
+                            )
+                            .right(
+                                crate::controls::compact_icon_button("container-log-copy")
+                                    .ghost()
+                                    .icon(IconName::Copy)
+                                    .accessibility_label("Copy visible logs")
+                                    .disabled(count == 0 || pending)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let text = this
+                                            .logs
+                                            .rows
+                                            .iter()
+                                            .filter_map(Row::text)
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    })),
+                            ),
                     ),
             )
             .into_any_element()
     }
 }
 
-fn rows(source: &[ContainerLogEntry], first: u64, filter: &Filter) -> Vec<Row> {
+fn rows(
+    source: &[ContainerLogEntry],
+    styles: &[log_line::Styles],
+    first: u64,
+    filter: &Filter,
+) -> Vec<Row> {
     let mut stamped = source
         .iter()
         .filter_map(|entry| entry.at.and_then(crate::localized_time::journal_day_key));
@@ -561,6 +569,7 @@ fn rows(source: &[ContainerLogEntry], first: u64, filter: &Filter) -> Vec<Row> {
                 .as_ref()
                 .map(|s| format!("{s}: "))
                 .unwrap_or_default(),
+            styles: styles.get(index).cloned().flatten(),
             tone,
         });
     }

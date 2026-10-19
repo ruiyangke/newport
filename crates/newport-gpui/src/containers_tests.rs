@@ -1,4 +1,9 @@
-use super::{ContainersPanel, master_rows};
+use super::{ContainersPanel, Stopped, master_rows};
+
+const EVERY: Stopped = Stopped {
+    shown: true,
+    open: true,
+};
 use gpui::{Context, IntoElement, ParentElement, Render, Styled, Window, div};
 use gpui_kit as gpui;
 use gpui_kit::base::test_support::{ElementSnapshot, snapshots};
@@ -41,6 +46,8 @@ pub(crate) struct FakeBackend {
     calls: Arc<Mutex<Vec<Request>>>,
     snapshot: Arc<Mutex<ContainersSnapshot>>,
     disk: Arc<Mutex<FixtureResponse>>,
+    /// Answers volume measurements when set; otherwise they read `disk`.
+    disk_volumes: Arc<Mutex<Option<FixtureResponse>>>,
     logs: Arc<Mutex<Option<FixtureResponse>>>,
     inspect: Arc<Mutex<Option<FixtureResponse>>>,
     hold_inspects: Arc<AtomicBool>,
@@ -74,6 +81,8 @@ impl FakeBackend {
         let hold_disk = Arc::new(AtomicBool::new(false));
         let (disk_data, disk_streams, disk_gate) =
             (disk.clone(), held_disks.clone(), hold_disk.clone());
+        let disk_volumes = Arc::new(Mutex::new(None::<FixtureResponse>));
+        let volume_data = disk_volumes.clone();
         let logs = Arc::new(Mutex::new(None));
         let log_data = logs.clone();
         let inspect = Arc::new(Mutex::new(None::<FixtureResponse>));
@@ -165,7 +174,12 @@ impl FakeBackend {
                             value
                         })
                 } else if request.method == "docker_disk" {
-                    disk_data.lock().unwrap().clone()
+                    volume_data
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .filter(|_| request.args["part"] == "volumes")
+                        .unwrap_or_else(|| disk_data.lock().unwrap().clone())
                 } else if request.method == "container_logs"
                     && let Some(result) = log_data.lock().unwrap().clone()
                 {
@@ -258,6 +272,7 @@ impl FakeBackend {
             calls,
             snapshot: source,
             disk,
+            disk_volumes,
             logs,
             inspect,
             hold_inspects,
@@ -357,6 +372,9 @@ impl FakeBackend {
     fn fail_disk(&self, error: &str) {
         *self.disk.lock().unwrap() = Err(error.into());
     }
+    fn set_disk_volumes(&self, result: FixtureResponse) {
+        *self.disk_volumes.lock().unwrap() = Some(result);
+    }
     fn hold_disk(&self) {
         self.hold_disk.store(true, Ordering::Release);
     }
@@ -442,6 +460,7 @@ impl Drop for FakeBackend {
 
 fn disk_snapshot() -> DockerDisk {
     DockerDisk {
+        volumes_measured: true,
         totals: DockerTotals {
             images: DiskTotals {
                 count: 2,
@@ -639,6 +658,35 @@ pub(super) fn element(cx: &mut VisualTestContext, label: &str) -> ElementSnapsho
 fn has_element(cx: &mut VisualTestContext, label: &str) -> bool {
     cx.update(|window, _| snapshots(window).iter().any(|e| e.label() == Some(label)))
 }
+/// Remove lives in the selected container's "…" menu.
+fn click_remove(cx: &mut VisualTestContext) {
+    let more = cx.update(|window, _| {
+        snapshots(window)
+            .into_iter()
+            .find(|e| {
+                e.label()
+                    .is_some_and(|l| l.starts_with("More actions for "))
+            })
+            .expect("container actions menu")
+            .bounds()
+            .center()
+    });
+    cx.simulate_click(more, Default::default());
+    draw(cx);
+    let item = cx.update(|window, _| {
+        snapshots(window)
+            .into_iter()
+            .find(|e| {
+                e.role() == Some(gpui_kit::accesskit::Role::MenuItem)
+                    && e.label() == Some("Remove…")
+            })
+            .expect("Remove menu item")
+            .bounds()
+            .center()
+    });
+    cx.simulate_click(item, Default::default());
+    draw(cx);
+}
 pub(super) fn click(cx: &mut VisualTestContext, label: &str) {
     let at = element(cx, label).bounds().center();
     cx.simulate_click(at, Default::default());
@@ -656,6 +704,16 @@ fn key(cx: &mut VisualTestContext, key: &str) {
 }
 pub(super) fn select(panel: &Entity<ContainersPanel>, cx: &mut VisualTestContext, key: &str) {
     cx.update(|window, cx| panel.update(cx, |panel, cx| panel.select(key.into(), window, cx)));
+    settle(panel, cx);
+}
+/// Projects open on Services; these tests read the Logs tab.
+pub(super) fn select_logs(panel: &Entity<ContainersPanel>, cx: &mut VisualTestContext, key: &str) {
+    select(panel, cx, key);
+    panel.update(cx, |panel, cx| {
+        panel.tab = 0;
+        panel.sync_selection(cx);
+        cx.notify();
+    });
     settle(panel, cx);
 }
 pub(crate) fn restart_web(panel: &Entity<ContainersPanel>, cx: &mut VisualTestContext) {
@@ -695,8 +753,7 @@ fn grouped_list_renders_each_container_once_and_search_opens_collapsed_matches(
             .unwrap_or_else(|| panic!("row {} should render", row.name));
         let master = cx.debug_bounds("containers-master").unwrap();
         assert!(
-            (bounds.right() - (master.right() - px(crate::controls::PAGE_PADDING + 1.))).abs()
-                <= px(2.),
+            (bounds.right() - (master.right() - px(1.))).abs() <= px(2.),
             "row {} must fill its pane, not shrink to its text",
             row.name
         );
@@ -750,6 +807,7 @@ fn grouped_list_renders_each_container_once_and_search_opens_collapsed_matches(
         "",
         &HashSet::new(),
         &HashSet::from(["stack".into()]),
+        EVERY,
         0,
     );
     let keys: Vec<_> = rows
@@ -765,14 +823,21 @@ fn grouped_list_renders_each_container_once_and_search_opens_collapsed_matches(
 fn oneoff_only_projects_do_not_display_a_zero_service_fraction() {
     let mut source = snapshot();
     source.containers[1].exit_code = Some(0);
-    let all_rows = master_rows(&source.containers, "", &HashSet::new(), &HashSet::new(), 0);
+    let all_rows = master_rows(
+        &source.containers,
+        "",
+        &HashSet::new(),
+        &HashSet::new(),
+        EVERY,
+        0,
+    );
     assert_eq!(
         all_rows
             .iter()
             .find(|row| row.key.as_deref() == Some("p:stack"))
             .unwrap()
             .note,
-        "1/2"
+        "1/2 running"
     );
     let jobs = source
         .containers
@@ -784,7 +849,7 @@ fn oneoff_only_projects_do_not_display_a_zero_service_fraction() {
                 .is_some_and(|labels| labels.oneoff)
         })
         .collect::<Vec<_>>();
-    let rows = master_rows(&jobs, "", &HashSet::new(), &HashSet::new(), 0);
+    let rows = master_rows(&jobs, "", &HashSet::new(), &HashSet::new(), EVERY, 0);
     let project = rows
         .iter()
         .find(|row| row.key.as_deref() == Some("p:stack"))
@@ -882,10 +947,11 @@ fn keyboard_navigation_and_tabs_only_read_with_one_selected_tab_stop(cx: &mut Te
         panel.read_with(cx, |p, _| p.selected.clone()),
         Some("c:cache".into())
     );
+    // Disk usage lives in the toolbar now; the list starts with projects.
     key(cx, "home");
     assert_eq!(
         panel.read_with(cx, |p, _| p.selected.clone()),
-        Some("disk".into())
+        Some("p:stack".into())
     );
     select(&panel, cx, "c:stack-web-1");
     click(cx, "Logs");
@@ -911,6 +977,56 @@ fn keyboard_navigation_and_tabs_only_read_with_one_selected_tab_stop(cx: &mut Te
         });
     }
     settle(&panel, cx);
+    assert_eq!(backend.writes(), 0);
+}
+
+#[gpui::test]
+fn arrow_keys_enter_the_list_from_a_selection_it_does_not_show(cx: &mut TestAppContext) {
+    let (panel, cx, backend) = fixture(cx);
+    for (stroke, expected) in [
+        ("down", "p:stack"),
+        ("home", "p:stack"),
+        ("up", "c:cache"),
+        ("end", "c:cache"),
+    ] {
+        select(&panel, cx, "disk");
+        key(cx, stroke);
+        assert_eq!(
+            panel.read_with(cx, |p, _| p.selected.clone()),
+            Some(expected.into()),
+            "{stroke} from Disk usage"
+        );
+    }
+    assert_eq!(backend.writes(), 0);
+}
+
+#[gpui::test]
+fn default_selection_skips_containers_the_running_filter_hides(cx: &mut TestAppContext) {
+    let container = |id: char, name: &str, state| Container {
+        id: id.to_string().repeat(64),
+        name: name.into(),
+        image: "redis:7".into(),
+        state,
+        exit_code: (state == ContainerState::Exited).then_some(0),
+        ..Default::default()
+    };
+    let data = ContainersSnapshot {
+        containers: vec![
+            container('a', "old", ContainerState::Exited),
+            container('b', "cache", ContainerState::Running),
+        ],
+        ..snapshot()
+    };
+    let (panel, cx, backend) = fixture_with_snapshot(cx, data, 980., 1000.);
+    assert_eq!(
+        panel.read_with(cx, |p, cx| p.effective_selection(cx)),
+        Some("c:cache".into()),
+        "the stopped container is first but hidden"
+    );
+    assert_eq!(
+        panel.read_with(cx, |p, _| p.active_selection.clone()),
+        Some("c:cache".into())
+    );
     assert_eq!(backend.writes(), 0);
 }
 
@@ -953,7 +1069,7 @@ fn filtering_a_fallback_project_discards_its_compose_review_without_writing(
         assert_eq!(p.client.selected_project(), Some("stack"));
         assert!(p.client.selected_container().is_none());
     });
-    click(cx, "More");
+    click(cx, "More Compose actions");
     click(cx, "Down…");
     assert!(panel.read_with(cx, |p, _| p.compose_state.proposed.is_some()));
     assert!(cx.debug_bounds("compose-review").is_some());
@@ -1227,7 +1343,7 @@ fn shell_handover_uses_the_observed_container_and_pause_lives_in_the_menu(cx: &m
     select(&panel, cx, "c:stack-web-1");
     assert!(has_element(cx, "Shell"));
     assert!(!has_element(cx, "Pause"));
-    assert!(!has_element(cx, "Remove"));
+    assert!(!has_element(cx, "Remove…"));
     click(cx, "Shell");
     assert_eq!(shells.borrow().len(), 1);
     assert_eq!(shells.borrow()[0].1, "web");
@@ -1262,7 +1378,7 @@ fn shell_handover_uses_the_observed_container_and_pause_lives_in_the_menu(cx: &m
     settle(&panel, cx);
     assert!(has_element(cx, "Resume"));
     assert!(!has_element(cx, "Shell"));
-    assert!(!has_element(cx, "Remove"));
+    assert!(!has_element(cx, "Remove…"));
     assert_eq!(backend.writes(), 1);
 }
 
@@ -1272,7 +1388,7 @@ fn removal_review_cancels_retries_and_keeps_its_original_target_while_navigating
 ) {
     let (panel, cx, backend) = fixture(cx);
     select(&panel, cx, "c:stack-worker-1");
-    click(cx, "Remove");
+    click_remove(cx);
     assert!(cx.debug_bounds("container-action-review").is_some());
     cx.update(|window, cx| assert!(panel.read(cx).review_focus.is_focused(window)));
     assert_eq!(backend.writes(), 0);
@@ -1281,7 +1397,7 @@ fn removal_review_cancels_retries_and_keeps_its_original_target_while_navigating
     assert_eq!(backend.writes(), 0);
 
     backend.hold_actions();
-    click(cx, "Remove");
+    click_remove(cx);
     click_selector(cx, "confirm-container-action");
     wait_for_held_action(&backend);
     click_selector(cx, "confirm-container-action");
@@ -1339,7 +1455,7 @@ fn removal_review_cancels_retries_and_keeps_its_original_target_while_navigating
 fn removal_review_rejects_a_restarted_or_recreated_container(cx: &mut TestAppContext) {
     let (panel, cx, backend) = fixture(cx);
     select(&panel, cx, "c:stack-worker-1");
-    click(cx, "Remove");
+    click_remove(cx);
     let mut changed = snapshot();
     changed.containers[1].state = ContainerState::Running;
     backend.set_snapshot(changed);
@@ -1353,7 +1469,7 @@ fn removal_review_rejects_a_restarted_or_recreated_container(cx: &mut TestAppCon
     backend.set_snapshot(snapshot());
     panel.update(cx, |p, cx| p.refresh(cx));
     settle(&panel, cx);
-    click(cx, "Remove");
+    click_remove(cx);
     let mut changed = snapshot();
     changed.containers[1].id = "f".repeat(64);
     backend.set_snapshot(changed);
@@ -1368,7 +1484,7 @@ fn removal_review_rejects_a_restarted_or_recreated_container(cx: &mut TestAppCon
 fn compact_removal_review_keeps_cancel_visible_and_focused(cx: &mut TestAppContext) {
     let (panel, cx, backend) = fixture_with_size(cx, 560., 480.);
     select(&panel, cx, "c:stack-worker-1");
-    click(cx, "Remove");
+    click_remove(cx);
     let detail = cx.update(|window, _| window.viewport_size());
     let cancel = cx.debug_bounds("cancel-container-review").unwrap();
     assert!(
@@ -1395,7 +1511,7 @@ fn lifecycle_dialog_blocks_background_pointer_and_keyboard_until_explicit_confir
     let (panel, cx, backend) = fixture(cx);
     select(&panel, cx, "c:stack-worker-1");
     let start = element(cx, "Start").bounds().center();
-    click(cx, "Remove");
+    click_remove(cx);
     assert!(cx.debug_bounds("dialog-layer").is_some());
     assert_eq!(
         element(cx, "The stopped container and its logs are deleted. Its image and volumes stay. Compose creates it again on the next up.").role(),
@@ -1442,12 +1558,12 @@ fn lifecycle_dialog_scope_cleanup_closes_only_its_owner_even_when_covered(cx: &m
     use gpui::component::WindowExt;
     let (panel, cx, backend) = fixture(cx);
     select(&panel, cx, "c:stack-worker-1");
-    click(cx, "Remove");
+    click_remove(cx);
     panel.update(cx, |p, cx| p.poll(false, cx));
     draw(cx);
     assert!(!panel.read_with(cx, |p, _| p.has_review_dialog()));
     cx.update(|window, cx| assert!(!window.has_active_dialog(cx)));
-    click(cx, "Remove");
+    click_remove(cx);
     let unrelated = cx.update(|window, cx| {
         window.open_dialog(cx, |dialog, _, _| dialog.title("Unrelated dialog"));
         window.active_dialog_focus_handle(cx).unwrap()
@@ -1577,7 +1693,7 @@ fn lifecycle_dialog_rejects_retained_confirmation_after_external_close_without_p
     use gpui::component::WindowExt;
     let (panel, cx, backend) = fixture(cx);
     select(&panel, cx, "c:stack-worker-1");
-    click(cx, "Remove");
+    click_remove(cx);
     let (token, action) = panel.read_with(cx, |p, _| {
         (p.review_dialog_token, p.review.clone().unwrap())
     });
@@ -1921,6 +2037,43 @@ fn failed_disk_read_has_an_explicit_retry_without_starting_cleanup(cx: &mut Test
     assert!(has_element(cx, "Clean up"));
     assert_eq!(backend.count("docker_disk"), requests + 1);
     assert_eq!(backend.writes(), 0);
+}
+
+#[gpui::test]
+fn failed_volume_measurement_stops_measuring_and_retries_only_volumes(cx: &mut TestAppContext) {
+    let (panel, cx, backend) = fixture(cx);
+    let measured = disk_snapshot();
+    let mut quick = measured.clone();
+    quick.volumes_measured = false;
+    quick.totals.volumes.size = 0;
+    quick.totals.volumes.reclaimable = 0;
+    for volume in &mut quick.volumes {
+        volume.size = None;
+    }
+    backend.set_disk(quick);
+    backend.set_disk_volumes(Err("Fixture volume scan timed out".into()));
+    select(&panel, cx, "disk");
+    assert!(panel.read_with(cx, |p, _| {
+        p.client
+            .resource("docker-disk-volumes")
+            .is_some_and(|r| r.error.is_some() && !r.pending)
+    }));
+    let tile = element(cx, "Volumes: Unknown, 2 volumes");
+    assert!(tile.bounds().size.width > px(0.));
+    assert!(!has_element(cx, "Volumes: Measuring…, 2 volumes"));
+    assert!(has_element(cx, "Retry measuring volumes"));
+    let quick_reads = backend.count("docker_disk");
+    backend.set_disk_volumes(Ok(serde_json::to_value(measured).unwrap()));
+    click(cx, "Retry measuring volumes");
+    settle(&panel, cx);
+    assert_eq!(backend.count("docker_disk"), quick_reads + 1);
+    assert_eq!(
+        backend.requests("docker_disk").last().unwrap()["part"],
+        "volumes"
+    );
+    assert!(!has_element(cx, "Retry measuring volumes"));
+    // Sizes come from the measurement; totals are recomputed from them.
+    assert!(has_element(cx, "Volumes: 976.6 KiB, 2 volumes"));
 }
 
 #[gpui::test]
@@ -2284,6 +2437,30 @@ fn prepared_list_tracks_refresh_search_and_project_expansion(cx: &mut TestAppCon
     assert!(
         !refreshed
             .iter()
+            .any(|row| row.key.as_deref() == Some("c:stack-web-1"))
+    );
+}
+
+#[test]
+fn sections_fold_and_a_search_opens_them() {
+    let source = snapshot();
+    let folded = HashSet::from([
+        "section:Projects".to_owned(),
+        "section:Containers".to_owned(),
+    ]);
+    let rows = master_rows(&source.containers, "", &folded, &HashSet::new(), EVERY, 0);
+    assert!(rows.iter().all(|row| row.group && row.project.is_none()));
+    assert!(rows.iter().any(|row| row.name == "Projects" && !row.open));
+    let rows = master_rows(
+        &source.containers,
+        "web",
+        &folded,
+        &HashSet::new(),
+        EVERY,
+        0,
+    );
+    assert!(
+        rows.iter()
             .any(|row| row.key.as_deref() == Some("c:stack-web-1"))
     );
 }

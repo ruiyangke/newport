@@ -118,7 +118,7 @@ impl PreviewText {
                     .aria_label("Source file preview")
                     .h_full()
                     .font_family(preview_font(cx))
-                    .text_size(px(12.))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .line_height(relative(1.7))
                     .into_any_element()
             } else {
@@ -139,7 +139,7 @@ impl PreviewText {
                     .h_full()
                     .font_family(preview_font(cx))
                     .font_weight(FontWeight::NORMAL)
-                    .text_size(px(12.))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .line_height(relative(1.7))
                     .p_0()
                     .into_any_element()
@@ -274,7 +274,7 @@ mod tests {
         draw(cx);
         editor.read_with(cx, |state, _| {
             let (caret, line_height) = state.cursor_layout().expect("focused preview caret");
-            assert!((line_height - px(20.4)).abs() < px(0.001));
+            assert!((line_height - px(crate::ui::FONT_SIZE * 1.7)).abs() < px(0.001));
             assert_eq!(caret.left(), px(20.));
             assert_eq!(state.input_bounds().top(), px(20.));
         });
@@ -422,14 +422,19 @@ mod tests {
         view.update(cx, |view, cx| {
             view.content = "\t\tX\n        X".into();
             view.wrap = true;
-            view.width = px(110.);
+            // Include the two 20px insets and Kit's 10px caret margin.
+            view.width = px(50.) + one * 8.5;
             cx.notify();
         });
         // Eight spaces fit but X must wrap on both equivalent lines.
         draw(cx);
         let tab_x = caret(3, cx);
         let space_x = caret(13, cx);
-        assert!((tab_x.x - space_x.x).abs() < px(0.01));
+        assert!(
+            (tab_x.x - space_x.x).abs() < px(0.01),
+            "tab={tab_x:?} spaces={space_x:?} cell={one:?} bounds={:?}",
+            editor.read_with(cx, |state, _| state.input_bounds())
+        );
         assert!(
             (tab_x.x - px(20.) - one).abs() < px(0.01),
             "tab={tab_x:?} spaces={space_x:?} cell={one:?} bounds={:?}",

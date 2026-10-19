@@ -164,11 +164,12 @@ fn container_compose_menu_hides_unsupported_build_cli_and_oneoff_choices(cx: &mu
     assert!(menu_item(cx, "Rebuild").is_none());
     close_menu(cx);
     select(&panel, cx, "c:stack-run-1");
-    assert!(!cx.update(|window, _| {
-        snapshots(window)
-            .iter()
-            .any(|node| node.label() == Some("More actions for stack-run-1"))
-    }));
+    // A stopped container's menu holds only removal.
+    click(cx, "More actions for stack-run-1");
+    assert!(menu_item(cx, "Remove…").is_some());
+    assert!(menu_item(cx, "Pause").is_none());
+    assert!(menu_item(cx, "Recreate").is_none());
+    close_menu(cx);
     let mut source = snapshot();
     source.containers[2].state = domain::ContainerState::Running;
     backend.set_snapshot(source);
@@ -190,11 +191,12 @@ fn container_compose_menu_hides_unsupported_build_cli_and_oneoff_choices(cx: &mu
     assert!(menu_item(cx, "Recreate").is_none());
     close_menu(cx);
     select(&panel, cx, "c:stack-worker-1");
-    assert!(!cx.update(|window, _| {
-        snapshots(window)
-            .iter()
-            .any(|node| node.label() == Some("More actions for stack-worker-1"))
-    }));
+    // A stopped container's menu holds only removal.
+    click(cx, "More actions for stack-worker-1");
+    assert!(menu_item(cx, "Remove…").is_some());
+    assert!(menu_item(cx, "Pause").is_none());
+    assert!(menu_item(cx, "Recreate").is_none());
+    close_menu(cx);
     assert_eq!(backend.writes(), 0);
 }
 

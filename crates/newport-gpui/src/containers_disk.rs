@@ -1,7 +1,7 @@
 //! Docker inventory presentation. Reads, cache lifetime, and cleanup ownership
 //! remain in newport-client; this view owns only ordering, scrolling and review.
 use super::*;
-use newport_domain::containers::{DiskTotals, DockerImage, DockerVolume, PruneTarget};
+use newport_domain::containers::{DiskTotals, DockerDisk, DockerImage, DockerVolume, PruneTarget};
 
 #[cfg(test)]
 #[path = "containers_disk_layout_tests.rs"]
@@ -33,6 +33,8 @@ impl InventoryRow {
 struct HeaderState {
     disk_pending: bool,
     disk_error: Option<String>,
+    volumes_pending: bool,
+    volumes_error: Option<String>,
     action_pending: bool,
     action_error: Option<String>,
     width: f32,
@@ -54,9 +56,9 @@ impl DiskView {
         }
     }
     pub(super) fn sync(&mut self, client: &Containers, width: f32) {
-        let revision = client
-            .resource("docker-disk")
-            .map_or(0, |r| r.data_revision);
+        // The merged reading changes when volume sizes arrive on their own,
+        // which may also change the volume list. Rows index into it.
+        let revision = client.disk_revision();
         if self.revision != revision {
             self.revision = revision;
             let mut rows = vec![InventoryRow::Header];
@@ -98,6 +100,12 @@ impl DiskView {
                 .resource("docker-disk")
                 .is_some_and(|r| r.display_pending()),
             disk_error: client.resource("docker-disk").and_then(|r| r.error.clone()),
+            volumes_pending: client
+                .resource("docker-disk-volumes")
+                .is_some_and(|r| r.display_pending()),
+            volumes_error: client
+                .resource("docker-disk-volumes")
+                .and_then(|r| r.error.clone()),
             action_pending: client.resource("action").is_some_and(|r| r.pending),
             action_error: client.resource("action").and_then(|r| r.error.clone()),
         };
@@ -116,7 +124,27 @@ impl DiskView {
     }
 }
 
+/// Where a reading's volume sizes stand. A quick reading lists volumes before
+/// a separate, slower measurement sizes them, and that measurement can fail.
+#[derive(Clone, Copy, PartialEq)]
+enum VolumeSizes {
+    Known,
+    Measuring,
+    Failed,
+}
+
 impl ContainersPanel {
+    fn volume_sizes(&self, data: &DockerDisk) -> VolumeSizes {
+        if data.volumes_measured {
+            VolumeSizes::Known
+        } else if !self.pending("docker-disk-volumes")
+            && self.error("docker-disk-volumes").is_some()
+        {
+            VolumeSizes::Failed
+        } else {
+            VolumeSizes::Measuring
+        }
+    }
     pub(super) fn disk_detail(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("containers-disk")
@@ -159,6 +187,7 @@ impl ContainersPanel {
             .min_h_0()
             .h_full()
             .p(px(crate::controls::PAGE_PADDING))
+            .child(self.measure_detail(cx))
             .child(
                 div()
                     .id("docker-inventory-table")
@@ -188,25 +217,22 @@ impl ContainersPanel {
                                     InventoryRow::Image(i, _) => this
                                         .client
                                         .disk()
-                                        .map(|data| {
-                                            image_row(
-                                                i,
-                                                row_index,
-                                                &data.images[i],
-                                                this.disk_narrow(),
-                                                cx,
-                                            )
+                                        .and_then(|data| Some((data, data.images.get(i)?)))
+                                        .map(|(_, image)| {
+                                            image_row(i, row_index, image, this.disk_narrow(), cx)
                                         })
                                         .unwrap_or_else(|| div().into_any_element()),
                                     InventoryRow::Volume(i, _) => this
                                         .client
                                         .disk()
-                                        .map(|data| {
+                                        .and_then(|data| Some((data, data.volumes.get(i)?)))
+                                        .map(|(data, volume)| {
                                             volume_row(
                                                 i,
                                                 row_index,
-                                                &data.volumes[i],
+                                                volume,
                                                 this.disk_narrow(),
+                                                this.volume_sizes(data) == VolumeSizes::Measuring,
                                                 cx,
                                             )
                                         })
@@ -228,29 +254,21 @@ impl ContainersPanel {
         )
     }
     fn disk_narrow(&self) -> bool {
-        let detail_width = if self.width <= 600. {
-            self.width - 32.
-        } else {
-            self.width - 312.
-        };
-        detail_width < 460.
+        self.detail_content_width() < 460.
     }
     fn disk_header(&self, cx: &mut Context<Self>) -> AnyElement {
-        let detail_width = if self.width <= 600. {
-            self.width - 32.
-        } else {
-            self.width - 312.
-        };
+        let detail_width = self.detail_content_width();
         // Match repeat(auto-fill, minmax(140px, 1fr)): each row shares tracks,
         // including an incomplete final row, rather than stretching its cards.
         let columns = ((detail_width + 10.) / 150.).floor().max(1.) as u16;
         let data = self.client.disk();
         let error = self.error("docker-disk");
         let pending = self.pending("docker-disk");
+        let volume_sizes = data.map_or(VolumeSizes::Known, |data| self.volume_sizes(data));
         let subtitle = data
             .map(|data| {
                 format!(
-                    "Docker uses {} on this server{}",
+                    "Docker uses {} on this server{}{}",
                     bytes(&json!(data.totals.size())),
                     if data.totals.reclaimable() > 0 {
                         format!(
@@ -259,6 +277,13 @@ impl ContainersPanel {
                         )
                     } else {
                         String::new()
+                    },
+                    // Volume sizes arrive seconds later; until then the totals
+                    // leave them out rather than counting them as empty.
+                    match volume_sizes {
+                        VolumeSizes::Known => "",
+                        VolumeSizes::Measuring => " · measuring volumes…",
+                        VolumeSizes::Failed => " · volume sizes unavailable",
                     }
                 )
             })
@@ -329,6 +354,36 @@ impl ContainersPanel {
             .when_some(error, |v, error| {
                 v.child(alert("docker-disk-error", error, cx))
             })
+            .when(volume_sizes == VolumeSizes::Failed, |v| {
+                v.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            alert(
+                                "docker-disk-volumes-error",
+                                format!(
+                                    "Couldn’t measure volumes: {}",
+                                    self.error("docker-disk-volumes").unwrap_or_default()
+                                ),
+                                cx,
+                            )
+                            .flex_1()
+                            .min_w_0(),
+                        )
+                        .child(
+                            crate::controls::compact_button("retry-docker-disk-volumes")
+                                .ghost()
+                                .label("Retry")
+                                .accessibility_label("Retry measuring volumes")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.client.retry_disk_volumes();
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
             .when(
                 data.is_none() && !pending && self.error("docker-disk").is_some(),
                 |v| {
@@ -353,9 +408,12 @@ impl ContainersPanel {
                         .grid_cols(columns)
                         .w_full()
                         .gap(px(10.))
-                        .children(
-                            (0..4).map(|_| Skeleton::new().h(px(112.)).w_full().rounded(px(10.))),
-                        ),
+                        .children((0..4).map(|_| {
+                            Skeleton::new()
+                                .h(px(112.))
+                                .w_full()
+                                .rounded(px(crate::ui::RADIUS))
+                        })),
                 )
             })
             .when_some(data, |v, data| {
@@ -370,6 +428,7 @@ impl ContainersPanel {
                             &data.totals.images,
                             ["image", "images"],
                             self.image_cleanup(cx),
+                            VolumeSizes::Known,
                             cx,
                         ))
                         .child(self.disk_tile(
@@ -377,6 +436,7 @@ impl ContainersPanel {
                             &data.totals.containers,
                             ["container", "containers"],
                             self.prune_button(PruneTarget::Containers, "Remove stopped", cx),
+                            VolumeSizes::Known,
                             cx,
                         ))
                         .child(self.disk_tile(
@@ -384,6 +444,7 @@ impl ContainersPanel {
                             &data.totals.volumes,
                             ["volume", "volumes"],
                             self.prune_button(PruneTarget::Volumes, "Remove unused", cx),
+                            volume_sizes,
                             cx,
                         ))
                         .child(self.disk_tile(
@@ -391,6 +452,7 @@ impl ContainersPanel {
                             &data.totals.build_cache,
                             ["entry", "entries"],
                             self.prune_button(PruneTarget::BuildCache, "Clear", cx),
+                            VolumeSizes::Known,
                             cx,
                         )),
                 )
@@ -403,8 +465,14 @@ impl ContainersPanel {
         totals: &DiskTotals,
         unit: [&str; 2],
         action: AnyElement,
+        sizes: VolumeSizes,
         cx: &App,
     ) -> AnyElement {
+        let size = match sizes {
+            VolumeSizes::Known => bytes(&json!(totals.size)),
+            VolumeSizes::Measuring => "Measuring…".to_owned(),
+            VolumeSizes::Failed => "Unknown".to_owned(),
+        };
         div()
             .id(SharedString::from(format!("disk-tile-{label}")))
             .debug_selector(move || format!("disk-tile-{label}"))
@@ -412,7 +480,7 @@ impl ContainersPanel {
             .test_support()
             .aria_label(format!(
                 "{label}: {}, {} {}{}",
-                bytes(&json!(totals.size)),
+                size,
                 totals.count,
                 unit[usize::from(totals.count != 1)],
                 if totals.reclaimable > 0 {
@@ -425,21 +493,24 @@ impl ContainersPanel {
             .flex()
             .flex_col()
             .gap(px(6.))
-            .rounded(px(10.))
+            .rounded(px(crate::ui::RADIUS))
             .border_1()
             .border_color(cx.theme().border)
             .px(px(14.))
             .py(px(12.))
             .child(
                 quiet(label, cx)
-                    .text_size(px(11.5))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .font_weight(FontWeight::MEDIUM),
             )
             .child(
                 div()
                     .text_size(px(20.))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(bytes(&json!(totals.size))),
+                    .when(sizes != VolumeSizes::Known, |v| {
+                        v.text_color(cx.theme().muted_foreground)
+                    })
+                    .child(size),
             )
             .child(
                 quiet(
@@ -447,7 +518,11 @@ impl ContainersPanel {
                         "{} {}{}",
                         totals.count,
                         unit[usize::from(totals.count != 1)],
-                        if totals.reclaimable > 0 {
+                        if sizes == VolumeSizes::Measuring {
+                            " · measuring sizes".to_owned()
+                        } else if sizes == VolumeSizes::Failed {
+                            " · sizes unavailable".to_owned()
+                        } else if totals.reclaimable > 0 {
                             format!(" · {} can be freed", bytes(&json!(totals.reclaimable)))
                         } else {
                             String::new()
@@ -455,7 +530,7 @@ impl ContainersPanel {
                     ),
                     cx,
                 )
-                .text_size(px(11.5)),
+                .text_size(px(crate::ui::FONT_SIZE)),
             )
             .child(
                 div()
@@ -569,7 +644,7 @@ impl ContainersPanel {
                         "{}: {count}",
                         if volumes { "Volumes" } else { "Images" }
                     ))
-                    .text_size(px(12.5))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(format!(
                         "{}  {count}",
@@ -592,7 +667,7 @@ impl ContainersPanel {
                         .flex()
                         .gap(px(12.))
                         .text_color(cx.theme().muted_foreground)
-                        .text_size(px(11.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .child(
                             inventory_cell(
                                 "name",
@@ -713,7 +788,7 @@ fn inventory_row(
         .border_t_1()
         .border_color(cx.theme().border)
         .py(px(5.))
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
 }
 fn image_row(
     index: usize,
@@ -774,11 +849,11 @@ fn image_row(
         .child(
             div()
                 .font_family(cx.theme().mono_font_family.clone())
-                .text_size(px(11.5))
+                .text_size(px(crate::ui::FONT_SIZE))
                 .child(name),
         )
         .when(narrow, |v| {
-            v.child(quiet(format!("{age} · {usage}"), cx).text_size(px(11.)))
+            v.child(quiet(format!("{age} · {usage}"), cx).text_size(px(crate::ui::FONT_SIZE)))
         }),
     )
     .child(
@@ -809,6 +884,7 @@ fn volume_row(
     row_index: usize,
     volume: &DockerVolume,
     narrow: bool,
+    measuring: bool,
     cx: &App,
 ) -> AnyElement {
     let name = if volume.anonymous {
@@ -816,10 +892,11 @@ fn volume_row(
     } else {
         volume.name.clone()
     };
-    let size = volume
-        .size
-        .map(|n| bytes(&json!(n)))
-        .unwrap_or_else(|| "—".into());
+    let size = match volume.size {
+        Some(n) => bytes(&json!(n)),
+        None if measuring => "Measuring…".into(),
+        None => "—".into(),
+    };
     let usage = used_by(volume.ref_count, "unused");
     inventory_row(
         format!("docker-volume-{index}"),
@@ -862,24 +939,18 @@ fn volume_row(
                 .child(
                     div()
                         .font_family(cx.theme().mono_font_family.clone())
-                        .text_size(px(11.5))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .child(name),
                 )
                 .when_some(volume.compose.clone(), |v, project| {
-                    v.child(
-                        quiet(project, cx)
-                            .text_size(px(10.5))
-                            .bg(cx.theme().muted)
-                            .rounded(px(4.))
-                            .px(px(4.)),
-                    )
+                    v.child(crate::controls::tag(project, cx))
                 })
                 .when(volume.anonymous, |v| {
-                    v.child(quiet("anonymous", cx).text_size(px(11.)))
+                    v.child(crate::controls::tag("anonymous", cx))
                 }),
         )
         .when(narrow, |v| {
-            v.child(quiet(usage.clone(), cx).text_size(px(11.)))
+            v.child(quiet(usage.clone(), cx).text_size(px(crate::ui::FONT_SIZE)))
         }),
     )
     .child(

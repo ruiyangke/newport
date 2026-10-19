@@ -162,9 +162,15 @@ pub async fn remove(
     validated::<Removed>(monitor::ask(server, &request, ACTION_TIMEOUT).await?)
 }
 
-pub async fn disk(server: &std::sync::Arc<ServerSession>) -> Result<Value, String> {
-    let reply = monitor::ask(server, &json!({"op": "docker_disk"}), READ_TIMEOUT).await?;
-    validated::<Disk>(reply)
+pub(crate) async fn disk(
+    server: &std::sync::Arc<ServerSession>,
+    part: crate::server_queries::DiskPart,
+) -> Result<Value, String> {
+    let mut request = json!({"op": "docker_disk"});
+    if let Some(part) = part.name() {
+        request["part"] = json!(part);
+    }
+    validated::<Disk>(monitor::ask(server, &request, READ_TIMEOUT).await?)
 }
 
 pub async fn prune(
@@ -326,7 +332,10 @@ mod tests {
             "volumes": [{"name": ID, "driver": "local", "size": null, "refCount": null, "anonymous": true, "compose": null}],
             "totals": {"images": total, "containers": total, "volumes": total, "buildCache": total}
         });
-        assert_eq!(validated::<Disk>(disk.clone()).unwrap(), disk);
+        // Replies from agents before the quick/volumes split count as measured.
+        let mut normalized = disk.clone();
+        normalized["volumesMeasured"] = json!(true);
+        assert_eq!(validated::<Disk>(disk.clone()).unwrap(), normalized);
         let mut bad = disk;
         bad["totals"]["buildCache"] = Value::Null;
         assert!(validated::<Disk>(bad).is_err());

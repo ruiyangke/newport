@@ -112,7 +112,7 @@ fn integration_revocations_remain_independent_during_lifecycle_work(cx: &mut Tes
             assert_eq!(
                 request.args,
                 json!({"id":"fixture","feature":feature,"enabled":false,
-                    "expectedConnection":view.read_with(visual, |v, _| crate::terminal_scope::connection(&v.selected_server().unwrap(), &v.snapshot))})
+                    "expectedConnection":view.read_with(visual, |v, _| crate::terminal_scope::connection(v.selected_server().unwrap(), &v.snapshot))})
             );
             visual.simulate_click(point, Default::default());
             frame(visual);
@@ -471,7 +471,7 @@ fn integration_callbacks_and_queued_requests_retain_the_displayed_connection(
     let (work, requests) = std::sync::mpsc::sync_channel(8);
     let original = view.update(visual, |v, _| {
         v.work = work.into();
-        crate::terminal_scope::connection(&v.selected_server().unwrap(), &v.snapshot)
+        crate::terminal_scope::connection(v.selected_server().unwrap(), &v.snapshot)
     });
     view.update(visual, |v, cx| {
         v.integration_scoped_command("fixture", &original, ("browser", false), cx)
@@ -495,7 +495,7 @@ fn integration_callbacks_and_queued_requests_retain_the_displayed_connection(
         "queued intent is immutable"
     );
     view.update(visual, |v, cx| {
-        let current = crate::terminal_scope::connection(&v.selected_server().unwrap(), &v.snapshot);
+        let current = crate::terminal_scope::connection(v.selected_server().unwrap(), &v.snapshot);
         v.integration_scoped_command("fixture", &current, ("browser", false), cx);
     });
     let fresh = requests.try_recv().unwrap();

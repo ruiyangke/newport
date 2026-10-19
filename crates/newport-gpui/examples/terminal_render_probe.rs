@@ -6,6 +6,11 @@ mod terminal_color;
 mod terminal_paint;
 #[path = "../src/terminal_search_paint.rs"]
 mod terminal_search_paint;
+// The renderer reads the shared metrics; the probe doesn't draw headers.
+#[allow(dead_code)]
+#[path = "../src/ui.rs"]
+mod ui;
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::{prelude::*, *};
 use newport_terminal::Engine;
 

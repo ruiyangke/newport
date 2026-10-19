@@ -19,7 +19,9 @@ enum Format {
     DetailDate,
     UpdatedTime,
     FullDate,
-    FileDate,
+    ShortTime,
+    MonthDay,
+    MediumDate,
 }
 
 /// Equivalent fields to `toLocaleTimeString` with a two-digit hour/minute/second.
@@ -47,9 +49,22 @@ pub(crate) fn full_date(timestamp: i64) -> String {
     format(timestamp, Format::FullDate)
 }
 
-/// Numeric local date without a time, like the file table's toLocaleDateString.
-pub(crate) fn file_date(timestamp: i64) -> String {
-    format(timestamp, Format::FileDate)
+/// A file's modification time at a glance: the time for today, month and day
+/// within this year, and a medium date otherwise. Hover shows `detail_date`.
+pub(crate) fn file_modified(timestamp: i64, now: i64) -> String {
+    use chrono::{DateTime, Datelike, Local};
+    let local = |millis| DateTime::from_timestamp_millis(millis).map(|t| t.with_timezone(&Local));
+    let (Some(at), Some(now)) = (local(timestamp), local(now)) else {
+        return MISSING.into();
+    };
+    let format = if at.date_naive() == now.date_naive() {
+        Format::ShortTime
+    } else if at.year() == now.year() {
+        Format::MonthDay
+    } else {
+        Format::MediumDate
+    };
+    self::format(timestamp, format)
 }
 
 /// Identity of the local civil day, including its year, independent of its label.
@@ -74,6 +89,32 @@ fn format(timestamp: i64, format: Format) -> String {
         return MISSING.into();
     }
     platform::format(timestamp, format).unwrap_or_else(|| MISSING.into())
+}
+
+#[cfg(test)]
+mod file_modified_tests {
+    use super::file_modified;
+    #[test]
+    fn age_picks_time_month_day_or_full_date() {
+        let now = chrono::Local::now().timestamp_millis();
+        let today = file_modified(now, now);
+        let earlier_year = file_modified(now - 400 * 86_400_000, now);
+        assert!(today.chars().any(|c| c.is_ascii_digit()));
+        assert_ne!(today, earlier_year);
+        let year = chrono::Datelike::year(&chrono::Local::now()).to_string();
+        let previous = (chrono::Datelike::year(&chrono::Local::now()) - 1).to_string();
+        assert!(
+            !today.contains(&year),
+            "today shows a time, not a date: {today}"
+        );
+        assert!(
+            earlier_year.contains(&previous)
+                || earlier_year
+                    .contains(&(chrono::Datelike::year(&chrono::Local::now()) - 2).to_string()),
+            "older files show their year: {earlier_year}"
+        );
+        assert_eq!(file_modified(i64::MAX, now), "—");
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -196,7 +237,7 @@ mod platform {
     }
 
     struct Formatters {
-        values: [StrongPtr; 6],
+        values: [StrongPtr; 8],
         zone: StrongPtr,
     }
 
@@ -235,8 +276,14 @@ mod platform {
                         4 => {
                             let _: () = msg_send![*formatter, setLocalizedDateFormatFromTemplate:ns_string("yMdjms")];
                         }
+                        5 => {
+                            let _: () = msg_send![*formatter, setTimeStyle:1_usize];
+                        }
+                        6 => {
+                            let _: () = msg_send![*formatter, setLocalizedDateFormatFromTemplate:ns_string("MMMd")];
+                        }
                         _ => {
-                            let _: () = msg_send![*formatter, setLocalizedDateFormatFromTemplate:ns_string("yMd")];
+                            let _: () = msg_send![*formatter, setDateStyle:2_usize];
                         }
                     }
                     formatter
@@ -410,20 +457,13 @@ mod platform {
                 formatted("en_US", "UTC", at, Format::FullDate),
                 "1/2/2026, 6:04:05 PM"
             );
-        }
-
-        #[test]
-        fn file_dates_follow_locale_and_local_day_without_a_time() {
-            let at = "2026-01-02T07:30:00Z";
-            assert_eq!(formatted("en_US", "UTC", at, Format::FileDate), "1/2/2026");
+            assert_eq!(formatted("en_US", "UTC", at, Format::ShortTime), "6:04 PM");
+            assert_eq!(formatted("en_GB", "UTC", at, Format::ShortTime), "18:04");
+            assert_eq!(formatted("en_US", "UTC", at, Format::MonthDay), "Jan 2");
+            assert_eq!(formatted("en_GB", "UTC", at, Format::MonthDay), "2 Jan");
             assert_eq!(
-                formatted("en_GB", "UTC", at, Format::FileDate),
-                "02/01/2026"
-            );
-            assert_eq!(formatted("ja_JP", "UTC", at, Format::FileDate), "2026/1/2");
-            assert_eq!(
-                formatted("en_US", "America/Los_Angeles", at, Format::FileDate),
-                "1/1/2026"
+                formatted("en_US", "UTC", at, Format::MediumDate),
+                "Jan 2, 2026"
             );
         }
 
@@ -551,9 +591,12 @@ mod platform {
         let date = DateTime::from_timestamp_millis(timestamp)?.with_timezone(&Local);
         let pattern = match format {
             Format::JournalTime | Format::UpdatedTime => "%H:%M:%S",
-            Format::JournalDay | Format::FileDate => "%Y-%m-%d",
+            Format::JournalDay => "%Y-%m-%d",
             Format::DetailDate => "%Y-%m-%d %H:%M",
             Format::FullDate => "%Y-%m-%d %H:%M:%S",
+            Format::ShortTime => "%H:%M",
+            Format::MonthDay => "%b %-d",
+            Format::MediumDate => "%Y-%m-%d",
         };
         Some(date.format(pattern).to_string())
     }

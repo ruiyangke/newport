@@ -5,7 +5,7 @@ fn bar(width: f32, height: f32) -> impl IntoElement {
     Skeleton::new()
         .w(relative(width))
         .h(px(height))
-        .rounded(px(3.))
+        .rounded(px(crate::ui::RADIUS))
 }
 fn region(name: &str) -> Stateful<Div> {
     div()
@@ -36,7 +36,7 @@ pub(super) fn picker_detail(name: &str, content: Option<String>, pending: bool) 
                         .role(accesskit::Role::Label)
                         .aria_label(content.clone())
                         .hover_hint(content.clone())
-                        .text_xs()
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .truncate(),
                 )
             })
@@ -95,7 +95,7 @@ pub(super) fn listing(name: &str, tab: usize, count: usize) -> AnyElement {
                 .items_center()
                 .gap_2()
                 .when(tab != 1, |row| {
-                    row.child(Skeleton::new().size(px(14.)).rounded(px(3.)))
+                    row.child(Skeleton::new().size(px(14.)).rounded(px(crate::ui::RADIUS)))
                 })
                 .child(
                     div()
@@ -160,8 +160,18 @@ pub(super) fn diff() -> AnyElement {
                 .flex()
                 .items_center()
                 .gap_3()
-                .child(Skeleton::new().w(px(20.)).h(px(10.)).rounded(px(2.)))
-                .child(Skeleton::new().w(px(20.)).h(px(10.)).rounded(px(2.)))
+                .child(
+                    Skeleton::new()
+                        .w(px(20.))
+                        .h(px(10.))
+                        .rounded(px(crate::ui::RADIUS)),
+                )
+                .child(
+                    Skeleton::new()
+                        .w(px(20.))
+                        .h(px(10.))
+                        .rounded(px(crate::ui::RADIUS)),
+                )
                 .child(bar([0.62, 0.44, 0.76, 0.3, 0.54][i % 5], 12.))
         }))
         .into_any_element()
@@ -180,7 +190,12 @@ pub(super) fn blob() -> AnyElement {
                 .flex()
                 .items_center()
                 .gap_3()
-                .child(Skeleton::new().w(px(20.)).h(px(10.)).rounded(px(2.)))
+                .child(
+                    Skeleton::new()
+                        .w(px(20.))
+                        .h(px(10.))
+                        .rounded(px(crate::ui::RADIUS)),
+                )
                 .child(bar([0.62, 0.44, 0.76, 0.3, 0.54][i % 5], 12.))
         }))
         .into_any_element()
@@ -190,7 +205,7 @@ pub(super) fn library(width: f32, cx: &App) -> AnyElement {
         .debug_selector(|| "project-library-loading".into())
         .border_1()
         .border_color(cx.theme().border)
-        .rounded(px(8.))
+        .rounded(px(crate::ui::RADIUS))
         .child(
             div()
                 .h(px(30.))
@@ -209,7 +224,7 @@ pub(super) fn library(width: f32, cx: &App) -> AnyElement {
                 .gap_3()
                 .border_t_1()
                 .border_color(cx.theme().border)
-                .child(Skeleton::new().size(px(20.)).rounded(px(4.)))
+                .child(Skeleton::new().size(px(20.)).rounded(px(crate::ui::RADIUS)))
                 .child(
                     div()
                         .flex_1()
@@ -334,7 +349,7 @@ pub(super) fn resource(key: &str, tab: usize) -> AnyElement {
                     .items_center()
                     .gap_2()
                     .h(px(20.))
-                    .child(Skeleton::new().size(px(16.)).rounded(px(3.)))
+                    .child(Skeleton::new().size(px(16.)).rounded(px(crate::ui::RADIUS)))
                     .child(bar(0.65, 12.)),
             )
             .child(bar(0.9, 18.))

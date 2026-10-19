@@ -198,7 +198,7 @@ impl Newport {
             .flex_wrap()
             .gap_2()
             .child(
-                crate::project_ui::button("git-fetch-remote")
+                crate::controls::button("git-fetch-remote")
                     .label("Fetch")
                     .disabled(
                         reviewing
@@ -213,7 +213,7 @@ impl Newport {
                     })),
             )
             .child(
-                crate::project_ui::button("prepare-pull")
+                crate::controls::button("prepare-pull")
                     .label("Pull…")
                     .disabled(!self.can_prepare_pull() || reviewing)
                     .on_click(
@@ -221,7 +221,7 @@ impl Newport {
                     ),
             )
             .child(
-                crate::project_ui::button("prepare-push")
+                crate::controls::button("prepare-push")
                     .label("Push…")
                     .disabled(
                         !self.can_prepare_pull()
@@ -245,33 +245,33 @@ impl Newport {
             .child(self.status("git-remote-status", cx))
 
             .when_some(self.git.pull_form.as_ref(), |view, form| {
-                view.when(form.needs_review,|view|view.child(crate::project_ui::label("Your draft was kept. Review the updated repository state before submitting again.").text_size(px(crate::project_ui::FONT_SIZE)))
-                    .child(crate::project_ui::button("review-transfer").label("Review updated state").disabled(!self.can_prepare_pull()).on_click(cx.listener(|this,_,_,cx|this.review_transfer(cx)))))
+                view.when(form.needs_review,|view|view.child(crate::label("Your draft was kept. Review the updated repository state before submitting again.").text_size(px(crate::ui::FONT_SIZE)))
+                    .child(crate::controls::button("review-transfer").label("Review updated state").disabled(!self.can_prepare_pull()).on_click(cx.listener(|this,_,_,cx|this.review_transfer(cx)))))
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(form.title()))
                 .child(
-                    crate::project_ui::label(if let Some((branch,oid)) = &form.push { format!("Push {branch} · {} to {}. Remote history will not be overwritten.",oid.chars().take(8).collect::<String>(),form.remote) } else {format!(
+                    crate::label(if let Some((branch,oid)) = &form.push { format!("Push {branch} · {} to {}. Remote history will not be overwritten.",oid.chars().take(8).collect::<String>(),form.remote) } else {format!(
                         "Fast-forward current branch from {}. Diverged history will be refused.",
                         form.remote
                     )})
-                    .text_size(px(crate::project_ui::FONT_SIZE)),
+                    .text_size(px(crate::ui::FONT_SIZE)),
                 )
-                .child(crate::project_ui::label(if form.push.is_some() {"Destination branch"} else {"Remote branch"}))
+                .child(crate::label(if form.push.is_some() {"Destination branch"} else {"Remote branch"}))
                 .child(
                             div().w_full().min_w_0().child(
-                                crate::project_ui::input(&form.branch)
+                                crate::controls::input(&form.branch)
                                     .aria_label(if form.push.is_some() {"Destination branch to push"} else {"Remote branch to pull"})
                                     .disabled(self.git_mutation_blocks_write()),
                             ),
                         )
     .child(project_dialog::actions()
-    .child(crate::project_ui::button("cancel-pull").label("Cancel").disabled(self.git_write_pending()).on_click(
+    .child(crate::controls::button("cancel-pull").label("Cancel").disabled(self.git_write_pending()).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.git.pull_form = None;
                                 cx.notify();
                             }),
                         ))
     .child(
-                            crate::project_ui::button("pull-fast-forward").loading(self.git_write_pending())
+                            crate::controls::button("pull-fast-forward").loading(self.git_write_pending())
                                 .label(if form.push.is_some() {"Push branch"} else {"Pull fast-forward"})
                                 .disabled(
                                     !self.can_prepare_pull()

@@ -326,12 +326,14 @@ pub fn timer_json(record: &HashMap<String, String>, scope: Scope) -> Value {
 }
 
 /// Control characters would corrupt the log view; tabs are kept, newlines in
-/// multi-line messages become spaces.
+/// multi-line messages become spaces. Escape stays: the app renders colour
+/// sequences and drops every other control sequence.
 fn clean(message: &str) -> String {
     let mut out: String = message
         .chars()
         .filter_map(|c| match c {
             '\t' => Some('\t'),
+            '\u{1b}' => Some('\u{1b}'),
             '\n' | '\r' => Some(' '),
             c if c.is_control() => None,
             c => Some(c),
@@ -954,7 +956,7 @@ mod tests {
         assert_eq!(entries[0]["message"], "listening\ton :8080");
         assert_eq!(entries[1]["identifier"], "atlas");
         assert_eq!(entries[1]["pid"], Value::Null);
-        assert_eq!(entries[1]["message"], "db \u{fffd} [31mdown");
+        assert_eq!(entries[1]["message"], "db \u{fffd} \u{1b}[31mdown");
         assert_eq!(cursor.as_deref(), Some("s=1;i=2"));
         assert_eq!(
             clean(&"x".repeat(MAX_MESSAGE + 10)).chars().count(),

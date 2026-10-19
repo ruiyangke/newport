@@ -543,6 +543,7 @@ impl Newport {
                     "Branches: {}",
                     git::head_label(&self.git.repo["head"])
                 ))
+                .icon(Icon::new(IconName::GitBranch).text_color(cx.theme().muted_foreground))
                 .disabled(
                     self.git_write_pending()
                         || self.project_dialog_open
@@ -703,7 +704,7 @@ impl Newport {
             .when(reviewing, |view| {
                 view.child(
                     div().flex().items_center().gap_2().px_3().py_2().child(
-                        crate::project_ui::compact_button("branch-review-back")
+                        crate::controls::compact_button("branch-review-back")
                             .icon(IconName::ArrowLeft)
                             .label("Branches")
                             .ghost()
@@ -735,7 +736,7 @@ impl Newport {
             .when(!pending, |view| view.child(self.status("git-branches", cx)))
             .child(self.status("git-branch-status", cx))
             .when_some(self.git.branches.error.clone(), |view, error| {
-                view.child(crate::project_ui::label(error).p_3())
+                view.child(crate::label(error).p_3())
             })
             .when(reviewing, |view| {
                 view.child(
@@ -758,7 +759,7 @@ impl Newport {
                                 |view| {
                                     view.child(
                                         div().p_3().child(
-                                            crate::project_ui::button("branch-worktree-create")
+                                            crate::controls::button("branch-worktree-create")
                                                 .label("New worktree…")
                                                 .disabled(!self.can_create_branch_worktree())
                                                 .on_click(cx.listener(|this, _, window, cx| {
@@ -833,12 +834,10 @@ impl Newport {
                                                             .child(name),
                                                     )
                                                     .child(
-                                                        crate::project_ui::label(details)
+                                                        crate::label(details)
                                                             .w_full()
                                                             .truncate()
-                                                            .text_size(px(
-                                                                crate::project_ui::FONT_SIZE,
-                                                            )),
+                                                            .text_size(px(crate::ui::FONT_SIZE)),
                                                     ),
                                             )
                                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -928,7 +927,7 @@ impl Newport {
             .when(failed, |view| {
                 view.child(
                     div().p_2().child(
-                        crate::project_ui::button("branch-picker-more")
+                        crate::controls::button("branch-picker-more")
                             .label("Retry branches")
                             .disabled(
                                 pending
@@ -953,8 +952,8 @@ impl Newport {
                     && self.git.branches.page["nextCursor"].is_null(),
                 |view| {
                     view.child(
-                        crate::project_ui::label("All matching branches loaded")
-                            .text_size(px(crate::project_ui::FONT_SIZE))
+                        crate::label("All matching branches loaded")
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .px_3()
                             .py_2(),
                     )

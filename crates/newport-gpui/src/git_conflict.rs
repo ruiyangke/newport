@@ -170,15 +170,15 @@ impl Newport {
                     .child(text(&self.git.selected["path"], "display")),
             )
             .child(
-                crate::project_ui::label(
+                crate::label(
                     "Choose a recorded side, or edit the working file and stage your resolution.",
                 )
                 .px_3(),
             )
             .child(
                 div().flex().p_3().child(
-                    crate::project_ui::tabs("conflict-sides")
-                        .segmented()
+                    crate::controls::tabs("conflict-sides")
+                        .gap_0()
                         .selected_index(side)
                         .children(LABELS.map(|title| Tab::new().label(title)))
                         .on_click(cx.listener(|this, index: &usize, _, cx| {
@@ -188,12 +188,12 @@ impl Newport {
                 ),
             )
             .child(
-                crate::project_ui::label(match side {
+                crate::label(match side {
                     0 => "Index stage 2. During rebase, Ours is the upstream version.",
                     1 => "Index stage 3. During rebase, Theirs is the commit being replayed.",
                     _ => "Index stage 1: the common ancestor.",
                 })
-                .text_size(px(crate::project_ui::FONT_SIZE))
+                .text_size(px(crate::ui::FONT_SIZE))
                 .px_3(),
             )
             .child(
@@ -202,7 +202,7 @@ impl Newport {
                     .gap_2()
                     .p_3()
                     .child(
-                        crate::project_ui::button("review-conflict-side")
+                        crate::controls::button("review-conflict-side")
                             .label(if absent {
                                 "Resolve as deleted"
                             } else {
@@ -218,7 +218,7 @@ impl Newport {
                             ),
                     )
                     .child(
-                        crate::project_ui::button("stage-manual-resolution")
+                        crate::controls::button("stage-manual-resolution")
                             .label("Stage resolution")
                             .disabled(
                                 !self.git_can_change_index(true)
@@ -232,11 +232,11 @@ impl Newport {
             .child(self.status("git-conflict-preview", cx))
             .child(self.status("git-conflict-more", cx))
             .when_some(preview.error.clone(), |view, error| {
-                view.child(crate::project_ui::label(error).p_3())
+                view.child(crate::label(error).p_3())
             })
             .when(has_error, |view| {
                 view.child(
-                    crate::project_ui::button("retry-conflict-preview")
+                    crate::controls::button("retry-conflict-preview")
                         .label("Retry preview")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.select_conflict_side(side);
@@ -246,20 +246,17 @@ impl Newport {
             })
             .when(action.is_none(), |view| {
                 view.child(
-                    crate::project_ui::label(
+                    crate::label(
                         "Recorded conflict sides are unavailable. Refresh the repository.",
                     )
                     .p_3(),
                 )
             })
             .when(absent, |view| {
-                view.child(crate::project_ui::label("This side deleted the file.").p_3())
+                view.child(crate::label("This side deleted the file.").p_3())
             })
             .when(preview.content.binary, |view| {
-                view.child(
-                    crate::project_ui::label("Binary content. This side can still be chosen.")
-                        .p_3(),
-                )
+                view.child(crate::label("Binary content. This side can still be chosen.").p_3())
             })
             .when(
                 !preview.content.binary
@@ -270,12 +267,12 @@ impl Newport {
             )
             .when(!preview.content.snapshot.is_empty(), |view| {
                 view.child(
-                    crate::project_ui::label(format!(
+                    crate::label(format!(
                         "{} of {} bytes loaded",
                         preview.content.bytes.len(),
                         preview.content.size.unwrap_or(0)
                     ))
-                    .text_size(px(crate::project_ui::FONT_SIZE))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .p_3(),
                 )
             })

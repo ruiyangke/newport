@@ -9,6 +9,10 @@ pub(super) fn lines(name: &str, count: usize) -> AnyElement {
 fn line_content(name: &str, count: usize, padded: bool) -> AnyElement {
     div()
         .id(SharedString::from(format!("loading-{name}")))
+        .debug_selector({
+            let name = format!("loading-{name}");
+            move || name.clone()
+        })
         .role(accesskit::Role::Status)
         .aria_label(format!("Loading {name}"))
         .w_full()
@@ -21,7 +25,7 @@ fn line_content(name: &str, count: usize, padded: bool) -> AnyElement {
             div().w_full().child(
                 Skeleton::new()
                     .h(px(14.))
-                    .rounded(px(4.))
+                    .rounded(px(crate::ui::RADIUS))
                     .when(index % 3 == 2, |line| line.w(relative(0.6))),
             )
         }))
@@ -58,7 +62,7 @@ pub(super) fn history(metric: usize) -> AnyElement {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(Skeleton::new().h_full().rounded(px(4.))),
+                        .child(Skeleton::new().h_full().rounded(px(crate::ui::RADIUS))),
                 ),
         )
         .child(div().h(px(14.)).mt_1().flex_shrink_0())
@@ -84,10 +88,10 @@ pub(super) fn page(page: Page, width: f32) -> AnyElement {
                     .children((0..4).map(|_| {
                         div()
                             .flex_1()
-                            .child(Skeleton::new().h(px(134.)).rounded(px(10.)))
+                            .child(Skeleton::new().h(px(134.)).rounded(px(crate::ui::RADIUS)))
                     })),
             )
-            .child(Skeleton::new().h(px(208.)).rounded(px(10.)))
+            .child(Skeleton::new().h(px(208.)).rounded(px(crate::ui::RADIUS)))
         })
         .child(line_content("content", 8, false))
         .into_any_element()

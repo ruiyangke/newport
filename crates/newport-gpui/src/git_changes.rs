@@ -180,18 +180,18 @@ impl Newport {
             .px_3()
             .gap_2()
             .child(
-                crate::project_ui::label(group.title())
-                    .text_size(px(crate::project_ui::FONT_SIZE))
+                crate::label(group.title())
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .font_weight(FontWeight::SEMIBOLD),
             )
             .child(
-                crate::project_ui::label(count)
-                    .text_size(px(crate::project_ui::FONT_SIZE))
+                crate::label(count)
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .flex_1(),
             )
             .when(group != Group::Conflicted, |view| {
                 view.child(
-                    crate::project_ui::compact_button(("change-group-action", index))
+                    crate::controls::compact_button(("change-group-action", index))
                         .ghost()
                         .label(format!(
                             "{} {scope}",
@@ -331,7 +331,7 @@ impl Newport {
                         .pt(px(8.))
                         .pb(px(6.))
                         .child(
-                            crate::project_ui::input(input)
+                            crate::controls::input(input)
                                 .aria_label("Filter changed files")
                                 .prefix(
                                     Icon::new(IconName::Search)
@@ -410,7 +410,7 @@ impl Newport {
             )
             .when(self.git.changes.filtering(), |view| {
                 view.child(
-                    crate::project_ui::label(format!(
+                    crate::label(format!(
                         "{} · {}",
                         self.git
                             .changes
@@ -428,7 +428,7 @@ impl Newport {
                         }
                     ))
                     .px_3()
-                    .text_size(px(crate::project_ui::FONT_SIZE)),
+                    .text_size(px(crate::ui::FONT_SIZE)),
                 )
             })
             .when(empty && !pending && !failed, |view| {
@@ -480,7 +480,7 @@ impl Newport {
                                         .items_center()
                                         .pr(px(3.))
                                         .min_w_0()
-                                        .rounded(px(5.))
+                                        .rounded(px(crate::ui::RADIUS))
                                         .when(!active, |view| {
                                             view.hover(|style| style.bg(theme::row_hover(cx)))
                                         })
@@ -488,7 +488,7 @@ impl Newport {
                                             view.bg(theme::git_selection(cx.theme().is_dark()))
                                         })
                                         .child(
-                                            crate::project_ui::button(("change-file", index))
+                                            crate::controls::button(("change-file", index))
                                                 .custom(git_file_row::selection_style(active, cx))
                                                 .selected(active)
                                                 .h_full()
@@ -509,9 +509,7 @@ impl Newport {
                                                                 .min_w_0()
                                                                 .flex_shrink(1000.)
                                                                 .truncate()
-                                                                .text_size(px(
-                                                                    crate::project_ui::FONT_SIZE,
-                                                                ))
+                                                                .text_size(px(crate::ui::FONT_SIZE))
                                                                 .text_color(
                                                                     cx.theme().muted_foreground,
                                                                 )

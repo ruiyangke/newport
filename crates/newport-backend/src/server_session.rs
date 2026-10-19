@@ -296,6 +296,7 @@ pub struct ServerSession {
     revision: u64,
     cancelled: watch::Sender<bool>,
     transport: crate::session_transport::Transport,
+    terminal_dials: Arc<tokio::sync::Semaphore>,
     generation: Arc<AtomicU64>,
     pub(crate) monitor: crate::monitor::Channels,
     pub(crate) metrics: crate::metrics_sampler::Slot,
@@ -360,6 +361,7 @@ impl ServerSession {
             revision,
             cancelled,
             transport,
+            terminal_dials: Arc::new(tokio::sync::Semaphore::new(1)),
             generation,
             monitor: Default::default(),
             metrics: Default::default(),
@@ -376,6 +378,7 @@ impl ServerSession {
     pub fn transport_snapshot(&self) -> crate::session_transport::Snapshot {
         self.transport.snapshot()
     }
+    #[cfg(test)]
     pub(crate) async fn wait_for_transport(&self) -> Result<(), String> {
         self.transport.ready().await
     }
@@ -393,6 +396,13 @@ impl ServerSession {
     }
     pub(crate) fn has_transport(&self) -> bool {
         self.transport.observe().is_some()
+    }
+    pub(crate) fn terminal_transport(&self) -> crate::session_transport::Transport {
+        crate::session_transport::Transport::terminal(
+            self.server.clone(),
+            self.cancellation(),
+            self.terminal_dials.clone(),
+        )
     }
 
     pub(crate) fn cancellation(&self) -> watch::Receiver<bool> {
@@ -499,23 +509,14 @@ pub struct Lease {
     generation: u64,
 }
 impl Lease {
-    pub(crate) async fn sftp(&self) -> anyhow::Result<russh_sftp::client::RawSftpSession> {
+    pub(crate) fn channel_pressure(&self) -> watch::Receiver<u64> {
+        self.connection.channel_pressure()
+    }
+    pub(crate) async fn sftp(&self) -> anyhow::Result<Arc<crate::ssh::sftp::Session>> {
         self.validate().map_err(anyhow::Error::msg)?;
         let session = self.connection.sftp().await?;
         self.validate().map_err(anyhow::Error::msg)?;
         Ok(session)
-    }
-    pub(crate) async fn terminal(
-        &self,
-        size: &mut (u32, u32),
-        input: &mut tokio::sync::mpsc::Receiver<crate::terminal::Input>,
-        output: &tokio::sync::mpsc::Sender<crate::terminal::Event>,
-        selector: &str,
-    ) -> anyhow::Result<crate::ssh::TerminalEnd> {
-        self.validate().map_err(anyhow::Error::msg)?;
-        self.connection
-            .terminal(size, input, output, selector)
-            .await
     }
     pub(crate) fn release_demand(&self) {
         self._demand.lock().unwrap().take();
@@ -1906,6 +1907,8 @@ mod tests {
     async fn saturated_worker_admission_is_retryable_without_runtime_or_transport_replacement() {
         let registry = Registry::default();
         let mut server = profile();
+        // Test Needle's worker bound independently of sshd's session bound.
+        server.ssh_user = "fixture-many-sessions".into();
         server.ssh_port = std::env::var("NEWPORT_TEST_SSH_PORT")
             .unwrap()
             .parse()

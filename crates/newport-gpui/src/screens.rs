@@ -5,7 +5,9 @@ impl Newport {
         if self.page == Page::Settings {
             return self.settings(cx);
         }
-        if self.initial_loading("snapshot")
+        // A refresh after a mutation keeps showing the accepted snapshot; only a
+        // first read with nothing to show replaces the page with a skeleton.
+        if (self.initial_loading("snapshot") && self.snapshot.is_null())
             || (!matches!(
                 self.page,
                 Page::Overview
@@ -34,6 +36,9 @@ impl Newport {
                     })),
             )
             .into_any_element();
+        }
+        if self.welcome_visible() {
+            return self.welcome(cx);
         }
         if self.server.is_empty() && self.page != Page::Settings {
             return empty::pane(

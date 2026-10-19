@@ -120,8 +120,10 @@ impl Render for DirectionSelector {
                             .line_height(relative(1.25))
                             .border_1()
                             .border_color(cx.theme().border)
-                            .when(index == 0, |item| item.rounded_l(px(7.)))
-                            .when(index == 1, |item| item.border_l_0().rounded_r(px(7.)))
+                            .when(index == 0, |item| item.rounded_l(px(crate::ui::RADIUS)))
+                            .when(index == 1, |item| {
+                                item.border_l_0().rounded_r(px(crate::ui::RADIUS))
+                            })
                             .bg(if selected {
                                 selected_background
                             } else {
@@ -326,7 +328,7 @@ impl Form {
                 .w(px(480.))
                 .p_0()
                 .gap_0()
-                .rounded(px(14.))
+                .rounded(px(crate::ui::RADIUS))
                 .border_0()
                 .centered(true)
                 .on_cancel(move |_, _, cx| !cancel_form.read(cx).pending)
@@ -495,7 +497,7 @@ fn field(title: &str) -> Div {
                 .id(SharedString::from(format!("forward-field-{title}")))
                 .role(accesskit::Role::Label)
                 .aria_label(title.to_owned())
-                .text_size(px(12.))
+                .text_size(px(crate::ui::FONT_SIZE))
                 .font_weight(FontWeight::MEDIUM)
                 .child(title.to_owned()),
         )
@@ -507,7 +509,7 @@ fn hint(value: &'static str, cx: &App) -> Div {
             .id(value)
             .role(accesskit::Role::Paragraph)
             .aria_label(value)
-            .text_size(px(11.))
+            .text_size(px(crate::ui::FONT_SIZE))
             .font_weight(FontWeight::NORMAL)
             .text_color(cx.theme().muted_foreground)
             .line_height(relative(1.5))
@@ -531,7 +533,7 @@ fn error_message(message: String, cx: &App) -> impl IntoElement {
         .debug_selector(|| "forward-editor-error".into())
         .role(accesskit::Role::Alert)
         .aria_label(message.clone())
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .line_height(relative(1.65))
         .text_color(crate::theme::error(cx.theme().is_dark()))
         .child(message)
@@ -542,7 +544,7 @@ impl Form {
         crate::controls::form_input(&self.fields[index])
             .aria_label(title.to_owned())
             .disabled(self.pending)
-            .rounded(px(7.))
+            .rounded(px(crate::ui::RADIUS))
             .bg(control_background(cx))
             .border_color(cx.theme().border)
     }
@@ -574,7 +576,7 @@ impl Form {
                 crate::controls::form_button("cancel-forward")
                     .label("Cancel")
                     .min_w(px(76.))
-                    .rounded(px(7.))
+                    .rounded(px(crate::ui::RADIUS))
                     .disabled(pending)
                     .on_click(move |_, window, cx| {
                         if !cancel.read(cx).pending {
@@ -587,7 +589,7 @@ impl Form {
                     .primary()
                     .label(if pending { "Saving…" } else { "Save forward" })
                     .min_w(px(76.))
-                    .rounded(px(7.))
+                    .rounded(px(crate::ui::RADIUS))
                     .loading(pending)
                     .disabled(pending)
                     .on_click(move |_, window, cx| {
@@ -629,7 +631,7 @@ impl Render for Form {
             .px(px(if compact { 18. } else { 24. }))
             .pt(px(8.))
             .pb(px(if compact { 14. } else { 20. }))
-            .text_size(px(12.))
+            .text_size(px(crate::ui::FONT_SIZE))
             .child(self.section(0, self.input_field(0, "Name", cx)))
             .child(self.section(1,
                 field("Direction")
@@ -680,7 +682,7 @@ impl Render for Form {
                     field("Project").child(
                         crate::controls::form_button("forward-project")
                             .w_full()
-                            .rounded(px(7.))
+                            .rounded(px(crate::ui::RADIUS))
                             .bg(control_background(cx))
                             .disabled(self.pending)
                             .accessibility_label(format!("Project: {project_name}"))

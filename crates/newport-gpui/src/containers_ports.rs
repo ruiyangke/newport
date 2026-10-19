@@ -135,204 +135,245 @@ impl ContainersPanel {
         cx.notify();
     }
 
-    pub(super) fn port_links(&self, container: &Container, cx: &mut Context<Self>) -> AnyElement {
+    /// The Ports fact: published bindings as forward-and-open chips, then any
+    /// unpublished exposed ports. Absent when the container exposes nothing.
+    pub(super) fn port_links(
+        &self,
+        container: &Container,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let published = domain::published_ports(container);
         let internal = domain::exposed_ports(container);
         if published.is_empty() && internal.is_empty() {
-            return div().into_any_element();
+            return None;
         }
         let current = self.ports.container.as_deref() == Some(container.id.as_str());
-        div()
-            .id("container-port-links")
-            .debug_selector(|| "container-port-links".into())
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(quiet("Ports", cx).text_size(px(11.)).mr(px(2.)))
-                    .children(published.iter().enumerate().map(|(index, port)| {
-                        let label = domain::port_label(port);
-                        if !domain::forwardable(port) {
-                            let reason = if port.protocol != domain::PortProtocol::Tcp {
-                                "SSH forwards support TCP ports.".to_owned()
-                            } else {
-                                format!(
-                                    "Bound to {}; this binding cannot be forwarded here.",
-                                    port.ip.as_deref().unwrap_or("an unavailable address")
-                                )
-                            };
-                            return div()
-                                .id(("container-port-info", index))
-                                .aria_label(format!("Port {label}. {reason}"))
-                                .hover_hint(reason.clone())
-                                .h(px(24.))
-                                .px(px(8.))
-                                .flex()
-                                .items_center()
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .rounded(px(6.))
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_size(px(11.5))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(label)
-                                .into_any_element();
-                        }
-                        let row = current
-                            .then(|| self.ports.rows.iter().find(|r| r.port == **port))
-                            .flatten();
-                        let forward = row.and_then(|r| r.forward.as_ref());
-                        let connected = forward.is_some_and(|f| f.status == Status::Connected);
-                        let attempt = current
-                            .then(|| self.ports.attempts.iter().find(|a| a.port == **port))
-                            .flatten();
-                        let pending = row.is_some_and(|r| r.busy)
-                            || attempt.is_some_and(|a| a.ticket.is_some() && a.result.is_none());
-                        let transitioning = forward.is_some_and(|f| {
-                            matches!(f.status, Status::Connecting | Status::Reconnecting)
-                        });
-                        let busy = pending || transitioning;
-                        let blocked = self
-                            .client
-                            .port_destination(&container.id, &container.name, port)
-                            .err();
-                        let unavailable = !current || !self.ports.available;
-                        let action = if connected {
-                            "Open"
-                        } else if forward.is_some() {
-                            "Connect and open"
-                        } else {
-                            "Forward and open"
-                        };
-                        let tooltip = if let Some(reason) = blocked {
-                            reason.to_owned()
-                        } else if unavailable {
-                            "Waiting for server configuration.".into()
-                        } else if let Some(forward) = forward.filter(|_| connected) {
-                            format!("Open http://localhost:{}", forward.local_port)
-                        } else if let Some(error) = forward.and_then(|f| f.error.as_ref()) {
-                            error.clone()
-                        } else if busy {
-                            "Waiting for the forward to connect…".into()
-                        } else if forward.is_some() {
-                            "Connect the saved forward and open it".into()
-                        } else {
-                            "Forward to this computer and open it".into()
-                        };
-                        let id = container.id.clone();
-                        let name = container.name.clone();
-                        let port = (*port).clone();
-                        crate::controls::compact_button(("container-port", index))
-                            .debug_selector(move || format!("container-port-{index}"))
-                            .rounded(px(6.))
-                            .px(px(8.))
-                            .when(connected, |button| {
-                                button.ghost().bg(cx.theme().primary.opacity(0.08))
-                            })
-                            .when(busy, |button| button.icon(IconName::RefreshCw))
-                            .loading(busy)
-                            .disabled(busy || blocked.is_some() || unavailable)
-                            .accessibility_label(format!(
-                                "{action} port {label}{}",
-                                if busy { ", connecting" } else { "" }
-                            ))
-                            .hover_hint(tooltip)
-                            .child(
-                                div()
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .text_size(px(11.5))
-                                    .when(connected, |v| v.text_color(cx.theme().primary))
-                                    .child(if let Some(forward) = forward.filter(|_| connected) {
-                                        format!("localhost:{} → {label}", forward.local_port)
-                                    } else {
-                                        label
-                                    }),
-                            )
-                            .when(!connected, |button| {
-                                button.child(
-                                    quiet(
-                                        if busy {
-                                            "Forwarding…"
-                                        } else if forward.is_some() {
-                                            "Connect & open"
-                                        } else {
-                                            "Forward & open"
-                                        },
-                                        cx,
-                                    )
-                                    .text_size(px(11.)),
-                                )
-                            })
-                            .when(connected, |button| {
-                                button.child(
-                                    Icon::new(IconName::ExternalLink)
-                                        .size(px(11.))
-                                        .text_color(cx.theme().primary),
-                                )
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if this.selected_container_is(&id, &name) {
-                                    cx.emit(ContainersEvent::OpenPort(PortTarget {
-                                        container: id.clone(),
-                                        name: name.clone(),
-                                        port: port.clone(),
-                                    }));
-                                }
-                            }))
-                            .into_any_element()
-                    }))
-                    .when(!internal.is_empty(), |v| {
-                        v.child(
-                            div()
-                                .flex()
-                                .gap(px(4.))
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(if published.is_empty() {
-                                    "internal"
+        Some(
+            div()
+                .id("container-port-links")
+                .debug_selector(|| "container-port-links".into())
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(quiet("Ports", cx).text_size(px(crate::ui::FONT_SIZE)))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(6.))
+                        .children(published.iter().enumerate().map(|(index, port)| {
+                            let label = domain::port_label(port);
+                            if !domain::forwardable(port) {
+                                let reason = if port.protocol != domain::PortProtocol::Tcp {
+                                    "SSH forwards support TCP ports.".to_owned()
                                 } else {
-                                    "· internal"
+                                    format!(
+                                        "Bound to {}; this binding cannot be forwarded here.",
+                                        port.ip.as_deref().unwrap_or("an unavailable address")
+                                    )
+                                };
+                                return div()
+                                    .id(("container-port-info", index))
+                                    .aria_label(format!("Port {label}. {reason}"))
+                                    .hover_hint(reason.clone())
+                                    .h(px(24.))
+                                    .px(px(8.))
+                                    .flex()
+                                    .items_center()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .rounded(px(crate::ui::RADIUS))
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_size(px(crate::ui::FONT_SIZE))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(label)
+                                    .into_any_element();
+                            }
+                            let row = current
+                                .then(|| self.ports.rows.iter().find(|r| r.port == **port))
+                                .flatten();
+                            let forward = row.and_then(|r| r.forward.as_ref());
+                            let connected = forward.is_some_and(|f| f.status == Status::Connected);
+                            let attempt = current
+                                .then(|| self.ports.attempts.iter().find(|a| a.port == **port))
+                                .flatten();
+                            let pending = row.is_some_and(|r| r.busy)
+                                || attempt
+                                    .is_some_and(|a| a.ticket.is_some() && a.result.is_none());
+                            let transitioning = forward.is_some_and(|f| {
+                                matches!(f.status, Status::Connecting | Status::Reconnecting)
+                            });
+                            let busy = pending || transitioning;
+                            let blocked = self
+                                .client
+                                .port_destination(&container.id, &container.name, port)
+                                .err();
+                            let unavailable = !current || !self.ports.available;
+                            let action = if connected {
+                                "Open"
+                            } else if forward.is_some() {
+                                "Connect and open"
+                            } else {
+                                "Forward and open"
+                            };
+                            let tooltip = if let Some(reason) = blocked {
+                                reason.to_owned()
+                            } else if unavailable {
+                                "Waiting for server configuration.".into()
+                            } else if let Some(forward) = forward.filter(|_| connected) {
+                                format!("Open http://localhost:{}", forward.local_port)
+                            } else if let Some(error) = forward.and_then(|f| f.error.as_ref()) {
+                                error.clone()
+                            } else if busy {
+                                "Waiting for the forward to connect…".into()
+                            } else if forward.is_some() {
+                                "Connect the saved forward and open it".into()
+                            } else {
+                                "Forward to this computer and open it".into()
+                            };
+                            let id = container.id.clone();
+                            let name = container.name.clone();
+                            let port = (*port).clone();
+                            crate::controls::compact_button(("container-port", index))
+                                .debug_selector(move || format!("container-port-{index}"))
+                                .rounded(px(crate::ui::RADIUS))
+                                .px(px(8.))
+                                .when(connected, |button| {
+                                    button.ghost().bg(cx.theme().primary.opacity(0.08))
                                 })
+                                .when(busy, |button| button.icon(IconName::RefreshCw))
+                                .loading(busy)
+                                .disabled(busy || blocked.is_some() || unavailable)
+                                .accessibility_label(format!(
+                                    "{action} port {label}{}",
+                                    if busy { ", connecting" } else { "" }
+                                ))
+                                .hover_hint(tooltip)
                                 .child(
                                     div()
                                         .font_family(cx.theme().mono_font_family.clone())
+                                        .text_size(px(crate::ui::FONT_SIZE))
+                                        .when(connected, |v| v.text_color(cx.theme().primary))
                                         .child(
-                                            internal
-                                                .into_iter()
-                                                .map(domain::port_label)
-                                                .collect::<Vec<_>>()
-                                                .join(", "),
+                                            if let Some(forward) = forward.filter(|_| connected) {
+                                                format!(
+                                                    "localhost:{} → {label}",
+                                                    forward.local_port
+                                                )
+                                            } else {
+                                                label
+                                            },
                                         ),
-                                ),
-                        )
-                    }),
-            )
-            .children(
-                self.ports
-                    .attempts
-                    .iter()
-                    .enumerate()
-                    .filter(|_| current)
-                    .filter_map(|(index, attempt)| {
-                        attempt
-                            .result
-                            .as_ref()
-                            .and_then(|r| r.as_ref().err())
-                            .map(|error| {
-                                alert(
-                                    format!("container-port-error-{index}"),
-                                    format!("Port {}: {error}", domain::port_label(&attempt.port)),
-                                    cx,
                                 )
-                                .debug_selector(move || format!("container-port-error-{index}"))
-                            })
-                    }),
-            )
-            .into_any_element()
+                                .when(!connected, |button| {
+                                    button.child(
+                                        quiet(
+                                            if busy {
+                                                "Forwarding…"
+                                            } else if forward.is_some() {
+                                                "Connect & open"
+                                            } else {
+                                                "Forward & open"
+                                            },
+                                            cx,
+                                        )
+                                        .text_size(px(crate::ui::FONT_SIZE)),
+                                    )
+                                })
+                                .when(connected, |button| {
+                                    button.child(
+                                        Icon::new(IconName::ExternalLink)
+                                            .size(px(11.))
+                                            .text_color(cx.theme().primary),
+                                    )
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if this.selected_container_is(&id, &name) {
+                                        cx.emit(ContainersEvent::OpenPort(PortTarget {
+                                            container: id.clone(),
+                                            name: name.clone(),
+                                            port: port.clone(),
+                                        }));
+                                    }
+                                }))
+                                .into_any_element()
+                        }))
+                        .when(!internal.is_empty(), |v| {
+                            v.child(
+                                div()
+                                    .flex()
+                                    .gap(px(4.))
+                                    .text_size(px(crate::ui::FONT_SIZE))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(if published.is_empty() {
+                                        "internal"
+                                    } else {
+                                        "· internal"
+                                    })
+                                    .child(
+                                        div()
+                                            .font_family(cx.theme().mono_font_family.clone())
+                                            .child(
+                                                internal
+                                                    .into_iter()
+                                                    .map(domain::port_label)
+                                                    .collect::<Vec<_>>()
+                                                    .join(", "),
+                                            ),
+                                    ),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+    /// Failed forward attempts span the detail width beneath the facts.
+    pub(super) fn port_errors(
+        &self,
+        container: &Container,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let current = self.ports.container.as_deref() == Some(container.id.as_str());
+        let failed = self
+            .ports
+            .attempts
+            .iter()
+            .any(|attempt| attempt.result.as_ref().is_some_and(|r| r.is_err()));
+        if !current || !failed {
+            return None;
+        }
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .children(
+                    self.ports
+                        .attempts
+                        .iter()
+                        .enumerate()
+                        .filter(|_| current)
+                        .filter_map(|(index, attempt)| {
+                            attempt
+                                .result
+                                .as_ref()
+                                .and_then(|r| r.as_ref().err())
+                                .map(|error| {
+                                    alert(
+                                        format!("container-port-error-{index}"),
+                                        format!(
+                                            "Port {}: {error}",
+                                            domain::port_label(&attempt.port)
+                                        ),
+                                        cx,
+                                    )
+                                    .debug_selector(move || format!("container-port-error-{index}"))
+                                })
+                        }),
+                )
+                .into_any_element(),
+        )
     }
 }

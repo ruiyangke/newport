@@ -1,7 +1,5 @@
 //! Scoped Files reads, independent of rendering and media preparation.
 //! Each slot retains one physical read and only its newest desired replacement.
-pub mod folders;
-
 use crate::backend::Backend;
 use serde_json::{Value, json};
 use std::{sync::mpsc, thread, time::Duration};

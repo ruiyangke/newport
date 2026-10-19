@@ -37,7 +37,7 @@ impl Actions {
         let hunk = hunk.to_owned();
         let discard_hunk = hunk.clone();
         // An inline action fits the diff's 22px line grid, like the Tauri hunk band.
-        let button = Button::new(SharedString::from(format!("apply-diff-hunk-{hunk}")))
+        let button = crate::controls::button(SharedString::from(format!("apply-diff-hunk-{hunk}")))
             .small()
             .ghost()
             .h(px(22.))
@@ -57,7 +57,7 @@ impl Actions {
             .child(button)
             .when_some(self.discard.clone(), |view, discard| {
                 view.child(
-                    Button::new(SharedString::from(format!(
+                    crate::controls::button(SharedString::from(format!(
                         "discard-diff-hunk-{discard_hunk}"
                     )))
                     .small()
@@ -132,8 +132,8 @@ impl Actions {
                 } else {
                     0.18
                 }))
-                .when(run.first, |v| v.rounded_t(px(2.)))
-                .when(run.last, |v| v.rounded_b(px(2.)));
+                .when(run.first, |v| v.rounded_t(px(crate::ui::RADIUS)))
+                .when(run.last, |v| v.rounded_b(px(crate::ui::RADIUS)));
             let label = format!(
                 "{} {} changed {} from line {}",
                 self.verb(),
@@ -206,25 +206,22 @@ impl Actions {
                 .py_2()
                 .border_b_1()
                 .border_color(cx.theme().border)
-                .child(crate::project_ui::label(format!(
-                    "{} {noun} selected",
-                    lines.len()
-                )))
+                .child(crate::label(format!("{} {noun} selected", lines.len())))
                 .child(
-                    crate::project_ui::compact_button("apply-selected-diff-lines")
+                    crate::controls::compact_button("apply-selected-diff-lines")
                         .label(format!("{} {} {noun}", self.verb(), lines.len()))
                         .disabled(!enabled)
                         .on_click(move |_, _, cx| apply(&hunks, Some(&lines), cx)),
                 )
                 .child(
-                    crate::project_ui::compact_button("clear-selected-diff-lines")
+                    crate::controls::compact_button("clear-selected-diff-lines")
                         .label("Clear")
                         .disabled(!enabled)
                         .on_click(move |_, _, cx| toggle(None, cx)),
                 )
                 .when_some(self.discard.clone(), |view, discard| {
                     view.child(
-                        crate::project_ui::compact_button("discard-selected-diff-lines")
+                        crate::controls::compact_button("discard-selected-diff-lines")
                             .danger()
                             .label(format!("Discard {} {noun}…", discard_lines.len()))
                             .disabled(!enabled)
@@ -235,8 +232,8 @@ impl Actions {
                 })
                 .when(mixed, |view| {
                     view.child(
-                        crate::project_ui::label("Deletions you did not select stay in the file.")
-                            .text_size(px(crate::project_ui::FONT_SIZE)),
+                        crate::label("Deletions you did not select stay in the file.")
+                            .text_size(px(crate::ui::FONT_SIZE)),
                     )
                 })
                 .into_any_element(),

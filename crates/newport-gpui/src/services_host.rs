@@ -126,7 +126,7 @@ impl Newport {
         if !self.services_panels.contains_key(&self.server) {
             let server = self.server.clone();
             let connection =
-                terminal_scope::connection(&self.selected_server().unwrap(), &self.snapshot);
+                terminal_scope::connection(self.selected_server().unwrap(), &self.snapshot);
             let preferences = self.services_preferences.remove(&server);
             let panel = cx.new(|cx| {
                 let mut panel =
@@ -293,7 +293,7 @@ mod tests {
             gpui::component::init(cx);
             crate::theme::install(false, cx);
             let mut terminals = HashMap::new();
-            for index in 0..8 {
+            for index in 0..newport_domain::terminal::MAX_TERMINALS {
                 open_service_command(
                     &mut terminals,
                     "fixture",

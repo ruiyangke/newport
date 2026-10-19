@@ -30,15 +30,16 @@ mod containers;
 mod containers_host;
 mod controls;
 mod hover;
+mod ui;
 use hover::HoverExt as _;
-mod display_preferences;
 mod file_icon;
 mod file_icon_assets;
 mod file_image;
 mod file_pdf;
 mod file_preview;
+#[cfg(test)]
+mod file_test_backend;
 mod file_transfer;
-mod file_tree;
 mod files;
 mod git;
 mod git_blob_text;
@@ -98,12 +99,12 @@ mod integration_removal;
 mod request_dispatch;
 mod server_setup;
 mod setup_preview;
+mod welcome;
 pub use setup_preview::run as run_setup_preview;
 mod empty;
 mod loading;
 mod localized_time;
 mod log_line;
-mod material;
 mod modal;
 mod navigation;
 mod overview;
@@ -124,7 +125,6 @@ mod project_library_state;
 mod project_loading;
 mod project_preferences;
 mod project_quick_open;
-mod project_ui;
 mod project_workspace;
 mod quiet_action;
 mod screens;
@@ -248,10 +248,10 @@ struct Newport {
     services_preferences: std::collections::HashMap<String, services::Preferences>,
     retired_services: Vec<Entity<services::ServicesPanel>>,
     services_refresh_requested: bool,
-    display_preferences: display_preferences::DisplayPreferences,
     connections_state: std::collections::HashMap<String, connections::State>,
     tunnel_operations: newport_client::tunnel_operations::Operations,
     setup_flow: Option<server_setup::Flow>,
+    welcome: welcome::Welcome,
     overview_state: overview::OverviewState,
     containers_panels: std::collections::HashMap<String, containers_host::HostedContainers>,
     containers_preferences: std::collections::HashMap<String, containers::Preferences>,
@@ -347,7 +347,10 @@ fn rows(value: &Value) -> Vec<Value> {
     value.as_array().cloned().unwrap_or_default()
 }
 fn label(value: impl Into<SharedString>) -> Div {
-    div().text_sm().opacity(0.7).child(value.into())
+    div()
+        .text_size(px(crate::ui::FONT_SIZE))
+        .opacity(0.7)
+        .child(value.into())
 }
 fn cell(value: impl Into<SharedString>, width: f32) -> Div {
     div()
@@ -422,12 +425,8 @@ impl Newport {
             ),
         };
         theme::install(appearance.is_dark(window.appearance()), cx);
-        material::sync(window, appearance.is_dark(window.appearance()));
-        let material_dark = appearance.is_dark(window.appearance());
-        window.defer(cx, move |window, _| material::sync(window, material_dark));
         cx.observe_window_appearance(window, |this, window, cx| {
             theme::install(this.appearance.is_dark(window.appearance()), cx);
-            material::sync(window, this.appearance.is_dark(window.appearance()));
             cx.notify();
         })
         .detach();
@@ -482,8 +481,8 @@ impl Newport {
             services_preferences: Default::default(),
             retired_services: Vec::new(),
             services_refresh_requested: false,
-            display_preferences: display_preferences::DisplayPreferences::new(cx),
             setup_flow: None,
+            welcome: Default::default(),
             overview_state: overview::OverviewState {
                 chart_focus: Some(chart_focus),
                 interfaces: restored.network_interfaces,
@@ -635,8 +634,7 @@ impl Newport {
         let remote_refs_changed = self.poll_remote_refs();
         let remote_search_changed = self.poll_git_remote_search();
         self.window_state.settle();
-        let mut changed = self.display_preferences.refresh();
-        changed |= branch_search_changed;
+        let mut changed = branch_search_changed;
         changed |= self.poll_checkout_search();
         changed |= self.poll_checkout_scroll();
         changed |= changes_search_changed;
@@ -821,10 +819,15 @@ impl Newport {
                             .iter()
                             .any(|server| server["id"] == id)
                     {
-                        self.reset();
-                        self.server = id;
                         self.saved_server_selection = None;
-                        self.refresh();
+                        // Re-saving the current server keeps its pages; the
+                        // connection check below resets them when the
+                        // connection itself changed.
+                        if id != self.server {
+                            self.reset();
+                            self.server = id;
+                            self.refresh();
+                        }
                     }
                     if self.server.is_empty() && data_server_exists(&self.snapshot) {
                         self.server = self.snapshot["config"]["servers"][0]["id"]
@@ -976,6 +979,7 @@ impl Newport {
         self.poll_services(cx);
         self.poll_containers(cx);
         changed |= self.poll_setup();
+        changed |= self.poll_welcome();
         let refresh_interval = Duration::from_secs(if self.page == Page::Overview { 3 } else { 5 });
         if self.last_refresh.elapsed() >= refresh_interval {
             self.last_refresh = Instant::now();
@@ -1089,60 +1093,24 @@ impl Newport {
     }
     fn sidebar(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let menu_view = cx.entity().downgrade();
-        let connected = rows(&self.snapshot["config"]["tunnels"])
-            .iter()
-            .filter(|t| self.snapshot["runtime"]["tunnels"][text(t, "id")]["status"] == "connected")
-            .count();
         div()
             .id("shell-sidebar")
             .debug_selector(|| "shell-sidebar".into())
             .w_full()
             .h_full()
             .min_h_0()
-            .overflow_y_scroll()
             .flex_shrink_0()
-            .bg(cx
-                .theme()
-                .sidebar
-                .opacity(if self.display_preferences.opaque {
-                    1.0
-                } else {
-                    0.30
-                }))
+            .bg(cx.theme().sidebar)
             .text_color(theme::sidebar_foreground(cx.theme().is_dark()))
-            // The resizable panel handle supplies the single sidebar divider.
-            .px(px(10.))
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .h(px(52.))
-                    .flex_shrink_0()
-                    .mx(px(-10.))
-                    .window_control_area(WindowControlArea::Drag),
-            )
-            .child(
-                div()
-                    .h(px(30.))
-                    .flex_shrink_0()
-                    .mb(px(6.))
-                    .px(px(9.))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .window_control_area(WindowControlArea::Drag)
-                    .text_size(px(14.))
-                    .child(img("newport.png").size(px(22.)).rounded(px(5.)))
-                    .child("Newport"),
-            )
-            .child(self.server_selector(compact, cx))
+            .pt(px(6.))
             .child(
                 div()
                     .id("sidebar-navigation-scroll")
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(self.navigation(cx)),
+                    .child(self.navigation(compact, cx)),
             )
             .child(div().flex_1())
             .child(
@@ -1150,102 +1118,56 @@ impl Newport {
                     .flex()
                     .flex_col()
                     .flex_shrink_0()
-                    .gap(px(3.))
-                    .pt(px(if compact { 4. } else { 16. }))
-                    .pb(px(8.))
-                    .child(
-                        Button::new("settings")
-                            .accessibility_label("Settings")
-                            .disabled(self.server_form.is_some() || self.modal_open)
-                            .selected(self.page == Page::Settings)
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(9.))
-                                    .text_size(px(13.))
-                                    .child(Icon::new(IconName::Settings2).size(px(16.)))
-                                    .child("Settings"),
-                            )
-                            .custom(navigation::sidebar_action_style(
-                                self.page == Page::Settings,
-                                cx,
-                            ))
-                            .h(px(32.))
-                            .rounded(px(6.))
-                            .px(px(8.))
-                            .text_color(theme::sidebar_action(cx.theme().is_dark()))
-                            .font_weight(if cx.theme().is_dark() {
-                                FontWeight::NORMAL
-                            } else {
-                                FontWeight::MEDIUM
-                            })
-                            .justify_start()
-                            .text_size(px(13.))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.navigate(Page::Settings, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("add-server")
-                            .accessibility_label("Add Server")
-                            .disabled(self.server_form.is_some() || !self.configuration_available())
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(9.))
-                                    .text_size(px(13.))
-                                    .child(Icon::new(IconName::Plus).size(px(16.)))
-                                    .child("Add Server"),
-                            )
-                            .custom(navigation::sidebar_action_style(false, cx))
-                            .h(px(32.))
-                            .rounded(px(6.))
-                            .px(px(8.))
-                            .text_color(theme::sidebar_action(cx.theme().is_dark()))
-                            .font_weight(if cx.theme().is_dark() {
-                                FontWeight::NORMAL
-                            } else {
-                                FontWeight::MEDIUM
-                            })
-                            .justify_start()
-                            .text_size(px(13.))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.edit_server(None, window, cx)
-                            })),
-                    ),
-            )
-            .child(
-                div()
+                    .py(px(6.))
                     .border_t_1()
-                    .flex_shrink_0()
                     .border_color(cx.theme().border)
-                    .px(px(8.))
-                    .pt(px(10.))
-                    .pb(px(14.))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(div().size(px(5.)).rounded_full().bg(if connected > 0 {
-                        theme::success(cx.theme().is_dark())
-                    } else {
-                        theme::sidebar_muted(cx.theme().is_dark())
-                    }))
-                    .child(
+                    .child({
+                        let selected = self.page == Page::Settings;
                         div()
-                            .child(if connected > 0 {
-                                format!(
-                                    "{connected} active tunnel{}",
-                                    if connected == 1 { "" } else { "s" }
-                                )
-                            } else {
-                                "No active tunnels".into()
-                            })
-                            .text_size(px(11.)),
-                    ),
+                            .relative()
+                            .w_full()
+                            .child(
+                                crate::controls::button("settings")
+                                    .accessibility_label("Settings")
+                                    .disabled(self.server_form.is_some() || self.modal_open)
+                                    .selected(selected)
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(11.))
+                                            .when(selected, |row| {
+                                                row.font_weight(FontWeight::MEDIUM)
+                                            })
+                                            .when(compact, |row| row.justify_center())
+                                            .child(
+                                                Icon::new(IconName::SlidersHorizontal)
+                                                    .size(px(crate::controls::ICON_SIZE))
+                                                    .text_color(navigation::icon_color(
+                                                        selected, cx,
+                                                    )),
+                                            )
+                                            .when(!compact, |row| row.child("Settings")),
+                                    )
+                                    .when(compact, |button| button.tooltip("Settings"))
+                                    .custom(navigation::sidebar_page_style(selected, cx))
+                                    .h(px(if compact { 40. } else { 36. }))
+                                    .min_h(px(if compact { 40. } else { 36. }))
+                                    .max_h(px(if compact { 40. } else { 36. }))
+                                    .w_full()
+                                    .rounded_none()
+                                    // Navigation tabs reserve a 1px focus border;
+                                    // match their content inset.
+                                    .border_0()
+                                    .px(px(if compact { 0. } else { 17. }))
+                                    .when(!compact, |button| button.justify_start())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.navigate(Page::Settings, cx)
+                                    })),
+                            )
+                            .when(selected, |row| row.child(navigation::selection_marker(cx)))
+                    }),
             )
             .context_menu(move |menu, _, cx| shell::server_menu(menu, menu_view.clone(), cx))
             .into_any_element()
@@ -1310,9 +1232,9 @@ impl Render for Newport {
         {
             let server = self.server.clone();
             let config = self.selected_server().expect("validated server");
-            let endpoint = format!("{}@{}", text(&config, "sshUser"), text(&config, "sshHost"));
+            let endpoint = format!("{}@{}", text(config, "sshUser"), text(config, "sshHost"));
             let scope = terminal_scope::connection(
-                &self.selected_server().expect("validated server"),
+                self.selected_server().expect("validated server"),
                 &self.snapshot,
             );
             let workspace = cx
@@ -1337,26 +1259,21 @@ impl Render for Newport {
         if let Some(workspace) = self.terminals.get(&self.server) {
             workspace.update(cx, |workspace, cx| workspace.set_immersive(immersive, cx));
         }
-        let show_sidebar = self.sidebar_visible && !immersive;
+        let welcome = self.welcome_visible();
+        // First run and an unfinished setup are single-purpose screens.
+        let focused = welcome || (self.page == Page::Overview && self.setup_visible());
+        let show_sidebar = self.sidebar_visible && !immersive && !focused;
         self.sidebar_layout.prepare(viewport, cx);
         self.content_width = viewport
             - if show_sidebar {
-                self.sidebar_layout.width(viewport)
+                if self.sidebar_layout.compact() {
+                    crate::ui::ICON_RAIL_WIDTH
+                } else {
+                    self.sidebar_layout.width(viewport)
+                }
             } else {
                 0.
             };
-        let title = self.snapshot["config"]["servers"]
-            .as_array()
-            .and_then(|a| a.iter().find(|s| s["id"] == self.server))
-            .map(|s| {
-                format!(
-                    "{} · {}@{}",
-                    server_picker::display_name(s),
-                    text(s, "sshUser"),
-                    text(s, "sshHost")
-                )
-            })
-            .unwrap_or_else(|| "Connect to Newport".into());
         let connection = connectivity::scoped(&self.server, &self.snapshot, cx);
         let health = connection.map(|state| state.phase);
         let health_label = health
@@ -1367,143 +1284,96 @@ impl Render for Newport {
             Some(connectivity::Phase::Failed) => theme::error(cx.theme().is_dark()),
             _ => cx.theme().muted_foreground,
         };
-        let title = if self.page == Page::Settings {
-            "Application preferences".to_owned()
-        } else {
-            title
-        };
-        let page_heading = if self.server.is_empty() && self.page != Page::Settings {
-            "Servers"
-        } else {
-            self.page.title()
-        };
+        let header = div()
+            .id("workspace-header")
+            .debug_selector(|| "workspace-header".into())
+            .h(px(crate::ui::TITLEBAR_HEIGHT))
+            .flex_shrink_0()
+            .pl(px(
+                if cfg!(target_os = "macos") && !window.is_fullscreen() {
+                    80.
+                } else {
+                    8.
+                },
+            ))
+            .pr(px(8.))
+            .bg(cx.theme().sidebar)
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .when(!focused, |header| {
+                header.child(
+                    crate::controls::icon_button("toggle-sidebar")
+                        .icon(Icon::new(IconName::PanelLeft).size(px(18.)))
+                        .accessibility_label(if !self.sidebar_visible {
+                            "Show sidebar"
+                        } else if self.sidebar_layout.compact() {
+                            "Use full-name navigation"
+                        } else {
+                            "Use icons-only navigation"
+                        })
+                        .ghost()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if window.has_active_dialog(cx) {
+                                return;
+                            }
+                            if !this.sidebar_visible {
+                                this.sidebar_visible = true;
+                            } else if let Err(error) = this
+                                .sidebar_layout
+                                .set_compact(!this.sidebar_layout.compact())
+                            {
+                                this.notification = Some(Notification::error(format!(
+                                    "Could not save navigation style: {error}"
+                                )));
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+            .when(!welcome, |header| header.child(self.server_selector(cx)))
+            .child(
+                div()
+                    .id("workspace-header-drag-region")
+                    .debug_selector(|| "workspace-header-drag-region".into())
+                    .window_control_area(WindowControlArea::Drag)
+                    .flex_1()
+                    .min_w(px(8.))
+                    .h_full(),
+            )
+            .when(
+                !self.server.is_empty() && self.page != Page::Settings,
+                |header| {
+                    header.child(
+                        div()
+                            .id("server-connection-status")
+                            .role(accesskit::Role::Status)
+                            .test_support()
+                            .aria_label(health_label)
+                            .flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap(px(6.))
+                            .text_size(px(crate::ui::FONT_SIZE))
+                            .text_color(health_color)
+                            .child(div().size(px(5.)).rounded_full().bg(health_color))
+                            .child(health_label),
+                    )
+                },
+            )
+            .child(self.shell_actions(cx));
         let content = div()
             .bg(cx.theme().background)
             .w_full()
             .flex_1()
             .min_w_0()
             .h_full()
+            .min_h_0()
             .overflow_hidden()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .id("workspace-header")
-                    .h(px(52.))
-                    .flex_shrink_0()
-                    .pl(px(
-                        if !self.sidebar_visible
-                            && cfg!(target_os = "macos")
-                            && !window.is_fullscreen()
-                        {
-                            96.
-                        } else {
-                            12.
-                        },
-                    ))
-                    .pr(px(if viewport <= 700. { 10. } else { 16. }))
-                    .bg(rgb(if cx.theme().is_dark() {
-                        0x2a292d
-                    } else {
-                        0xf5f4f6
-                    }))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(if viewport <= 700. { 7. } else { 10. }))
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(if viewport <= 700. { 7. } else { 10. }))
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .child(
-                                crate::controls::icon_button("toggle-sidebar")
-                                    .icon(Icon::new(IconName::PanelLeft).size(px(18.)))
-                                    .accessibility_label(if self.sidebar_visible {
-                                        "Hide sidebar"
-                                    } else {
-                                        "Show sidebar"
-                                    })
-                                    .ghost()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.sidebar_visible = !this.sidebar_visible;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .id("workspace-header-drag-region")
-                                    .debug_selector(|| "workspace-header-drag-region".into())
-                                    // Native hit testing must never mark the sidebar
-                                    // toggle or the trailing action buttons as caption.
-                                    .window_control_area(WindowControlArea::Drag)
-                                    .flex()
-                                    .flex_col()
-                                    .h_full()
-                                    .justify_center()
-                                    .gap(px(2.))
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_wrap()
-                                            .items_center()
-                                            .gap_x(px(10.))
-                                            .gap_y(px(5.))
-                                            .child(
-                                                div()
-                                                    .id("workspace-page-heading")
-                                                    .aria_label(page_heading)
-                                                    .role(accesskit::Role::Heading)
-                                                    .aria_level(1)
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .child(page_heading),
-                                            )
-                                            .when(
-                                                !self.server.is_empty()
-                                                    && self.page != Page::Settings,
-                                                |row| {
-                                                    row.child(
-                                                        div()
-                                                            .id("server-connection-status")
-                                                            .role(accesskit::Role::Status)
-                                                            .test_support()
-                                                            .aria_label(health_label)
-                                                            .flex()
-                                                            .flex_shrink_0()
-                                                            .items_center()
-                                                            .gap(px(6.))
-                                                            .text_size(px(10.))
-                                                            .text_color(health_color)
-                                                            .child(
-                                                                div()
-                                                                    .size(px(5.))
-                                                                    .rounded_full()
-                                                                    .bg(health_color),
-                                                            )
-                                                            .child(health_label),
-                                                    )
-                                                },
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .child(title)
-                                            .text_color(cx.theme().muted_foreground)
-                                            .text_size(px(11.))
-                                            .truncate(),
-                                    ),
-                            ),
-                    )
-                    .child(self.shell_actions(cx))
-                    .when(immersive, |header| header.hidden()),
-            )
             .when(!self.initial_loading("snapshot"), |view| {
                 view.child(self.status("snapshot", cx))
             })
@@ -1549,9 +1419,10 @@ impl Render for Newport {
             })
             .size_full()
             .flex()
+            .flex_col()
             .text_color(cx.theme().foreground)
             .font_family(crate::theme::UI_FONT)
-            .text_size(px(13.))
+            .text_size(px(crate::ui::FONT_SIZE))
             .track_focus(&self.focus)
             .when(cfg!(not(target_os = "macos")), |shell| {
                 shell.on_action(cx.listener(|_, _: &About, window, cx| {
@@ -1694,25 +1565,49 @@ impl Render for Newport {
                 }
                 cx.notify();
             }))
-            .child(if show_sidebar {
-                self.sidebar_group(cx)
+            .when(!immersive, |root| root.child(header))
+            .child(if show_sidebar && !self.sidebar_layout.compact() {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
                     .child(
-                        self.sidebar_layout.sidebar_panel(viewport).child(
-                            self.sidebar(f32::from(window.viewport_size().height) <= 560., cx),
-                        ),
+                        self.sidebar_group(cx)
+                            .child(
+                                self.sidebar_layout
+                                    .sidebar_panel(viewport)
+                                    .child(self.sidebar(false, cx)),
+                            )
+                            .child(self.sidebar_layout.content_panel().child(content))
+                            .on_resize(cx.listener(|this, _, window, cx| {
+                                if let Err(error) = this
+                                    .sidebar_layout
+                                    .capture_resize(f32::from(window.viewport_size().width), cx)
+                                {
+                                    this.notification = Some(Notification::error(format!(
+                                        "Could not save sidebar width: {error}"
+                                    )));
+                                }
+                                cx.notify();
+                            })),
                     )
-                    .child(self.sidebar_layout.content_panel().child(content))
-                    .on_resize(cx.listener(|this, _, window, cx| {
-                        if let Err(error) = this
-                            .sidebar_layout
-                            .capture_resize(f32::from(window.viewport_size().width), cx)
-                        {
-                            this.notification = Some(Notification::error(format!(
-                                "Could not save sidebar width: {error}"
-                            )));
-                        }
-                        cx.notify();
-                    }))
+                    .into_any_element()
+            } else if show_sidebar {
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .w(px(crate::ui::ICON_RAIL_WIDTH))
+                            .flex_shrink_0()
+                            .h_full()
+                            .border_r_1()
+                            .border_color(cx.theme().border)
+                            .child(self.sidebar(true, cx)),
+                    )
+                    .child(content)
                     .into_any_element()
             } else {
                 content.into_any_element()
@@ -1861,7 +1756,7 @@ pub fn run_with_options_and_ready(
                 window_bounds: Some(bounds),
                 display_id: window_state.display_id(),
                 window_min_size: Some(size(px(640.), px(480.))),
-                window_background: WindowBackgroundAppearance::Blurred,
+                window_background: WindowBackgroundAppearance::Opaque,
                 titlebar: Some(TitlebarOptions {
                     title: Some("Newport — Native".into()),
                     // On Windows transparency removes the system caption and
@@ -1869,7 +1764,7 @@ pub fn run_with_options_and_ready(
                     // the shell explicitly provides a replacement title bar.
                     appears_transparent: !cfg!(target_os = "windows"),
                     traffic_light_position: cfg!(target_os = "macos")
-                        .then(|| point(px(9.), px(9.))),
+                        .then(|| point(px(12.), px(12.))),
                 }),
                 ..Default::default()
             },

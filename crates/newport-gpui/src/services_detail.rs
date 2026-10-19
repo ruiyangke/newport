@@ -14,6 +14,9 @@ impl ServicesPanel {
                 .iter()
                 .find(|u| selected == Selection::Unit(u.key()))
         });
+        // Unit tabs size to the pane as last laid out. When the list beside
+        // it is resized, lay out again with the new width.
+        let laid_out = self.detail_scroll.bounds().size.width;
         div()
             .id("services-detail")
             .debug_selector(|| "services-detail".into())
@@ -27,6 +30,20 @@ impl ServicesPanel {
             .h_full()
             .overflow_y_scroll()
             .track_scroll(&self.detail_scroll)
+            .child(
+                canvas(
+                    move |bounds, window, _| {
+                        if bounds.size.width != laid_out {
+                            window.refresh();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full()
+                .left_0()
+                .top_0(),
+            )
             .child(
                 div()
                     .min_h_full()
@@ -104,6 +121,40 @@ impl ServicesPanel {
                 triggered.push(t.name.clone());
             }
         }
+        let restarts = unit.restarts.filter(|n| *n > 0);
+        let has_facts = unit.main_pid.is_some() || restarts.is_some() || !triggered.is_empty();
+        // Identity and boot behaviour that rarely change ride the status line.
+        let boot_switch = {
+            let verbs = domain::available_verbs(unit);
+            verbs.enable || verbs.disable
+        };
+        let meta = [
+            unit.main_pid.map(|pid| format!("PID {pid}")),
+            Some(format!(
+                "runs as {}",
+                unit.user.clone().unwrap_or(
+                    if unit.scope == Scope::User {
+                        "you"
+                    } else {
+                        "root"
+                    }
+                    .into()
+                )
+            )),
+            (!boot_switch)
+                .then(|| match unit.enabled.as_deref() {
+                    Some("static") => Some("started by another unit".to_owned()),
+                    Some("masked") => Some("masked".to_owned()),
+                    Some("enabled") => Some("starts at boot".to_owned()),
+                    Some("disabled") => Some("doesn’t start at boot".to_owned()),
+                    _ => None,
+                })
+                .flatten(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
         let facts = div()
             .flex()
             .flex_wrap()
@@ -111,64 +162,26 @@ impl ServicesPanel {
             .gap_y(px(10.))
             .when(unit.main_pid.is_some(), |v| {
                 v.child(fact(
-                    "Memory",
-                    unit.memory.map(|n| bytes(&json!(n))).unwrap_or("—".into()),
-                    None,
-                    cx,
-                ))
-                .child(fact(
                     "CPU",
                     unit.cpu.map(|n| format!("{n:.1}%")).unwrap_or("—".into()),
                     None,
                     cx,
                 ))
                 .child(fact(
-                    "Main PID",
-                    unit.main_pid.map(|n| n.to_string()).unwrap_or_default(),
+                    "Memory",
+                    unit.memory.map(|n| bytes(&json!(n))).unwrap_or("—".into()),
                     None,
                     cx,
                 ))
             })
-            .child(fact(
-                "Runs as",
-                unit.user.clone().unwrap_or(
-                    if unit.scope == Scope::User {
-                        "you"
-                    } else {
-                        "root"
-                    }
-                    .into(),
-                ),
-                None,
-                cx,
-            ))
-            .when(unit.restarts.is_some_and(|n| n > 0), |v| {
-                v.child(fact(
-                    "Restarts",
-                    unit.restarts.unwrap_or_default().to_string(),
-                    None,
-                    cx,
-                ))
+            .when_some(restarts, |v, restarts| {
+                v.child(fact("Restarts", restarts.to_string(), None, cx))
             })
-            .child(fact(
-                "At boot",
-                match unit.enabled.as_deref() {
-                    Some("enabled") => "Starts",
-                    Some("disabled") => "Doesn’t start",
-                    Some("static") => "Started by another unit",
-                    Some("masked") => "Masked",
-                    Some(other) => other,
-                    None => "—",
-                }
-                .into(),
-                None,
-                cx,
-            ))
             .when(!triggered.is_empty(), |v| {
                 v.child(
                     div()
                         .min_w_0()
-                        .child(quiet("Triggered by", cx).text_size(px(11.)))
+                        .child(quiet("Triggered by", cx).text_size(px(crate::ui::FONT_SIZE)))
                         .children(triggered.iter().map(|name| {
                             if let Some(timer) = matching.iter().find(|timer| timer.name == *name) {
                                 let key = timer.key();
@@ -195,10 +208,12 @@ impl ServicesPanel {
                                     )
                                     .child(
                                         quiet(format!(" · next {}", self.clock.timer(timer)), cx)
-                                            .text_size(px(11.)),
+                                            .text_size(px(crate::ui::FONT_SIZE)),
                                     )
                             } else {
-                                div().text_size(px(12.5)).child(name.clone())
+                                div()
+                                    .text_size(px(crate::ui::FONT_SIZE))
+                                    .child(name.clone())
                             }
                         })),
                 )
@@ -219,12 +234,12 @@ impl ServicesPanel {
                             .gap(px(8.))
                             .child(title(unit.name.clone()))
                             .when(unit.scope == Scope::User, |v| {
-                                v.child(badge("user service", cx))
+                                v.child(crate::controls::tag("user service", cx))
                             }),
                     )
                     .child(
                         quiet(unit.description.clone(), cx)
-                            .text_size(px(12.))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .mt(px(2.)),
                     )
                     .child(
@@ -234,7 +249,7 @@ impl ServicesPanel {
                             .flex_wrap()
                             .items_center()
                             .gap(px(8.))
-                            .text_size(px(12.5))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .child(
                                 div()
                                     .id("service-state")
@@ -273,6 +288,9 @@ impl ServicesPanel {
                                     .id("service-since")
                                     .hover_hint(date(since)),
                                 )
+                            })
+                            .when(!meta.is_empty(), |v| {
+                                v.child(quiet(format!("· {meta}"), cx).id("service-meta"))
                             }),
                     ),
             )
@@ -283,7 +301,7 @@ impl ServicesPanel {
                         .role(accesskit::Role::Alert)
                         .aria_label(reason.clone())
                         .text_color(tone_color(state.tone, cx))
-                        .text_size(px(12.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .flex()
                         .items_start()
                         .gap(px(8.))
@@ -301,13 +319,15 @@ impl ServicesPanel {
                 )
             })
             .child(self.service_actions(unit, cx))
-            .child(
-                facts
-                    .py(px(10.))
-                    .border_t_1()
-                    .border_b_1()
-                    .border_color(cx.theme().border),
-            )
+            .when(has_facts, |v| {
+                v.child(
+                    facts
+                        .py(px(10.))
+                        .border_t_1()
+                        .border_b_1()
+                        .border_color(cx.theme().border),
+                )
+            })
             .child(self.unit_tabs(
                 &unit.name,
                 true,
@@ -332,7 +352,7 @@ impl ServicesPanel {
             .child(
                 div().child(title(timer.name.clone())).child(
                     quiet(timer.description.clone(), cx)
-                        .text_size(px(12.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .mt(px(2.)),
                 ),
             )
@@ -360,44 +380,46 @@ impl ServicesPanel {
                         timer.last.map(date),
                         cx,
                     ))
-                    .child(div().child(quiet("Runs", cx).text_size(px(11.))).child(
-                        if let Some(target) = target {
-                            let key = target.key();
-                            let label = format!(
-                                "{} · {}",
-                                target.name,
-                                domain::state_of(target).label.to_lowercase()
-                            );
-                            div()
-                                .flex()
-                                .items_start()
-                                .child(
-                                    crate::controls::compact_button("timer-service-link")
-                                        .text()
-                                        .px_0()
-                                        .group("timer-service-link")
-                                        .accessibility_label(label.clone())
-                                        .child(
-                                            div()
-                                                .text_size(px(12.5))
-                                                .text_color(cx.theme().foreground)
-                                                .group_hover("timer-service-link", |style| {
-                                                    style.text_decoration_1()
-                                                })
-                                                .child(label),
-                                        )
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.select(Selection::Unit(key.clone()), cx)
-                                        })),
-                                )
-                                .into_any_element()
-                        } else {
-                            div()
-                                .text_size(px(12.5))
-                                .child(timer.unit.clone().unwrap_or("—".into()))
-                                .into_any_element()
-                        },
-                    )),
+                    .child(
+                        div()
+                            .child(quiet("Runs", cx).text_size(px(crate::ui::FONT_SIZE)))
+                            .child(if let Some(target) = target {
+                                let key = target.key();
+                                let label = format!(
+                                    "{} · {}",
+                                    target.name,
+                                    domain::state_of(target).label.to_lowercase()
+                                );
+                                div()
+                                    .flex()
+                                    .items_start()
+                                    .child(
+                                        crate::controls::compact_button("timer-service-link")
+                                            .text()
+                                            .px_0()
+                                            .group("timer-service-link")
+                                            .accessibility_label(label.clone())
+                                            .child(
+                                                div()
+                                                    .text_size(px(crate::ui::FONT_SIZE))
+                                                    .text_color(cx.theme().foreground)
+                                                    .group_hover("timer-service-link", |style| {
+                                                        style.text_decoration_1()
+                                                    })
+                                                    .child(label),
+                                            )
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.select(Selection::Unit(key.clone()), cx)
+                                            })),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .text_size(px(crate::ui::FONT_SIZE))
+                                    .child(timer.unit.clone().unwrap_or("—".into()))
+                                    .into_any_element()
+                            }),
+                    ),
             )
             .child(self.unit_tabs(&timer.name, timer.unit.is_some(), None, 0, cx))
             .into_any_element()
@@ -460,23 +482,55 @@ impl ServicesPanel {
         };
         div().flex().flex_col().gap(px(8.))
             .child(div().flex().flex_wrap().items_center().gap(px(6.))
-                .child(action(if running{ServiceVerb::Restart}else{ServiceVerb::Start},"service-primary",true,self,cx))
+                .child(action(if running{ServiceVerb::Restart}else{ServiceVerb::Start},"service-primary",!running,self,cx))
                 .when(verbs.stop,|v|v.child(action(ServiceVerb::Stop,"service-stop",false,self,cx)))
                 .when(!running&&verbs.restart&&unit.active=="failed",|v|v.child(action(ServiceVerb::Restart,"service-restart",false,self,cx)))
-                .when(verbs.reload,|v|v.child(action(ServiceVerb::Reload,"service-reload",false,self,cx).ghost().hover_hint("Ask the service to reload its configuration without restarting")))
+                .when(verbs.reload,|v|v.child(self.more_actions(unit,cx)))
                 .when(verbs.enable||verbs.disable,|v|{let name=unit.name.clone();let scope=unit.scope;let next=if unit.enabled.as_deref()==Some("enabled"){ServiceVerb::Disable}else{ServiceVerb::Enable};v.child(div().ml_auto().child(crate::controls::switch("service-at-boot").label("Start at boot").checked(unit.enabled.as_deref()==Some("enabled")).disabled(!self.client.can_action(&name,scope,next)).on_click(cx.listener(move|this,checked,_,cx|{let verb=if *checked{ServiceVerb::Enable}else{ServiceVerb::Disable};if verb==ServiceVerb::Disable{this.review=Some(Review{unit:name.clone(),scope,verb});cx.notify();}else{this.start_action(name.clone(),scope,verb,cx);}}))))}))
             .when_some(blocked,|v,reason|v.child(quiet(reason,cx)))
             .when(review.is_none(),|v|v.when_some(status.and_then(|s|s.error.clone()),|v,error|v.child(alert("service-action-error",error,cx))))
-            .when_some(handover,|v,command|v.child(div().id("service-handover").role(accesskit::Role::Alert).rounded(px(8.)).border_1().border_color(tone_color(Tone::Warning,cx).opacity(0.3)).bg(tone_color(Tone::Warning,cx).opacity(0.05)).p(px(12.)).flex().flex_col().gap(px(8.)).child(div().text_size(px(12.)).child("This needs your sudo password. Run this command in the Terminal."))
-                .child(div().font_family(cx.theme().mono_font_family.clone()).text_size(px(11.5)).child(command.clone()))
+            .when_some(handover,|v,command|v.child(div().id("service-handover").role(accesskit::Role::Alert).rounded(px(crate::ui::RADIUS)).border_1().border_color(tone_color(Tone::Warning,cx).opacity(0.3)).bg(tone_color(Tone::Warning,cx).opacity(0.05)).p(px(12.)).flex().flex_col().gap(px(8.)).child(div().text_size(px(crate::ui::FONT_SIZE)).child("This needs your sudo password. Run this command in the Terminal."))
+                .child(div().font_family(cx.theme().mono_font_family.clone()).text_size(px(crate::ui::FONT_SIZE)).child(command.clone()))
                 .child(crate::controls::button("service-open-terminal").label("Open in Terminal").on_click(cx.listener(move|_,_,_,cx|cx.emit(ServicesEvent::OpenTerminal{command:command.clone()}))))))
             .when_some(review,|v,review|{let name=review.unit.clone();let scope=review.scope;let verb=review.verb;
                 let title=if verb==ServiceVerb::Stop{format!("Stop {}?",domain::short_name(&name))}else{format!("Don’t start at boot {}?",domain::short_name(&name))};
                 let description=if verb==ServiceVerb::Stop{format!("This stops {name}{}. Anything relying on it stops working until it is started again.",if scope==Scope::User{" (user service)"}else{""})}else{format!("{name} will no longer start when the server boots. It keeps running until it is stopped.")};
-                v.child(div().id("service-action-review").role(accesskit::Role::Region).aria_label(title.clone()).border_1().border_color(cx.theme().border).rounded(px(8.)).p(px(12.)).flex().flex_col().gap(px(8.)).child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(title)).child(quiet(description,cx))
+                v.child(div().id("service-action-review").role(accesskit::Role::Region).aria_label(title.clone()).border_1().border_color(cx.theme().border).rounded(px(crate::ui::RADIUS)).p(px(12.)).flex().flex_col().gap(px(8.)).child(div().text_size(px(crate::ui::FONT_SIZE)).font_weight(FontWeight::SEMIBOLD).child(title)).child(quiet(description,cx))
                     .when_some(status.and_then(|s|s.error.clone()),|v,error|v.child(alert("service-review-error",error,cx)))
                     .child(div().flex().justify_end().gap(px(6.)).child(crate::controls::button("service-review-cancel").label("Cancel").disabled(pending).on_click(cx.listener(|this,_,_,cx|{this.review=None;cx.notify();})))
                         .child(crate::controls::button("service-review-confirm").label(verb.label()).accessibility_label(format!("Confirm {}",verb.as_str())).danger().disabled(!self.client.can_action(&name,scope,verb)).loading(pending).on_click(cx.listener(move|this,_,_,cx|this.start_action(name.clone(),scope,verb,cx))))))}).into_any_element()
+    }
+    /// Rare verbs live behind "…": today only Reload.
+    fn more_actions(&self, unit: &ServiceUnit, cx: &mut Context<Self>) -> AnyElement {
+        let (name, scope) = (unit.name.clone(), unit.scope);
+        let weak = cx.weak_entity();
+        crate::controls::icon_button("service-more")
+            .ghost()
+            .icon(IconName::Ellipsis)
+            .accessibility_label(format!(
+                "More actions for {}",
+                domain::short_name(&unit.name)
+            ))
+            .dropdown_menu(move |menu, _, cx| {
+                let enabled = weak.upgrade().is_some_and(|panel| {
+                    panel
+                        .read(cx)
+                        .client
+                        .can_action(&name, scope, ServiceVerb::Reload)
+                });
+                let (weak, name) = (weak.clone(), name.clone());
+                menu.item(
+                    PopupMenuItem::new("Reload configuration")
+                        .icon(IconName::RotateCw)
+                        .disabled(!enabled)
+                        .on_click(move |_, _, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.start_action(name.clone(), scope, ServiceVerb::Reload, cx)
+                            });
+                        }),
+                )
+            })
+            .into_any_element()
     }
     fn unit_tabs(
         &self,
@@ -487,12 +541,17 @@ impl ServicesPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let active = if has_logs { self.tab } else { 1 };
-        let detail_width = if self.width <= 600. {
+        // Measured, since the list beside the detail pane is resizable. Until
+        // the first layout, assume the default 280px list.
+        let pane = f32::from(self.detail_scroll.bounds().size.width);
+        let detail_width = if pane > 0. {
+            pane - 32.
+        } else if self.width <= 600. {
             self.width - 32.
         } else {
             self.width - 312.
         };
-        let stacked = detail_width <= 600.;
+        let stacked = detail_width <= 720.;
         let choices: &[(usize, &str)] = if has_logs {
             &[(0, "Logs"), (1, "Unit file")]
         } else {
@@ -508,7 +567,11 @@ impl ServicesPanel {
                         .clone()
                         .tab_stop(index == active),
                 )
-                .focus_visible(|style| style.rounded(px(4.)).border_color(cx.theme().ring))
+                .focus_visible(|style| {
+                    style
+                        .rounded(px(crate::ui::RADIUS))
+                        .border_color(cx.theme().ring)
+                })
                 .on_key_down(cx.listener(move |this, event, window, cx| {
                     this.detail_tab_key(index, has_logs, event, window, cx)
                 }))
@@ -526,7 +589,13 @@ impl ServicesPanel {
                     .flex()
                     .flex_shrink_0()
                     .min_h(px(if stacked {
-                        36. + if detail_width < 480. { 64. } else { 28. }
+                        36. + if detail_width < 320. {
+                            100.
+                        } else if detail_width < 540. {
+                            64.
+                        } else {
+                            28.
+                        }
                     } else {
                         35.
                     }))
@@ -558,7 +627,9 @@ impl ServicesPanel {
                             .flex()
                             .items_center()
                             .justify_end()
-                            .min_h(px(if stacked && detail_width < 480. {
+                            .min_h(px(if stacked && detail_width < 320. {
+                                100.
+                            } else if stacked && detail_width < 540. {
                                 64.
                             } else {
                                 28.
@@ -671,7 +742,7 @@ impl ServicesPanel {
                         .readonly(true)
                         .aria_label(format!("{name} unit file"))
                         .h_full()
-                        .text_size(px(12.)),
+                        .text_size(px(crate::ui::FONT_SIZE)),
                 )
             })
             .into_any_element()
@@ -702,10 +773,15 @@ fn fact(label: &str, value: String, detail: Option<String>, cx: &App) -> Statefu
         .role(accesskit::Role::Group)
         .aria_label(accessible)
         .min_w_0()
-        .child(quiet(label.to_owned(), cx).text_size(px(11.)))
-        .child(div().text_size(px(12.5)).mt(px(1.)).child(value))
+        .child(quiet(label.to_owned(), cx).text_size(px(crate::ui::FONT_SIZE)))
+        .child(
+            div()
+                .text_size(px(crate::ui::FONT_SIZE))
+                .mt(px(1.))
+                .child(value),
+        )
         .when_some(detail, |v, text| {
-            v.child(quiet(text, cx).text_size(px(11.)))
+            v.child(quiet(text, cx).text_size(px(crate::ui::FONT_SIZE)))
         })
 }
 fn date(at: i64) -> String {

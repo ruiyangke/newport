@@ -158,10 +158,10 @@ impl RenderOnce for SortColumn {
                 .group(group.clone())
                 .px(px(4.))
                 .ml(px(-4.))
-                .rounded(px(4.))
+                .rounded(px(crate::ui::RADIUS))
                 .child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .text_color(cx.theme().muted_foreground)
                         .child(self.title),
                 )
@@ -251,6 +251,14 @@ impl RenderOnce for RowPresentation {
             })
             .unwrap_or_else(|_| div().into_any_element())
     }
+}
+
+/// Width of the table's actions column: toggle, menu and the Always on icon.
+const ACTIONS_COLUMN_WIDTH: f32 = 104.;
+
+/// A row is Always on only when every saved forward on it is.
+fn always_on(forwards: &[Value]) -> bool {
+    !forwards.is_empty() && forwards.iter().all(|t| t["autoConnect"] == true)
 }
 
 pub(super) fn project_name(key: &str) -> &str {
@@ -637,13 +645,13 @@ impl Newport {
         let Some((value, remote_port)) = row.open.clone() else {
             return label(row.address.clone())
                 .font_family(cx.theme().mono_font_family.clone())
-                .text_size(px(11.5))
+                .text_size(px(crate::ui::FONT_SIZE))
                 .into_any_element();
         };
         let server = self.server.clone();
         crate::controls::compact_button(SharedString::from(format!("open-{}", row.key)))
             .ghost()
-            .rounded(px(6.))
+            .rounded(px(crate::ui::RADIUS))
             .bg(cx.theme().primary.opacity(0.08))
             .text_color(cx.theme().primary)
             .font_family(cx.theme().mono_font_family.clone())
@@ -748,13 +756,15 @@ impl Newport {
                                     .flex_shrink_0()
                                     .px(px(10.))
                                     .text_right()
-                                    .child(label("Local address").text_size(px(11.))),
+                                    .child(
+                                        label("Local address").text_size(px(crate::ui::FONT_SIZE)),
+                                    ),
                             )
                         })
                         .child(
                             TableHead::new("ports-heading-actions", if wide { 6 } else { 3 })
                                 .aria_label("Actions")
-                                .w(px(84.))
+                                .w(px(ACTIONS_COLUMN_WIDTH))
                                 .flex_shrink_0(),
                         ),
                 ),
@@ -917,7 +927,7 @@ impl Newport {
                                 .child(
                                     div()
                                         .min_w_0()
-                                        .text_size(px(13.))
+                                        .text_size(px(crate::ui::FONT_SIZE))
                                         .font_weight(FontWeight::MEDIUM)
                                         .truncate()
                                         .child(display_title.clone()),
@@ -925,26 +935,14 @@ impl Newport {
                                 .when(
                                     !row.entry.saved
                                         && newport_domain::port_context::is_docker(&row.entry.port),
-                                    |v| {
-                                        v.child(
-                                            div()
-                                                .flex_shrink_0()
-                                                .px(px(5.))
-                                                .py(px(1.))
-                                                .rounded(px(4.))
-                                                .bg(cx.theme().muted)
-                                                .text_color(cx.theme().muted_foreground)
-                                                .text_size(px(10.))
-                                                .child("Docker"),
-                                        )
-                                    },
+                                    |v| v.child(crate::controls::tag("Docker", cx)),
                                 ),
                         )
                         .when((compact && row.rank <= 1) || (table && !wide), |v| {
                             v.child(
                                 div()
                                     .flex_shrink_0()
-                                    .text_size(px(11.))
+                                    .text_size(px(crate::ui::FONT_SIZE))
                                     .text_color(tone)
                                     .child(row.status.clone()),
                             )
@@ -959,7 +957,7 @@ impl Newport {
                             .flex_wrap()
                             .items_baseline()
                             .gap_x(px(4.))
-                            .text_size(px(11.5))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .line_height(relative(1.45))
                             .text_color(if row.problem {
                                 cx.theme().danger
@@ -1004,6 +1002,22 @@ impl Newport {
                 });
         let menu = self.connection_menu(&row, true, cx);
         let pending = self.port_busy(&row.entry);
+        let always_on = always_on(&row.entry.forwards);
+        // Tables and narrow lists keep fixed action widths; a hinted icon
+        // carries the same fact there.
+        let always_on_marker = always_on.then(|| {
+            if table || compact {
+                div()
+                    .id(SharedString::from(format!("always-on-{}", row.key)))
+                    .flex_shrink_0()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Icon::new(IconName::Power).size(px(14.)))
+                    .hover_hint("Always on")
+                    .into_any_element()
+            } else {
+                crate::controls::tag("Always on", cx).into_any_element()
+            }
+        });
         let server = self.server.clone();
         let entry = row.entry.clone();
         let project = row.project.clone();
@@ -1042,7 +1056,7 @@ impl Newport {
             .min_h(px(42.))
             .py(px(5.))
             .flex_shrink_0()
-            .when(!table, |v| v.px_3().rounded(px(8.)))
+            .when(!table, |v| v.px_3().rounded(px(crate::ui::RADIUS)))
             .when(nested, |v| v.ml(px(if compact { 16. } else { 32. })))
             .when(stripe, |v| v.bg(cx.theme().foreground.opacity(0.02)))
             .when(engaged, |v| v.bg(theme::row_hover(cx)))
@@ -1075,7 +1089,7 @@ impl Newport {
                     .child(
                         div()
                             .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(13.))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .text_color(if row.entry.forwards.is_empty() {
                                 cx.theme().muted_foreground
                             } else {
@@ -1101,7 +1115,7 @@ impl Newport {
                         .flex_shrink_0()
                         .min_w_0()
                         .px(px(10.))
-                        .text_size(px(12.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .child(
                             div()
                                 .truncate()
@@ -1127,7 +1141,7 @@ impl Newport {
                                             .min_w_0()
                                             .truncate()
                                             .font_family(cx.theme().mono_font_family.clone())
-                                            .text_size(px(11.))
+                                            .text_size(px(crate::ui::FONT_SIZE))
                                             .child(row.branch),
                                     ),
                             )
@@ -1149,7 +1163,7 @@ impl Newport {
                         .w(px(124.))
                         .flex_shrink_0()
                         .px(px(10.))
-                        .text_size(px(12.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .text_color(tone)
                         .child(row.status.clone()),
                 )
@@ -1173,7 +1187,7 @@ impl Newport {
                         .when(!table, |v| v.w(px(184.)).pr(px(12.)))
                         .text_right()
                         .font_family(cx.theme().mono_font_family.clone())
-                        .text_size(px(11.5))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .text_color(cx.theme().muted_foreground)
                         .child(route.take().unwrap()),
                 )
@@ -1186,15 +1200,15 @@ impl Newport {
                             .aria_column_index(if wide { 6 } else { 3 })
                             .aria_label("Actions")
                     })
-                    .w(px(if table {
-                        84.
-                    } else if compact {
-                        72.
-                    } else if row.rank <= 1 {
-                        166.
-                    } else {
-                        72.
-                    }))
+                    .map(|v| {
+                        if table {
+                            v.w(px(ACTIONS_COLUMN_WIDTH))
+                        } else {
+                            // Toggles stay aligned on the right edge while a
+                            // row's tag widens its own cell.
+                            v.min_w(px(if !compact && row.rank <= 1 { 166. } else { 72. }))
+                        }
+                    })
                     .flex_shrink_0()
                     .pr(px(if table { 10. } else { 0. }))
                     .flex()
@@ -1210,11 +1224,12 @@ impl Newport {
                     .when(!table && !compact && row.rank <= 1, |v| {
                         v.child(
                             div()
-                                .text_size(px(11.))
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .text_color(tone)
                                 .child(row.status.clone()),
                         )
                     })
+                    .children(always_on_marker)
                     .child(control)
                     .child(menu),
             )
@@ -1230,7 +1245,6 @@ impl Newport {
         let port = row.number;
         let name = newport_domain::port_context::forward_name(&row.entry.port);
         let project = row.project.clone();
-        let open = row.open.clone();
         let pending = self.port_busy(&row.entry);
         RowMenu {
             id: SharedString::from(format!("actions-visibility-{}", row.key)),
@@ -1293,7 +1307,7 @@ impl Newport {
                     let server = server.clone();
                     let id = string(t, "id").to_owned();
                     let title = if forwards.len() == 1 {
-                        "Edit forward…".into()
+                        "Edit…".into()
                     } else {
                         format!("Edit {}…", tunnel_delete::name(t))
                     };
@@ -1307,37 +1321,40 @@ impl Newport {
                         },
                     ));
                 }
-                if let Some((value, remote_port)) = open.clone() {
-                    let owner = weak.clone();
-                    let expected_server = server.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new("Open in browser")
-                            .icon(IconName::ExternalLink)
-                            .on_click(move |_, _, cx| {
-                                let _ = owner.update(cx, |this, cx| {
-                                    if this.server == expected_server {
-                                        this.open_forward(value.clone(), remote_port, cx);
-                                    }
-                                });
-                            }),
-                    );
-                }
                 let address = address.clone();
                 menu = menu
-                    .item(
-                        PopupMenuItem::new("Copy address")
-                            .icon(IconName::Copy)
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(address.clone()))
-                            }),
-                    )
+                    .item(PopupMenuItem::new("Copy").icon(IconName::Copy).on_click(
+                        move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(address.clone()))
+                        },
+                    ))
                     .separator();
+                {
+                    let owner = weak.clone();
+                    let expected_server = server.clone();
+                    let values = forwards.clone();
+                    let enabled = always_on(&forwards);
+                    menu = menu
+                        .item(
+                            PopupMenuItem::new("Always on")
+                                .icon(IconName::Power)
+                                .checked(enabled)
+                                .on_click(move |_, _, cx| {
+                                    let _ = owner.update(cx, |this, cx| {
+                                        if this.server == expected_server {
+                                            this.set_always_on(values.clone(), !enabled, cx);
+                                        }
+                                    });
+                                }),
+                        )
+                        .separator();
+                }
                 for t in &forwards {
                     let owner = weak.clone();
                     let expected_server = server.clone();
                     let value = t.clone();
                     let title = if forwards.len() == 1 {
-                        "Delete forward…".into()
+                        "Delete…".into()
                     } else {
                         format!("Delete {}…", tunnel_delete::name(t))
                     };
@@ -1377,8 +1394,19 @@ impl Newport {
 
 #[cfg(test)]
 mod tests {
-    use super::{Entry, Row, local_address, open_target, sort};
+    use super::{Entry, Row, always_on, local_address, open_target, sort};
     use serde_json::json;
+    #[test]
+    fn always_on_requires_every_saved_forward_on_the_row() {
+        assert!(!always_on(&[]), "an unsaved port has no policy");
+        assert!(always_on(&[json!({"autoConnect":true})]));
+        assert!(!always_on(&[json!({"autoConnect":false})]));
+        assert!(!always_on(&[json!({})]));
+        assert!(!always_on(&[
+            json!({"autoConnect":true}),
+            json!({"autoConnect":false})
+        ]));
+    }
     fn row(port: u64, project: &str) -> Row {
         Row::new(
             project,

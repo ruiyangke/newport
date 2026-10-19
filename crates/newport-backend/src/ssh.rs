@@ -90,6 +90,9 @@ struct Connection {
     disconnected: Arc<tokio::sync::Notify>,
     forwards: Arc<reverse::RemoteForwards>,
     channel_cleanup: Mutex<JoinSet<()>>,
+    session_open: tokio::sync::Mutex<()>,
+    channel_pressure: tokio::sync::watch::Sender<u64>,
+    sftp: tokio::sync::Mutex<std::sync::Weak<sftp::Session>>,
 }
 impl Drop for Connection {
     fn drop(&mut self) {
@@ -246,6 +249,9 @@ impl Connection {
             disconnected,
             forwards,
             channel_cleanup: Mutex::new(JoinSet::new()),
+            session_open: tokio::sync::Mutex::new(()),
+            channel_pressure: tokio::sync::watch::channel(0).0,
+            sftp: tokio::sync::Mutex::default(),
         })
     }
     async fn close(&self) {
@@ -336,18 +342,28 @@ pub(crate) async fn terminal_with_session(
     output: &tokio::sync::mpsc::Sender<crate::terminal::Event>,
 ) -> Result<()> {
     use crate::terminal::Event;
-    let _demand = owner.transport_demand();
+    if !owner.server().same_connection(server) || owner.is_revoked() {
+        bail!("Server session changed. Reconnect before retrying.");
+    }
+    // The terminal task owns this supervisor. Exiting or cancelling the task
+    // closes only this tab's socket, including a pending authentication attempt.
+    let transport = owner.terminal_transport();
+    let _demand = transport.demand();
     let mut cancelled = owner.cancellation();
     let run = async {
         let selector = owner.integration_session_id().to_string();
         let mut size = (cols, rows);
         loop {
-            let (result, lost) = match owner.acquire(server).await {
-                Ok(lease) => {
-                    let result = lease
+            let acquired = tokio::select! {
+                result = transport.acquire() => result,
+                _ = discard_input(&mut input, &mut size) => return Ok(()),
+            };
+            let (result, lost) = match acquired {
+                Ok((connection, _, _lease)) => {
+                    let result = connection
                         .terminal(&mut size, &mut input, output, &selector)
                         .await;
-                    let lost = lease.is_closed()
+                    let lost = connection.is_closed()
                         || result.as_ref().is_err_and(|e| e.is::<ConnectionLost>());
                     (result, lost)
                 }
@@ -360,22 +376,22 @@ pub(crate) async fn terminal_with_session(
                 }
                 Ok(TerminalEnd::Closed) => return Ok(()),
                 Err(error) => {
-                    let transport = owner.transport_snapshot();
+                    let snapshot = transport.snapshot();
                     // A refused PTY or shell is a service failure. Reconnecting
                     // a healthy transport cannot repair it.
-                    if (!lost && (owner.has_transport() || !transport.retryable))
-                        || (!transport.retryable && transport.error.is_some())
+                    if (!lost && (transport.observe().is_some() || !snapshot.retryable))
+                        || (!snapshot.retryable && snapshot.error.is_some())
                     {
                         return Err(error);
                     }
                     output
                         .send(Event::Reconnecting {
-                            attempt: transport.attempt.max(1),
+                            attempt: snapshot.attempt.max(1),
                             message: format!("{error:#}"),
                         })
                         .await?;
                     tokio::select! {
-                        result = owner.wait_for_transport() => result.map_err(anyhow::Error::msg)?,
+                        result = transport.ready() => result.map_err(anyhow::Error::msg)?,
                         _ = discard_input(&mut input, &mut size) => return Ok(()),
                     }
                 }
@@ -391,20 +407,30 @@ pub(crate) async fn terminal_with_session(
     }
 }
 
-/// PTYs own only a channel. Cancellation must never close the shared transport.
-struct TerminalChannel {
+/// Cancelling a channel closes that channel. The transport's owner decides
+/// whether the underlying connection should also close.
+struct SessionChannel<'a> {
     writer: Option<russh::ChannelWriteHalf<client::Msg>>,
-    connection: Arc<Connection>,
+    connection: &'a Connection,
 }
-impl std::ops::Deref for TerminalChannel {
+impl std::ops::Deref for SessionChannel<'_> {
     type Target = russh::ChannelWriteHalf<client::Msg>;
     fn deref(&self) -> &Self::Target {
         self.writer.as_ref().unwrap()
     }
 }
-impl Drop for TerminalChannel {
-    fn drop(&mut self) {
+impl SessionChannel<'_> {
+    /// Close in place; the drop cleanup then has nothing left to close.
+    async fn close(mut self) -> Result<(), russh::Error> {
         let writer = self.writer.take().unwrap();
+        writer.close().await
+    }
+}
+impl Drop for SessionChannel<'_> {
+    fn drop(&mut self) {
+        let Some(writer) = self.writer.take() else {
+            return;
+        };
         let mut cleanup = self.connection.channel_cleanup.lock().unwrap();
         while cleanup.try_join_next().is_some() {}
         cleanup.spawn(async move {
@@ -420,16 +446,14 @@ async fn terminal_session(
     integration: Option<&str>,
 ) -> Result<TerminalEnd> {
     use crate::terminal::{Event, Input};
-    let (mut reader, writer) = tokio::time::timeout(
-        Duration::from_secs(10),
-        connection.handle.channel_open_session(),
-    )
-    .await
-    .context("Terminal channel timed out")??
-    .split();
-    let writer = TerminalChannel {
+    let (mut reader, writer) =
+        tokio::time::timeout(Duration::from_secs(10), connection.open_session())
+            .await
+            .context("Terminal channel timed out")??
+            .split();
+    let writer = SessionChannel {
         writer: Some(writer),
-        connection: connection.clone(),
+        connection,
     };
     let mut early_output = Vec::new();
     tokio::time::timeout(Duration::from_secs(10), async {

@@ -38,17 +38,17 @@ fn status_view_button(
     active: bool,
     cx: &App,
 ) -> Button {
-    crate::project_ui::compact_button(id)
+    crate::controls::compact_button(id)
         .ghost()
         .icon(icon)
         .label(title)
         .selected(active)
         .toggled(active)
-        .h(px(20.))
-        .min_h(px(20.))
-        .max_h(px(20.))
+        .h(px(crate::ui::STATUS_HEIGHT - 1.))
+        .min_h(px(crate::ui::STATUS_HEIGHT - 1.))
+        .max_h(px(crate::ui::STATUS_HEIGHT - 1.))
         .px(px(8.))
-        .rounded(px(3.))
+        .rounded(px(crate::ui::RADIUS))
         .border_0()
         .text_color(if active {
             cx.theme().foreground
@@ -138,28 +138,25 @@ impl Newport {
                 _ => "Repository",
             });
         }
-        crate::project_ui::header()
+        crate::ui::header()
             .when(files, |header| {
-                header
-                    .gap_1()
-                    .px_1()
-                    .child(crate::project_ui::header_rule(cx))
+                header.gap_1().px_1().child(crate::ui::header_rule(cx))
             })
             .when(files, |header| {
                 header.child(
                     div()
                         .flex_1()
                         .px_2()
-                        .text_size(px(crate::project_ui::FONT_SIZE))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .font_weight(FontWeight::MEDIUM)
                         .child("Explorer"),
                 )
             })
             .when(!files, |header| {
                 header.child(
-                    crate::project_ui::tabs("project-navigation")
+                    crate::controls::tabs("project-navigation")
                         .accessibility_label("Project navigation")
-                        .with_size(px(crate::project_ui::HEADER_HEIGHT))
+                        .with_size(px(crate::ui::HEADER_HEIGHT))
                         .rounded_none()
                         .bg(cx.theme().muted)
                         .flex_1()
@@ -263,6 +260,29 @@ impl Newport {
             })
             .into_any_element()
     }
+    pub(super) fn project_close_repository_tab(&mut self, cx: &mut Context<Self>) {
+        if self.git.tab <= 1 {
+            return;
+        }
+        let Some(editor) = self.code_workspace() else {
+            return;
+        };
+        let reviewing = editor.read(cx).reviewing;
+        let next = editor.read(cx).navigator.documents.reviews.last().cloned();
+        self.git_navigate(0, cx);
+        editor.update(cx, |e, cx| {
+            if e.navigator.panel == 3 {
+                e.navigator.panel = 1;
+            }
+            if reviewing && let Some(document) = next {
+                e.review_document(document, cx);
+            } else {
+                e.reviewing = false;
+                cx.notify();
+            }
+        });
+        cx.notify();
+    }
     fn project_review_tabs(&self, cx: &mut Context<Self>) -> (Vec<AnyElement>, Option<usize>) {
         let Some(editor) = self.code_workspace() else {
             return (Vec::new(), None);
@@ -286,7 +306,7 @@ impl Newport {
             tabs.push(
                 document_tab_surface("project-repository-tab-surface", reviewing, cx)
                     .child(
-                        crate::project_ui::compact_button("project-repository-tab")
+                        crate::controls::compact_button("project-repository-tab")
                             .text()
                             .label(title)
                             .text_color(if reviewing {
@@ -295,6 +315,18 @@ impl Newport {
                                 cx.theme().muted_foreground
                             })
                             .on_click(cx.listener(|this, _, _, cx| this.project_show_review(cx))),
+                    )
+                    .child(
+                        crate::controls::compact_icon_button("project-close-repository")
+                            .ghost()
+                            .icon(IconName::X)
+                            .accessibility_label(format!("Close {title}"))
+                            .tooltip("Close tab")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if !window.has_active_dialog(cx) {
+                                    this.project_close_repository_tab(cx);
+                                }
+                            })),
                     )
                     .into_any_element(),
             );
@@ -314,7 +346,7 @@ impl Newport {
             tabs.push(
                 document_tab_surface(("project-review-tab-surface", index), selected, cx)
                     .child(
-                        crate::project_ui::compact_button(("project-review-tab", index))
+                        crate::controls::compact_button(("project-review-tab", index))
                             .text()
                             .cursor_default()
                             .text_color(if selected {
@@ -532,15 +564,11 @@ impl Newport {
             .child(div().flex_1().min_h_0().min_w_0().child(content))
             .child(self.git_log_panel(window, cx))
             .child(
-                div()
-                    .h(px(26.))
-                    .flex_shrink_0()
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(
+                crate::controls::status_bar(cx)
+                    // View buttons carry their own 8px inset; their icons
+                    // align with the text of every other page's status bar.
+                    .px(px(crate::controls::PAGE_PADDING - 8.))
+                    .left(
                         status_view_button(
                             "project-status-files",
                             IconName::Folder,
@@ -552,7 +580,7 @@ impl Newport {
                             this.project_choose_panel(0, window, cx)
                         })),
                     )
-                    .child(
+                    .left(
                         status_view_button(
                             "project-status-git",
                             IconName::GitBranch,
@@ -564,7 +592,7 @@ impl Newport {
                             this.project_choose_panel(1, window, cx)
                         })),
                     )
-                    .child(
+                    .left(
                         status_view_button(
                             "project-status-terminal",
                             IconName::Terminal,
@@ -579,17 +607,13 @@ impl Newport {
                             }
                         })),
                     )
-                    .child(
-                        crate::project_ui::label(if editor.read(cx).reviewing {
-                            self.git_read_feedback()
-                        } else {
-                            "".into()
-                        })
-                        .text_size(px(crate::project_ui::FONT_SIZE))
-                        .flex_1(),
-                    )
-                    .child(
-                        crate::project_ui::compact_button("project-log")
+                    .left(div().truncate().child(if editor.read(cx).reviewing {
+                        self.git_read_feedback()
+                    } else {
+                        "".into()
+                    }))
+                    .right(
+                        crate::controls::compact_button("project-log")
                             .ghost()
                             .icon(IconName::ScrollText)
                             .label("Log")

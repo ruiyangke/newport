@@ -1,6 +1,9 @@
 //! Newport control metrics in logical pixels, independent of Kit's rem scale.
 //! Commands and filters share a 28px row; dense actions use 24px, modal forms
-//! use 34px. Navigation rows, editors and the title bar own their own layout.
+//! and tab bars use 34px. Navigation rows, editors and the title bar own their
+//! own layout.
+use gpui_kit::AppContext as _;
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::{
     Sizable, Size,
     button::Button,
@@ -8,18 +11,22 @@ use gpui_kit::component::{
     input::{Input, InputState, Textarea, TextareaState},
     pagination::Pagination,
     select::{Select, SelectDelegate, SelectItem, SelectState},
+    status_bar::StatusBar,
     switch::Switch,
     tab::TabBar,
 };
-use gpui_kit::{App, ElementId, Entity, Focusable, Styled, Window, div, px, size};
+use gpui_kit::{
+    App, Div, ElementId, Entity, Focusable, ParentElement, SharedString, Styled, Window, div, px,
+    size,
+};
 
 /// Shared outer page and pane inset in logical pixels.
 pub const PAGE_PADDING: f32 = 16.;
 pub const CONTROL_HEIGHT: f32 = 28.;
 pub const COMPACT_HEIGHT: f32 = 24.;
 pub const FORM_HEIGHT: f32 = 34.;
-pub const FONT_SIZE: f32 = 12.;
-pub const ICON_SIZE: f32 = 14.;
+pub const FONT_SIZE: f32 = crate::ui::FONT_SIZE;
+pub const ICON_SIZE: f32 = 16.;
 
 /// Hand off after the editor has mounted and the menu's dismissal frame has
 /// finished, without keeping a cancelled editor alive just to focus it.
@@ -134,8 +141,94 @@ pub fn checkbox(id: impl Into<ElementId>) -> Checkbox {
 }
 pub fn tabs(id: impl Into<ElementId>) -> TabBar {
     TabBar::new(id)
-        .with_size(px(CONTROL_HEIGHT))
+        .with_size(px(crate::ui::HEADER_HEIGHT))
         .label_size(px(FONT_SIZE))
+}
+
+/// Widths for a resizable horizontal split, kept while its view stays mounted.
+/// Each distinct key (for example, per combination of visible panes) has its own.
+pub fn split_state(
+    key: &SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<gpui_kit::component::resizable::ResizableState> {
+    window
+        .use_keyed_state(key.clone(), cx, |_, cx| {
+            cx.new(|_| gpui_kit::component::resizable::ResizableState::default())
+        })
+        .read(cx)
+        .clone()
+}
+
+/// The bar along a page's bottom edge: status on the left, freshness or
+/// page actions on the right. Every page uses this one shape.
+pub fn status_bar(cx: &App) -> StatusBar {
+    StatusBar::new()
+        .h(px(crate::ui::STATUS_HEIGHT))
+        .min_h(px(crate::ui::STATUS_HEIGHT))
+        .max_h(px(crate::ui::STATUS_HEIGHT))
+        .flex_shrink_0()
+        .px(px(PAGE_PADDING))
+        .py_0()
+        .gap(px(8.))
+        .border_color(cx.theme().border)
+        .bg(cx.theme().transparent)
+        .text_size(px(FONT_SIZE))
+        .text_color(cx.theme().muted_foreground)
+}
+
+/// The same status line beneath a pane's own content, such as a log box,
+/// aligned to that content rather than spanning the page.
+pub fn pane_status_bar(cx: &App) -> StatusBar {
+    status_bar(cx).px_0().border_t_0()
+}
+
+/// A neutral inline label beside a name or control, such as "Docker" or
+/// "Always on". States with meaning of their own use colour, not this.
+pub fn tag(value: impl Into<SharedString>, cx: &App) -> Div {
+    div()
+        .flex_shrink_0()
+        .px(px(5.))
+        .py(px(1.))
+        .rounded(px(crate::ui::RADIUS))
+        .bg(cx.theme().muted)
+        .text_color(cx.theme().muted_foreground)
+        .text_size(px(FONT_SIZE))
+        .child(value.into())
+}
+
+/// A foldable list group: chevron, name, and its count as a tag. Callers add
+/// `on_click`; the button announces whether the group is expanded.
+pub fn group_heading(
+    id: impl Into<ElementId>,
+    name: &str,
+    count: usize,
+    open: bool,
+    cx: &App,
+) -> Button {
+    use gpui_kit::component::{Icon, button::ButtonVariants as _};
+    // Kit centres a button's content row; a list heading reads from the left,
+    // its chevron centred over the rows' status dots.
+    let mut content = div().text_size(px(FONT_SIZE)).gap(px(6.)).justify_start();
+    compact_button(id)
+        .ghost()
+        .w_full()
+        .justify_start()
+        .px(px(11.))
+        .content_style(content.style().clone(), Size::Size(px(12.)))
+        .text_color(cx.theme().muted_foreground)
+        .icon(
+            Icon::new(if open {
+                gpui_kit::assets::IconName::ChevronDown
+            } else {
+                gpui_kit::assets::IconName::ChevronRight
+            })
+            .size(px(12.)),
+        )
+        .label(name.to_owned())
+        .child(tag(count.to_string(), cx))
+        .expanded(open)
+        .accessibility_label(format!("{name}, {count}"))
 }
 
 pub fn pagination(id: impl Into<ElementId>) -> Pagination {
@@ -352,7 +445,7 @@ mod tests {
                 .child(probe(
                     "segmented",
                     tabs("segmented")
-                        .segmented()
+                        .gap_0()
                         .selected_index(0)
                         .children([Tab::new().label("Changes"), Tab::new().label("History")]),
                 ))
@@ -416,8 +509,8 @@ mod tests {
                     ("compact-icon", COMPACT_HEIGHT),
                     ("switch", CONTROL_HEIGHT),
                     ("checkbox", 16.),
-                    ("segmented", CONTROL_HEIGHT),
-                    ("underline", CONTROL_HEIGHT),
+                    ("segmented", crate::ui::HEADER_HEIGHT),
+                    ("underline", crate::ui::HEADER_HEIGHT),
                     ("pagination", CONTROL_HEIGHT),
                 ] {
                     let bounds = cx

@@ -274,7 +274,7 @@ impl Newport {
         if !self.containers_panels.contains_key(&self.server) {
             let server = self.server.clone();
             let connection =
-                terminal_scope::connection(&self.selected_server().unwrap(), &self.snapshot);
+                terminal_scope::connection(self.selected_server().unwrap(), &self.snapshot);
             let preferences = self.containers_preferences.remove(&server);
             let panel = cx.new(|cx| {
                 let mut panel = containers::ContainersPanel::new(
@@ -511,7 +511,7 @@ mod tests {
             .unwrap();
             let other_id = terminals["other"].entity_id();
             let other_state = terminals["other"].read(cx).menu_state(cx);
-            for index in 0..8 {
+            for index in 0..newport_domain::terminal::MAX_TERMINALS {
                 open_container_shell(
                     &mut terminals,
                     "fixture",
@@ -539,7 +539,7 @@ mod tests {
                     json!({"scope":"fixture"}),
                     "fixture@unconnected.invalid".into(),
                     "docker exec -it -- abcdef sh".into(),
-                    "ninth · Shell".into(),
+                    "over capacity · Shell".into(),
                     cx,
                 )
                 .is_err()

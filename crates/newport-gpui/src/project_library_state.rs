@@ -17,7 +17,7 @@ impl Newport {
         if !self.project_libraries.contains_key(&self.server) {
             let connection = self
                 .selected_server()
-                .map(|server| terminal_scope::connection(&server, &self.snapshot))
+                .map(|server| terminal_scope::connection(server, &self.snapshot))
                 .unwrap_or_default();
             self.project_libraries.insert(
                 self.server.clone(),

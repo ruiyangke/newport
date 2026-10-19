@@ -309,7 +309,7 @@ impl Render for Picker {
             .min_h_0()
             .gap_2()
             .capture_key_down(cx.listener(Self::key))
-            .child(crate::project_ui::input(&self.input).aria_label("Find project file"))
+            .child(crate::controls::input(&self.input).aria_label("Find project file"))
             .child(
                 div()
                     .flex_1()
@@ -318,7 +318,7 @@ impl Render for Picker {
                         v.child(
                             div()
                                 .p_3()
-                                .text_size(px(crate::project_ui::FONT_SIZE))
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .text_color(cx.theme().danger)
                                 .child(e),
                         )
@@ -366,13 +366,17 @@ impl Render for Picker {
                                                                 .flex_1()
                                                                 .child(
                                                                     div()
-                                                                        .text_size(px(crate::project_ui::FONT_SIZE))
+                                                                        .text_size(px(
+                                                                            crate::ui::FONT_SIZE,
+                                                                        ))
                                                                         .truncate()
                                                                         .child(name.to_owned()),
                                                                 )
                                                                 .child(
                                                                     div()
-                                                                        .text_size(px(crate::project_ui::FONT_SIZE))
+                                                                        .text_size(px(
+                                                                            crate::ui::FONT_SIZE,
+                                                                        ))
                                                                         .text_color(
                                                                             cx.theme()
                                                                                 .muted_foreground,
@@ -412,7 +416,7 @@ impl Render for Picker {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .text_size(px(crate::project_ui::FONT_SIZE))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .text_color(cx.theme().muted_foreground)
                     .child(footer)
                     .child("↑↓ Select · Enter Open"),

@@ -152,6 +152,18 @@ impl Resources {
     pub fn invalidate_prefix(&mut self, prefix: &str) {
         self.rows.retain(|key, _| !key.starts_with(prefix));
     }
+    /// Retire any in-flight read so the next request starts fresh, while the
+    /// last value stays on screen. Prefer this after a mutation: `invalidate`
+    /// also drops the value, which sends views back to their first-load state.
+    pub fn fence(&mut self, key: &str) {
+        let group = self.take_cached(&[key]);
+        self.restore(group);
+    }
+    /// [`Self::fence`] for every key in a dynamic read namespace.
+    pub fn fence_prefix(&mut self, prefix: &str) {
+        let group = self.take_cached_prefix(prefix);
+        self.restore(group);
+    }
     /// Suspend only this namespace without clearing unrelated shell resources.
     /// Values, errors, revisions and freshness are moved intact. In-flight rows
     /// are removed too, but never saved as permanently pending cached resources.
@@ -350,16 +362,22 @@ impl Resources {
         row.poll_checked_at = None;
         row.error = observation.error;
         row.error_code = None;
-        if row.value != observation.data {
-            row.set_value(observation.data, generation);
-            row.revision = generation;
+        // A replaced or retired backend query reports no data while it
+        // refetches. Keep presenting the last reading instead of falling back
+        // to the first-load state; real scope changes clear rows explicitly.
+        let keep = observation.data.is_null() && observation.fetching && !row.value.is_null();
+        if !keep {
+            if row.value != observation.data {
+                row.set_value(observation.data, generation);
+                row.revision = generation;
+            }
+            row.updated_at = observation.updated_at.and_then(|millis| {
+                let age = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH + Duration::from_millis(millis))
+                    .unwrap_or_default();
+                Instant::now().checked_sub(age)
+            });
         }
-        row.updated_at = observation.updated_at.and_then(|millis| {
-            let age = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH + Duration::from_millis(millis))
-                .unwrap_or_default();
-            Instant::now().checked_sub(age)
-        });
         row.publish_presentation(
             generation,
             observation.updated_at,
@@ -401,6 +419,9 @@ impl Resources {
                 // Its owner explicitly invalidates these when the dialog closes.
                 || key == "server-save"
                 || key == "server-form-agent-keys"
+                // First-run imports finish one by one while the page may change;
+                // the welcome screen reads each result before starting the next.
+                || key.starts_with("server-import:")
                 || ((key == "project-created-save"
                     || key == "action"
                     || key == "compose-start"
@@ -438,6 +459,36 @@ mod tests {
         assert!(!row.pending);
         assert!(!resources.complete(key, pending, Ok(json!({"changes":99}))));
         assert!(resources.complete("repository", unrelated, Ok(json!({}))));
+    }
+
+    #[test]
+    fn fence_keeps_the_displayed_value_but_rejects_the_retired_read() {
+        let mut resources = Resources::default();
+        let generation = resources.begin("snapshot").unwrap();
+        resources.complete("snapshot", generation, Ok(json!({"revision":1})));
+        let stale = resources.begin_refresh("snapshot", false).unwrap();
+        resources.fence("snapshot");
+        let row = resources.get("snapshot").unwrap();
+        assert_eq!(row.value, json!({"revision":1}));
+        assert!(!row.pending);
+        assert!(!resources.complete("snapshot", stale, Ok(json!({"revision":0}))));
+        let fresh = resources.begin_refresh("snapshot", false).unwrap();
+        assert!(fresh > stale);
+        assert_eq!(
+            resources.get("snapshot").unwrap().value,
+            json!({"revision":1})
+        );
+        assert!(resources.complete("snapshot", fresh, Ok(json!({"revision":2}))));
+
+        resources.fence("missing");
+        assert!(resources.get("missing").is_none());
+        let status = resources.begin("project-status:a").unwrap();
+        resources.complete("project-status:a", status, Ok(json!({"changes":1})));
+        resources.fence_prefix("project-status:");
+        assert_eq!(
+            resources.get("project-status:a").unwrap().value,
+            json!({"changes":1})
+        );
     }
 
     #[test]
@@ -533,6 +584,32 @@ mod tests {
         let third = resources.begin("snapshot").unwrap();
         resources.complete("snapshot", third, Ok(json!([1, 2, 4])));
         assert_eq!(resources.get("snapshot").unwrap().data_revision, third);
+    }
+
+    #[test]
+    fn refetching_without_data_keeps_the_last_reading_and_its_age() {
+        let mut resources = Resources::default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let reading = json!({"data":[8080],"fetching":false,"error":null,"stale":false,"updatedAt":now - 60_000});
+        let first = resources.begin("page").unwrap();
+        assert!(resources.complete_query("page", first, Ok(reading)));
+        let refetch =
+            json!({"data":null,"fetching":true,"error":null,"stale":false,"updatedAt":null});
+        let second = resources.begin_refresh("page", false).unwrap();
+        assert!(resources.complete_query("page", second, Ok(refetch)));
+        let row = resources.get("page").unwrap();
+        assert_eq!(row.value, json!([8080]));
+        assert!(row.updated_at.is_some());
+        assert!(!row.pending);
+        // A settled empty reading is real data and replaces the old one.
+        let empty =
+            json!({"data":null,"fetching":false,"error":null,"stale":false,"updatedAt":now});
+        let third = resources.begin_refresh("page", false).unwrap();
+        assert!(resources.complete_query("page", third, Ok(empty)));
+        assert!(resources.get("page").unwrap().value.is_null());
     }
 
     #[test]

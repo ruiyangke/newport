@@ -14,7 +14,7 @@ fn detail_and_project_tabs_survive_selection_and_disk_navigation(cx: &mut TestAp
     select(&panel, cx, "c:stack-web-1");
     click(cx, "Inspect");
     select(&panel, cx, "p:stack");
-    assert_eq!(panel.read_with(cx, |p, _| p.tab), 0);
+    assert_eq!(panel.read_with(cx, |p, _| p.tab), super::PROJECT_SERVICES);
     click(cx, "Compose files");
     select(&panel, cx, "c:cache");
     assert_eq!(panel.read_with(cx, |p, _| p.tab), 1);
@@ -119,10 +119,13 @@ fn default_selection_changes_restore_the_matching_tab_and_clamp_restored_indices
     settle(&panel, cx);
     assert_eq!(
         panel.read_with(cx, |p, _| (p.active_selection.clone(), p.tab)),
-        (Some("p:stack".into()), 2)
+        (Some("p:stack".into()), super::PROJECT_SERVICES)
     );
     let saved = panel.read_with(cx, |p, cx| p.preferences(cx));
     assert!(saved.live);
-    assert_eq!((saved.detail_tab, saved.project_tab), (1, 2));
+    assert_eq!(
+        (saved.detail_tab, saved.project_tab),
+        (1, super::PROJECT_SERVICES)
+    );
     assert_eq!(backend.writes(), 0);
 }

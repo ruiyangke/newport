@@ -1,4 +1,4 @@
-//! Newport's existing CSS design tokens, expressed in logical pixels for GPUI.
+//! Newport's shared native palette and square geometry, in logical pixels.
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{App, px, rgb};
 
@@ -20,9 +20,9 @@ pub fn install(dark: bool, cx: &mut App) {
     // palette. The supported update path synchronizes both and the Base theme.
     Theme::update(cx, |theme| {
         theme.font_family = UI_FONT.into();
-        theme.font_size = px(14.);
-        theme.radius = px(5.);
-        theme.radius_lg = px(8.);
+        theme.font_size = px(crate::ui::FONT_SIZE);
+        theme.radius = px(crate::ui::RADIUS);
+        theme.radius_lg = px(crate::ui::RADIUS);
         let c = &mut theme.colors;
         c.background = rgb(if dark { 0x1e1f21 } else { 0xffffff }).into();
         c.foreground = rgb(if dark { 0xeeeeef } else { 0x25262a }).into();
@@ -33,12 +33,17 @@ pub fn install(dark: bool, cx: &mut App) {
         // thumb in both appearances, independent of the page background.
         c.switch = c.border;
         c.switch_thumb = rgb(0xffffff).into();
-        c.sidebar = rgb(if dark { 0x343337 } else { 0xf5f4f6 }).into();
+        c.sidebar = rgb(if dark { 0x242528 } else { 0xf5f5f6 }).into();
         c.sidebar_foreground = c.foreground;
         c.sidebar_accent = rgb(if dark { 0x454349 } else { 0xdad9dd }).into();
         c.sidebar_accent_foreground = c.foreground;
         c.sidebar_border = c.border;
         c.accent = rgb(if dark { 0x37383d } else { 0xe8e7eb }).into();
+        // Kit buttons paint `button_active` for both pressed and selected. Its
+        // fallback sat a few levels above the resting fill, so a selected
+        // segment was indistinguishable from its neighbours.
+        c.button_hover = rgb(if dark { 0x2d2e32 } else { 0xf1f1f3 }).into();
+        c.button_active = selected_fill(dark);
         c.accent_foreground = c.foreground;
         c.primary = rgb(if dark { 0x4b96f6 } else { 0x1768d7 }).into();
         c.primary_foreground = rgb(if dark { 0x101b29 } else { 0xffffff }).into();
@@ -79,6 +84,11 @@ pub fn install(dark: bool, cx: &mut App) {
     });
 }
 
+/// The one fill for a chosen option among siblings: segments, selected buttons.
+pub fn selected_fill(dark: bool) -> gpui_kit::Hsla {
+    rgb(if dark { 0x3a3b41 } else { 0xe1e2e6 }).into()
+}
+
 /// Neutral feedback shared by list and table rows; selection keeps its own tint.
 pub fn row_hover(cx: &App) -> gpui_kit::Hsla {
     let theme = Theme::global(cx);
@@ -94,7 +104,7 @@ pub fn sidebar_muted(dark: bool) -> gpui_kit::Hsla {
     rgb(if dark { 0xa9abb3 } else { 0x494c55 }).into()
 }
 pub fn sidebar_selection(dark: bool) -> gpui_kit::Hsla {
-    sidebar_foreground(dark).opacity(if dark { 0.13 } else { 0.09 })
+    rgb(if dark { 0x34363c } else { 0xe8e9ec }).into()
 }
 
 pub fn success(dark: bool) -> gpui_kit::Hsla {
@@ -105,13 +115,6 @@ pub fn error(dark: bool) -> gpui_kit::Hsla {
 }
 pub fn warning(dark: bool) -> gpui_kit::Hsla {
     rgb(if dark { 0xdbbc76 } else { 0x896218 }).into()
-}
-pub fn sidebar_action(dark: bool) -> gpui_kit::Hsla {
-    if dark {
-        sidebar_muted(true)
-    } else {
-        sidebar_foreground(false)
-    }
 }
 
 // Shared with the Tauri diff palette in diffExtensions.ts. Opaque surfaces

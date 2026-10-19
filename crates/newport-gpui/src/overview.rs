@@ -667,31 +667,41 @@ impl Newport {
                 .when(fraction.unwrap_or(0.) <= 0.5, |v| v.right(px(8.)))
                 .min_w(px(150.))
                 .p(px(10.))
-                .rounded(px(8.))
+                .rounded(px(crate::ui::RADIUS))
                 .border_1()
                 .border_color(cx.theme().border)
                 .bg(cx.theme().background)
                 .shadow_sm()
-                .child(label(timestamp).text_size(px(10.)))
-                .child(div().mt_1().text_size(px(12.)).child(format!(
-                    "{} · {}",
-                    if metric == 3 {
-                        "Receive"
-                    } else {
-                        NAMES[metric]
-                    },
-                    format_value(p.value)
-                )))
+                .child(label(timestamp).text_size(px(crate::ui::FONT_SIZE)))
+                .child(
+                    div()
+                        .mt_1()
+                        .text_size(px(crate::ui::FONT_SIZE))
+                        .child(format!(
+                            "{} · {}",
+                            if metric == 3 {
+                                "Receive"
+                            } else {
+                                NAMES[metric]
+                            },
+                            format_value(p.value)
+                        )),
+                )
                 .when(metric == 3, |v| {
-                    v.child(div().mt_1().text_size(px(12.)).child(format!(
-                            "Send · {}",
-                            format_value(
-                                second
-                                    .iter()
-                                    .find(|other| other.at == p.at)
-                                    .and_then(|other| other.value)
-                            )
-                        )))
+                    v.child(
+                        div()
+                            .mt_1()
+                            .text_size(px(crate::ui::FONT_SIZE))
+                            .child(format!(
+                                "Send · {}",
+                                format_value(
+                                    second
+                                        .iter()
+                                        .find(|other| other.at == p.at)
+                                        .and_then(|other| other.value)
+                                )
+                            )),
+                    )
                 })
         });
         let bounds = std::rc::Rc::new(std::cell::Cell::new(None::<Bounds<Pixels>>));
@@ -793,7 +803,7 @@ impl Newport {
                         .border_t_1().border_color(cx.theme().muted_foreground.opacity(0.5))
                         .flex().justify_end()
                         .child(label(format!("{cores:.0} {}", if cores == 1. { "core" } else { "cores" }))
-                            .text_size(px(10.)).px_1().pt_1()),
+                            .text_size(px(crate::ui::FONT_SIZE)).px_1().pt_1()),
                 )
             })
             .child(
@@ -895,7 +905,7 @@ impl Newport {
                                             .min_w_0()
                                             .truncate()
                                             .font_weight(FontWeight::MEDIUM)
-                                            .text_size(px(12.))
+                                            .text_size(px(crate::ui::FONT_SIZE))
                                             .child(mount.clone()),
                                     )
                                     .child(
@@ -908,7 +918,7 @@ impl Newport {
                                         } else {
                                             "Usage unavailable".into()
                                         })
-                                        .text_size(px(11.5)),
+                                        .text_size(px(crate::ui::FONT_SIZE)),
                                     ),
                             )
                             .when(known && used >= 85., |view| {
@@ -918,7 +928,7 @@ impl Newport {
                                     } else {
                                         "High storage usage"
                                     })
-                                    .text_size(px(11.))
+                                    .text_size(px(crate::ui::FONT_SIZE))
                                     .text_color(color),
                                 )
                             })
@@ -965,7 +975,9 @@ impl Newport {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("Network totals"),
                     )
-                    .child(label("Since each interface started").text_size(px(11.))),
+                    .child(
+                        label("Since each interface started").text_size(px(crate::ui::FONT_SIZE)),
+                    ),
             )
             .child(
                 div()
@@ -1044,7 +1056,7 @@ impl Newport {
                                 .py_2()
                                 .border_b_1()
                                 .border_color(cx.theme().border)
-                                .text_size(px(11.))
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .child(div().flex_1().min_w_0().truncate().child(text(n, "name")))
                                 .child(label(format!("↓ {}", bytes(&n["received"]))))
                                 .child(label(format!("↑ {}", bytes(&n["sent"]))))
@@ -1270,7 +1282,7 @@ impl Newport {
                                         .or_default()
                                         .minutes = minutes;
                                     this.save_workspace_selection();
-                                    this.resources.invalidate("history");
+                                    this.resources.fence("history");
                                     this.refresh();
                                     cx.notify();
                                 }))
@@ -1282,7 +1294,7 @@ impl Newport {
                     div()
                         .id("overview-error-0")
                         .role(accesskit::Role::Alert)
-                        .text_size(px(12.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .text_color(theme::error(cx.theme().is_dark()))
                         .mb_2()
                         .child(format!(
@@ -1300,7 +1312,7 @@ impl Newport {
                     div()
                         .id("overview-error-1")
                         .role(accesskit::Role::Alert)
-                        .text_size(px(12.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .text_color(theme::error(cx.theme().is_dark()))
                         .mb_2()
                         .child(error.to_owned()),
@@ -1344,7 +1356,7 @@ impl Newport {
                         .into();
                         div()
                             .min_w_0()
-                            .rounded(px(10.))
+                            .rounded(px(crate::ui::RADIUS))
                             .border_1()
                             .border_color(if metric == index {
                                 accent.opacity(0.6)
@@ -1380,7 +1392,7 @@ impl Newport {
                                     .w_full()
                                     .h(px(132.))
                                     .p_0()
-                                    .rounded(px(9.))
+                                    .rounded(px(crate::ui::RADIUS))
                                     .border_0()
                                     .child(
                                         div()
@@ -1399,13 +1411,13 @@ impl Newport {
                                                     .justify_between()
                                                     .child(
                                                         label(NAMES[index])
-                                                            .text_size(px(12.))
+                                                            .text_size(px(crate::ui::FONT_SIZE))
                                                             .font_weight(FontWeight::MEDIUM),
                                                     )
                                                     .when_some(level, |view, level| {
                                                         view.child(
                                                             label(level)
-                                                                .text_size(px(11.))
+                                                                .text_size(px(crate::ui::FONT_SIZE))
                                                                 .text_color(
                                                                     if level == "Critical" {
                                                                         theme::error(
@@ -1451,7 +1463,7 @@ impl Newport {
                                             )
                                             .child(
                                                 label(contexts[index].clone())
-                                                    .text_size(px(11.))
+                                                    .text_size(px(crate::ui::FONT_SIZE))
                                                     .truncate(),
                                             )
                                             .child(div().flex_1())
@@ -1488,7 +1500,7 @@ impl Newport {
                 view.child(
                     div()
                         .mt(px(10.))
-                        .rounded(px(10.))
+                        .rounded(px(crate::ui::RADIUS))
                         .border_1()
                         .border_color(cx.theme().border)
                         .px(px(14.))
@@ -1505,7 +1517,7 @@ impl Newport {
                                         "{} online · busiest {busiest:.0}% · last minute",
                                         cpus.len()
                                     ))
-                                    .text_size(px(11.)),
+                                    .text_size(px(crate::ui::FONT_SIZE)),
                                 ),
                         )
                         .child(core_render::grid(
@@ -1519,7 +1531,7 @@ impl Newport {
             .child(
                 div()
                     .mt(px(12.))
-                    .rounded(px(10.))
+                    .rounded(px(crate::ui::RADIUS))
                     .border_1()
                     .border_color(cx.theme().border)
                     .px(px(14.))
@@ -1534,13 +1546,17 @@ impl Newport {
                             .items_center()
                             .gap_2()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(div().flex_1().min_w(px(140.)).text_size(px(12.5)).child(
-                                format!(
-                                    "{} · last {}",
-                                    NAMES[metric],
-                                    RANGES.iter().find(|r| r.0 == minutes).unwrap().1
-                                ),
-                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(140.))
+                                    .text_size(px(crate::ui::FONT_SIZE))
+                                    .child(format!(
+                                        "{} · last {}",
+                                        NAMES[metric],
+                                        RANGES.iter().find(|r| r.0 == minutes).unwrap().1
+                                    )),
+                            )
                             .when(metric == 3 && interfaces.len() > 1, |view| {
                                 let names = interfaces
                                     .iter()
@@ -1600,7 +1616,7 @@ impl Newport {
                                             })
                                             .unwrap_or_else(|| "Reading time unavailable".into())
                                     })
-                                    .text_size(px(11.))
+                                    .text_size(px(crate::ui::FONT_SIZE))
                                     .font_weight(FontWeight::NORMAL),
                                 )
                             }),
@@ -1615,7 +1631,7 @@ impl Newport {
                                 .flex_wrap()
                                 .gap_3()
                                 .justify_end()
-                                .text_size(px(11.))
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .mb_2()
                                 .child(
                                     label(format!("Receive · {}", latest(&plots[3]))).text_color(
@@ -1659,7 +1675,7 @@ impl Newport {
                                                     } else {
                                                         format!("{value:.1}")
                                                     })
-                                                    .text_size(px(10.))
+                                                    .text_size(px(crate::ui::FONT_SIZE))
                                                 }),
                                         ),
                                 )
@@ -1737,7 +1753,7 @@ impl Newport {
                                                 })
                                                 .unwrap_or_else(|| "—".into()),
                                             )
-                                            .text_size(px(10.))
+                                            .text_size(px(crate::ui::FONT_SIZE))
                                         }),
                                 ),
                         )

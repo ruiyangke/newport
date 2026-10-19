@@ -3,7 +3,7 @@ use russh::{
     server::{self, Auth, ChannelOpenHandle, Msg, Server as _, Session},
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -25,15 +25,18 @@ struct Config {
     runtime: PathBuf,
     agent: PathBuf,
     key: keys::PublicKey,
-    sessions: Arc<Mutex<Vec<server::Handle>>>,
+    sessions: Arc<Mutex<HashMap<uuid::Uuid, server::Handle>>>,
 }
 struct Listener(Config);
 impl server::Server for Listener {
     type Handler = Client;
     fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Client {
         Client {
+            connection_id: uuid::Uuid::new_v4(),
             config: self.0.clone(),
             channels: HashMap::new(),
+            sessions: Arc::default(),
+            max_sessions: 10,
             ptys: HashMap::new(),
             tasks: Vec::new(),
         }
@@ -49,13 +52,37 @@ impl Drop for AbortTask {
     }
 }
 struct Client {
+    connection_id: uuid::Uuid,
     config: Config,
     channels: HashMap<ChannelId, Channel<Msg>>,
+    sessions: Arc<Mutex<HashSet<ChannelId>>>,
+    max_sessions: usize,
     ptys: HashMap<ChannelId, pty::Pty>,
     tasks: Vec<JoinHandle<()>>,
 }
+struct SessionSlot(Arc<Mutex<HashSet<ChannelId>>>, ChannelId);
+impl Drop for SessionSlot {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().remove(&self.1);
+    }
+}
+impl Client {
+    fn session_task(&mut self, id: ChannelId, task: JoinHandle<()>) {
+        let slot = SessionSlot(self.sessions.clone(), id);
+        let mut task = AbortTask(task);
+        self.tasks.push(tokio::spawn(async move {
+            let _slot = slot;
+            let _ = (&mut task.0).await;
+        }));
+    }
+}
 impl Drop for Client {
     fn drop(&mut self) {
+        self.config
+            .sessions
+            .lock()
+            .unwrap()
+            .remove(&self.connection_id);
         for task in &self.tasks {
             task.abort();
         }
@@ -71,14 +98,27 @@ impl server::Handler for Client {
         })
     }
     async fn auth_publickey(&mut self, user: &str, key: &keys::PublicKey) -> anyhow::Result<Auth> {
-        Ok(if user == "fixture" && key == &self.config.key {
-            Auth::Accept
-        } else {
-            Auth::reject()
-        })
+        Ok(
+            if matches!(user, "fixture" | "fixture-many-sessions") && key == &self.config.key {
+                // The runtime-admission test deliberately exceeds SSH's default
+                // to exercise Needle's independent 16-worker bound.
+                self.max_sessions = if user == "fixture-many-sessions" {
+                    32
+                } else {
+                    10
+                };
+                Auth::Accept
+            } else {
+                Auth::reject()
+            },
+        )
     }
     async fn auth_succeeded(&mut self, session: &mut Session) -> anyhow::Result<()> {
-        self.config.sessions.lock().unwrap().push(session.handle());
+        self.config
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(self.connection_id, session.handle());
         Ok(())
     }
     async fn channel_open_session(
@@ -87,8 +127,21 @@ impl server::Handler for Client {
         reply: ChannelOpenHandle,
         _: &mut Session,
     ) -> anyhow::Result<()> {
+        // Match OpenSSH's default per-connection session limit. Forwarded TCP
+        // channels do not consume a session slot.
+        if self.sessions.lock().unwrap().len() >= self.max_sessions {
+            reply.reject(ChannelOpenFailure::ConnectFailed).await;
+            return Ok(());
+        }
+        self.sessions.lock().unwrap().insert(channel.id());
         self.channels.insert(channel.id(), channel);
         reply.accept().await;
+        Ok(())
+    }
+    async fn channel_close(&mut self, id: ChannelId, _: &mut Session) -> anyhow::Result<()> {
+        self.sessions.lock().unwrap().remove(&id);
+        self.channels.remove(&id);
+        self.ptys.remove(&id);
         Ok(())
     }
     async fn channel_open_direct_tcpip(
@@ -178,9 +231,12 @@ impl server::Handler for Client {
             session.channel_success(id)?;
             let stream = self.channels.remove(&id).unwrap().into_stream();
             let handler = sftp::Sftp::new(self.config.home.clone());
-            self.tasks.push(tokio::spawn(async move {
-                russh_sftp::server::run(stream, handler).await;
-            }));
+            self.session_task(
+                id,
+                tokio::spawn(async move {
+                    russh_sftp::server::run(stream, handler).await;
+                }),
+            );
         } else {
             session.channel_failure(id)?;
         }
@@ -226,11 +282,13 @@ impl server::Handler for Client {
         };
         session.data(id, b"early shell output\r\n".to_vec())?;
         session.channel_success(id)?;
-        self.tasks.push(pty.start(
+        let task = pty.start(
             self.channels.remove(&id).unwrap(),
             self.config.home.clone(),
             None,
-        )?);
+            self.connection_id,
+        )?;
+        self.session_task(id, task);
         Ok(())
     }
     async fn exec_request(
@@ -248,22 +306,27 @@ impl server::Handler for Client {
         {
             session.data(id, b"early shell output\r\n".to_vec())?;
             session.channel_success(id)?;
-            self.tasks.push(pty.start(
+            let task = pty.start(
                 self.channels.remove(&id).unwrap(),
                 self.config.home.clone(),
                 Some(selector),
-            )?);
+                self.connection_id,
+            )?;
+            self.session_task(id, task);
             return Ok(());
         }
         session.channel_success(id)?;
         let channel = self.channels.remove(&id).unwrap();
         let command = command.to_vec();
         let config = self.config.clone();
-        self.tasks.push(tokio::spawn(async move {
-            if let Err(error) = execute(channel, &command, config).await {
-                eprintln!("Fixture exec: {error}");
-            }
-        }));
+        self.session_task(
+            id,
+            tokio::spawn(async move {
+                if let Err(error) = execute(channel, &command, config).await {
+                    eprintln!("Fixture exec: {error}");
+                }
+            }),
+        );
         Ok(())
     }
 }
@@ -336,7 +399,7 @@ async fn execute(channel: Channel<Msg>, command: &[u8], config: Config) -> anyho
             write.exit_status(0).await?;
             tokio::time::sleep(Duration::from_millis(100)).await;
             let handles = config.sessions.lock().unwrap().clone();
-            for handle in handles {
+            for handle in handles.into_values() {
                 let _ = handle
                     .disconnect(
                         russh::Disconnect::ByApplication,
@@ -346,6 +409,20 @@ async fn execute(channel: Channel<Msg>, command: &[u8], config: Config) -> anyho
                     .await;
             }
             return Ok(());
+        }
+        command if command.starts_with(b"drop-connection ") => {
+            let id = uuid::Uuid::parse_str(std::str::from_utf8(&command[16..])?)?;
+            let handle = config.sessions.lock().unwrap().get(&id).cloned();
+            if let Some(handle) = handle {
+                handle
+                    .disconnect(
+                        russh::Disconnect::ByApplication,
+                        "fixture disconnect".into(),
+                        "".into(),
+                    )
+                    .await?;
+            }
+            0
         }
         b"printf ok" => {
             write.data(&b"ok"[..]).await?;
@@ -374,6 +451,14 @@ async fn execute(channel: Channel<Msg>, command: &[u8], config: Config) -> anyho
             }
             write.data(count.to_string().as_bytes()).await?;
             0
+        }
+        b"stall-until-close" => {
+            while let Some(message) = read.wait().await {
+                if matches!(message, russh::ChannelMsg::Close) {
+                    break;
+                }
+            }
+            return Ok(());
         }
         b"fixture-agent"
         | b"fixture-runtime"

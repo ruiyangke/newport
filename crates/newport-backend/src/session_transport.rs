@@ -1,5 +1,5 @@
-//! One connection task and retry policy per server session. Callers own demand,
-//! never the connection attempt or transport shutdown authority.
+//! Connection supervision shared by server services and dedicated terminals.
+//! Each instance owns one transport, its demand and its retry policy.
 use crate::{
     model::Server,
     ssh::{ConnectFailure, ExecSession},
@@ -102,6 +102,37 @@ pub(crate) struct Transport {
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 impl Transport {
+    /// A terminal shares profile retirement and recovery policy, but never the
+    /// app transport, connectivity publisher, generation or integration gate.
+    pub fn terminal(
+        server: Server,
+        retired: watch::Receiver<bool>,
+        admissions: Arc<tokio::sync::Semaphore>,
+    ) -> Self {
+        let mut transport = Self::new(
+            server.clone(),
+            retired,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Notify::new()),
+            Arc::new(crate::integration_permissions::Gate::new(false, false)),
+            None,
+        );
+        // Opening many tabs must not create a burst of unauthenticated sockets
+        // or simultaneous agent prompts. Connected terminals run independently.
+        transport.dial = Arc::new(move || {
+            let server = server.clone();
+            let admissions = admissions.clone();
+            Box::pin(async move {
+                let _permit = admissions
+                    .acquire()
+                    .await
+                    .expect("terminal admissions open");
+                ExecSession::connect_session(&server).await
+            })
+        });
+        transport
+    }
+
     pub fn new(
         server: Server,
         retired: watch::Receiver<bool>,

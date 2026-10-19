@@ -547,7 +547,7 @@ impl Newport {
             .py_2()
             .child(div().font_weight(FontWeight::SEMIBOLD).child(form.title()))
             .child(
-                crate::project_ui::label(format!(
+                crate::label(format!(
                     "{} {} · {}",
                     if form.rename {
                         "Rename"
@@ -557,11 +557,11 @@ impl Newport {
                     form.source,
                     form.oid.chars().take(8).collect::<String>()
                 ))
-                .text_size(px(crate::project_ui::FONT_SIZE)),
+                .text_size(px(crate::ui::FONT_SIZE)),
             )
             .child(
                 div().w_full().min_w_0().child(
-                    crate::project_ui::input(&form.name)
+                    crate::controls::input(&form.name)
                         .aria_label(if form.rename {
                             "Branch name"
                         } else {
@@ -573,7 +573,7 @@ impl Newport {
             .child(
                 project_dialog::actions()
                     .child(
-                        crate::project_ui::button("create-branch-cancel")
+                        crate::controls::button("create-branch-cancel")
                             .label("Cancel")
                             .disabled(self.git_write_pending())
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -582,7 +582,7 @@ impl Newport {
                             })),
                     )
                     .child(
-                        crate::project_ui::button("create-branch-submit")
+                        crate::controls::button("create-branch-submit")
                             .loading(self.git_write_pending())
                             .label(if form.rename {
                                 "Rename branch"
@@ -1286,6 +1286,7 @@ impl Newport {
                 if tab > 1 {
                     e.files = false;
                     e.navigator.panel = 3;
+                    e.navigator.documents.active = None;
                 }
                 cx.notify();
             });
@@ -1328,6 +1329,7 @@ impl Newport {
     }
     pub(super) fn git_tools_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         crate::controls::icon_button("git-tools")
+            .ghost()
             .icon(IconName::Ellipsis)
             .accessibility_label("Repository tools")
             .tooltip("Repository tools")
@@ -1437,10 +1439,10 @@ impl Newport {
                     .child(Button::new(("git-entry",i)).accessibility_label(if subtitle.is_empty() {title.clone()} else {format!("{title} · {subtitle}")}).custom(git_file_row::selection_style(this.git.selected==*e,cx)).selected(this.git.selected==*e).w_full().h_full().min_w_0().toggled(this.git.selected==*e)
                         .when(matches!(tab,3|4), |button|button.child(Icon::new(if tab==3 {gpui_kit::assets::IconName::Archive} else {gpui_kit::assets::IconName::Tag}).size(px(14.)).text_color(cx.theme().muted_foreground)))
                         .child(div().flex_1().min_w_0().flex().when(tab!=0,|row|row.flex_col().items_start()).when(tab==0,|row|row.items_center()).gap(px(if tab==1 {2.} else if matches!(tab,3|4) {3.} else {6.}))
-                            .when(tab==0,|row|row.child(div().text_size(px(crate::project_ui::FONT_SIZE)).text_color(cx.theme().muted_foreground).w(px(16.)).flex_shrink_0().child(change_mark(e))))
-                            .child(div().w_full().min_w_0().truncate().when(matches!(tab,1|3|4), |text|text.text_size(px(crate::project_ui::FONT_SIZE))).when(tab==1, |text|text.line_height(px(17.))).font_weight(FontWeight::MEDIUM).child(title))
+                            .when(tab==0,|row|row.child(div().text_size(px(crate::ui::FONT_SIZE)).text_color(cx.theme().muted_foreground).w(px(16.)).flex_shrink_0().child(change_mark(e))))
+                            .child(div().w_full().min_w_0().truncate().when(matches!(tab,1|3|4), |text|text.text_size(px(crate::ui::FONT_SIZE))).when(tab==1, |text|text.line_height(px(17.))).font_weight(FontWeight::MEDIUM).child(title))
                             .when(tab==1,|row|row.child(git_commit_header::history_row_identity(e,cx)))
-                            .when(tab!=0 && tab!=1 && tab!=6,|row|row.child(crate::project_ui::label(subtitle).text_size(px(crate::project_ui::FONT_SIZE)).w_full().truncate())))
+                            .when(tab!=0 && tab!=1 && tab!=6,|row|row.child(crate::label(subtitle).text_size(px(crate::ui::FONT_SIZE)).w_full().truncate())))
                         .on_click(cx.listener(move |this,_,_,cx| {
                         if this.git.tab != tab || !this.git_visible_entries().contains(&entry) { return; }
                         this.project_show_review(cx);
@@ -1529,7 +1531,7 @@ impl Newport {
                         .border_b_1()
                         .border_color(cx.theme().border)
                         .child(
-                            crate::project_ui::button("git-back-to-changes")
+                            crate::controls::button("git-back-to-changes")
                                 .icon(IconName::ArrowLeft)
                                 .label(if self.git.repo["bare"] == true {
                                     "History"
@@ -1563,7 +1565,7 @@ impl Newport {
             .when(compact && show_detail && !clean_detail, |view| {
                 view.child(
                     div().flex().items_center().px_2().py_1().child(
-                        crate::project_ui::compact_button("git-back-to-list")
+                        crate::controls::compact_button("git-back-to-list")
                             .icon(IconName::ArrowLeft)
                             .label(format!("All {}", title.to_lowercase()))
                             .ghost()
@@ -1640,8 +1642,8 @@ impl Newport {
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .child(
-                        crate::project_ui::label(self.git_read_feedback())
-                            .text_size(px(crate::project_ui::FONT_SIZE))
+                        crate::label(self.git_read_feedback())
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .flex_1(),
                     )
                     .when(
@@ -1652,7 +1654,7 @@ impl Newport {
                                 .is_some_and(|r| r.error.is_some()),
                         |view| {
                             view.child(
-                                crate::project_ui::compact_button("git-load-more")
+                                crate::controls::compact_button("git-load-more")
                                     .label("Retry loading more")
                                     .disabled(
                                         self.git.error.is_some()
@@ -1671,7 +1673,7 @@ impl Newport {
                         },
                     )
                     .child(
-                        crate::project_ui::compact_button("git-log-toggle")
+                        crate::controls::compact_button("git-log-toggle")
                             .ghost()
                             .icon(IconName::ScrollText)
                             .label("Log")

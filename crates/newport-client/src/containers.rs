@@ -29,6 +29,8 @@ const LOG_INTERVAL: Duration = Duration::from_secs(2);
 const INSPECT_STALE: Duration = Duration::from_secs(15);
 const COMPOSE_STALE: Duration = Duration::from_secs(30);
 const DISK_STALE: Duration = Duration::from_secs(30);
+/// Measuring volume sizes walks them on disk; keep a reading for longer.
+const DISK_VOLUMES_STALE: Duration = Duration::from_secs(120);
 const MAX_ENTRIES: usize = 2_000;
 const MAX_INSPECTS: usize = 32;
 const MAX_LOGS: usize = 8;
@@ -244,17 +246,19 @@ enum Kind {
     Logs,
     Compose,
     Disk,
+    DiskVolumes,
     Jobs,
     Output,
     Action,
     ComposeStart,
     ComposeCancel,
 }
-const READS: [Kind; 7] = [
+const READS: [Kind; 8] = [
     Kind::Snapshot,
     Kind::Inspect,
     Kind::Compose,
     Kind::Disk,
+    Kind::DiskVolumes,
     Kind::Logs,
     Kind::Jobs,
     Kind::Output,
@@ -266,6 +270,7 @@ enum Job {
     Logs(LogTarget),
     Compose(String),
     Disk,
+    DiskVolumes,
     Jobs,
     Output(String),
     Action(Action),
@@ -280,6 +285,7 @@ impl Job {
             Self::Logs(_) => Kind::Logs,
             Self::Compose(_) => Kind::Compose,
             Self::Disk => Kind::Disk,
+            Self::DiskVolumes => Kind::DiskVolumes,
             Self::Jobs => Kind::Jobs,
             Self::Output(_) => Kind::Output,
             Self::Action(_) => Kind::Action,
@@ -293,7 +299,7 @@ impl Job {
             Self::Inspect(_) => "container_inspect",
             Self::Logs(_) => "container_logs",
             Self::Compose(_) => "compose_project",
-            Self::Disk => "docker_disk",
+            Self::Disk | Self::DiskVolumes => "docker_disk",
             Self::Jobs => "compose_jobs",
             Self::Output(_) => "compose_job",
             Self::Action(action) => action.method(),
@@ -330,7 +336,15 @@ pub struct Containers {
     logs: VecDeque<(LogTarget, LogCache)>,
     next_log_epoch: u64,
     projects: VecDeque<(String, Slot<Value>)>,
+    /// The quick reading; volumes may be listed without sizes.
     disk: Slot<DockerDisk>,
+    /// Volume sizes, measured apart because they take seconds.
+    disk_volumes: Slot<DockerDisk>,
+    /// The quick reading with measured volumes merged in, for presentation.
+    disk_view: Option<DockerDisk>,
+    /// Advances whenever `disk_view` changes, including when only the
+    /// separately measured volumes arrive.
+    disk_view_revision: u64,
     jobs: Slot<Value>,
     outputs: VecDeque<(String, Slot<Value>)>,
     selected_job: Option<String>,
@@ -402,6 +416,9 @@ impl Containers {
             next_log_epoch: 0,
             projects: VecDeque::new(),
             disk: Slot::default(),
+            disk_volumes: Slot::default(),
+            disk_view: None,
+            disk_view_revision: 0,
             jobs: Slot::default(),
             outputs: VecDeque::new(),
             selected_job: None,
@@ -443,6 +460,7 @@ impl Containers {
                 Some(&slot(&self.projects, self.selected_project.as_ref()?)?.resource)
             }
             "docker-disk" => Some(&self.disk.resource),
+            "docker-disk-volumes" => Some(&self.disk_volumes.resource),
             "action" => Some(&self.action_resource),
             "compose-jobs" => Some(&self.jobs.resource),
             "compose-output" => Some(&slot(&self.outputs, self.selected_job.as_ref()?)?.resource),
@@ -495,7 +513,11 @@ impl Containers {
             .as_ref()
     }
     pub fn disk(&self) -> Option<&DockerDisk> {
-        self.disk.data.as_ref()
+        self.disk_view.as_ref()
+    }
+    /// Changes whenever [`Self::disk`] does; derived presentation keys on it.
+    pub fn disk_revision(&self) -> u64 {
+        self.disk_view_revision
     }
     pub fn jobs(&self) -> Option<&Value> {
         self.jobs.data.as_ref()
@@ -578,6 +600,8 @@ impl Containers {
         self.projects.clear();
         self.outputs.clear();
         self.disk = Slot::default();
+        self.disk_volumes = Slot::default();
+        self.disk_view = None;
         self.jobs = Slot::default();
         self.selected_job = None;
         self.started_jobs.clear();
@@ -591,7 +615,9 @@ impl Containers {
     pub fn refresh(&mut self) {
         self.request(Kind::Snapshot, true);
     }
-    pub fn server_id(&self) -> &str { &self.server }
+    pub fn server_id(&self) -> &str {
+        &self.server
+    }
     pub fn retry_inspect(&mut self) {
         self.request(Kind::Inspect, true);
     }
@@ -603,6 +629,20 @@ impl Containers {
     }
     pub fn retry_disk(&mut self) {
         self.request(Kind::Disk, true);
+        // A refresh re-measures volumes too, but only where the quick reading
+        // cannot size them; a full reading from an older agent already did.
+        if self
+            .disk
+            .data
+            .as_ref()
+            .is_some_and(|disk| !disk.volumes_measured)
+        {
+            self.request(Kind::DiskVolumes, true);
+        }
+    }
+    /// Re-measure volume sizes alone, after that measurement failed.
+    pub fn retry_disk_volumes(&mut self) {
+        self.request(Kind::DiskVolumes, true);
     }
     pub fn retry_jobs(&mut self) {
         self.request(Kind::Jobs, true);
@@ -699,8 +739,10 @@ impl Containers {
             self.request(Kind::Disk, false);
         }
         if !active {
-            self.wanted.remove(&Kind::Disk);
-            self.manual.remove(&Kind::Disk);
+            for kind in [Kind::Disk, Kind::DiskVolumes] {
+                self.wanted.remove(&kind);
+                self.manual.remove(&kind);
+            }
         }
     }
 
@@ -1226,6 +1268,7 @@ impl Containers {
             Kind::Inspect,
             Kind::Compose,
             Kind::Disk,
+            Kind::DiskVolumes,
             Kind::Logs,
         ] {
             let result =
@@ -1386,6 +1429,7 @@ impl Containers {
     fn invalidate_readings(&mut self) {
         self.snapshot.invalidate();
         self.disk.invalidate();
+        self.disk_volumes.invalidate();
         for (_, slot) in &mut self.inspects {
             slot.invalidate();
         }
@@ -1406,6 +1450,21 @@ impl Containers {
         }
         self.changed = true;
     }
+    fn merge_disk(&mut self) {
+        let view = self
+            .disk
+            .data
+            .clone()
+            .map(|quick| match &self.disk_volumes.data {
+                Some(volumes) => quick.with_volumes(volumes),
+                None => quick,
+            });
+        if view != self.disk_view {
+            self.changed = true;
+            self.disk_view_revision += 1;
+            self.disk_view = view;
+        }
+    }
     fn request(&mut self, kind: Kind, manual: bool) {
         if self.retired {
             return;
@@ -1425,13 +1484,13 @@ impl Containers {
         if self.retired || !self.wanted.contains(&kind) {
             return;
         }
-        if kind == Kind::Disk && (!self.visible || !self.disk_active) {
+        if matches!(kind, Kind::Disk | Kind::DiskVolumes) && (!self.visible || !self.disk_active) {
             return;
         }
         if self.pending.contains_key(&Kind::Action)
             && matches!(
                 kind,
-                Kind::Snapshot | Kind::Inspect | Kind::Compose | Kind::Disk
+                Kind::Snapshot | Kind::Inspect | Kind::Compose | Kind::Disk | Kind::DiskVolumes
             )
         {
             return;
@@ -1442,6 +1501,7 @@ impl Containers {
             Kind::Compose => self.selected_project.clone().map(Job::Compose),
             Kind::Logs => self.selected_logs.clone().map(Job::Logs),
             Kind::Disk => Some(Job::Disk),
+            Kind::DiskVolumes => Some(Job::DiskVolumes),
             Kind::Jobs => Some(Job::Jobs),
             Kind::Output => self.selected_job.clone().map(Job::Output),
             _ => None,
@@ -1479,6 +1539,8 @@ impl Containers {
             Job::Output(job) => {
                 json!({"id":self.server,"job":job,"offset":slot(&self.outputs, job).and_then(|slot|slot.data.as_ref()).and_then(|output|output["offset"].as_u64()).unwrap_or(0)})
             }
+            Job::Disk => json!({"id":self.server,"part":"quick"}),
+            Job::DiskVolumes => json!({"id":self.server,"part":"volumes"}),
             _ => json!({"id":self.server}),
         };
         self.launch(job, args, manual);
@@ -1490,6 +1552,7 @@ impl Containers {
             Job::Logs(target) => slot(&self.logs, target)?.slot.generation,
             Job::Compose(project) => slot(&self.projects, project)?.generation,
             Job::Disk => self.disk.generation,
+            Job::DiskVolumes => self.disk_volumes.generation,
             Job::Jobs => self.jobs.generation,
             Job::Output(job) => slot(&self.outputs, job)?.generation,
             Job::ComposeStart { .. } => self.compose_start.generation,
@@ -1504,6 +1567,7 @@ impl Containers {
             Job::Logs(target) => &mut slot_mut(&mut self.logs, target)?.slot.resource,
             Job::Compose(project) => &mut slot_mut(&mut self.projects, project)?.resource,
             Job::Disk => &mut self.disk.resource,
+            Job::DiskVolumes => &mut self.disk_volumes.resource,
             Job::Jobs => &mut self.jobs.resource,
             Job::Output(job) => &mut slot_mut(&mut self.outputs, job)?.resource,
             Job::ComposeStart { .. } => &mut self.compose_start.resource,
@@ -1528,6 +1592,7 @@ impl Containers {
                 .unwrap()
                 .begin(generation),
             Job::Disk => self.disk.begin(generation),
+            Job::DiskVolumes => self.disk_volumes.begin(generation),
             Job::Jobs => self.jobs.begin(generation),
             Job::Output(job) => slot_mut(&mut self.outputs, job).unwrap().begin(generation),
             Job::ComposeStart { .. } => self.compose_start.begin(generation),
@@ -1614,7 +1679,36 @@ impl Containers {
                 .is_some_and(|cache| cache.complete(generation, result, now)),
             Job::Compose(project) => slot_mut(&mut self.projects, &project)
                 .is_some_and(|slot| finish_changed(slot, generation, result, now)),
-            Job::Disk => finish_changed(&mut self.disk, generation, result.and_then(decode), now),
+            Job::Disk => {
+                let accepted =
+                    finish_changed(&mut self.disk, generation, result.and_then(decode), now);
+                if accepted {
+                    self.merge_disk();
+                    // Volumes are measured only when the quick reading could
+                    // not size them, so older agents never scan twice. A
+                    // volume created since the last measurement is measured
+                    // at once rather than when that measurement goes stale.
+                    if self.disk_view.as_ref().is_some_and(|d| !d.volumes_measured)
+                        && (self.disk_volumes.data.is_some()
+                            || self.disk_volumes.stale(now, DISK_VOLUMES_STALE))
+                    {
+                        self.wanted.insert(Kind::DiskVolumes);
+                    }
+                }
+                accepted
+            }
+            Job::DiskVolumes => {
+                let accepted = finish_changed(
+                    &mut self.disk_volumes,
+                    generation,
+                    result.and_then(decode),
+                    now,
+                );
+                if accepted {
+                    self.merge_disk();
+                }
+                accepted
+            }
             Job::Jobs => {
                 let result = result.and_then(validate_jobs);
                 let accepted = finish(&mut self.jobs, generation, result, now);
@@ -4000,6 +4094,113 @@ mod tests {
         assert_eq!(h.count("docker_disk"), 2);
         h.controller.set_disk_active(true);
         assert_eq!(h.count("docker_disk"), 3);
+    }
+
+    fn quick_disk(size: u64) -> Value {
+        let mut quick = disk(size);
+        quick["volumesMeasured"] = json!(false);
+        quick["volumes"] = json!([{"name":"data","driver":"local","size":null,"refCount":1,"anonymous":false,"compose":null}]);
+        quick["totals"]["volumes"] = json!({"count":1,"size":0,"reclaimable":0});
+        quick
+    }
+
+    #[test]
+    fn quick_disk_reading_shows_first_and_volumes_are_measured_once_after() {
+        let mut h = Harness::new();
+        h.controller.set_disk_active(true);
+        h.controller.retry_disk();
+        h.controller.poll(true);
+        assert_eq!(h.count("docker_disk"), 1);
+        assert_eq!(h.last_args("docker_disk")["part"], "quick");
+        h.reply("docker_disk", Ok(quick_disk(100)));
+        h.controller.poll(true);
+        let quick_revision = h.controller.disk_revision();
+        assert!(quick_revision > 0);
+        let shown = h.controller.disk().unwrap();
+        assert!(!shown.volumes_measured, "the quick reading shows at once");
+        assert_eq!(shown.volumes[0].size, None);
+        assert_eq!(h.count("docker_disk"), 2, "volume sizes are read after");
+        assert_eq!(h.last_args("docker_disk")["part"], "volumes");
+        let mut measured = disk(0);
+        measured["volumes"] = json!([{"name":"data","driver":"local","size":700,"refCount":1,"anonymous":false,"compose":null}]);
+        measured["totals"]["volumes"] = json!({"count":1,"size":700,"reclaimable":0});
+        h.reply("docker_disk", Ok(measured));
+        h.controller.poll(true);
+        assert!(
+            h.controller.disk_revision() > quick_revision,
+            "volumes arriving alone still change the presented reading"
+        );
+        let merged = h.controller.disk().unwrap();
+        assert!(merged.volumes_measured);
+        assert_eq!(merged.volumes[0].size, Some(700));
+        assert_eq!(
+            merged.totals.size(),
+            800,
+            "images from quick, volumes measured"
+        );
+        // A later quick refresh reuses the recent volume measurement.
+        h.advance(31);
+        h.controller.set_disk_active(false);
+        h.controller.set_disk_active(true);
+        h.controller.poll(true);
+        assert_eq!(h.count("docker_disk"), 3);
+        h.reply("docker_disk", Ok(quick_disk(90)));
+        h.controller.poll(true);
+        assert_eq!(h.count("docker_disk"), 3, "no rescan within two minutes");
+        let reused = h.controller.disk().unwrap();
+        assert!(reused.volumes_measured);
+        assert_eq!(reused.totals.size(), 790);
+        // A volume removed since the measurement leaves the merged reading.
+        h.advance(31);
+        h.controller.set_disk_active(false);
+        h.controller.set_disk_active(true);
+        h.controller.poll(true);
+        assert_eq!(h.count("docker_disk"), 4);
+        let mut removed = quick_disk(90);
+        removed["volumes"] = json!([]);
+        removed["totals"]["volumes"] = json!({"count":0,"size":0,"reclaimable":0});
+        h.reply("docker_disk", Ok(removed));
+        h.controller.poll(true);
+        let current = h.controller.disk().unwrap();
+        assert!(current.volumes.is_empty(), "no stale volume rows");
+        assert!(current.volumes_measured);
+        assert_eq!(current.totals.volumes.count, 0);
+        assert_eq!(current.totals.size(), 90);
+        assert_eq!(h.count("docker_disk"), 4);
+        // A volume created since is measured at once, not in two minutes.
+        h.advance(31);
+        h.controller.set_disk_active(false);
+        h.controller.set_disk_active(true);
+        h.controller.poll(true);
+        let mut created = quick_disk(90);
+        created["volumes"] = json!([
+            {"name":"data","driver":"local","size":null,"refCount":1,"anonymous":false,"compose":null},
+            {"name":"logs","driver":"local","size":null,"refCount":0,"anonymous":false,"compose":null}
+        ]);
+        created["totals"]["volumes"] = json!({"count":2,"size":0,"reclaimable":0});
+        h.reply("docker_disk", Ok(created));
+        h.controller.poll(true);
+        let partial = h.controller.disk().unwrap();
+        assert!(!partial.volumes_measured, "the new volume is not sized yet");
+        assert_eq!(partial.volumes[0].size, Some(700));
+        assert_eq!(partial.volumes[1].size, None);
+        assert_eq!(h.count("docker_disk"), 6);
+        assert_eq!(h.last_args("docker_disk")["part"], "volumes");
+    }
+
+    #[test]
+    fn full_reading_from_an_older_agent_never_scans_volumes_twice() {
+        let mut h = Harness::new();
+        h.controller.set_disk_active(true);
+        h.controller.retry_disk();
+        h.controller.poll(true);
+        h.reply("docker_disk", Ok(disk(100)));
+        h.controller.poll(true);
+        assert!(h.controller.disk().unwrap().volumes_measured);
+        h.controller.retry_disk();
+        h.controller.poll(true);
+        assert_eq!(h.count("docker_disk"), 2, "only the refresh itself");
+        assert_eq!(h.last_args("docker_disk")["part"], "quick");
     }
 
     #[test]

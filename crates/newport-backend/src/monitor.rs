@@ -145,8 +145,9 @@ pub async fn ask(
         if slot.open.is_none() {
             match open(server).await? {
                 Ok(open) => {
+                    let pressure = open.session.channel_pressure();
                     slot.open = Some(open);
-                    close_when_idle(Arc::downgrade(&shared));
+                    close_when_idle(Arc::downgrade(&shared), pressure);
                 }
                 Err(reason) => {
                     slot.unavailable = Some(Unavailable {
@@ -256,6 +257,7 @@ async fn open(server: &Arc<ServerSession>) -> Result<Result<Open, String>, Strin
 }
 fn connection_problem(error: &str) -> bool {
     error == crate::agent_runtime::BUSY
+        || error.starts_with("SSH session capacity unavailable")
         || error.contains("Needle runtime disconnected")
         || error.contains("Needle runtime changed before worker registration")
         || error.starts_with("SSH transport interrupted")
@@ -263,16 +265,32 @@ fn connection_problem(error: &str) -> bool {
         || error.contains("timed out")
 }
 
-fn close_when_idle(slot: Weak<Mutex<Slot>>) {
+fn close_when_idle(slot: Weak<Mutex<Slot>>, mut pressure: tokio::sync::watch::Receiver<u64>) {
     tokio::spawn(async move {
+        // A reclaim that finds the channel busy is retried shortly instead of
+        // waiting for the next idle check.
+        let mut pending = false;
         loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            let wait = Duration::from_secs(if pending { 1 } else { 60 });
+            let reclaim = tokio::select! {
+                _ = tokio::time::sleep(wait) => pending,
+                changed = pressure.changed() => {
+                    if changed.is_err() { return; }
+                    true
+                }
+            };
             let Some(slot) = slot.upgrade() else { return };
-            let mut slot = slot.lock().await;
+            // The same lock protects the entire exchange. Never interrupt a
+            // running monitor action to make room for another SSH channel.
+            let Ok(mut slot) = slot.try_lock() else {
+                pending = reclaim;
+                continue;
+            };
+            pending = false;
             if slot.open.is_none() {
                 return;
             }
-            if slot.used.is_some_and(|used| used.elapsed() > IDLE) {
+            if reclaim || slot.used.is_some_and(|used| used.elapsed() > IDLE) {
                 slot.close().await;
                 return;
             }
@@ -530,6 +548,9 @@ mod tests {
     #[test]
     fn only_connection_failures_are_retried_at_once() {
         assert!(connection_problem(crate::agent_runtime::BUSY));
+        assert!(connection_problem(
+            "SSH session capacity unavailable. Retry shortly"
+        ));
         assert!(connection_problem("Needle runtime disconnected"));
         assert!(connection_problem(
             "Needle runtime changed before worker registration"

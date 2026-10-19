@@ -215,7 +215,7 @@ fn table_renders_definition_order_missing_profiles_replicas_and_orphans(cx: &mut
             .text_system()
             .shape_line(
                 "Up".into(),
-                px(11.5),
+                px(crate::ui::FONT_SIZE),
                 &[gpui::TextRun {
                     len: 2,
                     font: gpui::font(cx.theme().font_family.clone()),
@@ -227,7 +227,7 @@ fn table_renders_definition_order_missing_profiles_replicas_and_orphans(cx: &mut
     });
     assert!(
         (up.size.width - up_label_width - px(18.)).abs() <= px(1.),
-        "Up must retain its 11.5px label, 8px side padding and 1px outline"
+        "Up must retain the shared 14px label, 8px side padding and 1px outline"
     );
     for name in [
         "stack-worker-1",

@@ -86,7 +86,7 @@ impl Newport {
         let error = resource.and_then(|r| r.error.clone());
         if pending {
             return project_loading::workspace(
-                crate::project_ui::button("open-back-projects")
+                crate::controls::button("open-back-projects")
                     .label("All projects")
                     .on_click(cx.listener(|this, _, _, cx| this.git_all_projects(cx))),
                 cx,
@@ -108,7 +108,7 @@ impl Newport {
             .gap_3()
             .p_5()
             .child(
-                crate::project_ui::button("open-back-projects")
+                crate::controls::button("open-back-projects")
                     .label("All projects")
                     .on_click(cx.listener(|this, _, _, cx| this.git_all_projects(cx))),
             )
@@ -119,15 +119,12 @@ impl Newport {
                         .child("Could not open this checkout"),
                 )
             })
-            .child(crate::project_ui::label(text(
-                &self.git.opening_path,
-                "display",
-            )))
+            .child(crate::label(text(&self.git.opening_path, "display")))
             .when_some(error, |view, error| {
                 view.child(div().text_color(cx.theme().danger).child(error))
             })
             .when(!pending, |view| {
-                view.child(crate::project_ui::label(
+                view.child(crate::label(
                     "Retry the connection, or open the saved project to locate a moved worktree.",
                 ))
                 .child(
@@ -136,7 +133,7 @@ impl Newport {
                         .flex_wrap()
                         .gap_2()
                         .child(
-                            crate::project_ui::button("retry-open-repository")
+                            crate::controls::button("retry-open-repository")
                                 .label("Retry")
                                 .disabled(!self.git.opening_path["bytesB64"].is_string())
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -146,7 +143,7 @@ impl Newport {
                         )
                         .when(different_root, |view| {
                             view.child(
-                                crate::project_ui::button("open-saved-project")
+                                crate::controls::button("open-saved-project")
                                     .label("Open saved project")
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.git_open_with_retry(root.clone(), true);

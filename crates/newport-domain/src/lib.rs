@@ -16,4 +16,5 @@ pub mod model;
 pub mod port_context;
 pub mod port_grouping;
 pub mod services;
+pub mod terminal;
 pub mod text_file;

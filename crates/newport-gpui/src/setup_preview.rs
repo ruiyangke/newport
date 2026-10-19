@@ -81,7 +81,7 @@ impl Preview {
             .justify_between()
             .gap(px(8.))
             .py(px(9.))
-            .text_size(px(13.))
+            .text_size(px(crate::ui::FONT_SIZE))
             .child(
                 div()
                     .text_color(cx.theme().muted_foreground)
@@ -97,7 +97,7 @@ impl Preview {
     fn content(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut body = div().flex().flex_col().gap(px(12.));
         if self.failed {
-            return body.text_size(px(13.)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground)
+            return body.text_size(px(crate::ui::FONT_SIZE)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground)
                 .child(if self.installing { "Retry will send the incomplete transfer again. Integrations haven’t been enabled." } else { "Nothing has been installed. You can retry the inspection." }).into_any_element();
         }
         match self.step {
@@ -108,7 +108,7 @@ impl Preview {
                     .flex_col()
                     .px(px(16.))
                     .py(px(6.))
-                    .rounded(px(8.))
+                    .rounded(px(crate::ui::RADIUS))
                     .bg(cx.theme().sidebar);
                 for (label, value) in [
                     ("System", "Ubuntu 24.04 LTS · x86_64"),
@@ -124,7 +124,7 @@ impl Preview {
                 }
                 body = body.child(facts).child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .text_color(cx.theme().muted_foreground)
                         .child(if ready {
                             "Inspection complete. Needle is not installed yet."
@@ -141,7 +141,7 @@ impl Preview {
                         div()
                             .flex()
                             .justify_between()
-                            .text_size(px(13.))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .child(if self.elapsed < 20 {
                                 "Transferring Needle"
                             } else {
@@ -170,7 +170,7 @@ impl Preview {
                         div()
                             .flex()
                             .justify_between()
-                            .text_size(px(12.))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .text_color(cx.theme().muted_foreground)
                             .child(format!("{:.1} of 5.0 MiB", fraction * 5.))
                             .child(if self.elapsed < 20 {
@@ -181,11 +181,11 @@ impl Preview {
                     );
             }
             1 => {
-                body = body.child(div().flex().flex_col().px(px(16.)).py(px(6.)).rounded(px(8.)).bg(cx.theme().sidebar)
+                body = body.child(div().flex().flex_col().px(px(16.)).py(px(6.)).rounded(px(crate::ui::RADIUS)).bg(cx.theme().sidebar)
                     .child(Self::fact("Tool", "Needle", cx))
                     .child(Self::fact("Size", "5.0 MiB · sample", cx))
                     .child(Self::fact("Transfer", "Over your SSH connection", cx)))
-                    .child(div().text_size(px(12.)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground)
+                    .child(div().text_size(px(crate::ui::FONT_SIZE)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground)
                         .child("Installed only with your permission. Browser and clipboard access stay off until you choose them in the next step."));
             }
             2 => {
@@ -194,7 +194,7 @@ impl Preview {
                     .child(self.integration_option(false, cx))
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .text_color(cx.theme().muted_foreground)
                             .child("Optional. You can change these later in Integrations."),
                     );
@@ -207,7 +207,7 @@ impl Preview {
                             .flex_col()
                             .px(px(16.))
                             .py(px(6.))
-                            .rounded(px(8.))
+                            .rounded(px(crate::ui::RADIUS))
                             .bg(cx.theme().sidebar)
                             .child(Self::fact("Needle", "Installed", cx))
                             .child(Self::fact(
@@ -223,7 +223,7 @@ impl Preview {
                     )
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .text_color(cx.theme().muted_foreground)
                             .child("Preview complete. No server was changed."),
                     );
@@ -237,12 +237,12 @@ impl Preview {
         } else {
             self.clipboard
         };
-        div().p(px(16.)).rounded(px(8.)).border_1().border_color(if checked { cx.theme().primary } else { cx.theme().border })
+        div().p(px(16.)).rounded(px(crate::ui::RADIUS)).border_1().border_color(if checked { cx.theme().primary } else { cx.theme().border })
             .flex().flex_col().gap(px(8.))
             .child(crate::controls::checkbox(if browser { "setup-browser" } else { "setup-clipboard" })
                 .label(if browser { "Browser integration" } else { "Clipboard integration" }).checked(checked)
                 .on_click(cx.listener(move |this, checked: &bool, _, cx| { if browser { this.browser = *checked; } else { this.clipboard = *checked; } cx.notify(); })))
-            .child(div().pl(px(24.)).text_size(px(12.)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground)
+            .child(div().pl(px(24.)).text_size(px(crate::ui::FONT_SIZE)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground)
                 .child(if browser { "Open links from remote commands in your local browser." } else { "Let remote commands read and write your local clipboard. Enable only for servers you trust." }))
             .into_any_element()
     }
@@ -385,13 +385,13 @@ impl Render for Preview {
                                     .gap(px(3.))
                                     .child(
                                         div()
-                                            .text_size(px(13.))
+                                            .text_size(px(crate::ui::FONT_SIZE))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child("demo-server"),
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(11.))
+                                            .text_size(px(crate::ui::FONT_SIZE))
                                             .text_color(cx.theme().muted_foreground)
                                             .child("developer · SSH"),
                                     ),
@@ -399,7 +399,7 @@ impl Render for Preview {
                     )
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .text_color(cx.theme().muted_foreground)
                             .child(if self.step < 3 {
                                 format!("Step {} of 3", self.step + 1)
@@ -439,7 +439,7 @@ impl Render for Preview {
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(13.))
+                                            .text_size(px(crate::ui::FONT_SIZE))
                                             .line_height(relative(1.5))
                                             .text_color(cx.theme().muted_foreground)
                                             .child(self.description()),
@@ -474,7 +474,7 @@ impl Render for Preview {
                             .gap(px(8.))
                             .child(
                                 div()
-                                    .text_size(px(11.))
+                                    .text_size(px(crate::ui::FONT_SIZE))
                                     .text_color(cx.theme().muted_foreground)
                                     .child("Preview · sample server · no changes are made"),
                             )

@@ -4,12 +4,36 @@ use gpui_kit::component::{
     searchable_list::{SearchableListItem, SearchableVec},
 };
 
+/// Where a server's connection stands, as far as this window knows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Reach {
+    Connected,
+    Failed,
+    Unknown,
+}
+
 #[derive(Clone, PartialEq)]
 pub(super) struct ServerItem {
     id: String,
     name: String,
     endpoint: String,
     search_text: String,
+    reach: Reach,
+}
+
+/// Search earns its place only once the list is long enough to hunt in.
+pub(super) const SEARCH_ABOVE: usize = 6;
+
+/// A small dot saying whether the server is reachable: filled green when
+/// connected, red when the last attempt failed, a hollow ring when unknown.
+pub(super) fn reach_dot(reach: Reach, cx: &App) -> Div {
+    let dark = cx.theme().is_dark();
+    let dot = div().size(px(7.)).flex_shrink_0().rounded_full();
+    match reach {
+        Reach::Connected => dot.bg(theme::success(dark)),
+        Reach::Failed => dot.bg(theme::error(dark)),
+        Reach::Unknown => dot.border_1().border_color(cx.theme().muted_foreground),
+    }
 }
 impl SearchableListItem for ServerItem {
     type Value = String;
@@ -26,37 +50,32 @@ impl SearchableListItem for ServerItem {
             .all(|word| self.search_text.contains(word))
     }
     fn render(&self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        // One line per server: whether it is reachable, its name, and where
+        // it is -- the endpoint quieter and giving way first when narrow.
         div()
             .flex()
             .items_center()
-            .gap(px(10.))
+            .gap(px(9.))
             .min_w_0()
+            .py(px(2.))
+            .child(reach_dot(self.reach, cx))
             .child(
-                Icon::new(IconName::Server)
-                    .size(px(16.))
-                    .text_color(cx.theme().muted_foreground),
+                div()
+                    .flex_shrink_0()
+                    .max_w(px(150.))
+                    .text_size(px(crate::ui::FONT_SIZE))
+                    .font_weight(FontWeight::MEDIUM)
+                    .truncate()
+                    .child(self.name.clone()),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .truncate()
-                            .child(self.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .truncate()
-                            .child(self.endpoint.clone()),
-                    ),
+                    .text_size(px(crate::ui::FONT_SIZE - 1.))
+                    .text_color(cx.theme().muted_foreground)
+                    .truncate()
+                    .child(self.endpoint.clone()),
             )
     }
 }
@@ -109,7 +128,7 @@ fn compare_labels(a: &str, b: &str, server_name: bool) -> std::cmp::Ordering {
     }
 }
 
-fn items(snapshot: &Value) -> Vec<ServerItem> {
+fn items(snapshot: &Value, reach: impl Fn(&str) -> Reach) -> Vec<ServerItem> {
     let mut items: Vec<_> = rows(&snapshot["config"]["servers"])
         .iter()
         .map(|server| {
@@ -138,6 +157,7 @@ fn items(snapshot: &Value) -> Vec<ServerItem> {
                     text(server, "sshUser")
                 )
                 .to_lowercase(),
+                reach: reach(&text(server, "id")),
                 id: text(server, "id"),
                 name,
                 endpoint,
@@ -153,6 +173,9 @@ fn items(snapshot: &Value) -> Vec<ServerItem> {
 }
 impl Newport {
     pub(super) fn init_picker(window: &mut Window, cx: &mut Context<Self>) -> Entity<Picker> {
+        Self::new_picker(false, window, cx)
+    }
+    fn new_picker(searchable: bool, window: &mut Window, cx: &mut Context<Self>) -> Entity<Picker> {
         let picker = cx.new(|cx| {
             Picker::new(
                 SearchableVec::new(Vec::<ServerItem>::new()),
@@ -160,7 +183,7 @@ impl Newport {
                 window,
                 cx,
             )
-            .searchable(true)
+            .searchable(searchable)
             .multiple(false)
         });
         cx.subscribe(&picker, |this, _, event, cx| {
@@ -193,9 +216,23 @@ impl Newport {
         picker
     }
     pub(super) fn sync_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let items = items(&self.snapshot);
+        let snapshot = &self.snapshot;
+        let items = items(snapshot, |id| {
+            match crate::connectivity::scoped(id, snapshot, cx).map(|state| state.phase) {
+                Some(crate::connectivity::Phase::Connected) => Reach::Connected,
+                Some(crate::connectivity::Phase::Failed) => Reach::Failed,
+                _ => Reach::Unknown,
+            }
+        });
         if self.picker_items == items && self.picker_selection == self.server {
             return;
+        }
+        // The kit fixes searchability when a picker is built, so crossing the
+        // threshold builds a new one; the old one is closed and dropped.
+        let searchable = items.len() > SEARCH_ABOVE;
+        if searchable != (self.picker_items.len() > SEARCH_ABOVE) {
+            self.server_picker.update(cx, |picker, cx| picker.close(cx));
+            self.server_picker = Self::new_picker(searchable, window, cx);
         }
         self.picker_items = items.clone();
         self.picker_selection = self.server.clone();
@@ -208,127 +245,150 @@ impl Newport {
             });
         });
     }
-    pub(super) fn server_selector(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn server_selector(&self, cx: &mut Context<Self>) -> AnyElement {
         let view = cx.entity().downgrade();
         let count = self.picker_items.len();
         let blocked =
             self.server_form.is_some() || self.modal_open || !self.configuration_available();
+        let current = self.selected_server().map(display_name);
+        let deleting = self
+            .resources
+            .get(&format!("server-delete:{}", self.server))
+            .is_some_and(|r| r.pending);
+        // A title, not a form field: the server's name with a small chevron,
+        // marked only on hover or while open. Sized to the name, within bounds.
+        let width = current.as_deref().map_or(132., |name| {
+            (name.chars().count() as f32 * 8. + 44.).clamp(72., 260.)
+        });
         div()
-            .h(px(56.))
+            .h(px(crate::controls::CONTROL_HEIGHT))
             .flex_shrink_0()
-            .w_full()
-            .mb(px(if compact { 8. } else { 20. }))
+            .w(px(width))
             .child(
                 Combobox::new(&self.server_picker)
                     .accessibility_label("Choose server")
                     .placeholder("Choose a server")
                     .search_placeholder("Find a server…")
-                    .menu_width(px(336.))
-                    .menu_max_h(px(320.))
+                    .menu_width(px(300.))
+                    .menu_max_h(px(360.))
                     .disabled(blocked)
                     .empty(move |_, cx| {
                         empty::compact(
                             if count == 0 {
-                                "No saved servers yet. Use Add server to get started."
+                                "No saved servers yet. Add one to get started."
                             } else {
-                                "No matching servers. Try another search."
+                                "No matching servers."
                             },
                             cx,
                         )
                     })
                     .appearance(false)
-                    .h(px(56.))
+                    .h(px(crate::controls::CONTROL_HEIGHT))
                     .flex_shrink_0()
                     .w_full()
                     .px(px(0.))
                     .render_trigger(|trigger, _, cx| {
                         let selected = trigger.selection().first().map(|(_, item)| item);
                         div()
-                            .h(px(56.))
+                            .id("server-picker-trigger")
+                            .h(px(crate::controls::CONTROL_HEIGHT))
                             .w_full()
+                            .min_w_0()
                             .px(px(8.))
-                            .rounded(px(6.))
-                            .when(trigger.is_open(), |el| {
-                                el.bg(theme::sidebar_selection(cx.theme().is_dark()))
-                            })
+                            .rounded(px(crate::ui::RADIUS))
                             .flex()
                             .items_center()
-                            .gap(px(8.))
-                            .child(
-                                div()
-                                    .w(px(26.))
-                                    .flex_shrink_0()
-                                    .flex()
-                                    .justify_center()
-                                    .child(
-                                        Icon::new(IconName::Server)
-                                            .size(px(16.))
-                                            .text_color(theme::sidebar_muted(cx.theme().is_dark())),
-                                    ),
-                            )
+                            .gap(px(5.))
+                            .hover(|el| el.bg(theme::row_hover(cx)))
+                            .when(trigger.is_open(), |el| el.bg(theme::row_hover(cx)))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(3.))
+                                    .truncate()
+                                    .text_size(px(crate::ui::FONT_SIZE))
+                                    .font_weight(FontWeight::SEMIBOLD)
                                     .child(
-                                        div()
-                                            .text_size(px(13.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .truncate()
-                                            .child(
-                                                selected
-                                                    .map(|s| s.name.clone())
-                                                    .unwrap_or_else(|| "Choose a server".into()),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(theme::sidebar_foreground(
-                                                cx.theme().is_dark(),
-                                            ))
-                                            .truncate()
-                                            .child(
-                                                selected
-                                                    .map(|s| s.endpoint.clone())
-                                                    .unwrap_or_else(|| "Your SSH workspace".into()),
-                                            ),
+                                        selected
+                                            .map(|s| s.name.clone())
+                                            .unwrap_or_else(|| "Choose a server".into()),
                                     ),
                             )
-                            .child(Icon::new(IconName::ChevronsUpDown).size(px(12.)))
+                            .child(
+                                Icon::new(IconName::ChevronDown)
+                                    .size(px(13.))
+                                    .text_color(cx.theme().muted_foreground),
+                            )
                     })
-                    .footer(move |_, cx| {
-                        let view = view.clone();
+                    .footer(move |_, _| {
+                        let edit_view = view.clone();
+                        let add_view = view.clone();
+                        // Switching is what the list is for; the footer holds
+                        // the two things done from here: add another, or edit
+                        // the one in use. Deleting lives in the edit dialog,
+                        // next to everything else about that server.
                         div()
                             .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(8.))
+                            .flex_col()
+                            .gap(px(1.))
                             .child(
                                 crate::controls::button("picker-add-server")
                                     .ghost()
+                                    .w_full()
                                     .disabled(blocked)
-                                    .label("Add server…")
-                                    .icon(IconName::Plus)
+                                    .accessibility_label("Add server…")
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(8.))
+                                            .child(Icon::new(IconName::Plus).size(px(15.)))
+                                            .child("Add server…"),
+                                    )
                                     .on_click(move |_, window, cx| {
-                                        let _ = view.update(cx, |this, cx| {
+                                        let _ = add_view.update(cx, |this, cx| {
+                                            this.server_picker
+                                                .update(cx, |picker, cx| picker.close(cx));
                                             this.edit_server(None, window, cx)
                                         });
                                     }),
                             )
-                            .child(
-                                div()
-                                    .pr(px(8.))
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!(
-                                        "{count} server{}",
-                                        if count == 1 { "" } else { "s" }
-                                    )),
-                            )
+                            .when_some(current.clone(), |footer, name| {
+                                footer.child(
+                                    crate::controls::button("picker-edit-server")
+                                        .ghost()
+                                        .w_full()
+                                        .disabled(blocked || deleting)
+                                        .accessibility_label("Edit server")
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .min_w_0()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(8.))
+                                                .child(Icon::new(IconName::Settings2).size(px(15.)))
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .child(format!("Edit {name}…")),
+                                                ),
+                                        )
+                                        .on_click(move |_, window, cx| {
+                                            let _ = edit_view.update(cx, |this, cx| {
+                                                this.server_picker
+                                                    .update(cx, |picker, cx| picker.close(cx));
+                                                if let Some(server) =
+                                                    this.selected_server().cloned()
+                                                {
+                                                    this.edit_server(Some(server), window, cx);
+                                                }
+                                            });
+                                        }),
+                                )
+                            })
                     }),
             )
             .into_any_element()
@@ -336,14 +396,17 @@ impl Newport {
 }
 #[cfg(test)]
 mod tests {
-    use super::{display_name, items};
+    use super::{Reach, display_name, items};
+    fn items_unreached(snapshot: &serde_json::Value) -> Vec<super::ServerItem> {
+        items(snapshot, |_| Reach::Unknown)
+    }
     use gpui_kit::component::searchable_list::SearchableListItem;
     use serde_json::json;
     #[test]
     fn unnamed_servers_use_the_reference_user_and_host_label() {
         let server = json!({"id":"a", "name":"", "sshUser":"dev", "sshHost":"example.org"});
         assert_eq!(display_name(&server), "dev@example.org");
-        let list = items(&json!({"config":{"servers":[server]}}));
+        let list = items_unreached(&json!({"config":{"servers":[server]}}));
         assert_eq!(list[0].name, "dev@example.org");
         assert!(list[0].matches("dev@example.org"));
         assert_eq!(
@@ -360,7 +423,7 @@ mod tests {
         assert_eq!(compare_labels("node2", "node10", true), Ordering::Less);
         assert_eq!(compare_labels("NODE2", "node2", true), Ordering::Equal);
         assert_eq!(compare_labels("nóde2", "node2", true), Ordering::Equal);
-        let list = items(&json!({"config":{"servers":[
+        let list = items_unreached(&json!({"config":{"servers":[
             {"id":"10", "name":"node10", "sshUser":"dev", "sshHost":"host"},
             {"id":"2", "name":"node2", "sshUser":"dev", "sshHost":"host"}
         ]}}));
@@ -371,7 +434,7 @@ mod tests {
     }
     #[test]
     fn server_search_preserves_identity_and_formats_endpoints() {
-        let list = items(&json!({"config":{"servers":[
+        let list = items_unreached(&json!({"config":{"servers":[
             {"id":"b","name":"Same","sshHost":"::1","sshUser":"dev","sshPort":2222},
             {"id":"a","name":"Same","sshHost":"example.org","sshUser":"other","sshPort":22}
         ]}}));

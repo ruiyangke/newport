@@ -1,7 +1,7 @@
 //! Offline whole-page CPU fixtures. No main-loop timer, startup request, or save hook.
 use super::{
-    Newport, Page, appearance, display_preferences, file_preview, git, navigation, overview,
-    settings, sidebar_layout, theme, window_state, workspace_state,
+    Newport, Page, appearance, file_preview, git, navigation, overview, settings, sidebar_layout,
+    theme, window_state, workspace_state,
 };
 use gpui_kit::{
     self as gpui, AppContext, Context, Entity, IntoElement, Render, TestAppContext,
@@ -15,7 +15,7 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
     Newport::observe_connectivity(cx);
     let restored = workspace_state::Selection::default();
     let window_state = window_state::WindowState::load(cx);
-    let (sidebar_layout, _) = sidebar_layout::SidebarLayout::new(cx);
+    let sidebar_layout = sidebar_layout::SidebarLayout::isolated(cx);
     let appearance = appearance::Appearance::Light;
     let appearance_store = appearance::AppearanceStore::from_env();
     // A private nonexistent socket also isolates any accidental request from the host.
@@ -50,8 +50,8 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
         services_preferences: Default::default(),
         retired_services: Vec::new(),
         services_refresh_requested: false,
-        display_preferences: display_preferences::DisplayPreferences::new(cx),
         setup_flow: None,
+        welcome: Default::default(),
         overview_state: overview::OverviewState {
             chart_focus: Some(chart_focus),
             interfaces: restored.network_interfaces,
@@ -137,7 +137,7 @@ impl Render for PageHost {
             .flex()
             .flex_col()
             .font_family(crate::theme::UI_FONT)
-            .text_size(px(13.))
+            .text_size(px(crate::ui::FONT_SIZE))
             .child(content)
     }
 }
@@ -148,6 +148,53 @@ fn put(view: &mut Newport, key: &str, value: Value) {
 pub(super) fn frame(cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.update(|window, cx| window.draw(cx).clear(cx));
+}
+
+#[gpui::test]
+fn refreshing_an_accepted_snapshot_never_blanks_the_page(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui::component::init(cx);
+        theme::install(false, cx);
+    });
+    struct ScreenHost(Entity<Newport>);
+    impl Render for ScreenHost {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let content = self.0.update(cx, |view, cx| view.screen(window, cx));
+            div().size_full().flex().flex_col().child(content)
+        }
+    }
+    let mut view = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let entity = cx.new(|cx| owner(window, cx));
+        view = Some(entity.clone());
+        ScreenHost(entity)
+    });
+    let view = view.unwrap();
+    let skeleton = |visual: &mut VisualTestContext| {
+        frame(visual);
+        visual.debug_bounds("loading-page").is_some()
+    };
+    view.update(visual, |v, _| {
+        v.page = Page::Integration;
+        let snapshot = v.snapshot.clone();
+        put(v, "snapshot", snapshot);
+    });
+    assert!(!skeleton(visual));
+    // The refresh after a forward toggle or integration change.
+    view.update(visual, |v, _| {
+        v.resources.fence("snapshot");
+        v.resources.begin_refresh("snapshot", false).unwrap();
+    });
+    assert!(!skeleton(visual));
+    // Even a dropped row keeps the accepted snapshot on screen.
+    view.update(visual, |v, _| {
+        v.resources.invalidate("snapshot");
+        v.resources.begin("snapshot").unwrap();
+    });
+    assert!(!skeleton(visual));
+    // Only a first read with nothing to show uses the skeleton.
+    view.update(visual, |v, _| v.snapshot = Value::Null);
+    assert!(skeleton(visual));
 }
 
 #[gpui::test]
@@ -283,7 +330,66 @@ pub(super) fn settle_update_check(view: &Entity<Newport>, visual: &mut VisualTes
 }
 
 #[gpui::test]
-fn sidebar_button_reopens_and_stays_outside_caption_drag_region(cx: &mut TestAppContext) {
+fn server_dropdown_actions_preserve_edit_and_delete_guards(cx: &mut TestAppContext) {
+    use gpui::component::WindowExt;
+    cx.update(|cx| {
+        gpui::component::init(cx);
+        theme::install(false, cx);
+    });
+    let mut workspace = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let entity = cx.new(|cx| owner(window, cx));
+        workspace = Some(entity.clone());
+        gpui::base::Root::new(entity, window, cx)
+    });
+    let workspace = workspace.unwrap();
+    visual.simulate_resize(size(px(900.), px(700.)));
+    frame(visual);
+    let click = |cx: &mut VisualTestContext, label: &str| {
+        frame(cx);
+        let at = cx.update(|window, _| {
+            gpui::base::test_support::snapshots(window)
+                .iter()
+                .find(|e| e.label() == Some(label))
+                .unwrap_or_else(|| panic!("missing {label}"))
+                .bounds()
+                .center()
+        });
+        cx.simulate_click(at, Default::default());
+        frame(cx);
+    };
+    let controls = visual.update(|window, _| gpui::base::test_support::snapshots(window));
+    assert!(
+        !controls
+            .iter()
+            .any(|e| matches!(e.label(), Some("Edit server" | "Server actions")))
+    );
+    click(visual, "Choose server");
+    click(visual, "Edit server");
+    assert!(workspace.read_with(visual, |v, _| v.server_form.is_some()));
+    click(visual, "Cancel");
+    assert!(workspace.read_with(visual, |v, _| v.server_form.is_none()));
+    // Delete lives in the server's edit dialog, not in the switcher.
+    click(visual, "Choose server");
+    let controls = visual.update(|window, _| gpui::base::test_support::snapshots(window));
+    assert!(!controls.iter().any(|e| e.label() == Some("Delete server")));
+    click(visual, "Edit server");
+    click(visual, "Delete server");
+    assert!(workspace.read_with(visual, |v, _| v.server_form.is_none()));
+    assert!(visual.update(|window, cx| window.has_active_dialog(cx)));
+    assert!(workspace.read_with(visual, |v, _| {
+        v.resources.get("server-delete:fixture").is_none()
+    }));
+    click(visual, "Cancel");
+    assert!(workspace.read_with(visual, |v, _| v.selected_server().is_some()));
+    click(visual, "Choose server");
+    click(visual, "Add server…");
+    assert!(workspace.read_with(visual, |v, _| v.server_form.is_some()));
+    click(visual, "Cancel");
+}
+
+#[gpui::test]
+fn sidebar_modes_preserve_terminal_and_stay_outside_caption_drag_region(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui::component::init(cx);
         theme::install(false, cx);
@@ -304,7 +410,10 @@ fn sidebar_button_reopens_and_stays_outside_caption_drag_region(cx: &mut TestApp
         frame(visual);
         let terminal = workspace.read_with(visual, |view, _| view.terminals["fixture"].clone());
         for _ in 0..2 {
-            for (label, visible) in [("Hide sidebar", false), ("Show sidebar", true)] {
+            for (label, compact) in [
+                ("Use icons-only navigation", true),
+                ("Use full-name navigation", false),
+            ] {
                 let controls =
                     visual.update(|window, _| gpui::base::test_support::snapshots(window));
                 let toggle = controls
@@ -314,7 +423,8 @@ fn sidebar_button_reopens_and_stays_outside_caption_drag_region(cx: &mut TestApp
                     .bounds();
                 let drag = visual.debug_bounds("workspace-header-drag-region").unwrap();
                 assert!(drag.left() >= toggle.right());
-                for label in ["Test connection", "Edit server", "Server actions"] {
+                {
+                    let label = "Test connection";
                     let action = controls
                         .iter()
                         .find(|e| e.label() == Some(label))
@@ -328,14 +438,20 @@ fn sidebar_button_reopens_and_stays_outside_caption_drag_region(cx: &mut TestApp
                 visual.simulate_click(toggle.center(), Default::default());
                 frame(visual);
                 assert_eq!(
-                    workspace.read_with(visual, |view, _| view.sidebar_visible),
-                    visible
+                    workspace.read_with(visual, |view, _| view.sidebar_layout.compact()),
+                    compact
                 );
                 assert_eq!(
                     workspace.read_with(visual, |view, _| view.terminals["fixture"].clone()),
                     terminal
                 );
-                assert_eq!(visual.debug_bounds("shell-sidebar").is_some(), visible);
+                let sidebar = visual.debug_bounds("shell-sidebar").unwrap();
+                assert!(workspace.read_with(visual, |view, _| view.sidebar_visible));
+                assert_eq!(sidebar.top(), px(crate::ui::TITLEBAR_HEIGHT));
+                assert!(sidebar.bottom() <= px(700.));
+                if compact {
+                    assert_eq!(sidebar.size.width + px(1.), px(crate::ui::ICON_RAIL_WIDTH));
+                }
             }
         }
     }
@@ -431,14 +547,14 @@ fn integration_scrolls_to_the_bottom_in_short_windows(cx: &mut TestAppContext) {
         visual.simulate_resize(size(px(width), px(360.)));
         frame(visual);
         visual.simulate_event(gpui::ScrollWheelEvent {
-            position: gpui::point(px(width / 2.), px(100.)),
+            position: gpui::point(px(8.), px(100.)),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(10000.))),
             ..Default::default()
         });
         frame(visual);
         let before = visual.debug_bounds("needle-status").unwrap();
         visual.simulate_event(gpui::ScrollWheelEvent {
-            position: gpui::point(px(width / 2.), px(100.)),
+            position: gpui::point(px(8.), px(100.)),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-10000.))),
             ..Default::default()
         });
@@ -446,7 +562,8 @@ fn integration_scrolls_to_the_bottom_in_short_windows(cx: &mut TestAppContext) {
         let after = visual.debug_bounds("needle-status").unwrap();
         assert!(
             after.top() < before.top(),
-            "content must scroll at width {width}"
+            "content must scroll at width {width}: before={before:?}, after={after:?}, content={:?}",
+            visual.debug_bounds("integrations-content")
         );
         let content = visual.debug_bounds("integrations-content").unwrap();
         assert!(
@@ -593,7 +710,7 @@ fn integration_exposes_connection_states_and_locks_controls_during_updates(
         assert_eq!(
             request.args,
             json!({"id":"fixture", "feature":feature, "enabled":false,
-                "expectedConnection":view.read_with(visual, |v, _| crate::terminal_scope::connection(&v.selected_server().unwrap(), &v.snapshot))})
+                "expectedConnection":view.read_with(visual, |v, _| crate::terminal_scope::connection(v.selected_server().unwrap(), &v.snapshot))})
         );
         view.update(visual, |view, cx| {
             view.resources
@@ -2532,4 +2649,62 @@ fn projects_loading_routes_to_library_with_toolbar(cx: &mut TestAppContext) {
     visual.simulate_resize(size(px(1000.), px(700.)));
     frame(visual);
     assert!(visual.debug_bounds("project-library-loading").is_some());
+}
+
+#[gpui::test]
+fn empty_project_library_offers_the_add_choices_in_place(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui::component::init(cx);
+        theme::install(false, cx);
+    });
+    let mut owner_view = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            let mut view = owner(window, cx);
+            view.page = Page::Projects;
+            put(&mut view, "page", json!([]));
+            view
+        });
+        owner_view = Some(view.clone());
+        PageHost(view)
+    });
+    let view = owner_view.unwrap();
+    let labels = |visual: &mut VisualTestContext| {
+        visual.update(|window, _| {
+            gpui_kit::base::test_support::snapshots(window)
+                .iter()
+                .filter_map(|n| n.label().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+    };
+    visual.simulate_resize(size(px(1000.), px(700.)));
+    frame(visual);
+    assert!(visual.debug_bounds("projects-empty").is_some());
+    let shown = labels(visual);
+    for label in [
+        "Add a repository",
+        "Clone a repository",
+        "Create a repository",
+    ] {
+        assert!(shown.iter().any(|l| l == label), "missing {label}");
+    }
+    assert!(
+        !shown.iter().any(|l| l == "Search projects"),
+        "nothing to filter in an empty library"
+    );
+    let (add, clone) = (
+        visual.debug_bounds("projects-empty-add").unwrap(),
+        visual.debug_bounds("projects-empty-clone").unwrap(),
+    );
+    assert_eq!(add.top(), clone.top(), "cards share a row when wide");
+    visual.simulate_resize(size(px(520.), px(700.)));
+    frame(visual);
+    let (add, clone) = (
+        visual.debug_bounds("projects-empty-add").unwrap(),
+        visual.debug_bounds("projects-empty-clone").unwrap(),
+    );
+    assert!(clone.top() > add.top(), "cards stack when narrow");
+    visual.simulate_click(add.center(), Default::default());
+    frame(visual);
+    assert!(view.read_with(visual, |view, _| view.project_add.is_some()));
 }

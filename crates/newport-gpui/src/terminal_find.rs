@@ -207,7 +207,7 @@ impl TerminalView {
             .items_center()
             .gap(px(2.))
             .p(px(3.))
-            .rounded(px(8.))
+            .rounded(px(crate::ui::RADIUS))
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
@@ -232,7 +232,7 @@ impl TerminalView {
                     .role(Role::Status)
                     .aria_label(find.error.clone().unwrap_or_else(|| count.clone()))
                     .min_w(px(52.))
-                    .text_size(px(11.))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .text_color(cx.theme().muted_foreground)
                     .child(count),
             )

@@ -31,15 +31,24 @@ fn pending_reference(index: usize) -> AnyElement {
         .items_center()
         .px(px(9.))
         .child(reference_columns(
-            Skeleton::new().w(relative(0.65)).h(px(12.)).rounded(px(3.)),
-            Skeleton::new().w(px(48.)).h(px(10.)).rounded(px(3.)),
-            Skeleton::new().w(px(64.)).h(px(10.)).rounded(px(3.)),
+            Skeleton::new()
+                .w(relative(0.65))
+                .h(px(12.))
+                .rounded(px(crate::ui::RADIUS)),
+            Skeleton::new()
+                .w(px(48.))
+                .h(px(10.))
+                .rounded(px(crate::ui::RADIUS)),
+            Skeleton::new()
+                .w(px(64.))
+                .h(px(10.))
+                .rounded(px(crate::ui::RADIUS)),
         ))
         .into_any_element()
 }
 fn reference_button(index: usize, entry: &Value) -> Button {
     let name = text(&entry["reference"], "display");
-    crate::project_ui::button(("remote-ref", index))
+    crate::controls::button(("remote-ref", index))
         .accessibility_label(name.clone())
         .ghost()
         .w_full()
@@ -50,15 +59,14 @@ fn reference_button(index: usize, entry: &Value) -> Button {
         .hover_hint(name.clone())
         .child(reference_columns(
             name,
-            crate::project_ui::label(text(entry, "kind"))
-                .text_size(px(crate::project_ui::FONT_SIZE)),
-            crate::project_ui::label(
+            crate::label(text(entry, "kind")).text_size(px(crate::ui::FONT_SIZE)),
+            crate::label(
                 text(&entry["oid"], "hex")
                     .chars()
                     .take(8)
                     .collect::<String>(),
             )
-            .text_size(px(crate::project_ui::FONT_SIZE)),
+            .text_size(px(crate::ui::FONT_SIZE)),
         ))
 }
 pub(super) struct Browser {
@@ -75,7 +83,7 @@ pub(super) struct Browser {
 }
 impl Newport {
     pub(super) fn remote_refs_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        crate::project_ui::button("browse-remote-refs")
+        crate::controls::button("browse-remote-refs")
             .label("Branches and tags…")
             .disabled(
                 self.git_selected_remote().is_none()
@@ -291,7 +299,7 @@ impl Newport {
                     .px_4()
                     .py_2()
                     .child(
-                        crate::project_ui::button("back-from-remote-refs")
+                        crate::controls::button("back-from-remote-refs")
                             .label("Remotes")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.reset_remote_refs();
@@ -311,7 +319,7 @@ impl Newport {
                             )),
                     )
                     .child(
-                        crate::project_ui::button("refresh-remote-refs")
+                        crate::controls::button("refresh-remote-refs")
                             .label("Refresh remote references")
                             .disabled(loading)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -322,7 +330,7 @@ impl Newport {
                     ),
             )
             .child(
-                crate::project_ui::label(format!(
+                crate::label(format!(
                     "Remote destination: {}",
                     browser.remote["pushUrl"]
                         .as_str()
@@ -330,11 +338,11 @@ impl Newport {
                         .unwrap_or("Unavailable")
                 ))
                 .px_4()
-                .text_size(px(crate::project_ui::FONT_SIZE)),
+                .text_size(px(crate::ui::FONT_SIZE)),
             )
             .child(
                 div().px_4().py_2().child(
-                    crate::project_ui::input(&browser.input)
+                    crate::controls::input(&browser.input)
                         .aria_label("Filter remote branches and tags"),
                 ),
             )
@@ -383,7 +391,7 @@ impl Newport {
                 .min_h_0(),
             )
             .when(browser.selected["oid"].is_object(), |view| {
-                view.child(div().px_4().py_2().child(crate::project_ui::label(format!(
+                view.child(div().px_4().py_2().child(crate::label(format!(
                     "{} · {}",
                     text(&browser.selected["reference"], "display"),
                     text(&browser.selected["oid"], "hex")
@@ -400,8 +408,8 @@ impl Newport {
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .child(
-                        crate::project_ui::label(summary)
-                            .text_size(px(crate::project_ui::FONT_SIZE))
+                        crate::label(summary)
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .flex_1(),
                     ),
             )

@@ -248,7 +248,9 @@ impl Services {
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
-    pub fn server_id(&self) -> &str { &self.server }
+    pub fn server_id(&self) -> &str {
+        &self.server
+    }
 
     /// Prevent every future dispatch, including post-action refreshes. Workers
     /// already in flight are drained; no write is cancelled or replayed.

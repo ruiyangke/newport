@@ -764,7 +764,7 @@ impl Newport {
                         .id("connections-discovery-error")
                         .role(accesskit::Role::Alert)
                         .aria_label(message.clone())
-                        .text_size(px(12.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .text_color(theme::error(cx.theme().is_dark()))
                         .mb(px(14.))
                         .flex_shrink_0()
@@ -914,62 +914,57 @@ impl Newport {
                 ))
             })
             .when(!initial_loading, |view| view.child(content))
+            .into_any_element();
+        let summary = div()
+            .id("connections-summary")
+            .role(accesskit::Role::Status)
+            .aria_label(if attention > 0 {
+                format!("{displayed_summary}; {summary} · {attention} need attention")
+            } else {
+                format!("{displayed_summary}; {summary}")
+            })
+            .flex()
+            .gap_1()
+            .min_w_0()
+            .truncate()
+            .child(if has_reading {
+                displayed_summary
+            } else {
+                "Discovering ports…".into()
+            })
+            .when(attention > 0, |v| {
+                v.child(
+                    div()
+                        .text_color(cx.theme().danger)
+                        .child(format!("· {attention} need attention")),
+                )
+            });
+        let footer = crate::controls::status_bar(cx)
+            .left(summary)
+            .when_some(updated, |bar, t| {
+                let message = format!("Updated {t}");
+                bar.right(
+                    div()
+                        .id("connections-updated")
+                        .role(accesskit::Role::Status)
+                        .aria_label(format!("{message}; refreshes every 30 seconds"))
+                        .child(message),
+                )
+            });
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .child(connections_viewport(viewport, content))
             .child(
                 div()
-                    .id("connections-footer")
-                    .debug_selector(|| "connections-footer".into())
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
                     .flex_shrink_0()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .mt(px(8.))
-                    .pt(px(8.))
-                    .text_size(px(11.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(
-                        div()
-                            .id("connections-summary")
-                            .role(accesskit::Role::Status)
-                            .aria_label(if attention > 0 {
-                                format!(
-                                    "{displayed_summary}; {summary} · {attention} need attention"
-                                )
-                            } else {
-                                format!("{displayed_summary}; {summary}")
-                            })
-                            .flex()
-                            .flex_wrap()
-                            .gap_1()
-                            .child(if has_reading {
-                                displayed_summary
-                            } else {
-                                "Discovering ports…".into()
-                            })
-                            .when(attention > 0, |v| {
-                                v.child(
-                                    div()
-                                        .text_color(cx.theme().danger)
-                                        .child(format!("· {attention} need attention")),
-                                )
-                            }),
-                    )
-                    .when_some(updated, |v, t| {
-                        let message = format!("Updated {t}");
-                        v.child(
-                            label(message.clone())
-                                .id("connections-updated")
-                                .role(accesskit::Role::Status)
-                                .aria_label(format!("{message}; refreshes every 30 seconds"))
-                                .text_size(px(11.)),
-                        )
-                    }),
+                    .debug_selector(|| "connections-footer".into())
+                    .child(footer),
             )
-            .into_any_element();
-        connections_viewport(viewport, content).into_any_element()
+            .into_any_element()
     }
     fn project_chunk(
         &self,
@@ -1087,7 +1082,7 @@ impl Newport {
                             .min_h(px(28.))
                             .px(px(12.))
                             .pt(px(8.))
-                            .text_size(px(11.5))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .text_color(cx.theme().muted_foreground)
                             .child(Icon::new(IconName::Laptop).size(px(12.)))
                             .child(
@@ -1108,7 +1103,7 @@ impl Newport {
                             .px(px(16.))
                             .pt(px(8.))
                             .pb(px(4.))
-                            .text_size(px(11.5))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .text_color(cx.theme().muted_foreground)
                             .child("Other saved forwards")
                             .into_any_element(),
@@ -1154,7 +1149,7 @@ impl Newport {
                                 .pl(px(16.))
                                 .pr(px(12.))
                                 .pt(px(4.))
-                                .text_size(px(12.))
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .text_color(cx.theme().muted_foreground)
                                 .child(
                                     gpui_kit::base::Button::new(SharedString::from(format!(
@@ -1165,7 +1160,7 @@ impl Newport {
                                     .justify_start()
                                     .gap(px(6.))
                                     .py(px(4.))
-                                    .rounded(px(6.))
+                                    .rounded(px(crate::ui::RADIUS))
                                     .text_left()
                                     .aria_expanded(!folded)
                                     .accessibility_label(format!(
@@ -1218,7 +1213,11 @@ impl Newport {
                                     ),
                                 )
                                 .when(folded, |v| {
-                                    v.child(label(tally).text_size(px(11.)).flex_shrink_0())
+                                    v.child(
+                                        label(tally)
+                                            .text_size(px(crate::ui::FONT_SIZE))
+                                            .flex_shrink_0(),
+                                    )
                                 }),
                             self.port_batch_button(scope, &title, &section, cx),
                         )
@@ -1283,7 +1282,7 @@ impl Newport {
                                 .justify_start()
                                 .gap(px(8.))
                                 .py(px(4.))
-                                .rounded(px(6.))
+                                .rounded(px(crate::ui::RADIUS))
                                 .text_left()
                                 .line_height(relative(1.5))
                                 .aria_expanded(!collapsed)
@@ -1344,7 +1343,7 @@ impl Newport {
                                     div()
                                         .min_w_0()
                                         .truncate()
-                                        .text_size(px(13.))
+                                        .text_size(px(crate::ui::FONT_SIZE))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .child(name.clone()),
                                 )
@@ -1361,14 +1360,18 @@ impl Newport {
                                                     .font_family(
                                                         cx.theme().mono_font_family.clone(),
                                                     )
-                                                    .text_size(px(11.)),
+                                                    .text_size(px(crate::ui::FONT_SIZE)),
                                             ),
                                     )
                                 })
                                 .child(div().flex_1().min_w_0()),
                         )
                         .when(collapsed, |v| {
-                            v.child(label(tally).text_size(px(11.5)).flex_shrink_0())
+                            v.child(
+                                label(tally)
+                                    .text_size(px(crate::ui::FONT_SIZE))
+                                    .flex_shrink_0(),
+                            )
                         })
                         .children(
                             self.port_project_stop_button(&key, &name, full, cx)

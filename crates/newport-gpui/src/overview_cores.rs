@@ -156,7 +156,7 @@ fn tile(core: &Core, height: f32, graphs: &graph_render::Cache, cx: &App) -> Any
         .relative()
         .w_full()
         .h(px(height))
-        .rounded(px(5.))
+        .rounded(px(crate::ui::RADIUS))
         .overflow_hidden()
         .border_1()
         .border_color(accent.opacity(0.25))
@@ -174,9 +174,9 @@ fn tile(core: &Core, height: f32, graphs: &graph_render::Cache, cx: &App) -> Any
                 .top(px(3.))
                 .left(px(4.))
                 .px(px(2.))
-                .rounded(px(3.))
+                .rounded(px(crate::ui::RADIUS))
                 .bg(cx.theme().background.opacity(0.75))
-                .text_size(px(10.))
+                .text_size(px(crate::ui::FONT_SIZE))
                 .child(core.id.clone()),
         )
         .child(
@@ -185,9 +185,9 @@ fn tile(core: &Core, height: f32, graphs: &graph_render::Cache, cx: &App) -> Any
                 .top(px(3.))
                 .right(px(4.))
                 .px(px(2.))
-                .rounded(px(3.))
+                .rounded(px(crate::ui::RADIUS))
                 .bg(cx.theme().background.opacity(0.75))
-                .text_size(px(10.))
+                .text_size(px(crate::ui::FONT_SIZE))
                 .child(format!("{:.0}%", core.usage)),
         )
         .into_any_element()

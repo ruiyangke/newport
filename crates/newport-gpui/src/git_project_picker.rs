@@ -60,6 +60,7 @@ impl Newport {
         let busy = self.git_write_pending() || self.project_dialog_open;
         let owner = cx.weak_entity();
         git_layout::picker("git-project-picker", IconName::FolderGit2, name.clone())
+            .icon(Icon::new(IconName::FolderGit2).text_color(cx.theme().muted_foreground))
             .accessibility_label(format!("Current repository: {name}"))
             .disabled(busy)
             .dropdown_menu(move |mut menu, _, cx| {

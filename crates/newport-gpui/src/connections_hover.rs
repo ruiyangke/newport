@@ -107,6 +107,7 @@ impl Card {
             move |_, cx| {
                 div()
                     .id("connection-hover-scroll")
+                    .debug_selector(|| "connection-hover-scroll".into())
                     .max_h(px(height))
                     .overflow_y_scroll()
                     .child(self.content(width - 2. * crate::hover::PADDING, cx))
@@ -125,7 +126,7 @@ impl Card {
             .w(px(width))
             .min_w_0()
             .overflow_hidden()
-            .text_size(px(12.))
+            .text_size(px(crate::ui::FONT_SIZE))
             .line_height(relative(1.45))
             .text_color(cx.theme().foreground)
             .child(
@@ -147,12 +148,12 @@ impl Card {
                         v.child(
                             div()
                                 .flex_shrink_0()
-                                .rounded(px(4.))
+                                .rounded(px(crate::ui::RADIUS))
                                 .px(px(5.))
                                 .py(px(1.))
                                 .bg(cx.theme().muted)
                                 .text_color(cx.theme().muted_foreground)
-                                .text_size(px(10.))
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .child("Docker"),
                         )
                     }),
@@ -170,7 +171,7 @@ impl Card {
                 v.child(
                     div()
                         .mt(px(10.))
-                        .text_size(px(11.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .text_color(cx.theme().muted_foreground)
                         .child(process),
                 )
@@ -299,9 +300,11 @@ mod tests {
                 .debug_bounds("connection-hover-card")
                 .expect("hover content rendered");
             assert!(bounds.size.width <= px(356.) && bounds.right() <= px(width));
+            let viewport = visual.debug_bounds("connection-hover-scroll").unwrap();
+            assert!(viewport.size.height <= px(360.) && viewport.bottom() <= px(600.));
             assert!(
-                bounds.size.height < px(900.),
-                "long values must wrap: {bounds:?}"
+                bounds.size.height > viewport.size.height,
+                "long values wrap inside the scroll viewport"
             );
         }
     }

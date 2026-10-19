@@ -74,7 +74,7 @@ impl Newport {
     fn git_draft_key(&self) -> Option<String> {
         let root = self.git.repo["root"]["bytesB64"].as_str()?;
         let server = self.selected_server()?;
-        Some(json!([terminal_scope::connection(&server, &self.snapshot), root]).to_string())
+        Some(json!([terminal_scope::connection(server, &self.snapshot), root]).to_string())
     }
     pub(super) fn sync_git_drafts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for draft in self.git_drafts.values_mut() {
@@ -156,7 +156,7 @@ impl Newport {
     }
     fn can_git_commit(&self, summary: &str, cx: &App) -> bool {
         let (status, current) = self.project_commit_status(cx);
-        let (staged, conflicts, partial) = commit_counts(&status);
+        let (staged, conflicts, partial) = commit_counts(status);
         self.page == Page::Projects
             && current
             && !self.project_dialog_open
@@ -183,7 +183,7 @@ impl Newport {
             return;
         }
         let message = compose(&summary, &description);
-        let snapshot = text(&self.project_commit_status(cx).0, "snapshot");
+        let snapshot = text(self.project_commit_status(cx).0, "snapshot");
         self.start_git_mutation(
             self.git_repository_id(),
             "Commit staged changes".into(),
@@ -206,11 +206,11 @@ impl Newport {
             return div().into_any_element();
         }
         let summary = draft.summary.read(cx).value();
-        let (_, _, partial) = commit_counts(&status);
+        let (_, _, partial) = commit_counts(status);
         let head = status["metadata"]
             .get("head")
             .unwrap_or(&self.git.repo["head"]);
-        let title = commit_title(&status, head);
+        let title = commit_title(status, head);
         let enabled = self.can_git_commit(summary.as_str(), cx);
         let busy = self.git_mutation_blocks_write();
         div()
@@ -222,24 +222,24 @@ impl Newport {
             .p(px(10.))
             .border_t_1()
             .border_color(cx.theme().border)
-            .child(crate::project_ui::input(&draft.summary).aria_label("Commit summary").disabled(busy))
+            .child(crate::controls::input(&draft.summary).aria_label("Commit summary").disabled(busy))
             .when(long_summary(summary.as_str()), |view| {
-                view.child(crate::project_ui::label("Summaries under 50 characters read best in logs. Put the detail in the description.").text_size(px(crate::project_ui::FONT_SIZE)))
+                view.child(crate::label("Summaries under 50 characters read best in logs. Put the detail in the description.").text_size(px(crate::ui::FONT_SIZE)))
             })
             .child(
-                crate::project_ui::textarea(&draft.description)
+                crate::controls::textarea(&draft.description)
                     .h(px(66.))
                     .disabled(busy)
                     .aria_label("Commit description"),
             )
             .when(partial, |view| {
                 view.child(
-                    crate::project_ui::label("Commits all staged changes, including files not loaded here.")
-                        .text_size(px(crate::project_ui::FONT_SIZE)),
+                    crate::label("Commits all staged changes, including files not loaded here.")
+                        .text_size(px(crate::ui::FONT_SIZE)),
                 )
             })
             .child(
-                crate::project_ui::button("git-commit")
+                crate::controls::button("git-commit")
                     .label(title)
                     .when(enabled, |button| button.primary())
                     .when(!enabled, |button| button.bg(cx.theme().background).text_color(cx.theme().muted_foreground).border_color(cx.theme().border))

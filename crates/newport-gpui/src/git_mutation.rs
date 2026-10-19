@@ -139,7 +139,7 @@ impl Newport {
             context: format!(
                 "{} · {}",
                 self.selected_server()
-                    .map(|s| text(&s, "name"))
+                    .map(|s| text(s, "name"))
                     .unwrap_or_default(),
                 self.selection
                     .as_ref()
@@ -565,7 +565,7 @@ impl Newport {
             let owner = cx.weak_entity();
             notification = notification.action(move |_, _, cx| {
                 let owner = owner.clone();
-                crate::project_ui::button("recover-git-command")
+                crate::controls::button("recover-git-command")
                     .label(if reviewed {
                         "I've inspected the repository"
                     } else {

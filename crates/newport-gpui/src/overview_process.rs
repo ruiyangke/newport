@@ -192,7 +192,7 @@ fn process_row(p: &Value, wide: bool, memory_total: f64, cx: &App) -> AnyElement
         .items_center()
         .border_b_1()
         .border_color(cx.theme().border)
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .hover(|s| s.bg(theme::row_hover(cx)))
         .child(
             div()
@@ -219,7 +219,7 @@ fn process_row(p: &Value, wide: bool, memory_total: f64, cx: &App) -> AnyElement
                             })
                             .to_owned(),
                     )
-                    .text_size(px(11.))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .truncate(),
                 ),
         )
@@ -417,7 +417,7 @@ impl Newport {
                 format!("Showing {count} of {total} collected processes")
             } else {
                 format!("The busiest and largest {total} of {} · CPU over the last second, as a share of one core", text(data, "processCount"))
-            }).text_size(px(11.)))
+            }).text_size(px(crate::ui::FONT_SIZE)))
             .child(
                 div()
                     .flex()
@@ -427,7 +427,7 @@ impl Newport {
                     .children(columns.into_iter().map(|(index, name, width)| {
                         let ascending = state.sort == index && state.ascending;
                         crate::controls::compact_button(("process-sort", index))
-                            .child(div().w_full().flex().items_center().gap_1().text_size(px(11.))
+                            .child(div().w_full().flex().items_center().gap_1().text_size(px(crate::ui::FONT_SIZE))
                                 .when(matches!(index, 0 | 1 | 3 | 5), |v| v.justify_end())
                                 .when(matches!(index, 2 | 4), |v| v.justify_start())
                                 .child(format!(
@@ -458,7 +458,7 @@ impl Newport {
             .child(process_rows(processes, range.clone(), wide, memory_total))
             .when(count > 0, |view| view.child(
                 div().flex().flex_wrap().items_center().justify_between().gap_2().py_2()
-                    .child(label(format!("{}–{} of {count}{}", range.start + 1, range.end, if filtering { " matching" } else { " collected" })).text_size(px(11.)))
+                    .child(label(format!("{}–{} of {count}{}", range.start + 1, range.end, if filtering { " matching" } else { " collected" })).text_size(px(crate::ui::FONT_SIZE)))
                     .when(count > PAGE_SIZE, |view| view.child(
                         crate::controls::pagination("process-pages").current_page(page + 1).total_pages(count.div_ceil(PAGE_SIZE))
                             .on_click(cx.listener(|this, page: &usize, _, cx| {

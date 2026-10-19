@@ -12,7 +12,9 @@ pub(super) struct Flow {
     pub skipped: bool,
     error: Option<String>,
     pending: bool,
-    details_open: bool,
+    /// Failures of the current step, and when the latest one happened.
+    attempts: u32,
+    failed_at: Option<i64>,
 }
 fn identity(server: &Value) -> Value {
     json!([
@@ -60,7 +62,8 @@ impl Newport {
                 skipped: false,
                 error: None,
                 pending: true,
-                details_open: false,
+                attempts: 0,
+                failed_at: None,
             });
             self.request(
                 &format!("setup-inspect:{}", self.server),
@@ -90,6 +93,13 @@ impl Newport {
         }
         flow.pending = false;
         flow.error = resource.error.clone();
+        if flow.error.is_some() {
+            flow.attempts += 1;
+            flow.failed_at = Some(chrono::Local::now().timestamp_millis());
+        } else {
+            flow.attempts = 0;
+            flow.failed_at = None;
+        }
         if flow.error.is_none() {
             if flow.phase == 0 {
                 flow.specs = resource.value.clone();
@@ -103,9 +113,37 @@ impl Newport {
             } else {
                 flow.phase += 1;
             }
+            let finished = flow.phase == 3;
             self.request("snapshot", "snapshot", json!({}));
+            if finished {
+                self.finish_setup();
+            }
         }
         true
+    }
+    /// Choosing integrations is the last step: close the setup and show the
+    /// server's Overview, keeping any note the helper left about the shell.
+    fn finish_setup(&mut self) {
+        if let Some(flow) = &mut self.setup_flow {
+            flow.dismissed = true;
+        }
+        let note = self
+            .resources
+            .get(&format!("setup-finish:{}", self.server))
+            .and_then(|r| r.value.as_str())
+            .filter(|note| !note.is_empty())
+            .map(str::to_owned);
+        self.notification = Some(match note {
+            Some(note) => Notification::warning(note),
+            None => Notification::success("Server is set up."),
+        });
+        self.resources.invalidate("page");
+        self.request(
+            "page",
+            "cockpit_collect",
+            json!({"id":self.server,"section":"overview","refresh":true}),
+        );
+        self.refresh();
     }
     fn setup_request(&mut self, cx: &mut Context<Self>) {
         let Some(server) = self.selected_server().cloned() else {
@@ -131,8 +169,12 @@ impl Newport {
         }
         let args = json!({"expectedConnection":server,"browser":flow.browser,"clipboard":flow.clipboard,"operationId":flow.specs["operationId"],"helperOperationId":flow.specs["helperOperationId"]});
         flow.pending = true;
-        flow.error = None;
-        flow.details_open = false;
+        // A retry keeps the failed step on screen, with the button busy, so
+        // the page doesn't swap to a spinner and back. Installation shows
+        // its own progress instead.
+        if flow.phase == 1 {
+            flow.error = None;
+        }
         self.request(
             &format!("setup-{operation}:{}", self.server),
             &format!("setup_{operation}"),
@@ -163,6 +205,17 @@ impl Newport {
             gib(&specs["memoryKiB"]),
             gib(&specs["freeKiB"])
         );
+        let server = self.selected_server().cloned().unwrap_or_default();
+        let name = server["name"].as_str().unwrap_or("this server").to_owned();
+        let address = format!(
+            "{}@{}{}",
+            server["sshUser"].as_str().unwrap_or_default(),
+            server["sshHost"].as_str().unwrap_or_default(),
+            match server["sshPort"].as_u64() {
+                Some(22) | None => String::new(),
+                Some(port) => format!(":{port}"),
+            }
+        );
         let mut timeline = div().w_full().max_w(px(480.)).flex().flex_col();
         let mut before = div().flex_1().flex().flex_col().justify_end().child(
             div()
@@ -173,15 +226,16 @@ impl Newport {
                     div()
                         .text_size(px(24.))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child("Set up this server"),
+                        .child(format!("Set up {name}")),
                 )
                 .child(
                     div()
-                        .mt(px(8.))
-                        .text_size(px(13.))
-                        .line_height(relative(1.6))
+                        .id("setup-server-address")
+                        .mt(px(6.))
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .text_color(cx.theme().muted_foreground)
-                        .child("A few steps to bring this server into Newport."),
+                        .child(address),
                 ),
         );
         let mut after = div().flex_1().flex().flex_col().child(
@@ -192,44 +246,19 @@ impl Newport {
                 .child(div().h_full().w(px(1.)).bg(cx.theme().border)),
         );
         let mut current_step = None;
-        if phase == 3 {
-            timeline = timeline.child(
-                div()
-                    .mb(px(24.))
-                    .child(
-                        div()
-                            .text_size(px(24.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Your server is ready"),
-                    )
-                    .child(
-                        div()
-                            .mt(px(8.))
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Monitoring is set up. Here’s how this server is connected."),
-                    )
-                    .when_some(
-                        self.resources
-                            .get(&format!("setup-finish:{}", self.server))
-                            .and_then(|r| r.value.as_str()),
-                        |section, notice| {
-                            section.child(crate::integration::description(
-                                "setup-shell-notice",
-                                notice,
-                                cx,
-                            ))
-                        },
-                    ),
-            );
-        }
-        for (index, label) in ["Inspect server", "Install Needle", "Choose integrations"]
-            .into_iter()
-            .enumerate()
+        for (index, label) in [
+            "Inspect server",
+            "Install the helper",
+            "Choose integrations",
+        ]
+        .into_iter()
+        .enumerate()
         {
             let index = index as u8;
             let done = phase > index;
             let active = phase == index;
+            let failed = active && flow.error.is_some();
+            let retrying = failed && flow.pending;
             let mut entry = div()
                 .flex_1()
                 .min_w_0()
@@ -238,7 +267,7 @@ impl Newport {
                 .gap(px(8.))
                 .child(
                     div()
-                        .text_size(px(13.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .font_weight(if active {
                             FontWeight::SEMIBOLD
                         } else {
@@ -254,12 +283,12 @@ impl Newport {
             if done {
                 entry = entry.child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .line_height(relative(1.7))
                         .text_color(cx.theme().muted_foreground)
                         .child(match index {
                             0 => spec_text.clone(),
-                            1 => "Needle installed".into(),
+                            1 => "Helper installed".into(),
                             _ => format!(
                                 "Browser {} · Clipboard {}",
                                 if flow.browser { "enabled" } else { "off" },
@@ -270,17 +299,17 @@ impl Newport {
             }
             if active {
                 let mut body = div().mt(px(8.)).min_w_0().flex().flex_col().gap(px(16.));
-                if flow.pending {
+                if flow.pending && !retrying {
                     let progress = &self.snapshot["runtime"]["agentInstallation"][&self.server];
                     let title = match phase {
                         0 => "Inspecting your server…",
                         1 => {
                             if progress["stage"] == "uploading" {
-                                "Copying Needle…"
+                                "Copying the helper…"
                             } else if progress["stage"] == "verifying" {
-                                "Checking Needle…"
+                                "Checking the helper…"
                             } else {
-                                "Installing Needle…"
+                                "Installing the helper…"
                             }
                         }
                         _ => "Applying integrations…",
@@ -291,7 +320,7 @@ impl Newport {
                             .items_center()
                             .gap(px(12.))
                             .child(Spinner::new().small())
-                            .child(div().text_size(px(13.)).child(title)),
+                            .child(div().text_size(px(crate::ui::FONT_SIZE)).child(title)),
                     );
                     if phase == 1 && progress["stage"] == "uploading" {
                         let sent = progress["sent"].as_f64().unwrap_or(0.) / 1048576.;
@@ -307,16 +336,16 @@ impl Newport {
                             .unwrap_or("Measuring speed…".into());
                         body = body.child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .text_color(cx.theme().muted_foreground)
                                 .child(format!("{sent:.1} of {total:.1} MiB · {speed}")),
                         );
                     }
                 } else if flow.error.is_none() && phase == 1 {
-                    body=body.child(div().text_size(px(19.)).font_weight(FontWeight::SEMIBOLD).child("Install Needle?"))
-                        .child(div().text_size(px(13.)).text_color(cx.theme().muted_foreground).child("A small tool for server metrics, Git, and optional browser and clipboard integration."))
-                        .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground).child(format!("{:.1} MiB · copied over SSH",specs["total"].as_f64().unwrap_or(0.)/1048576.)))
-                        .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground).child("Browser and clipboard access stay off until you choose them below."));
+                    body=body.child(div().text_size(px(19.)).font_weight(FontWeight::SEMIBOLD).child("Install the helper?"))
+                        .child(div().text_size(px(crate::ui::FONT_SIZE)).text_color(cx.theme().muted_foreground).child("Needle, a small tool for server metrics, Git, and optional browser and clipboard integration."))
+                        .child(div().text_size(px(crate::ui::FONT_SIZE)).text_color(cx.theme().muted_foreground).child(format!("{:.1} MiB · copied over SSH",specs["total"].as_f64().unwrap_or(0.)/1048576.)))
+                        .child(div().text_size(px(crate::ui::FONT_SIZE)).text_color(cx.theme().muted_foreground).child("Browser and clipboard access stay off until you choose them below."));
                 } else if flow.error.is_none() && phase == 2 {
                     for (browser, label, checked) in [
                         (true, "Open server links in your browser", flow.browser),
@@ -335,7 +364,12 @@ impl Newport {
                                 .py(px(8.))
                                 .border_t_1()
                                 .border_color(cx.theme().border)
-                                .child(div().flex_1().text_size(px(13.)).child(label))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(px(crate::ui::FONT_SIZE))
+                                        .child(label),
+                                )
                                 .child(
                                     crate::controls::switch(if browser {
                                         "setup-browser"
@@ -362,39 +396,71 @@ impl Newport {
                         );
                     }
                 }
-                if let Some(error) = &flow.error {
-                    let (title, guidance) = error_copy(phase, error);
+                let copy = flow.error.as_deref().map(|error| error_copy(phase, error));
+                if let (Some(error), Some(copy)) = (&flow.error, copy) {
+                    // The cause usually follows a summary line, so show the
+                    // whole reply; only a very long one is cut short.
+                    let lines: Vec<&str> = error
+                        .lines()
+                        .map(str::trim_end)
+                        .filter(|l| !l.trim().is_empty())
+                        .collect();
+                    let mut shown = lines.iter().take(8).copied().collect::<Vec<_>>().join("\n");
+                    if lines.len() > 8 {
+                        shown.push_str("\n…");
+                    }
                     body = body.child(
                         div()
                             .id("setup-error")
                             .role(Role::Alert)
+                            .aria_label(format!("{} {}", copy.title, copy.guidance))
                             .flex()
                             .flex_col()
                             .gap(px(8.))
                             .child(
                                 div()
-                                    .text_size(px(19.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(title),
+                                    .text_size(px(crate::ui::FONT_SIZE))
+                                    .line_height(relative(1.6))
+                                    .child(div().font_weight(FontWeight::MEDIUM).child(copy.title))
+                                    .child(
+                                        div()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(copy.guidance),
+                                    ),
                             )
                             .child(
                                 div()
-                                    .text_size(px(13.))
-                                    .line_height(relative(1.6))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(guidance),
+                                    .id("setup-technical-error")
+                                    .debug_selector(|| "setup-technical-error".into())
+                                    .border_l_2()
+                                    .border_color(cx.theme().danger)
+                                    .bg(cx.theme().danger.opacity(0.06))
+                                    .px(px(12.))
+                                    .py(px(8.))
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_size(px(crate::ui::FONT_SIZE))
+                                    .line_height(relative(1.5))
+                                    .text_color(cx.theme().danger)
+                                    .whitespace_normal()
+                                    .child(shown),
                             ),
                     );
                 }
-                if !flow.pending {
+                if !flow.pending || retrying {
+                    let fix_connection = copy.is_some_and(|copy| copy.connection) && phase == 0;
                     body = body.child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
-                            .gap(px(8.))
+                            .gap(px(6.))
+                            .when(fix_connection, |actions| {
+                                actions.child(self.edit_connection_button(true, retrying, cx))
+                            })
                             .child(
-                                crate::controls::form_button("setup-action")
-                                    .primary()
+                                crate::controls::button("setup-action")
+                                    .when(!fix_connection, |b| b.primary())
+                                    .when(flow.error.is_some(), |b| b.icon(IconName::RefreshCw))
                                     .label(if flow.error.is_some() {
                                         "Retry"
                                     } else if phase == 1 {
@@ -402,65 +468,64 @@ impl Newport {
                                     } else {
                                         "Save and finish"
                                     })
+                                    .loading(retrying)
+                                    .disabled(retrying)
                                     .on_click(cx.listener(|this, _, _, cx| this.setup_request(cx))),
                             )
-                            .when(phase == 0 && flow.error.is_some(), |actions| {
+                            .when(
+                                phase == 0 && flow.error.is_some() && !fix_connection,
+                                |actions| {
+                                    actions.child(self.edit_connection_button(false, retrying, cx))
+                                },
+                            )
+                            // Declining the helper is always possible, and so is leaving a
+                            // failed integrations step; the sidebar is hidden meanwhile.
+                            .when(
+                                phase == 1 || (phase == 2 && flow.error.is_some()),
+                                |actions| {
+                                    actions.child(
+                                        crate::controls::button("setup-skip")
+                                            .ghost()
+                                            .label("Skip")
+                                            .disabled(retrying)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                if let Some(flow) = &mut this.setup_flow {
+                                                    flow.dismissed = true;
+                                                    flow.skipped = true;
+                                                }
+                                                cx.notify();
+                                            })),
+                                    )
+                                },
+                            )
+                            .when_some(flow.error.clone(), |actions, error| {
                                 actions.child(
-                                    crate::controls::form_button("setup-edit-connection")
-                                        .label("Edit connection")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            if let Some(server) = this.selected_server() {
-                                                this.edit_server(Some(server.clone()), window, cx);
-                                            }
-                                        })),
-                                )
-                            })
-                            .when(phase == 1, |body| {
-                                body.child(
-                                    crate::controls::compact_button("setup-skip")
+                                    crate::controls::button("setup-copy-details")
                                         .ghost()
-                                        .label("Skip")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if let Some(flow) = &mut this.setup_flow {
-                                                flow.dismissed = true;
-                                                flow.skipped = true;
-                                            }
-                                            cx.notify();
-                                        })),
+                                        .icon(IconName::Copy)
+                                        .label("Copy details")
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                error.clone(),
+                                            ))
+                                        }),
                                 )
                             }),
                     );
-                }
-                if let Some(error) = &flow.error {
-                    body = body.child(
-                        div().child(
-                            crate::controls::compact_button("setup-error-details")
-                                .ghost()
-                                .label(if flow.details_open {
-                                    "Hide details"
-                                } else {
-                                    "Show details"
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(flow) = &mut this.setup_flow {
-                                        flow.details_open = !flow.details_open;
-                                    }
-                                    cx.notify();
-                                })),
-                        ),
-                    );
-                    if flow.details_open {
+                    if flow.attempts > 1
+                        && let Some(at) = flow.failed_at
+                    {
                         body = body.child(
                             div()
-                                .id("setup-technical-error")
-                                .debug_selector(|| "setup-technical-error".into())
-                                .p(px(12.))
-                                .bg(cx.theme().muted)
-                                .rounded(px(6.))
-                                .text_size(px(12.))
-                                .line_height(relative(1.6))
+                                .id("setup-attempts")
+                                .debug_selector(|| "setup-attempts".into())
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .text_color(cx.theme().muted_foreground)
-                                .child(error.clone()),
+                                .child(format!(
+                                    "Tried {} times · last at {}",
+                                    flow.attempts,
+                                    crate::localized_time::file_modified(at, at)
+                                )),
                         );
                     }
                 }
@@ -474,19 +539,24 @@ impl Newport {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(11.))
-                .bg(if active {
+                .text_size(px(crate::ui::FONT_SIZE))
+                .bg(if failed {
+                    cx.theme().danger
+                } else if active {
                     cx.theme().foreground
                 } else {
                     cx.theme().muted
                 })
-                .text_color(if active {
+                .text_color(if failed {
+                    cx.theme().danger_foreground
+                } else if active {
                     cx.theme().background
                 } else {
                     cx.theme().muted_foreground
                 })
                 .when(done, |v| v.child(Icon::new(IconName::Check).size(px(12.))))
-                .when(!done, |v| v.child((index + 1).to_string()));
+                .when(failed, |v| v.child("!"))
+                .when(!done && !failed, |v| v.child((index + 1).to_string()));
             let row = div()
                 .flex_shrink_0()
                 .flex()
@@ -511,9 +581,7 @@ impl Newport {
                         }),
                 )
                 .child(entry.when(!active, |entry| entry.pb(px(24.))));
-            if phase == 3 {
-                timeline = timeline.child(row);
-            } else if active {
+            if active {
                 current_step = Some(row.debug_selector(|| "setup-current-step".into()));
             } else if done {
                 before = before.child(row);
@@ -527,40 +595,6 @@ impl Newport {
                 .child(before)
                 .child(current_step)
                 .child(after);
-        }
-        if phase == 3 {
-            timeline = timeline.child(
-                div()
-                    .ml(px(39.))
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .pt(px(20.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(16.))
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child("You can change these choices later in Integrations."),
-                    )
-                    .child(
-                        div().child(
-                            crate::controls::form_button("setup-done")
-                                .primary()
-                                .label("Done")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(flow) = &mut this.setup_flow {
-                                        flow.dismissed = true;
-                                    }
-                                    this.resources.invalidate("page");
-                                    this.request("page", "cockpit_collect", json!({"id":this.server,"section":"overview","refresh":true}));
-                                    this.refresh();
-                                    cx.notify();
-                                })),
-                        ),
-                    ),
-            );
         }
         div()
             .id("server-setup-timeline")
@@ -580,6 +614,22 @@ impl Newport {
                     .child(timeline.flex_shrink_0()),
             )
             .into_any_element()
+    }
+    fn edit_connection_button(
+        &self,
+        primary: bool,
+        disabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        crate::controls::button("setup-edit-connection")
+            .when(primary, |b| b.primary())
+            .disabled(disabled)
+            .label("Edit connection")
+            .on_click(cx.listener(|this, _, window, cx| {
+                if let Some(server) = this.selected_server() {
+                    this.edit_server(Some(server.clone()), window, cx);
+                }
+            }))
     }
     pub(super) fn setup_skipped(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
@@ -603,39 +653,57 @@ impl Newport {
             .into_any_element()
     }
 }
-fn error_copy(phase: u8, error: &str) -> (&'static str, &'static str) {
+#[derive(Clone, Copy)]
+struct ErrorCopy {
+    title: &'static str,
+    guidance: &'static str,
+    /// The fix is most likely in the server's connection settings.
+    connection: bool,
+}
+fn error_copy(phase: u8, error: &str) -> ErrorCopy {
+    let copy = |title, guidance, connection| ErrorCopy {
+        title,
+        guidance,
+        connection,
+    };
     if phase == 1 {
-        return (
-            "Needle couldn’t be installed",
-            "Check the connection and try again. Your server inspection is saved.",
+        return copy(
+            "The helper couldn’t be installed.",
+            "Check the connection and try again. The server inspection is kept.",
+            false,
         );
     }
     if phase == 2 {
-        return (
-            "Integrations couldn’t be enabled",
-            "Needle is installed. Try again to save your integration choices.",
+        return copy(
+            "Integrations couldn’t be enabled.",
+            "The helper is installed. Try again to save your integration choices.",
+            false,
         );
     }
     let error = error.to_lowercase();
     if error.contains("connection refused") {
-        (
-            "The server refused the connection",
-            "Check the server address and SSH port, and make sure SSH is running. Then try again.",
+        copy(
+            "The server refused the connection.",
+            "Check the server address and SSH port, and that SSH is running.",
+            true,
         )
     } else if error.contains("timed out") || error.contains("timeout") {
-        (
-            "The server isn’t responding",
-            "Check that the server is online and reachable from your network. Then try again.",
+        copy(
+            "The server isn’t responding.",
+            "Check that it’s online and reachable from your network, then try again.",
+            false,
         )
     } else if error.contains("permission denied") || error.contains("authentication") {
-        (
-            "We couldn’t sign in",
-            "Check the SSH username and authentication settings, then try again.",
+        copy(
+            "Newport couldn’t sign in.",
+            "Check the SSH username and key or password.",
+            true,
         )
     } else {
-        (
-            "We couldn’t inspect this server",
-            "Review the connection settings or open the details below to see what happened.",
+        copy(
+            "Newport couldn’t read this server’s details.",
+            "The server replied:",
+            false,
         )
     }
 }
@@ -678,7 +746,7 @@ mod tests {
                 let mut view = page_perf_tests::owner(window, cx);
                 view.page = Page::Overview;
                 view.setup_flow = Some(super::Flow {
-                    connection: super::identity(&view.selected_server().unwrap()),
+                    connection: super::identity(view.selected_server().unwrap()),
                     phase: 1,
                     specs: json!({"cores":8,"total":1000}),
                     browser: true,
@@ -687,7 +755,8 @@ mod tests {
                     skipped: false,
                     error: None,
                     pending: true,
-                    details_open: false,
+                    attempts: 0,
+                    failed_at: None,
                 });
                 view
             });
@@ -746,7 +815,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn connection_error_is_compact_and_details_are_optional(cx: &mut TestAppContext) {
+    fn connection_error_shows_the_reply_and_leads_with_the_connection_fix(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::component::init(cx);
             theme::install(false, cx);
@@ -756,10 +825,10 @@ mod tests {
                 let mut v=page_perf_tests::owner(window,cx);
                 v.page=Page::Overview;
                 v.setup_flow=Some(super::Flow {
-                    connection:super::identity(&v.selected_server().unwrap()), phase:0,
+                    connection:super::identity(v.selected_server().unwrap()), phase:0,
                     specs:serde_json::Value::Null,browser:true,clipboard:true,dismissed:false,skipped:false,
                     error:Some("SSH transport interrupted: Cannot connect to SSH server: Connection refused (os error 61)".into()),
-                    pending:false,details_open:false,
+                    pending:false,attempts:2,failed_at:Some(0),
                 });
                 v
             });
@@ -774,28 +843,43 @@ mod tests {
                 assert!(f32::from(active.size.width) <= 480.);
                 assert!(active.left() >= px(16.));
                 assert!(active.right() <= px(width - 16.));
-                assert!(visual.debug_bounds("setup-technical-error").is_none());
+                // The server's own reply is visible without another click.
+                assert!(visual.debug_bounds("setup-technical-error").is_some());
                 visual.update(|window, _| {
                     let nodes = gpui_kit::base::test_support::snapshots(window);
-                    for label in ["Retry", "Edit connection", "Show details"] {
+                    for label in ["Edit connection", "Retry", "Copy details"] {
                         assert!(
                             nodes.iter().any(|n| n.label() == Some(label)),
                             "missing {label}"
                         );
                     }
+                    assert!(!nodes.iter().any(|n| n.label() == Some("Show details")));
                 });
+                assert!(visual.debug_bounds("setup-attempts").is_some());
             }
         }
-        let target = visual.update(|window, _| {
-            gpui_kit::base::test_support::snapshots(window)
-                .into_iter()
-                .find(|n| n.label() == Some("Show details"))
-                .unwrap()
-                .bounds()
+        // A refused connection is fixed in its settings, which come first.
+        let (edit, retry) = visual.update(|window, _| {
+            let nodes = gpui_kit::base::test_support::snapshots(window);
+            let at = |label| {
+                nodes
+                    .iter()
+                    .find(|n| n.label() == Some(label))
+                    .unwrap()
+                    .bounds()
+            };
+            (at("Edit connection"), at("Retry"))
         });
-        visual.simulate_click(target.center(), Default::default());
+        assert!(edit.left() < retry.left());
+        // Retrying keeps the failed step in place instead of swapping it out.
+        let before = visual.debug_bounds("setup-current-step").unwrap();
+        visual.simulate_click(retry.center(), Default::default());
         visual.update(|window, cx| window.draw(cx).clear(cx));
         assert!(visual.debug_bounds("setup-technical-error").is_some());
+        assert_eq!(
+            visual.debug_bounds("setup-current-step").unwrap().top(),
+            before.top()
+        );
     }
 
     #[gpui::test]
@@ -1016,37 +1100,19 @@ mod tests {
                 )),
             );
             v.poll_setup();
+            // Choosing integrations closes the setup straight away.
             assert_eq!(v.setup_flow.as_ref().unwrap().phase, 3);
-            assert!(v.setup_visible());
+            assert!(!v.setup_visible());
+            assert!(v.page == Page::Overview);
+            assert!(v.notification.is_some(), "the shell note is not dropped");
         });
         visual.update(|window, cx| {
             window.draw(cx).clear(cx);
             assert!(
-                gpui_kit::base::test_support::snapshots(window)
+                !gpui_kit::base::test_support::snapshots(window)
                     .iter()
                     .any(|n| n.label() == Some("Done"))
             );
-        });
-        visual.update(|window, _| {
-            assert!(
-                gpui_kit::base::test_support::snapshots(window)
-                    .iter()
-                    .any(|n| n.label()
-                        == Some("Manual shell setup needed. /home/fixture/.bashrc is a symlink."))
-            );
-        });
-        requests.try_iter().for_each(drop);
-        let done = visual.update(|window, _| {
-            gpui_kit::base::test_support::snapshots(window)
-                .into_iter()
-                .find(|n| n.label() == Some("Done"))
-                .unwrap()
-                .bounds()
-        });
-        visual.simulate_click(done.center(), Default::default());
-        view.update(visual, |v, _| {
-            assert!(!v.setup_visible());
-            assert!(v.page == Page::Overview);
         });
         let reading = requests
             .try_iter()

@@ -184,8 +184,8 @@ impl Newport {
                 .when_some(review.source.as_ref(),|view,(branch,oid)|view.child(project_dialog::description("remote-reference-source", format!("Replace with {branch} · {oid}"))))
                 .when(stale,|view|view.child(project_dialog::description("remote-reference-stale", "The reviewed state changed. Refresh remote references and review again.")))
                 .child(project_dialog::actions()
-                    .child(crate::project_ui::button("cancel-remote-reference").label("Cancel").disabled(self.git_mutation_blocks_write()).on_click(cx.listener(|this,_,_,cx|{this.git.remote_ref_review=None;cx.notify();})))
-                    .child(crate::project_ui::button("submit-remote-reference").loading(self.git_write_pending()).label(if push {"Replace remote branch"} else if review.action["kind"] == "tag.delete_remote" {"Delete remote tag"} else {"Delete remote branch"}).danger().disabled(!can_review || stale).on_click(cx.listener(|this,_,_,cx|this.submit_remote_ref(cx)))));
+                    .child(crate::controls::button("cancel-remote-reference").label("Cancel").disabled(self.git_mutation_blocks_write()).on_click(cx.listener(|this,_,_,cx|{this.git.remote_ref_review=None;cx.notify();})))
+                    .child(crate::controls::button("submit-remote-reference").loading(self.git_write_pending()).label(if push {"Replace remote branch"} else if review.action["kind"] == "tag.delete_remote" {"Delete remote tag"} else {"Delete remote branch"}).danger().disabled(!can_review || stale).on_click(cx.listener(|this,_,_,cx|this.submit_remote_ref(cx)))));
         } else {
             view = view.child(
                 div()
@@ -193,7 +193,7 @@ impl Newport {
                     .flex_wrap()
                     .gap_2()
                     .child(
-                        crate::project_ui::button("review-delete-remote-reference")
+                        crate::controls::button("review-delete-remote-reference")
                             .label("Delete reference…")
                             .disabled(!can_review || target.is_none())
                             .on_click(
@@ -201,7 +201,7 @@ impl Newport {
                             ),
                     )
                     .child(
-                        crate::project_ui::button("review-replace-remote-reference")
+                        crate::controls::button("review-replace-remote-reference")
                             .label("Push with lease…")
                             .disabled(
                                 !can_review

@@ -324,6 +324,7 @@ where
         let retryable = !error.starts_with("Remote command failed")
             && !error.starts_with("Agent error:")
             && (error == crate::agent_runtime::BUSY
+                || error.starts_with("SSH session capacity unavailable")
                 || error.contains("Needle runtime disconnected")
                 || error.starts_with("Needle connection interrupted:")
                 || error == "Needle control request timed out"
@@ -1340,6 +1341,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn needle_connection_losses_and_control_timeouts_recover_automatically() {
         for error in [
+            "SSH session capacity unavailable. The server refused another channel",
             "Needle connection interrupted: early eof",
             "Needle control request timed out",
             "Needle runtime control timed out",

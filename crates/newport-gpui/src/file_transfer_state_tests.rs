@@ -1,5 +1,5 @@
 //! Held local RPCs exercise transfer ownership without touching remote/local files.
-use crate::file_tree::tests::reply;
+use crate::file_test_backend::reply;
 use crate::{Newport, Page};
 use gpui_kit::{
     AppContext, Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext, Window,
@@ -95,7 +95,7 @@ fn fixture(
         owner = Some(cx.new(|cx| {
             let mut view = crate::page_perf_tests::owner(window, cx);
             let connection =
-                crate::terminal_scope::connection(&view.selected_server().unwrap(), &view.snapshot);
+                crate::terminal_scope::connection(view.selected_server().unwrap(), &view.snapshot);
             view.page = Page::Overview;
             view.file_transfer = Some(Transfer::start(
                 Backend::at_path(host.path.clone()),

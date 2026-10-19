@@ -146,14 +146,14 @@ impl CodeWorkspace {
             .py_1()
             .border_b_1()
             .border_color(cx.theme().border)
-            .text_size(px(crate::project_ui::FONT_SIZE))
+            .text_size(px(crate::ui::FONT_SIZE))
             .child(div().flex_1().child(if remote {
                 "Remote version · read only"
             } else {
                 "Changed remotely · your edits are kept"
             }))
             .child(
-                crate::project_ui::compact_button("code-review-remote")
+                crate::controls::compact_button("code-review-remote")
                     .ghost()
                     .label(if remote {
                         "Back to my edits"
@@ -163,7 +163,7 @@ impl CodeWorkspace {
                     .on_click(cx.listener(|this, _, window, cx| this.review_remote(window, cx))),
             )
             .child(
-                crate::project_ui::compact_button("code-merge-remote")
+                crate::controls::compact_button("code-merge-remote")
                     .ghost()
                     .label("Merge changes")
                     .disabled(
@@ -173,7 +173,7 @@ impl CodeWorkspace {
             )
             .when(remote, |view| {
                 view.child(
-                    crate::project_ui::compact_button("code-keep-local")
+                    crate::controls::compact_button("code-keep-local")
                         .ghost()
                         .label("Use my edits")
                         .disabled(
@@ -183,7 +183,7 @@ impl CodeWorkspace {
                 )
             })
             .child(
-                crate::project_ui::compact_button("code-reload-remote")
+                crate::controls::compact_button("code-reload-remote")
                     .ghost()
                     .label("Reload remote")
                     .disabled(

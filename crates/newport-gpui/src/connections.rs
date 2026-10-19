@@ -210,7 +210,7 @@ impl Newport {
         if self.page == Page::Ports
             && let Some(server) = self.selected_server()
         {
-            let scope = terminal_scope::connection(&server, &self.snapshot);
+            let scope = terminal_scope::connection(server, &self.snapshot);
             let reads = self.resources.take_cached(&["page", "connection-projects"]);
             self.connections_state
                 .entry(self.server.clone())
@@ -225,7 +225,7 @@ impl Newport {
         }
         let scope = self
             .selected_server()
-            .map(|server| terminal_scope::connection(&server, &self.snapshot));
+            .map(|server| terminal_scope::connection(server, &self.snapshot));
         if let Some((saved, reads)) = self
             .connections_state
             .get_mut(&self.server)

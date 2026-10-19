@@ -62,11 +62,8 @@ pub(super) fn hover(entry: &Value, window: &mut Window, cx: &mut App) -> AnyView
                             .flex()
                             .flex_col()
                             .gap(px(4.))
-                            .text_size(px(crate::project_ui::FONT_SIZE))
-                            .child(
-                                crate::project_ui::label("Path")
-                                    .text_color(cx.theme().muted_foreground),
-                            )
+                            .text_size(px(crate::ui::FONT_SIZE))
+                            .child(crate::label("Path").text_color(cx.theme().muted_foreground))
                             .child(
                                 div()
                                     .w_full()

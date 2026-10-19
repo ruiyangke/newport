@@ -79,7 +79,7 @@ pub(super) fn history_row_identity(entry: &Value, cx: &App) -> Div {
         .w_full()
         .min_w_0()
         .gap(px(5.))
-        .text_size(px(crate::project_ui::FONT_SIZE))
+        .text_size(px(crate::ui::FONT_SIZE))
         .line_height(px(17.))
         .text_color(cx.theme().muted_foreground)
         .child(
@@ -100,7 +100,7 @@ pub(super) fn history_row_identity(entry: &Value, cx: &App) -> Div {
                 .pl(px(6.))
                 .flex_shrink_0()
                 .font_family(cx.theme().mono_font_family.clone())
-                .text_size(px(crate::project_ui::FONT_SIZE))
+                .text_size(px(crate::ui::FONT_SIZE))
                 .child(short_oid(&text(&entry["oid"], "hex"))),
         )
 }
@@ -130,7 +130,7 @@ fn message_body(body: String, state: &State, background: Hsla) -> Div {
                 .aria_label(body.clone())
                 .flex_shrink_0()
                 .w_full()
-                .text_size(px(crate::project_ui::FONT_SIZE))
+                .text_size(px(crate::ui::FONT_SIZE))
                 .line_height(px(18.))
                 .child(body),
         )
@@ -255,7 +255,7 @@ impl Newport {
                                         || self.git.history.header.expanded,
                                     |view| {
                                         view.child(
-                                            crate::project_ui::compact_button("git-commit-expand")
+                                            crate::controls::compact_button("git-commit-expand")
                                                 .link()
                                                 .expanded(self.git.history.header.expanded)
                                                 .self_start()
@@ -310,7 +310,7 @@ impl Newport {
                     .items_center()
                     .gap_x_3()
                     .gap_y_1()
-                    .text_size(px(crate::project_ui::FONT_SIZE))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .text_color(cx.theme().muted_foreground)
                     .child(
                         div()
@@ -390,7 +390,7 @@ impl Newport {
                     )
                     .when(multiple_parents, |view| {
                         view.child(
-                            crate::project_ui::compact_button("git-history-parent")
+                            crate::controls::compact_button("git-history-parent")
                                 .label(format!("Parent {} · {}", parent + 1, selected_parent))
                                 .accessibility_label("Compare with parent")
                                 .dropdown_menu({

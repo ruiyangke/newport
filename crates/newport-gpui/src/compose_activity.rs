@@ -310,7 +310,7 @@ impl ContainersPanel {
                 .a11y_synthetic_children(move |tree| { if pending { tree.parent_node().set_busy(); } tree.parent_node().set_live(if running {accesskit::Live::Polite} else {accesskit::Live::Off}); })
                 .track_focus(&self.activity.focus).on_key_down(cx.listener(Self::activity_keys))
                 .relative().flex_1().min_h(px(200.)).border_1().border_color(cx.theme().border)
-                .focus_visible(|s| s.border_color(cx.theme().ring)).rounded(px(8.))
+                .focus_visible(|s| s.border_color(cx.theme().ring)).rounded(px(crate::ui::RADIUS))
                 .bg(cx.theme().muted.opacity(0.35)).overflow_hidden()
                 .when(pending && rows.is_empty(), |v|v.child(loading::lines("compose-activity",12)))
                 .when(!pending && rows.is_empty() && data.jobs_error().is_none() && output_error.is_none(), |v|v.child(crate::empty::compact(if !has_job {
@@ -319,18 +319,18 @@ impl ContainersPanel {
                 .when(!rows.is_empty(), |v| v.child(self.activity.selection.viewport(
                     list(self.activity.list.clone(),cx.processor(move |this,index:usize,_,cx| {
                         let row=&rows[index];
-                        log_line::render("compose-output",index, log_line::LogLine { at:None,time:None,source:"",message:&row.message,tone:row.tone },"",&this.activity.selection,cx)
+                        log_line::render("compose-output",index, log_line::LogLine { at:None,time:None,source:"",message:&row.message,styles:None,tone:row.tone },"",&this.activity.selection,cx)
                     })).size_full().px(px(10.)).py(px(8.)))))
                 .when(self.activity.unseen>0&&!pinned, |v|v.child(div().absolute().bottom(px(12.)).left_0().right_0().flex().justify_center().child(
                     super::logs::new_lines_button("compose-output-latest",self.activity.unseen as u64,cx)
                         .on_click(cx.listener(|this,_,_,cx| {this.activity.list.set_follow_mode(FollowMode::Tail);this.activity.unseen=0;cx.notify();})))))
                 .on_scroll_wheel(|_,_,cx| cx.stop_propagation()))
-            .child(div().id("compose-output-footer").debug_selector(|| "compose-output-footer".into()).flex_shrink_0().flex().items_center().gap(px(8.))
-                .child(quiet(footer.clone(),cx).flex_1().text_size(px(11.)).id("compose-output-status").role(accesskit::Role::Status).aria_label(footer))
-                .child(crate::controls::compact_icon_button("compose-output-copy").ghost().icon(IconName::Copy).accessibility_label("Copy command output").disabled(count==0)
+            .child(div().id("compose-output-footer").debug_selector(|| "compose-output-footer".into()).flex_shrink_0().child(crate::controls::pane_status_bar(cx)
+                .left(quiet(footer.clone(),cx).text_size(px(crate::ui::FONT_SIZE)).id("compose-output-status").role(accesskit::Role::Status).aria_label(footer))
+                .right(crate::controls::compact_icon_button("compose-output-copy").ghost().icon(IconName::Copy).accessibility_label("Copy command output").disabled(count==0)
                     .on_click(cx.listener(|this,_,_,cx| {
                         if let Some(job)=this.activity.data.output() { cx.write_to_clipboard(ClipboardItem::new_string(job.output.clone())); }
-                    }))))
+                    })))))
             .when(data.jobs().len()>1, |v|v.child(self.activity_history(now,cx)))
             .into_any_element()
     }
@@ -349,7 +349,7 @@ impl ContainersPanel {
                     .flex_1()
                     .min_w(px(160.))
                     .font_family(cx.theme().mono_font_family.clone())
-                    .text_size(px(11.5))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .child(job.command.clone()),
             )
             .child(activity_job_state(
@@ -445,7 +445,7 @@ impl ContainersPanel {
                                             .min_w_0()
                                             .truncate()
                                             .font_family(cx.theme().mono_font_family.clone())
-                                            .text_size(px(11.5))
+                                            .text_size(px(crate::ui::FONT_SIZE))
                                             .child(job.command.clone()),
                                     )
                                     .child(activity_job_state(
@@ -480,7 +480,7 @@ fn activity_job_state(job: &ComposeJob, now: i64, id: String, cx: &App) -> AnyEl
         .flex_shrink_0()
         .items_center()
         .gap(px(5.))
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .line_height(relative(1.5))
         .font_weight(FontWeight::NORMAL)
         .text_color(tone_color(status.tone, cx))

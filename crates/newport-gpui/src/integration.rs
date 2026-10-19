@@ -82,7 +82,7 @@ pub(super) fn description(id: &'static str, content: &str, cx: &App) -> AnyEleme
         .role(Role::Paragraph)
         .test_support()
         .aria_label(content.to_owned())
-        .text_size(px(13.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .line_height(relative(1.6))
         .text_color(cx.theme().muted_foreground)
         .child(content.to_owned())
@@ -224,7 +224,7 @@ impl Newport {
         cx: &mut Context<Self>,
     ) {
         if self.selected_server().is_some_and(|current| {
-            crate::terminal_scope::connection(&current, &self.snapshot) == *expected
+            crate::terminal_scope::connection(current, &self.snapshot) == *expected
         }) {
             self.integration_command(server, Some(feature), cx);
         }
@@ -244,7 +244,7 @@ impl Newport {
             return;
         }
         let expected_connection =
-            crate::terminal_scope::connection(&self.selected_server().unwrap(), &self.snapshot);
+            crate::terminal_scope::connection(self.selected_server().unwrap(), &self.snapshot);
         if let Some((feature @ ("browser" | "clipboard"), false)) = feature {
             self.request(
                 &disable_key(server, feature),
@@ -355,7 +355,7 @@ impl Newport {
         }
         self.integration_refresh_pending.insert(server.to_owned());
         // An in-flight snapshot may have been captured before this mutation.
-        self.resources.invalidate("snapshot");
+        self.resources.fence("snapshot");
         self.request("snapshot", "snapshot", json!({}));
     }
 
@@ -464,7 +464,7 @@ impl Newport {
                                 .role(Role::Paragraph)
                                 .test_support()
                                 .aria_label(path.to_owned())
-                                .text_size(px(13.))
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .child(path.to_owned()),
                         )
                         .child(
@@ -473,7 +473,7 @@ impl Newport {
                                 .role(Role::Paragraph)
                                 .test_support()
                                 .aria_label(message.to_owned())
-                                .text_size(px(13.))
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .text_color(cx.theme().muted_foreground)
                                 .child(message.to_owned()),
                         );

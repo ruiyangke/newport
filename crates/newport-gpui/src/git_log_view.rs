@@ -73,7 +73,7 @@ pub(super) fn columns(width: f32, window: &mut Window, cx: &App) -> u16 {
     let cell = f32::from(
         window
             .text_system()
-            .shape_line("M".into(), px(crate::project_ui::FONT_SIZE), &[run], None)
+            .shape_line("M".into(), px(crate::ui::FONT_SIZE), &[run], None)
             .width,
     );
     ((width - 24.).max(0.) / cell.max(1.))
@@ -93,7 +93,7 @@ fn color(value: &LogColor, cx: &App) -> Hsla {
     rgb((u32::from(channels[0]) << 16) | (u32::from(channels[1]) << 8) | u32::from(channels[2]))
         .into()
 }
-fn highlight(style: &Style, cx: &App) -> HighlightStyle {
+pub(crate) fn highlight(style: &Style, cx: &App) -> HighlightStyle {
     let mut foreground = color(&style.foreground, cx);
     let mut background = color(&style.background, cx);
     if style.dim {
@@ -133,7 +133,7 @@ pub(super) fn line(document: &Rc<RefCell<Document>>, row: usize, cx: &App) -> An
         .aria_label(document.borrow().rows[row].text.clone())
         .h(px(18.))
         .font_family(cx.theme().mono_font_family.clone())
-        .text_size(px(crate::project_ui::FONT_SIZE))
+        .text_size(px(crate::ui::FONT_SIZE))
         .whitespace_nowrap()
         .child(
             document

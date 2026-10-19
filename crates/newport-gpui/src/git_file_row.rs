@@ -55,15 +55,15 @@ pub(super) fn badge(mark: &'static str, cx: &App) -> Div {
     };
     div()
         .size(px(18.))
-        .line_height(px(crate::project_ui::FONT_SIZE))
+        .line_height(px(crate::ui::FONT_SIZE))
         .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(4.))
+        .rounded(px(crate::ui::RADIUS))
         .font_family(cx.theme().mono_font_family.clone())
         .font_weight(FontWeight::BOLD)
-        .text_size(px(crate::project_ui::FONT_SIZE))
+        .text_size(px(crate::ui::FONT_SIZE))
         .bg(if mark == "!" {
             color
         } else {
@@ -84,7 +84,7 @@ fn split_path(path: &str) -> (&str, &str) {
 pub(super) fn path(path: String, cx: &App) -> Div {
     let (dir, base) = split_path(&path);
     div()
-        .text_size(px(crate::project_ui::FONT_SIZE))
+        .text_size(px(crate::ui::FONT_SIZE))
         .flex()
         .flex_1()
         .min_w_0()
@@ -136,7 +136,7 @@ pub(super) fn filename_first(path: &str, cx: &App) -> Div {
                 div()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(crate::project_ui::FONT_SIZE))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .text_color(cx.theme().muted_foreground)
                     .child(parent.trim_end_matches('/').to_owned()),
             )

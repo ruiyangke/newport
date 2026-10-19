@@ -220,7 +220,7 @@ impl ContainersPanel {
                 .w(px(480.))
                 .max_w((window.viewport_size().width - px(32.)).max(px(240.)))
                 .p(px(if compact { 18. } else { 24. }))
-                .rounded(px(14.))
+                .rounded(px(crate::ui::RADIUS))
                 .border_0()
                 .centered(true)
                 .overlay_closable(false)
@@ -333,7 +333,7 @@ impl ContainersPanel {
             let project = project.clone();
             controls = controls.child(crate::controls::button("compose-up").label("Up").icon(IconName::ArrowUpFromLine)
                 .when(group.running < group.services.len() || missing, |b| b.primary())
-                .disabled(blocked).hover_hint("Create missing containers and recreate what changed from the Compose files")
+                .disabled(blocked).hover_hint(format!("Create missing containers and recreate what changed from the Compose files. Restart and Stop act on the existing containers. Compose {}.", cli.map(|cli| cli.version.as_str()).unwrap_or_default()))
                 .on_click(cx.listener(move |this, _, _, cx| { if this.compose_project_selected(&project) {this.propose_compose(up(false,false,false)); cx.notify();} })));
         } else if group.running < group.services.len() {
             let action = action(ProjectVerb::Start);
@@ -366,12 +366,6 @@ impl ContainersPanel {
                     )))
                     .label(label)
                     .icon(icon)
-                    .when(
-                        verb == ProjectVerb::Restart
-                            && cli.is_none()
-                            && group.running == group.services.len(),
-                        |button| button.primary(),
-                    )
                     .disabled(!self.client.can_action(&action))
                     .loading(self.action_running(&action))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -386,10 +380,11 @@ impl ContainersPanel {
             let project = project.clone();
             let start = (group.running < group.services.len()).then(|| action(ProjectVerb::Start));
             controls = controls.child(
-                crate::controls::button("compose-more")
+                crate::controls::icon_button("compose-more")
                     .ghost()
-                    .label("More")
-                    .icon(IconName::ChevronDown)
+                    .icon(IconName::Ellipsis)
+                    .tooltip("More Compose actions")
+                    .accessibility_label("More Compose actions")
                     .disabled(blocked)
                     .dropdown_menu(move |mut menu, _, cx| {
                         let enabled = weak.upgrade().is_some_and(|p| {
@@ -473,14 +468,8 @@ impl ContainersPanel {
             );
         }
         controls = controls.child(self.project_finished_jobs_button(group, cx));
-        let helper = if let Some(cli) = cli {
-            format!(
-                "Up applies the compose files: it creates what’s missing and recreates what changed. Restart and Stop act on the existing containers. Compose {}.",
-                cli.version
-            )
-        } else if self.pending("compose-detail") {
-            "Checking for the Compose CLI…".into()
-        } else {
+        // Up explains itself in its tooltip; only a missing CLI needs words.
+        let helper = (cli.is_none() && !self.pending("compose-detail")).then(|| {
             format!(
                 "These act on the project’s existing containers. Up, Pull, Rebuild and Down need the Compose CLI on the server{}",
                 detail
@@ -493,13 +482,15 @@ impl ContainersPanel {
                     .map(|e| format!(": {e}"))
                     .unwrap_or_else(|| ".".into())
             )
-        };
+        });
         let mut view = div()
             .flex()
             .flex_col()
             .gap(px(8.))
             .child(controls)
-            .child(quiet(helper, cx).text_size(px(11.5)));
+            .when_some(helper, |view, helper| {
+                view.child(quiet(helper, cx).text_size(px(crate::ui::FONT_SIZE)))
+            });
         if self.running_compose_job().is_none()
             && cli.is_some()
             && let Some(reason) = self.client.compose_run_blocked_reason(&project)

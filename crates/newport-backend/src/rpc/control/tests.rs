@@ -498,7 +498,7 @@ async fn native_forward_edits_and_browser_opening_reject_stale_requests() {
     fixture.call("open_tunnel", args.clone()).await.unwrap();
     assert_eq!(
         *fixture.desktop.urls.lock().unwrap(),
-        vec!["http://127.0.0.1:9000"]
+        vec!["http://localhost:9000"]
     );
     fixture
         .manager
@@ -628,7 +628,7 @@ mod remote_tests {
             .unwrap();
         assert_eq!(
             *fixture.desktop.urls.lock().unwrap(),
-            vec![format!("http://127.0.0.1:{local}")]
+            vec![format!("http://localhost:{local}")]
         );
         fixture
             .call(

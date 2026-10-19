@@ -172,7 +172,7 @@ pub(super) fn render_setup(setup: Setup, cx: &App) -> AnyElement {
         .when(!failed, |body| {
             body.child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .text_color(cx.theme().muted_foreground)
                     .child(detail),
             )
@@ -199,7 +199,7 @@ pub(super) fn render_setup(setup: Setup, cx: &App) -> AnyElement {
             )
             .child(
                 div()
-                    .text_size(px(11.))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .text_color(cx.theme().muted_foreground)
                     .child(format!(
                         "{:.0}% · {:.1} / {:.1} MiB sent{}",
@@ -221,13 +221,13 @@ pub(super) fn render_setup(setup: Setup, cx: &App) -> AnyElement {
                 .role(Role::Alert)
                 .test_support()
                 .aria_label(error.unwrap_or_default().to_owned())
-                .text_size(px(12.))
+                .text_size(px(crate::ui::FONT_SIZE))
                 .text_color(cx.theme().danger)
                 .child(error.unwrap_or_default().to_owned()),
         );
         body = body.child(
             div()
-                .text_size(px(12.))
+                .text_size(px(crate::ui::FONT_SIZE))
                 .text_color(cx.theme().muted_foreground)
                 .child(recovery),
         );
@@ -277,7 +277,7 @@ pub(super) fn render_setup(setup: Setup, cx: &App) -> AnyElement {
                     .gap(px(8.))
                     .child(
                         div()
-                            .text_size(px(13.))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("Server setup"),
                     )
@@ -287,7 +287,7 @@ pub(super) fn render_setup(setup: Setup, cx: &App) -> AnyElement {
                             .role(Role::Status)
                             .test_support()
                             .aria_label(format!("Step {} of 4", current + 1))
-                            .text_size(px(12.))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .text_color(cx.theme().muted_foreground)
                             .child(format!("Step {} of 4", current + 1)),
                     ),
@@ -299,7 +299,7 @@ pub(super) fn render_setup(setup: Setup, cx: &App) -> AnyElement {
                     .gap(px(16.))
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .text_color(cx.theme().muted_foreground)
                             .child(destination),
                     )
@@ -317,13 +317,13 @@ pub(super) fn render_setup(setup: Setup, cx: &App) -> AnyElement {
                         .gap(px(8.))
                         .child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(note_title),
                         )
                         .child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .line_height(relative(1.5))
                                 .text_color(cx.theme().muted_foreground)
                                 .child(note),

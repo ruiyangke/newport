@@ -44,6 +44,11 @@ pub(super) enum ContainersEvent {
     Notification { message: String },
     ComposeCompleted(newport_domain::compose::ComposeJob),
 }
+/// Project tabs keep their historical indices (0 Logs, 1 Activity, 2 Compose
+/// files); the services table was added last but is shown first.
+pub(super) const PROJECT_SERVICES: usize = 3;
+/// Prefix for folded list sections in `collapsed`, beside project names.
+const SECTION: &str = "section:";
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct PortTarget {
     pub container: String,
@@ -70,7 +75,7 @@ impl Default for Preferences {
             selected: None,
             collapsed: HashSet::new(),
             detail_tab: 0,
-            project_tab: 0,
+            project_tab: PROJECT_SERVICES,
             live: true,
             log_level: newport_domain::containers_log::Level::All,
             log_query: String::new(),
@@ -91,6 +96,18 @@ struct Row {
     jobs: bool,
     oneoff: bool,
     open: bool,
+    /// A folded "Stopped" group, or the hint that stopped ones are hidden.
+    stopped: Option<StoppedRow>,
+}
+#[derive(Clone, Copy, PartialEq)]
+enum StoppedRow {
+    Group,
+    Hidden,
+}
+#[derive(Clone, Copy)]
+struct Stopped {
+    shown: bool,
+    open: bool,
 }
 struct ReviewDialog {
     token: u64,
@@ -104,6 +121,8 @@ struct ListKey {
     query: String,
     collapsed: HashSet<String>,
     jobs_open: HashSet<String>,
+    show_stopped: bool,
+    stopped_open: bool,
 }
 #[derive(Default)]
 struct ListCache {
@@ -121,14 +140,20 @@ pub(super) struct ContainersPanel {
     selected: Option<String>,
     collapsed: HashSet<String>,
     jobs_open: HashSet<String>,
+    /// The list shows every container, not only running ones and problems.
+    show_stopped: bool,
+    /// Under All, stopped standalone containers fold into their own group.
+    stopped_open: bool,
     tab: usize,
     detail_tab: usize,
     project_tab: usize,
     live: bool,
     width: f32,
+    /// The detail pane's measured width; the list beside it is resizable.
+    detail_width: f32,
     list_focus: FocusHandle,
     detail_focus: FocusHandle,
-    tab_focus: [FocusHandle; 3],
+    tab_focus: [FocusHandle; 4],
     list_scroll: UniformListScrollHandle,
     detail_scroll: ScrollHandle,
     logs: logs::Logs,
@@ -207,11 +232,14 @@ impl ContainersPanel {
             selected: None,
             collapsed: HashSet::new(),
             jobs_open: HashSet::new(),
+            show_stopped: false,
+            stopped_open: false,
             tab: 0,
             detail_tab: 0,
-            project_tab: 0,
+            project_tab: PROJECT_SERVICES,
             live: true,
             width: 800.,
+            detail_width: 0.,
             list_focus: cx.focus_handle(),
             detail_focus: cx.focus_handle(),
             tab_focus: std::array::from_fn(|_| cx.focus_handle()),
@@ -263,7 +291,7 @@ impl ContainersPanel {
         self.selected = p.selected;
         self.collapsed = p.collapsed;
         self.detail_tab = p.detail_tab.min(1);
-        self.project_tab = p.project_tab.min(2);
+        self.project_tab = p.project_tab.min(PROJECT_SERVICES);
         self.tab = self.preferred_tab(self.active_selection.as_deref());
         self.live = p.live;
         self.logs.level = p.log_level;
@@ -277,7 +305,7 @@ impl ContainersPanel {
     fn preferred_tabs(&self) -> (usize, usize) {
         match self.active_selection.as_deref() {
             Some(key) if key.starts_with("c:") => (self.tab.min(1), self.project_tab),
-            Some(key) if key.starts_with("p:") => (self.detail_tab, self.tab.min(2)),
+            Some(key) if key.starts_with("p:") => (self.detail_tab, self.tab.min(PROJECT_SERVICES)),
             _ => (self.detail_tab, self.project_tab),
         }
     }
@@ -484,6 +512,8 @@ impl ContainersPanel {
             query: self.search.read(cx).value().trim().to_lowercase(),
             collapsed: self.collapsed.clone(),
             jobs_open: self.jobs_open.clone(),
+            show_stopped: self.show_stopped,
+            stopped_open: self.stopped_open,
         };
         let mut cache = self.list_cache.borrow_mut();
         if cache.key.as_ref() != Some(&key) {
@@ -493,17 +523,28 @@ impl ContainersPanel {
                 .map(|snapshot| {
                     let groups =
                         domain::group_matching_containers(&snapshot.containers, &key.query);
-                    let fallback = Some(domain::default_selection(&groups));
-                    (
-                        master_rows(
-                            &snapshot.containers,
-                            &key.query,
-                            &key.collapsed,
-                            &key.jobs_open,
-                            self.updated.unwrap_or_default(),
-                        ),
-                        fallback,
-                    )
+                    let preferred = domain::default_selection(&groups);
+                    let rows = master_rows(
+                        &snapshot.containers,
+                        &key.query,
+                        &key.collapsed,
+                        &key.jobs_open,
+                        Stopped {
+                            shown: key.show_stopped,
+                            open: key.stopped_open,
+                        },
+                        self.updated.unwrap_or_default(),
+                    );
+                    // The Running filter and folded groups hide rows; the
+                    // default never selects one the list does not show.
+                    let fallback = if rows.iter().any(|row| row.key.as_ref() == Some(&preferred)) {
+                        preferred
+                    } else {
+                        rows.iter()
+                            .find_map(|row| row.key.clone())
+                            .unwrap_or_else(|| domain::DISK.into())
+                    };
+                    (rows, Some(fallback))
                 })
                 .unwrap_or_default();
             cache.rows = Rc::new(rows);
@@ -595,13 +636,15 @@ impl ContainersPanel {
         let selected = self.effective_selection(cx);
         let current = choices
             .iter()
-            .position(|(_, k)| Some(k) == selected.as_ref())
-            .unwrap_or(0);
-        let next = match event.keystroke.key.as_str() {
-            "down" => (current + 1).min(choices.len() - 1),
-            "up" => current.saturating_sub(1),
-            "home" => 0,
-            "end" => choices.len() - 1,
+            .position(|(_, k)| Some(k) == selected.as_ref());
+        let last = choices.len() - 1;
+        // Without a selected row (Disk usage, or one the filter hides), Down
+        // enters the list at its first row and Up at its last.
+        let next = match (event.keystroke.key.as_str(), current) {
+            ("down", Some(current)) => (current + 1).min(last),
+            ("up", Some(current)) => current.saturating_sub(1),
+            ("down" | "home", _) => 0,
+            ("up" | "end", _) => last,
             _ => return,
         };
         self.list_scroll
@@ -621,21 +664,12 @@ impl ContainersPanel {
             .flex()
             .flex_col()
             .h_full()
-            .p(px(crate::controls::PAGE_PADDING))
-            .when(self.width > 600., |v| {
-                v.border_r_1().border_color(cx.theme().border)
-            })
+            .py(px(6.))
             .min_h_0()
             .min_w_0()
-            .when(self.width > 600., |v| v.w(px(280.)).flex_shrink_0())
+            // Beside the detail, the resizable split owns width and divider.
+            .when(self.width > 600., |v| v.size_full())
             .when(self.width <= 600., |v| v.flex_1())
-            .child(
-                div().h(px(28.)).flex_shrink_0().mb(px(8.)).child(
-                    crate::controls::input(&self.search)
-                        .prefix(Icon::new(IconName::Search).size(px(14.)))
-                        .aria_label("Find a container"),
-                ),
-            )
             .when(self.client.snapshot().is_none(), |v| {
                 v.child(list_skeleton())
             })
@@ -646,7 +680,7 @@ impl ContainersPanel {
                         .role(accesskit::Role::ListBox)
                         .aria_label("Containers")
                         .track_focus(&self.list_focus)
-                        .rounded(px(6.))
+                        .rounded(px(crate::ui::RADIUS))
                         .border_1()
                         .border_color(cx.theme().ring.opacity(0.))
                         .focus_visible(|s| s.border_color(cx.theme().ring))
@@ -676,6 +710,140 @@ impl ContainersPanel {
             })
             .into_any_element()
     }
+    /// Search, the Running/All filter, Disk usage and Refresh for the page.
+    fn toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::connections_selector::{Choice, Selector};
+        let (running, total) = self.client.snapshot().map_or((0, 0), |snapshot| {
+            (
+                snapshot.containers.iter().filter(|c| active(c)).count(),
+                snapshot.containers.len(),
+            )
+        });
+        let owner = cx.weak_entity();
+        let disk = self.active_selection.as_deref() == Some(domain::DISK);
+        div()
+            .id("containers-toolbar")
+            .debug_selector(|| "containers-toolbar".into())
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(44.))
+            .px(px(crate::controls::PAGE_PADDING - 4.))
+            .flex_shrink_0()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div().w(px(260.)).min_w(px(120.)).flex_shrink(1.).child(
+                    crate::controls::input(&self.search)
+                        .prefix(Icon::new(IconName::Search).size(px(14.)))
+                        .cleanable(true)
+                        .aria_label("Find a container"),
+                ),
+            )
+            .child(Selector::new(
+                "containers-filter",
+                "Show",
+                usize::from(self.show_stopped),
+                vec![
+                    Choice {
+                        count: Some(running),
+                        tooltip: Some("Running containers and any that need attention"),
+                        ..Choice::text(0, "Running")
+                    },
+                    Choice {
+                        count: Some(total),
+                        ..Choice::text(1, "All")
+                    },
+                ],
+                move |index, _, cx| {
+                    let _ = owner.update(cx, |this, cx| {
+                        this.show_stopped = index == 1;
+                        cx.notify();
+                    });
+                },
+            ))
+            .child(div().flex_1())
+            .child(
+                crate::controls::button("containers-disk")
+                    .ghost()
+                    .icon(IconName::HardDrive)
+                    .label("Disk usage")
+                    .selected(disk)
+                    .toggled(disk)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.select(domain::DISK.into(), window, cx)
+                    })),
+            )
+            .child(
+                crate::controls::icon_button("containers-refresh")
+                    .ghost()
+                    .icon(IconName::RefreshCw)
+                    .tooltip("Refresh")
+                    .accessibility_label("Refresh containers")
+                    .loading(self.pending("snapshot"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.client.refresh();
+                        if this.active_selection.as_deref() == Some(domain::DISK) {
+                            this.client.retry_disk();
+                        } else if this.tab == 0 {
+                            // Logs have no refresh of their own, even when paused.
+                            this.client.retry_logs();
+                        }
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+    /// The shared page status bar: what the engine runs, and which engine.
+    fn status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(snapshot) = self.client.snapshot() else {
+            return div().into_any_element();
+        };
+        let running = snapshot
+            .containers
+            .iter()
+            .filter(|c| c.state == domain::ContainerState::Running)
+            .count();
+        let stopped = snapshot.containers.len() - running;
+        let projects = domain::group_containers(&snapshot.containers)
+            .projects
+            .len();
+        let plural =
+            |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let summary = format!(
+            "{} running · {} stopped · {}",
+            running,
+            stopped,
+            plural(projects, "project", "projects")
+        );
+        let engine = &snapshot.engine;
+        let engine = if engine.version.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "{} {}{}",
+                if engine.podman { "Podman" } else { "Docker" },
+                engine.version,
+                if engine.rootless { " · rootless" } else { "" }
+            )
+        };
+        div()
+            .id("containers-status")
+            .debug_selector(|| "containers-status".into())
+            .flex_shrink_0()
+            .child(
+                crate::controls::status_bar(cx)
+                    .left(
+                        div()
+                            .id("containers-summary")
+                            .role(accesskit::Role::Status)
+                            .aria_label(summary.clone())
+                            .child(summary),
+                    )
+                    .right(engine),
+            )
+            .into_any_element()
+    }
     fn master_row(
         &self,
         index: usize,
@@ -684,14 +852,72 @@ impl ContainersPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if row.group && row.project.is_none() {
+            let key = format!("{SECTION}{}", row.name);
             return div()
                 .h(px(28.))
-                .px(px(8.))
-                .pt(px(8.))
-                .text_size(px(10.5))
-                .font_weight(FontWeight::SEMIBOLD)
+                .pt(px(4.))
+                .child(
+                    crate::controls::group_heading(
+                        SharedString::from(format!(
+                            "containers-section-{}",
+                            row.name.to_lowercase()
+                        )),
+                        &row.name,
+                        row.note.parse().unwrap_or_default(),
+                        row.open,
+                        cx,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.collapsed.remove(&key) {
+                            this.collapsed.insert(key.clone());
+                        }
+                        cx.notify();
+                    })),
+                )
+                .into_any_element();
+        }
+        if row.stopped == Some(StoppedRow::Group) {
+            return div()
+                .h(px(28.))
+                .pl(px(6.))
+                .child(
+                    crate::controls::group_heading(
+                        "containers-stopped-group",
+                        &row.name,
+                        row.note.parse().unwrap_or_default(),
+                        row.open,
+                        cx,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.stopped_open = !this.stopped_open;
+                        cx.notify();
+                    })),
+                )
+                .into_any_element();
+        }
+        if row.stopped == Some(StoppedRow::Hidden) {
+            return div()
+                .id("containers-stopped-hidden")
+                .role(accesskit::Role::Button)
+                .aria_label(row.label.clone())
+                .test_support()
+                .h(px(28.))
+                .pl(px(row.indent))
+                .pr(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .cursor_pointer()
+                .text_size(px(crate::ui::FONT_SIZE))
                 .text_color(cx.theme().muted_foreground)
-                .child(row.name.to_uppercase())
+                .hover(|v| v.bg(theme::row_hover(cx)).text_color(cx.theme().foreground))
+                .child(div().flex_1().min_w_0().truncate().child(row.name.clone()))
+                .child(row.note.clone())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.show_stopped = true;
+                    this.stopped_open = true;
+                    cx.notify();
+                }))
                 .into_any_element();
         }
         if row.jobs {
@@ -762,15 +988,15 @@ impl ContainersPanel {
                     .h(px(28.))
                     .flex_1()
                     .min_w_0()
-                    .rounded(px(6.))
+                    .rounded(px(crate::ui::RADIUS))
                     .pl(px(row.indent))
                     .pr(px(8.))
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .text_size(px(12.5))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .cursor_pointer()
-                    .when(active, |v| v.bg(cx.theme().sidebar_accent))
+                    .when(active, |v| v.bg(theme::selected_fill(cx.theme().is_dark())))
                     .when(!active, |v| v.hover(|v| v.bg(theme::row_hover(cx))))
                     .child(if key == domain::DISK {
                         Icon::new(IconName::HardDrive)
@@ -787,13 +1013,7 @@ impl ContainersPanel {
                             div()
                                 .id(SharedString::from(badge_id.clone()))
                                 .debug_selector(move || badge_id.clone())
-                                .flex_shrink_0()
-                                .rounded(px(4.))
-                                .bg(cx.theme().muted)
-                                .px(px(4.))
-                                .text_size(px(10.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child("job"),
+                                .child(crate::controls::tag("job", cx)),
                         )
                     })
                     .child(
@@ -801,19 +1021,21 @@ impl ContainersPanel {
                             row.clock.map_or_else(
                                 || row.note.clone(),
                                 |(at, ago)| {
-                                    format!(
-                                        "{}{}",
-                                        newport_domain::services::duration(
-                                            self.updated.unwrap_or_default().saturating_sub(at)
-                                        ),
-                                        if ago { " ago" } else { "" }
-                                    )
+                                    let span = newport_domain::services::duration(
+                                        self.updated.unwrap_or_default().saturating_sub(at),
+                                    );
+                                    // Say which clock this is: uptime, or time since exit.
+                                    if ago {
+                                        format!("exited {span} ago")
+                                    } else {
+                                        format!("up {span}")
+                                    }
                                 },
                             ),
                             cx,
                         )
                         .flex_shrink_0()
-                        .text_size(px(11.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .text_color(tone_color(
                             if matches!(row.tone, domain::Tone::Danger | domain::Tone::Warning) {
                                 row.tone
@@ -836,7 +1058,8 @@ impl ContainersPanel {
 impl Render for ContainersPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.files.sync(&self.client, window, cx);
-        self.disk_view.sync(&self.client, self.width);
+        self.disk_view
+            .sync(&self.client, self.detail_content_width());
         let snapshot = self.client.snapshot();
         let error = self.error("snapshot");
         let initial = snapshot.is_none() && error.is_none();
@@ -876,6 +1099,7 @@ impl Render for ContainersPanel {
                 .left_0()
                 .top_0(),
             )
+            .when(snapshot.is_some() || initial, |v| v.child(self.toolbar(cx)))
             .when(snapshot.is_some(), |v| {
                 v.when_some(error.clone(), |v, error| {
                     v.child(
@@ -895,20 +1119,35 @@ impl Render for ContainersPanel {
                 v.child(self.unavailable(error.as_deref().unwrap_or_default(), cx))
             })
             .when(snapshot.is_some() || initial, |v| {
-                v.child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .min_w_0()
-                        .flex()
-                        .when(!compact || self.selected.is_none(), |v| {
-                            v.child(self.list(cx))
-                        })
-                        .when(!compact || self.selected.is_some(), |v| {
-                            v.child(self.detail(window, cx))
-                        }),
-                )
+                v.child(div().flex_1().min_h_0().min_w_0().flex().map(|v| {
+                    if compact {
+                        v.when(self.selected.is_none(), |v| v.child(self.list(cx)))
+                            .when(self.selected.is_some(), |v| {
+                                v.child(self.detail(window, cx))
+                            })
+                    } else {
+                        let key = SharedString::from("containers-split");
+                        let layout = crate::controls::split_state(&key, window, cx);
+                        v.child(
+                            gpui_kit::component::resizable::h_resizable(key)
+                                .with_state(&layout)
+                                .child(
+                                    gpui_kit::component::resizable::resizable_panel()
+                                        .size(px(280.))
+                                        .size_range(px(220.)..px(520.))
+                                        .flex_none()
+                                        .child(self.list(cx)),
+                                )
+                                .child(
+                                    gpui_kit::component::resizable::resizable_panel()
+                                        .size_range(px(360.)..Pixels::MAX)
+                                        .child(self.detail(window, cx)),
+                                ),
+                        )
+                    }
+                }))
             })
+            .when(snapshot.is_some(), |v| v.child(self.status_bar(cx)))
     }
 }
 impl ContainersPanel {
@@ -927,11 +1166,23 @@ impl ContainersPanel {
             .into_any_element()
     }
 }
+/// A container that belongs in the default (Running) list: anything alive,
+/// and anything that stopped badly enough to need attention.
+fn active(c: &Container) -> bool {
+    matches!(
+        c.state,
+        domain::ContainerState::Running
+            | domain::ContainerState::Paused
+            | domain::ContainerState::Restarting
+    ) || domain::is_problem(c)
+}
+
 fn master_rows(
     all: &[Container],
     query: &str,
     collapsed: &HashSet<String>,
     jobs_open: &HashSet<String>,
+    stopped: Stopped,
     now: i64,
 ) -> Vec<Row> {
     let needle = query.trim().to_lowercase();
@@ -942,11 +1193,14 @@ fn master_rows(
         .collect();
     let groups = domain::group_containers(&filtered);
     let mut rows = Vec::new();
-    let section = |name: String| Row {
+    // Sections fold like projects; their keys can't clash with Compose names.
+    let section_open =
+        |name: &str| !needle.is_empty() || !collapsed.contains(&format!("{SECTION}{name}"));
+    let section = |name: &str, count: usize| Row {
         key: None,
-        label: name.clone(),
-        name,
-        note: String::new(),
+        label: format!("{name}, {count}"),
+        name: name.to_owned(),
+        note: count.to_string(),
         clock: None,
         tone: domain::Tone::Muted,
         indent: 8.,
@@ -954,12 +1208,18 @@ fn master_rows(
         project: None,
         jobs: false,
         oneoff: false,
-        open: true,
+        open: section_open(name),
+        stopped: None,
     };
     if !groups.projects.is_empty() {
-        rows.push(section(format!("Projects  {}", groups.projects.len())));
+        rows.push(section("Projects", groups.projects.len()));
     }
-    for project in groups.projects {
+    let projects = if section_open("Projects") {
+        groups.projects
+    } else {
+        vec![]
+    };
+    for project in projects {
         let state = domain::project_state(&project);
         let open = !needle.is_empty() || !collapsed.contains(project.name);
         rows.push(Row {
@@ -977,7 +1237,7 @@ fn master_rows(
                     }
                 )
             } else if !project.services.is_empty() {
-                format!("{}/{}", project.running, project.services.len())
+                format!("{}/{} running", project.running, project.services.len())
             } else {
                 String::new()
             },
@@ -989,6 +1249,7 @@ fn master_rows(
             jobs: false,
             oneoff: false,
             open,
+            stopped: None,
         });
         if open {
             rows.extend(project.services.iter().map(|c| container_row(c, 30., now)));
@@ -1015,6 +1276,7 @@ fn master_rows(
                     jobs: true,
                     oneoff: false,
                     open: jobs_visible,
+                    stopped: None,
                 });
                 if jobs_visible {
                     rows.extend(project.jobs.iter().map(|c| container_row(c, 44., now)));
@@ -1022,9 +1284,55 @@ fn master_rows(
             }
         }
     }
-    if !groups.standalone.is_empty() {
-        rows.push(section(format!("Standalone  {}", groups.standalone.len())));
-        rows.extend(groups.standalone.iter().map(|c| container_row(c, 8., now)));
+    // Leftover stopped containers usually outnumber live ones. They stay out
+    // of the default list; a search always shows every match.
+    let (live, idle): (Vec<&Container>, Vec<&Container>) = groups
+        .standalone
+        .iter()
+        .copied()
+        .partition(|c| active(c) || !needle.is_empty());
+    let listed = if stopped.shown {
+        live.len() + idle.len()
+    } else {
+        live.len()
+    };
+    if listed > 0 || !idle.is_empty() {
+        rows.push(section("Containers", listed));
+    }
+    let standalone = section_open("Containers");
+    if standalone {
+        rows.extend(live.iter().map(|c| container_row(c, 14., now)));
+    }
+    if standalone && !idle.is_empty() {
+        let toggle = |name: String, kind: StoppedRow, open: bool| Row {
+            key: None,
+            label: name.clone(),
+            name,
+            note: String::new(),
+            clock: None,
+            tone: domain::Tone::Muted,
+            indent: 14.,
+            group: false,
+            project: None,
+            jobs: false,
+            oneoff: false,
+            open,
+            stopped: Some(kind),
+        };
+        if stopped.shown {
+            let mut group = toggle("Stopped".into(), StoppedRow::Group, stopped.open);
+            group.note = idle.len().to_string();
+            rows.push(group);
+            if stopped.open {
+                rows.extend(idle.iter().map(|c| container_row(c, 34., now)));
+            }
+        } else {
+            rows.push(toggle(
+                format!("{} stopped hidden · Show all", idle.len()),
+                StoppedRow::Hidden,
+                false,
+            ));
+        }
     }
     if rows.is_empty() {
         let mut row = section(
@@ -1032,29 +1340,13 @@ fn master_rows(
                 "No containers on this server yet."
             } else {
                 "No projects or containers match."
-            }
-            .into(),
+            },
+            0,
         );
         row.group = false;
+        row.note = String::new();
         rows.push(row);
     }
-    rows.insert(
-        0,
-        Row {
-            key: Some(domain::DISK.into()),
-            name: "Disk usage".into(),
-            label: "Disk usage".into(),
-            note: String::new(),
-            clock: None,
-            tone: domain::Tone::Muted,
-            indent: 8.,
-            group: false,
-            project: None,
-            jobs: false,
-            oneoff: false,
-            open: false,
-        },
-    );
     rows
 }
 fn container_row(c: &Container, indent: f32, now: i64) -> Row {
@@ -1087,6 +1379,7 @@ fn container_row(c: &Container, indent: f32, now: i64) -> Row {
         jobs: false,
         oneoff,
         open: false,
+        stopped: None,
     }
 }
 fn heading(value: impl Into<SharedString>, level: u8) -> Stateful<Div> {
@@ -1102,7 +1395,7 @@ fn heading(value: impl Into<SharedString>, level: u8) -> Stateful<Div> {
 }
 fn quiet(value: impl Into<SharedString>, cx: &App) -> Div {
     div()
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .text_color(cx.theme().muted_foreground)
         .child(value.into())
 }
@@ -1124,7 +1417,7 @@ fn alert(id: impl Into<SharedString>, value: impl Into<SharedString>, cx: &App) 
         .debug_selector(move || id.to_string())
         .role(accesskit::Role::Alert)
         .aria_label(value.clone())
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .text_color(cx.theme().danger)
         .child(value)
 }

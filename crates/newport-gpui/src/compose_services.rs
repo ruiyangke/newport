@@ -156,7 +156,7 @@ impl ContainersPanel {
             .flex()
             .items_center()
             .pb(px(4.))
-            .text_size(px(11.))
+            .text_size(px(crate::ui::FONT_SIZE))
             .text_color(cx.theme().muted_foreground)
             .child(
                 columns
@@ -210,7 +210,7 @@ impl ContainersPanel {
             .aria_label(format!("Services in {}", group.name))
             .w_full()
             .min_w(px(columns.total()))
-            .text_size(px(12.))
+            .text_size(px(crate::ui::FONT_SIZE))
             .child(header);
         let start = page * PAGE_SIZE;
         let end = (start + PAGE_SIZE).min(rows.len());
@@ -249,7 +249,7 @@ impl ContainersPanel {
                         .mb(px(8.))
                         .child(
                             label(format!("{}–{end} of {} services", start + 1, rows.len()))
-                                .text_size(px(11.)),
+                                .text_size(px(crate::ui::FONT_SIZE)),
                         )
                         .child(
                             crate::controls::pagination("compose-service-pages")
@@ -340,7 +340,7 @@ impl ContainersPanel {
                             .outline()
                             .px(px(8.))
                             .content_style(
-                                div().text_size(px(11.5)).style().clone(),
+                                div().text_size(px(crate::ui::FONT_SIZE)).style().clone(),
                                 gpui_kit::component::Size::Size(px(crate::controls::ICON_SIZE)),
                             )
                             .label("Up")
@@ -456,7 +456,7 @@ impl ContainersPanel {
                     .ports(format!("{key}-ports"))
                     .aria_label(published.clone())
                     .font_family(cx.theme().mono_font_family.clone())
-                    .text_size(px(11.5))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .text_color(cx.theme().muted_foreground)
                     .child(published),
             );
@@ -605,13 +605,14 @@ impl ServiceColumns {
             .ceil()
         };
         let mut widths = [
-            measure("Service", 11., &sans) + 10.,
-            measure("State", 11., &sans) + 10.,
-            measure("CPU", 11., &sans),
-            measure("Memory", 11., &sans),
-            measure("Ports", 11., &sans) + 14.,
+            measure("Service", crate::ui::FONT_SIZE, &sans) + 10.,
+            measure("State", crate::ui::FONT_SIZE, &sans) + 10.,
+            measure("CPU", crate::ui::FONT_SIZE, &sans),
+            measure("Memory", crate::ui::FONT_SIZE, &sans),
+            measure("Ports", crate::ui::FONT_SIZE, &sans) + 14.,
             if actions {
-                (measure("Up", 11.5, &sans) + 18.).max(crate::controls::CONTROL_HEIGHT)
+                (measure("Up", crate::ui::FONT_SIZE, &sans) + 18.)
+                    .max(crate::controls::CONTROL_HEIGHT)
             } else {
                 0.
             },
@@ -623,18 +624,27 @@ impl ServiceColumns {
                 .and_then(|container| container.compose.as_ref())
                 .and_then(|labels| labels.number)
                 .filter(|number| *number > 1)
-                .map_or(0., |number| 7. + measure(&format!("#{number}"), 12., &sans));
-            widths[0] =
-                widths[0].max(measure(row.service, 12., &sans) + 7. + 7. + replica_width + 10.);
+                .map_or(0., |number| {
+                    7. + measure(&format!("#{number}"), crate::ui::FONT_SIZE, &sans)
+                });
+            widths[0] = widths[0].max(
+                measure(row.service, crate::ui::FONT_SIZE, &sans) + 7. + 7. + replica_width + 10.,
+            );
             if let Some(container) = row.container {
                 let [cpu, memory, ports] = service_values(container);
-                widths[1] =
-                    widths[1].max(measure(domain::state_of(container).label, 12., &sans) + 10.);
-                widths[2] = widths[2].max(measure(&cpu, 12., &numeric));
-                widths[3] = widths[3].max(measure(&memory, 12., &numeric));
-                widths[4] = widths[4].max(measure(&ports, 11.5, &mono) + 14.);
+                widths[1] = widths[1].max(
+                    measure(
+                        domain::state_of(container).label,
+                        crate::ui::FONT_SIZE,
+                        &sans,
+                    ) + 10.,
+                );
+                widths[2] = widths[2].max(measure(&cpu, crate::ui::FONT_SIZE, &numeric));
+                widths[3] = widths[3].max(measure(&memory, crate::ui::FONT_SIZE, &numeric));
+                widths[4] = widths[4].max(measure(&ports, crate::ui::FONT_SIZE, &mono) + 14.);
             } else {
-                missing_width = missing_width.max(measure(&missing_note(row), 12., &sans) + 10.);
+                missing_width = missing_width
+                    .max(measure(&missing_note(row), crate::ui::FONT_SIZE, &sans) + 10.);
             }
         }
         // A missing service spans State through Ports in the reference table.

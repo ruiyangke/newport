@@ -52,7 +52,7 @@ impl Newport {
                 )
                 .w(px(480.))
                 .p(px(24.))
-                .rounded(px(14.))
+                .rounded(px(crate::ui::RADIUS))
                 .border_0()
                 .centered(true)
                 .overlay_closable(false)
@@ -141,15 +141,18 @@ impl Render for Confirmation {
             .flex_col()
             .pt(px(12.))
             .gap(px(32.))
-            .child(div().text_size(px(12.)).line_height(relative(1.65)).child(
-                StyledText::new(description).with_highlights([(
-                    7..7 + title.len(),
-                    HighlightStyle {
-                        font_weight: Some(FontWeight::SEMIBOLD),
-                        ..Default::default()
-                    },
-                )]),
-            ))
+            .child(
+                div()
+                    .text_size(px(crate::ui::FONT_SIZE))
+                    .line_height(relative(1.65))
+                    .child(StyledText::new(description).with_highlights([(
+                        7..7 + title.len(),
+                        HighlightStyle {
+                            font_weight: Some(FontWeight::SEMIBOLD),
+                            ..Default::default()
+                        },
+                    )])),
+            )
             .when_some(self.error.clone(), |view, error| {
                 view.child(
                     div()
@@ -168,7 +171,7 @@ impl Render for Confirmation {
                         crate::controls::form_button("cancel-delete-forward")
                             .label("Cancel")
                             .min_w(px(76.))
-                            .rounded(px(7.))
+                            .rounded(px(crate::ui::RADIUS))
                             .disabled(self.pending)
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
@@ -176,7 +179,7 @@ impl Render for Confirmation {
                         crate::controls::form_button("confirm-delete-forward")
                             .danger()
                             .min_w(px(76.))
-                            .rounded(px(7.))
+                            .rounded(px(crate::ui::RADIUS))
                             .label(if self.pending {
                                 "Deleting…"
                             } else {

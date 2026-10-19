@@ -105,7 +105,7 @@ fn column() -> Div {
         .w(px(170.))
         .min_w_0()
         .flex_shrink_0()
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
 }
 impl Newport {
     pub(super) fn project_library_caption(
@@ -169,10 +169,10 @@ impl Newport {
             .gap(px(12.))
             .px(px(12.))
             .border_1()
-            .rounded_t(px(8.))
+            .rounded_t(px(crate::ui::RADIUS))
             .border_color(cx.theme().border)
             .bg(cx.theme().sidebar)
-            .text_size(px(11.))
+            .text_size(px(crate::ui::FONT_SIZE))
             .text_color(cx.theme().muted_foreground)
             .child(div().w(px(18.)).flex_shrink_0())
             .child(
@@ -186,10 +186,14 @@ impl Newport {
                     .child(format!("({count})")),
             )
             .when(columns.branch, |v| {
-                v.child(column().text_size(px(11.)).child("Branch"))
+                v.child(column().text_size(px(crate::ui::FONT_SIZE)).child("Branch"))
             })
             .when(columns.tree, |v| {
-                v.child(column().text_size(px(11.)).child("Working tree"))
+                v.child(
+                    column()
+                        .text_size(px(crate::ui::FONT_SIZE))
+                        .child("Working tree"),
+                )
             })
             .child(div().w(px(60.)).flex_shrink_0())
             .into_any_element()
@@ -413,7 +417,7 @@ impl Newport {
             .border_b_1()
             .border_l_1()
             .border_r_1()
-            .when(last, |v| v.rounded_b(px(8.)))
+            .when(last, |v| v.rounded_b(px(crate::ui::RADIUS)))
             .border_color(cx.theme().border)
             .hover(|v| v.bg(theme::row_hover(cx)))
             .child(
@@ -537,7 +541,7 @@ fn identity(
         .w_full()
         .min_w_0()
         .whitespace_normal()
-        .text_size(px(13.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .line_height(px(18.))
         .font_weight(FontWeight::SEMIBOLD);
     div()
@@ -576,7 +580,7 @@ fn identity(
                 .id(("project-path", index))
                 .role(accesskit::Role::Label)
                 .aria_label(path.clone())
-                .text_size(px(11.))
+                .text_size(px(crate::ui::FONT_SIZE))
                 .line_height(px(16.))
                 .text_color(cx.theme().muted_foreground)
                 .truncate()

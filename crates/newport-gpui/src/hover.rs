@@ -13,7 +13,10 @@ pub(crate) fn height(window: &Window) -> f32 {
 }
 
 pub(crate) fn surface(tooltip: Tooltip) -> Tooltip {
-    tooltip.rounded(px(8.)).border_0().text_size(px(12.))
+    tooltip
+        .rounded(px(crate::ui::RADIUS))
+        .border_1()
+        .text_size(px(crate::ui::FONT_SIZE))
 }
 
 pub(crate) trait HoverExt: InteractiveElement + Sized {
@@ -60,7 +63,7 @@ pub(crate) fn text(content: SharedString, window: &mut Window, cx: &mut App) -> 
             .max_w(px(max_width))
             .min_w_0()
             .text_color(cx.theme().popover_foreground)
-            .text_size(px(12.))
+            .text_size(px(crate::ui::FONT_SIZE))
             .line_height(relative(1.45))
             .whitespace_normal()
             .child(content.clone())
@@ -95,7 +98,7 @@ pub(crate) fn detail(
             .when(!title.trim().is_empty(), |view| {
                 view.child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .font_weight(FontWeight::SEMIBOLD)
                         .whitespace_normal()
                         .child(title.clone()),
@@ -108,10 +111,10 @@ pub(crate) fn detail(
                     .w_full()
                     .min_w_0()
                     .whitespace_normal()
-                    .text_size(px(12.))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .when(monospace, |view| {
                         view.font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(11.))
+                            .text_size(px(crate::ui::FONT_SIZE))
                     })
                     .child(body.clone()),
             )

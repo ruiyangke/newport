@@ -10,7 +10,8 @@ enum LogRow {
     Day { key: String, label: String },
     // Keep the visible timestamp and selectable document in the same locale
     // snapshot. A locale change must never invalidate a text run's byte ranges.
-    Line(JournalEntry, String),
+    // The entry's message has its escapes stripped; colours ride alongside.
+    Line(JournalEntry, String, crate::log_line::Styles),
 }
 pub(super) struct Logs {
     pub(super) live: bool,
@@ -24,6 +25,7 @@ pub(super) struct Logs {
     selection: SelectableLog,
     rows: Rc<Vec<LogRow>>,
     source: Vec<JournalEntry>,
+    ansi: crate::log_line::Ansi,
     dataset: Option<(LogTarget, Option<String>)>,
     unseen: usize,
     initialized: bool,
@@ -78,6 +80,7 @@ impl Logs {
             selection,
             rows: Rc::new(vec![]),
             source: vec![],
+            ansi: Default::default(),
             dataset: None,
             unseen: 0,
             initialized: false,
@@ -147,7 +150,11 @@ impl Logs {
         }
     }
     fn rebuild(&mut self, cx: &mut App, filter_changed: bool) {
-        let rows = log_rows(&self.source, self.find.read(cx).value().as_ref());
+        let rows = styled_rows(
+            &self.source,
+            self.find.read(cx).value().as_ref(),
+            &mut self.ansi,
+        );
         if rows == *self.rows {
             return;
         }
@@ -180,7 +187,7 @@ impl Logs {
             rows.iter()
                 .map(|row| match row {
                     LogRow::Day { .. } => None,
-                    LogRow::Line(line, time) => {
+                    LogRow::Line(line, time, _) => {
                         Some(format!("{} {}{}", time, source(line), line.message))
                     }
                 })
@@ -419,7 +426,7 @@ impl ServicesPanel {
                     .border_1()
                     .border_color(cx.theme().border)
                     .focus_visible(|style| style.border_color(cx.theme().ring))
-                    .rounded(px(8.))
+                    .rounded(px(crate::ui::RADIUS))
                     .bg(cx.theme().muted.opacity(0.35))
                     .overflow_hidden()
                     .when(pending, |v| v.child(loading::lines("journal", 12)))
@@ -479,44 +486,56 @@ impl ServicesPanel {
                     .id("services-log-footer")
                     .debug_selector(|| "services-log-footer".into())
                     .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
                     .child(
-                        quiet(footer.clone(), cx)
-                            .flex_1()
-                            .text_size(px(11.))
-                            .id("services-log-status")
-                            .aria_label(footer)
-                            .role(accesskit::Role::Status),
-                    )
-                    .child(
-                        crate::controls::compact_icon_button("services-copy-logs")
-                            .icon(IconName::Copy)
-                            .ghost()
-                            .accessibility_label("Copy visible logs")
-                            .disabled(count == 0 || placeholder)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let text = this
-                                    .logs
-                                    .rows
-                                    .iter()
-                                    .map(|row| match row {
-                                        LogRow::Day { label, .. } => label.clone(),
-                                        LogRow::Line(line, time) => {
-                                            format!("{} {}{}", time, source(line), line.message)
-                                        }
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                            })),
+                        crate::controls::pane_status_bar(cx)
+                            .left(
+                                quiet(footer.clone(), cx)
+                                    .text_size(px(crate::ui::FONT_SIZE))
+                                    .id("services-log-status")
+                                    .aria_label(footer)
+                                    .role(accesskit::Role::Status),
+                            )
+                            .right(
+                                crate::controls::compact_icon_button("services-copy-logs")
+                                    .icon(IconName::Copy)
+                                    .ghost()
+                                    .accessibility_label("Copy visible logs")
+                                    .disabled(count == 0 || placeholder)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let text = this
+                                            .logs
+                                            .rows
+                                            .iter()
+                                            .map(|row| match row {
+                                                LogRow::Day { label, .. } => label.clone(),
+                                                LogRow::Line(line, time, _) => {
+                                                    format!(
+                                                        "{} {}{}",
+                                                        time,
+                                                        source(line),
+                                                        line.message
+                                                    )
+                                                }
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    })),
+                            ),
                     ),
             )
             .into_any_element()
     }
 }
+#[cfg(test)]
 fn log_rows(lines: &[JournalEntry], query: &str) -> Vec<LogRow> {
+    styled_rows(lines, query, &mut Default::default())
+}
+fn styled_rows(
+    lines: &[JournalEntry],
+    query: &str,
+    ansi: &mut crate::log_line::Ansi,
+) -> Vec<LogRow> {
     let needle = query.trim().to_lowercase();
     let stamped: Vec<_> = lines
         .iter()
@@ -528,11 +547,19 @@ fn log_rows(lines: &[JournalEntry], query: &str) -> Vec<LogRow> {
         .is_some_and(|(a, b)| a != b);
     let mut previous = None;
     let mut rows = vec![];
-    for line in lines.iter().filter(|line| {
-        format!("{} {}", source(line), line.message)
-            .to_lowercase()
-            .contains(&needle)
-    }) {
+    for (line, styles) in lines
+        .iter()
+        .map(|line| {
+            let mut line = line.clone();
+            let styles = ansi.strip(&mut line.message);
+            (line, styles)
+        })
+        .filter(|(line, _)| {
+            format!("{} {}", source(line), line.message)
+                .to_lowercase()
+                .contains(&needle)
+        })
+    {
         if spans_days
             && let Some(at) = line.at
             && let Some(key) = crate::localized_time::journal_day_key(at)
@@ -544,7 +571,8 @@ fn log_rows(lines: &[JournalEntry], query: &str) -> Vec<LogRow> {
             });
             previous = Some(key);
         }
-        rows.push(LogRow::Line(line.clone(), timestamp(line.at)));
+        let time = timestamp(line.at);
+        rows.push(LogRow::Line(line, time, styles));
     }
     rows
 }
@@ -585,7 +613,7 @@ fn log_line(
             .my(px(4.))
             .when(index == 0, |v| v.mt_0())
             .into_any_element(),
-        LogRow::Line(line, time) => {
+        LogRow::Line(line, time, styles) => {
             let prefix = source(line);
             crate::log_line::render(
                 "services-log",
@@ -595,6 +623,7 @@ fn log_line(
                     time: Some(time),
                     source: &prefix,
                     message: &line.message,
+                    styles: styles.as_deref(),
                     tone: match domain::priority_tone(line.priority) {
                         Tone::Danger => LogTone::Error,
                         Tone::Warning => LogTone::Warning,

@@ -31,6 +31,7 @@ pub enum Command {
     #[serde(rename = "native.files_download")]
     NativeFilesDownload,
     SshAgentKeys,
+    SshConfigHosts,
     CockpitCollect,
     CockpitHistory,
     GetMetricsCache,
@@ -78,7 +79,12 @@ impl Command {
                 }),
                 Self::ContainersSnapshot => Some(Read::Containers),
                 Self::ContainerInspect => Some(Read::Inspect(argument(args, "container")?)),
-                Self::DockerDisk => Some(Read::Disk),
+                Self::DockerDisk => Some(Read::Disk(
+                    crate::server_queries::DiskPart::parse(
+                        argument::<Option<String>>(args, "part")?.as_deref(),
+                    )
+                    .map_err(error)?,
+                )),
                 Self::ComposeProject => Some(Read::Compose(argument(args, "project")?)),
                 _ => None,
             };
@@ -92,8 +98,15 @@ impl Command {
             }
         }
         match self {
-            Self::FilesWatch => encode(crate::files::vfs::dispatch(services.manager, services.files,
-                serde_json::from_value(args.clone()).map_err(|e| error(e.to_string()))?).await.map_err(error)?),
+            Self::FilesWatch => encode(
+                crate::files::vfs::dispatch(
+                    services.manager,
+                    services.files,
+                    serde_json::from_value(args.clone()).map_err(|e| error(e.to_string()))?,
+                )
+                .await
+                .map_err(error)?,
+            ),
             Self::FilesList => encode(
                 crate::files::files_list_query(
                     services.manager,
@@ -103,7 +116,7 @@ impl Command {
                     argument(args, "path")?,
                     argument(args, "expectedConnection")?,
                     argument::<Option<bool>>(args, "refresh")?.unwrap_or(false),
-                    argument::<Option<String>>(args,"projectRoot")?,
+                    argument::<Option<String>>(args, "projectRoot")?,
                 )
                 .await
                 .map_err(error)?,
@@ -162,6 +175,9 @@ impl Command {
             )),
 
             Self::SshAgentKeys => encode(crate::commands::ssh_agent_keys().await),
+            Self::SshConfigHosts => {
+                encode(crate::commands::ssh_config_hosts().await.map_err(error)?)
+            }
             Self::CockpitCollect => encode(
                 crate::commands::cockpit_collect(
                     services.manager,
@@ -289,9 +305,13 @@ impl Command {
                 .map_err(error)?,
             ),
             Self::DockerDisk => encode(
-                crate::commands::docker_disk(services.manager, argument(args, "id")?)
-                    .await
-                    .map_err(error)?,
+                crate::commands::docker_disk(
+                    services.manager,
+                    argument(args, "id")?,
+                    argument(args, "part")?,
+                )
+                .await
+                .map_err(error)?,
             ),
             Self::DockerPrune => encode(
                 crate::commands::docker_prune(

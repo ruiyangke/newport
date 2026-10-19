@@ -204,9 +204,78 @@ pub fn render_styled_at(text: &str, columns: u16) -> Result<Vec<LogLine>, String
     }
     Ok(lines)
 }
+/// One log message with its styling. Plain text skips the terminal entirely;
+/// styled text is rendered wide and its soft wraps joined back into one line,
+/// so search, copy and severity all see the message without escapes.
+pub fn message(text: &str) -> LogLine {
+    if !text.contains('\x1b') {
+        return LogLine::from(text);
+    }
+    let Ok(rows) = render_styled_at(text, 500) else {
+        return LogLine::from(unstyled(text).as_str());
+    };
+    let mut line = LogLine::default();
+    let mut wrapped = true;
+    for row in rows {
+        if !wrapped {
+            line.text.push(' ');
+        }
+        let offset = line.text.len();
+        line.text.push_str(&row.text);
+        line.spans.extend(row.spans.into_iter().map(|span| Span {
+            range: span.range.start + offset..span.range.end + offset,
+            style: span.style,
+        }));
+        wrapped = row.wraps;
+    }
+    line
+}
+
+/// A message as plain text, for when the terminal cannot render it: the
+/// sanitized text without the styling sequences `sanitize` keeps.
+fn unstyled(text: &str) -> String {
+    let text = sanitize(text).replace("\r\n", " ");
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Only complete CSI sequences survive: skip `[` through the final byte.
+            chars
+                .by_ref()
+                .skip(1)
+                .find(|c| ('\x40'..='\x7e').contains(c));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LogColor, plain_text, render, render_styled, render_styled_at};
+    use super::{LogColor, message, plain_text, render, render_styled, render_styled_at, unstyled};
+    #[test]
+    fn unstyled_fallback_drops_escape_sequences() {
+        assert_eq!(
+            unstyled("\x1b[1;31mERROR\x1b[0m disk\x1b]0;title\x07 full\nnext"),
+            "ERROR disk full next"
+        );
+    }
+    #[test]
+    fn messages_drop_escapes_and_keep_colors_across_long_lines() {
+        let plain = message("plain [32m words");
+        assert_eq!(plain.text, "plain [32m words");
+        assert!(plain.spans.is_empty());
+        let long = "x".repeat(700);
+        let styled = message(&format!("\x1b[32mINFO\x1b[0m {long} \x1b[1;31mend\x1b[0m"));
+        assert_eq!(styled.text, format!("INFO {long} end"));
+        assert!(!styled.wraps);
+        assert_eq!(styled.spans[0].range, 0..4);
+        assert_eq!(styled.spans[0].style.foreground, LogColor::Palette(2));
+        let end = styled.spans.last().unwrap();
+        assert_eq!(&styled.text[end.range.clone()], "end");
+        assert!(end.style.bold);
+    }
     #[test]
     fn styles_keep_utf8_ranges_and_resets_without_escaping_into_copied_text() {
         let text = "Café 雪 🦀";

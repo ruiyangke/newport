@@ -526,34 +526,40 @@ fn compact_list_detail_back_and_arrow_navigation_are_operable(cx: &mut TestAppCo
     assert_eq!(backend.count("service_action"), 0);
 }
 #[gpui::test]
-fn system_disclosure_announces_expansion_and_supports_keyboard(cx: &mut TestAppContext) {
+fn system_services_reveal_from_the_list_and_the_filter(cx: &mut TestAppContext) {
     let (panel, cx, backend) = fixture(cx);
-    assert_eq!(element(cx, "System  1").expanded(), Some(false));
-    click(cx, "System  1");
-    assert!(panel.read_with(cx, |p, _| p.system_open));
-    assert_eq!(element(cx, "System  1").expanded(), Some(true));
-    cx.update(|window, cx| {
-        panel.read(cx).list_focus.clone().focus(window, cx);
-        window.focus_next(cx);
-    });
-    draw(cx);
-    assert_eq!(element(cx, "System  1").focused(), Some(true));
-    let keystroke = Keystroke::parse("space").unwrap();
-    cx.simulate_event(KeyDownEvent {
-        physical_key: None,
-        key_metadata: None,
-        keystroke: keystroke.clone(),
-        is_held: false,
-        prefer_character_input: false,
-    });
-    cx.simulate_event(gpui::KeyUpEvent {
-        physical_key: None,
-        key_metadata: None,
-        keystroke,
-    });
-    draw(cx);
     assert!(!panel.read_with(cx, |p, _| p.system_open));
-    assert_eq!(element(cx, "System  1").expanded(), Some(false));
+    click(cx, "1 system service · Show all");
+    assert!(panel.read_with(cx, |p, _| p.system_open));
+    assert!(cx.update(|window, _| {
+        !snapshots(window)
+            .iter()
+            .any(|e| e.label() == Some("1 system service · Show all"))
+    }));
+    let choice = |cx: &mut VisualTestContext, name: &str| {
+        let at = cx.update(|window, _| {
+            snapshots(window)
+                .into_iter()
+                .find(|e| {
+                    e.label()
+                        .is_some_and(|l| l.starts_with(&format!("{name} (")))
+                })
+                .unwrap_or_else(|| panic!("missing {name}"))
+                .bounds()
+                .center()
+        });
+        cx.simulate_click(at, Default::default());
+        draw(cx);
+    };
+    choice(cx, "Yours");
+    assert!(!panel.read_with(cx, |p, _| p.system_open));
+    choice(cx, "All");
+    assert!(panel.read_with(cx, |p, _| p.system_open));
+    click(cx, "System journal");
+    assert_eq!(
+        panel.read_with(cx, |p, _| p.selected.clone()),
+        Some(Selection::Journal)
+    );
     assert_eq!(backend.count("service_action"), 0);
 }
 #[gpui::test]
@@ -600,33 +606,50 @@ fn destructive_action_requires_review_and_retains_one_write_owner(cx: &mut TestA
 #[test]
 fn groups_search_system_visibility_and_uniform_row_shape() {
     let snapshot = snapshot();
-    let rows = master_rows(&snapshot, "", false, 0);
-    assert!(rows.iter().any(|r| r.name == "System"));
+    let rows = master_rows(&snapshot, "", false, &Default::default(), 0);
+    assert!(!rows.iter().any(|r| r.name == "System"));
     assert!(!rows.iter().any(|r| r.name == "systemd-logind"));
-    let rows = master_rows(&snapshot, "logind", false, 0);
-    assert!(rows.iter().any(|r| r.name == "systemd-logind"));
     assert!(
         rows.iter()
-            .find(|r| r.name == "System")
-            .is_some_and(|r| !r.collapsible)
+            .any(|r| r.reveal && r.name == "1 system service · Show all" && r.key.is_none())
+    );
+    assert!(
+        !rows.iter().any(|r| r.key == Some(Selection::Journal)),
+        "the journal opens from the toolbar"
+    );
+    let rows = master_rows(&snapshot, "", true, &Default::default(), 0);
+    assert!(
+        rows.iter()
+            .any(|r| r.heading && r.name == "System" && r.count == 1)
+    );
+    assert!(rows.iter().any(|r| r.name == "systemd-logind"));
+    assert!(!rows.iter().any(|r| r.reveal));
+    let rows = master_rows(&snapshot, "logind", false, &Default::default(), 0);
+    assert!(rows.iter().any(|r| r.name == "systemd-logind"));
+    let folded = std::collections::BTreeSet::from(["Services".to_owned()]);
+    let rows = master_rows(&snapshot, "", false, &folded, 0);
+    assert!(
+        rows.iter()
+            .any(|r| r.heading && r.name == "Services" && !r.open)
+    );
+    assert!(!rows.iter().any(|r| r.name == "app"));
+    let rows = master_rows(&snapshot, "app", false, &folded, 0);
+    assert!(
+        rows.iter().any(|r| r.name == "app"),
+        "a search opens folded groups"
     );
 
     let empty = ServicesSnapshot::default();
     for query in ["", "  "] {
-        let rows = master_rows(&empty, query, false, 0);
-        assert_eq!(
-            rows.len(),
-            1,
-            "an unfiltered empty list keeps only the journal"
-        );
-        assert_eq!(rows[0].key, Some(Selection::Journal));
+        let rows = master_rows(&empty, query, false, &Default::default(), 0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "No services or timers here.");
     }
     for data in [&snapshot, &empty] {
-        let rows = master_rows(data, "missing-service", false, 0);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].key, Some(Selection::Journal));
-        assert_eq!(rows[1].name, "No services or timers match.");
-        assert_eq!(rows[1].key, None, "empty copy is not a selectable service");
+        let rows = master_rows(data, "missing-service", false, &Default::default(), 0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "No services or timers match.");
+        assert_eq!(rows[0].key, None, "empty copy is not a selectable service");
     }
 }
 
@@ -680,22 +703,22 @@ fn large_master_virtualizes_and_keyboard_end_reveals_selection(cx: &mut TestAppC
     backend.set_snapshot(data);
     panel.update(cx, |p, cx| p.refresh(cx));
     settle(&panel, cx);
-    assert!(cx.debug_bounds("services-row-2").is_some());
-    assert!(cx.debug_bounds("services-row-500").is_none());
-    assert!(cx.debug_bounds("services-row-1001").is_none());
+    assert!(cx.debug_bounds("services-row-1").is_some());
+    assert!(cx.debug_bounds("services-row-499").is_none());
+    assert!(cx.debug_bounds("services-row-1000").is_none());
     cx.update(|window, cx| panel.read(cx).list_focus.clone().focus(window, cx));
     key(cx, "end");
     assert_eq!(
         panel.read_with(cx, |p, _| p.selected.clone()),
         Some(Selection::Unit("system:app-0999.service".into()))
     );
-    let last = cx.debug_bounds("services-row-1001").unwrap();
+    let last = cx.debug_bounds("services-row-1000").unwrap();
     let viewport = cx.debug_bounds("services-master").unwrap();
     assert!(last.bottom() <= viewport.bottom());
     key(cx, "home");
     assert_eq!(
         panel.read_with(cx, |p, _| p.selected.clone()),
-        Some(Selection::Journal)
+        Some(Selection::Unit("system:app-0000.service".into()))
     );
     assert_eq!(backend.count("service_action"), 0);
 }
@@ -1367,13 +1390,13 @@ fn cached_rows_keep_service_and_timer_clocks_current() {
         active: "active".into(),
         ..Default::default()
     });
-    let rows = master_rows(&data, "", false, 1000);
+    let rows = master_rows(&data, "", false, &Default::default(), 1000);
     let service = rows.iter().find(|row| row.name == "app").unwrap();
     let timer = rows
         .iter()
         .find(|row| row.name == "job.timer" || row.name == "job")
         .unwrap();
-    assert_eq!(service.note_at(31000), "30s");
+    assert_eq!(service.note_at(31000), "up 30s");
     assert_eq!(timer.note_at(31000), "in 30s");
     assert!(timer.accessible_at(31000).ends_with("in 30s"));
     assert_eq!(timer.note_at(62000), "waiting");

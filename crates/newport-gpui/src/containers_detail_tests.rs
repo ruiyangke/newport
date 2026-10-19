@@ -1,4 +1,4 @@
-use crate::containers::tests::{click, draw, fixture, select, settle, snapshot};
+use crate::containers::tests::{click, draw, fixture, select, select_logs, settle, snapshot};
 use gpui::{TestAppContext, px, size};
 use gpui_kit as gpui;
 
@@ -6,8 +6,10 @@ use gpui_kit as gpui;
 fn detail_controls_follow_pane_width_and_keep_logs_below_tabs(cx: &mut TestAppContext) {
     let (panel, cx, backend) = fixture(cx);
     for selection in ["p:stack", "c:stack-web-1"] {
-        select(&panel, cx, selection);
-        for width in [1200., 820., 600.] {
+        select_logs(&panel, cx, selection);
+        // 1100 leaves the pane just wide enough beside the resizable list,
+        // which a fixed 280px list estimate would have stacked.
+        for width in [1200., 1100., 820., 600.] {
             cx.simulate_resize(size(px(width), px(1100.)));
             draw(cx);
             let pane = cx.debug_bounds("containers-detail").unwrap();
@@ -15,7 +17,7 @@ fn detail_controls_follow_pane_width_and_keep_logs_below_tabs(cx: &mut TestAppCo
             let tools = cx.debug_bounds("container-detail-log-controls").unwrap();
             let toolbar = cx.debug_bounds("container-log-toolbar").unwrap();
             let logs = cx.debug_bounds("container-log-viewport").unwrap();
-            if pane.size.width - px(32.) > px(720.) {
+            if pane.size.width - px(32.) > px(840.) {
                 assert!(tools.left() >= tabs.right() + px(11.));
                 assert!(
                     tools.top() < tabs.bottom(),

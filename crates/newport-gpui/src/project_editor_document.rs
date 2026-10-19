@@ -108,12 +108,12 @@ impl CodeWorkspace {
             editor
         });
         let subscription = cx.subscribe(&editor, |this, source, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                if let Some(buffer) = this.buffers.iter_mut().find(|b| b.editor == source) {
-                    buffer
-                        .changed
-                        .set(buffer.page.is_none() && source.read(cx).text() != &buffer.saved);
-                }
+            if matches!(event, InputEvent::Change)
+                && let Some(buffer) = this.buffers.iter_mut().find(|b| b.editor == source)
+            {
+                buffer
+                    .changed
+                    .set(buffer.page.is_none() && source.read(cx).text() != &buffer.saved);
             }
             cx.notify();
         });
@@ -129,8 +129,40 @@ impl CodeWorkspace {
             error: None,
             conflict: None,
             page: loaded.page,
+            failure: None,
             _subscription: subscription,
         })
+    }
+
+    /// A tab for a file that could not be opened. It selects, closes and
+    /// retries like any tab, but holds no text and explains why in its place.
+    pub(super) fn failed_buffer(
+        path: String,
+        failure: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Buffer {
+        let editor = cx.new(|cx| {
+            let mut editor = EditorState::new(window, cx);
+            editor.set_readonly(true, cx);
+            editor
+        });
+        let subscription = cx.subscribe(&editor, |_, _, _: &InputEvent, _| {});
+        Buffer {
+            path,
+            editor,
+            saved: String::new(),
+            revision: String::new(),
+            crlf: false,
+            bom: false,
+            saving: false,
+            changed: std::cell::Cell::new(false),
+            error: None,
+            conflict: None,
+            page: None,
+            failure: Some(failure),
+            _subscription: subscription,
+        }
     }
     fn turn_section(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(buffer) = self.active.and_then(|i| self.buffers.get(i)) else {
@@ -221,7 +253,7 @@ impl CodeWorkspace {
             .flex_shrink_0()
             .border_b_1()
             .border_color(cx.theme().border)
-            .text_size(px(crate::project_ui::FONT_SIZE))
+            .text_size(px(crate::ui::FONT_SIZE))
             .text_color(cx.theme().muted_foreground)
             .child(div().flex_1().min_w_0().truncate().child(format!(
                 "{} · Bytes {}–{} of {} · Search this section",
@@ -235,7 +267,7 @@ impl CodeWorkspace {
                 page.size
             )))
             .child(
-                crate::project_ui::compact_button("file-previous-section")
+                crate::controls::compact_button("file-previous-section")
                     .label("Previous")
                     .ghost()
                     .disabled(busy || page.previous.is_empty())
@@ -244,7 +276,7 @@ impl CodeWorkspace {
                     ),
             )
             .child(
-                crate::project_ui::compact_button("file-next-section")
+                crate::controls::compact_button("file-next-section")
                     .label("Next")
                     .ghost()
                     .disabled(busy || page.next.is_none())

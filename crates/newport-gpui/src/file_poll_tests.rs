@@ -1,6 +1,6 @@
 //! Poll the real retained browser through strict, delayed local IPC replies.
-use crate::file_tree::tests::{Host, reply};
-use crate::{Newport, Page, file_tree};
+use crate::file_test_backend::{Host, reply};
+use crate::{Newport, Page};
 use gpui_kit::{
     AppContext, Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext, Window,
     div,
@@ -34,13 +34,6 @@ fn fixture(cx: &mut TestAppContext) -> (Entity<Newport>, &mut VisualTestContext,
                 "fixture".into(),
                 browser.connection.clone(),
             );
-            browser.tree = cx.new(|_| {
-                file_tree::FolderTree::new(newport_client::file_browser::folders::Folders::new(
-                    peer.backend(),
-                    "fixture".into(),
-                    browser.connection.clone(),
-                ))
-            });
             browser.active = true;
             host = Some(peer);
             view
@@ -195,7 +188,7 @@ fn file_filter_notifications_follow_the_captured_server_and_connection(cx: &mut 
             .into();
             let browser = view.file_browsers.get_mut("fixture").unwrap();
             browser.active = scope != "inactive";
-            browser.page = 2;
+            browser.selected = Some("/kept".into());
             browser.connection = if scope == "replacement" {
                 json!({"replacement":true})
             } else {
@@ -205,8 +198,8 @@ fn file_filter_notifications_follow_the_captured_server_and_connection(cx: &mut 
         filter.update(cx, |_, cx| cx.emit(InputEvent::Change));
         cx.run_until_parked();
         assert_eq!(
-            view.read_with(cx, |view, _| view.file_browsers["fixture"].page),
-            if scope == "visible" { 0 } else { 2 },
+            view.read_with(cx, |view, _| view.file_browsers["fixture"].selected.clone()),
+            (scope != "visible").then(|| "/kept".to_owned()),
             "{scope}"
         );
         assert_eq!(
@@ -238,7 +231,7 @@ fn projected_file_targets_revalidate_after_navigation_and_connection_changes(
     let targets = view.read_with(cx, |view, cx| {
         let entries = view.file_browsers["fixture"].entries(cx);
         let directory = view.file_action_target("/work").unwrap();
-        entries[super::page_range(entries.len(), 9)]
+        entries[360..]
             .iter()
             .map(|entry| directory.for_entry(entry).unwrap())
             .collect::<Vec<_>>()

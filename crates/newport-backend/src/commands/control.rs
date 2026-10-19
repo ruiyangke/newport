@@ -676,7 +676,9 @@ pub async fn open_tunnel(
         expected.as_ref(),
         expected_connection.as_ref(),
     )?;
-    let url = format!("http://{endpoint}");
+    // Open the same address the row shows. Forwards listen on IPv4 loopback,
+    // reachable as localhost, which keeps the cookies and origins users expect.
+    let url = format!("http://localhost:{}", endpoint.port());
     // The validated endpoint is now immutable. External opener work must not
     // hold up snapshots, configuration changes, or unrelated tunnel operations.
     tokio::task::spawn_blocking(move || desktop.open_url(&url))

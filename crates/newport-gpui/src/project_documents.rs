@@ -134,6 +134,7 @@ impl Documents {
 #[derive(Clone)]
 pub(super) enum Event {
     Open(ReviewDocument),
+    CloseRepository,
     Stage {
         snapshot: String,
         entries: Vec<Value>,
@@ -490,7 +491,7 @@ impl project_editor::CodeWorkspace {
                 view.when_some(self.navigator.filter.as_ref(), |view, input| {
                     view.child(
                         div().p_2().child(
-                            crate::project_ui::input(input).aria_label("Filter changed files"),
+                            crate::controls::input(input).aria_label("Filter changed files"),
                         ),
                     )
                 })
@@ -500,7 +501,7 @@ impl project_editor::CodeWorkspace {
                     div()
                         .px_2()
                         .py_1()
-                        .text_size(px(crate::project_ui::FONT_SIZE))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .text_color(cx.theme().danger)
                         .child(error),
                 )
@@ -558,14 +559,14 @@ impl project_editor::CodeWorkspace {
                                     let toggle_group = title.to_owned();
                                     let mut heading_content = div()
                                         .w_full().justify_start().gap(px(5.))
-                                        .text_size(px(crate::project_ui::FONT_SIZE));
+                                        .text_size(px(crate::ui::FONT_SIZE));
                                     return div()
                                         .id(SharedString::from(format!("project-nav-group-row-{title}")))
                                         .hover(|style| style.bg(theme::row_hover(cx)))
                                         .w_full().min_w_0().h(px(28.)).pl(px(12.)).pr(px(8.))
                                         .flex().items_center().gap(px(8.))
-                                        .text_size(px(crate::project_ui::FONT_SIZE)).text_color(cx.theme().muted_foreground)
-                                        .child(crate::project_ui::compact_button(SharedString::from(format!("project-nav-group-{title}")))
+                                        .text_size(px(crate::ui::FONT_SIZE)).text_color(cx.theme().muted_foreground)
+                                        .child(crate::controls::compact_button(SharedString::from(format!("project-nav-group-{title}")))
                                             .ghost()
                                             .custom(gpui_kit::component::button::ButtonCustomVariant::new(cx)
                                                 .color(cx.theme().transparent)
@@ -583,7 +584,7 @@ impl project_editor::CodeWorkspace {
                                                 }
                                                 cx.notify();
                                             })))
-                                        .child(div().text_size(px(crate::project_ui::FONT_SIZE)).child(count.to_string()))
+                                        .child(div().text_size(px(crate::ui::FONT_SIZE)).child(count.to_string()))
                                         .child(div().w(px(24.)).flex_shrink_0().flex().items_center().justify_center()
                                             .when(group != ChangeGroup::Conflicts, |slot| slot.child(
                                                 crate::controls::checkbox(SharedString::from(format!("project-stage-shown-{title}")))
@@ -628,7 +629,7 @@ impl project_editor::CodeWorkspace {
                                     .items_center()
                                     .min_w_0()
                                     .child(
-                                        crate::project_ui::compact_button(SharedString::from(format!("project-nav-entry-{identity}")))
+                                        crate::controls::compact_button(SharedString::from(format!("project-nav-entry-{identity}")))
                                             .ghost()
                                             .h_full()
                                             .flex_1()
@@ -669,8 +670,8 @@ impl project_editor::CodeWorkspace {
                                             })
                                             .when(index == 0, |button| button.child(
                                                 div().debug_selector(move || format!("project-nav-content-{i}"))
-                                                    .flex().items_center().gap(px(7.)).min_w_0().w_full().text_size(px(crate::project_ui::FONT_SIZE))
-                                                    .child(git_file_row::badge(change_mark(&entry, staged), cx))
+                                                    .flex().items_center().gap(px(7.)).min_w_0().w_full().text_size(px(crate::ui::FONT_SIZE))
+                                                    .child(git_file_row::badge(change_mark(entry, staged), cx))
                                                     .child(git_file_row::filename_first(&title, cx))
                                             ))
                                             .when(index == 1, |button| button
@@ -684,14 +685,14 @@ impl project_editor::CodeWorkspace {
                                                     .child(
                                                         div()
                                                             .truncate()
-                                                            .text_size(px(crate::project_ui::FONT_SIZE))
+                                                            .text_size(px(crate::ui::FONT_SIZE))
                                                             .line_height(px(17.))
                                                             .child(title),
                                                     )
                                                     .when(index == 1, |view| {
                                                         view.child(
                                                             git_commit_header::history_row_identity(
-                                                                &entry, cx,
+                                                                entry, cx,
                                                             ),
                                                         )
                                                     }),
@@ -735,7 +736,7 @@ impl project_editor::CodeWorkspace {
                 .min_h_0(),
             )
             .when(collection.page["metadata"]["truncated"] == true, |view| {
-                view.child(crate::project_ui::label("Listing incomplete").px_2().text_size(px(crate::project_ui::FONT_SIZE)))
+                view.child(crate::label("Listing incomplete").px_2().text_size(px(crate::ui::FONT_SIZE)))
             })
             .into_any_element()
     }
@@ -952,8 +953,8 @@ mod tests {
             ..Default::default()
         };
         nav.collections[0].set_page(json!({"snapshot":"current","entries":[entry]}));
-        assert!(nav.can_stage("current", &[entry.clone()]));
-        assert!(!nav.can_stage("old", &[entry.clone()]));
+        assert!(nav.can_stage("current", std::slice::from_ref(&entry)));
+        assert!(!nav.can_stage("old", std::slice::from_ref(&entry)));
         let mut changed = entry.clone();
         changed["flags"] = json!(512);
         assert!(
@@ -962,10 +963,10 @@ mod tests {
         );
         assert!(!nav.can_stage("current", &[file("other.rs", true).entry]));
         nav.collections[0].loading = true;
-        assert!(!nav.can_stage("current", &[entry.clone()]));
+        assert!(!nav.can_stage("current", std::slice::from_ref(&entry)));
         nav.collections[0].loading = false;
         nav.filter_changed = Some(Instant::now());
-        assert!(!nav.can_stage("current", &[entry.clone()]));
+        assert!(!nav.can_stage("current", std::slice::from_ref(&entry)));
         nav.filter_changed = None;
         nav.invalidated = true;
         assert!(!nav.can_stage("current", &[entry]));

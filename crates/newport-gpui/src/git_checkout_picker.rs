@@ -459,31 +459,28 @@ impl Newport {
             .p_0()
             .offset(px(6.))
             .trigger(
-                crate::project_ui::button("choose-worktree")
+                crate::controls::button("choose-worktree")
                     .ghost()
                     .w_full()
                     .min_w_0()
                     .px(px(8.))
-                    .icon(IconName::FolderTree)
+                    .icon(Icon::new(IconName::FolderTree).text_color(cx.theme().muted_foreground))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(6.))
                             .min_w_0()
-                            .text_size(px(crate::project_ui::FONT_SIZE))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(crate::ui::FONT_SIZE))
+                            .font_weight(FontWeight::NORMAL)
                             .child(div().min_w_0().truncate().child(label.clone()))
                             .when_some(self.git.checkout_summary.count(), |view, count| {
                                 view.child(
                                     div()
                                         .flex_shrink_0()
-                                        .px(px(5.))
-                                        .rounded_full()
-                                        .bg(cx.theme().muted)
                                         .text_color(cx.theme().muted_foreground)
-                                        .text_size(px(crate::project_ui::FONT_SIZE))
-                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_size(px(crate::ui::FONT_SIZE))
+                                        .font_weight(FontWeight::NORMAL)
                                         .child(count.to_string()),
                                 )
                             }),
@@ -629,12 +626,12 @@ impl Newport {
                     .when_some(self.git.checkouts.input.as_ref(), |view, input| {
                         view.child(
                             div().flex_1().min_w_0().child(
-                                crate::project_ui::input(input).aria_label("Filter worktrees"),
+                                crate::controls::input(input).aria_label("Filter worktrees"),
                             ),
                         )
                     })
                     .child(
-                        crate::project_ui::button("checkout-new-worktree")
+                        crate::controls::button("checkout-new-worktree")
                             .icon(IconName::Plus)
                             .label("New worktree")
                             .disabled(pending || !self.can_create_picker_worktree())
@@ -648,7 +645,7 @@ impl Newport {
                 self.resources.get(MORE).is_some_and(|r| r.error.is_some()),
                 |view| {
                     view.child(self.status(MORE, cx)).child(
-                        crate::project_ui::button("retry-more-checkouts")
+                        crate::controls::button("retry-more-checkouts")
                             .label("Retry loading worktrees")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.load_checkouts(true);
@@ -658,7 +655,7 @@ impl Newport {
                 },
             )
             .when_some(self.git.checkouts.error.clone(), |view, error| {
-                view.child(crate::project_ui::label(error).p_3())
+                view.child(crate::label(error).p_3())
             })
             .when(
                 !pending
@@ -666,7 +663,7 @@ impl Newport {
                         || self.resources.get(FIRST).is_some_and(|r| r.error.is_some())),
                 |view| {
                     view.child(
-                        crate::project_ui::button("retry-checkouts")
+                        crate::controls::button("retry-checkouts")
                             .label("Reload worktrees")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.git.checkouts.error = None;
@@ -714,11 +711,20 @@ impl Newport {
                                         .child(
                                             div()
                                                 .id(("checkout-hover", index))
-                                                .when(!text(&hover_entry["path"], "display").trim().is_empty(), |view| {
-                                                    view.hoverable_tooltip(move |window, cx| {
-                                                        git_worktree_view::hover(&hover_entry, window, cx)
-                                                    })
-                                                })
+                                                .when(
+                                                    !text(&hover_entry["path"], "display")
+                                                        .trim()
+                                                        .is_empty(),
+                                                    |view| {
+                                                        view.hoverable_tooltip(move |window, cx| {
+                                                            git_worktree_view::hover(
+                                                                &hover_entry,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        })
+                                                    },
+                                                )
                                                 .flex_1()
                                                 .min_w_0()
                                                 .flex()
@@ -727,8 +733,8 @@ impl Newport {
                                                 .gap_1()
                                                 .child(div().w_full().truncate().child(title))
                                                 .child(
-                                                    crate::project_ui::label(subtitle)
-                                                        .text_size(px(crate::project_ui::FONT_SIZE))
+                                                    crate::label(subtitle)
+                                                        .text_size(px(crate::ui::FONT_SIZE))
                                                         .w_full()
                                                         .truncate(),
                                                 ),
@@ -819,11 +825,11 @@ impl Newport {
                     .items_center()
                     .gap_2()
                     .child(
-                        crate::project_ui::label(format!(
+                        crate::label(format!(
                             "{} loaded",
                             rows(&self.git.checkouts.page["entries"]).len()
                         ))
-                        .text_size(px(crate::project_ui::FONT_SIZE))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .flex_1(),
                     ),
             )

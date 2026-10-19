@@ -42,6 +42,7 @@ fn restored_fixture(
                     query: String::new(),
                     selected: Some(Selection::Unit("system:app-0900.service".into())),
                     system_open: false,
+                    collapsed: Default::default(),
                     tab: 0,
                     log_level: "all".into(),
                     live: false,
@@ -79,10 +80,10 @@ fn restored_deep_selection_is_revealed_after_initial_snapshot(cx: &mut TestAppCo
     let (panel, cx, backend) = restored_fixture(cx);
     // Rendering the initial skeleton must not consume the pending reveal.
     assert!(panel.read_with(cx, |panel, _| panel.client.snapshot().is_none()));
-    assert!(cx.debug_bounds("services-row-902").is_none());
+    assert!(cx.debug_bounds("services-row-901").is_none());
     tests::settle(&panel, cx);
 
-    let row = cx.debug_bounds("services-row-902").unwrap();
+    let row = cx.debug_bounds("services-row-901").unwrap();
     let viewport = cx.debug_bounds("services-master").unwrap();
     assert!(
         row.top() >= viewport.top(),
@@ -93,7 +94,7 @@ fn restored_deep_selection_is_revealed_after_initial_snapshot(cx: &mut TestAppCo
         "restored row is below the viewport"
     );
     assert!(
-        cx.debug_bounds("services-row-500").is_none(),
+        cx.debug_bounds("services-row-499").is_none(),
         "master remains virtualized"
     );
     assert_eq!(backend.count("service_action"), 0);
@@ -103,7 +104,7 @@ fn restored_deep_selection_is_revealed_after_initial_snapshot(cx: &mut TestAppCo
 fn refreshed_snapshot_preserves_scroll_away_from_restored_selection(cx: &mut TestAppContext) {
     let (panel, cx, backend) = restored_fixture(cx);
     tests::settle(&panel, cx);
-    let selected = cx.debug_bounds("services-row-902").unwrap();
+    let selected = cx.debug_bounds("services-row-901").unwrap();
     let original = panel.read_with(cx, |panel, _| {
         panel.list_scroll.0.borrow().base_handle.offset()
     });
@@ -120,7 +121,7 @@ fn refreshed_snapshot_preserves_scroll_away_from_restored_selection(cx: &mut Tes
         scrolled.y > original.y,
         "wheel scrolling must move the master"
     );
-    assert!(cx.debug_bounds("services-row-902").is_none());
+    assert!(cx.debug_bounds("services-row-901").is_none());
 
     let mut fresh = many_services();
     fresh.services[900].description = "Updated after restoring the selection".into();
@@ -134,7 +135,7 @@ fn refreshed_snapshot_preserves_scroll_away_from_restored_selection(cx: &mut Tes
         after, scrolled,
         "fresh readings must not recenter the master"
     );
-    assert!(cx.debug_bounds("services-row-902").is_none());
+    assert!(cx.debug_bounds("services-row-901").is_none());
     assert_eq!(
         panel.read_with(cx, |panel, _| panel.selected.clone()),
         Some(Selection::Unit("system:app-0900.service".into()))

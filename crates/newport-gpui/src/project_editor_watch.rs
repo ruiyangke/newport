@@ -128,16 +128,15 @@ impl CodeWorkspace {
             .collect();
         let reset = value["reset"] == true;
         for directory in directories {
-            if reset
+            if (reset
                 || paths.iter().any(|p| {
                     *p == directory
                         || std::path::Path::new(p).parent().and_then(|p| p.to_str())
                             == Some(directory)
-                })
+                }))
+                && self.directories.contains_key(directory)
             {
-                if self.directories.contains_key(directory) {
-                    self.watch.folders.insert(directory.clone());
-                }
+                self.watch.folders.insert(directory.clone());
             }
         }
         for buffer in &self.buffers {

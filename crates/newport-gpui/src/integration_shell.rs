@@ -27,7 +27,7 @@ impl Render for ShellCode {
         div()
             .mt(px(16.))
             .mb(px(10.))
-            .rounded(px(6.))
+            .rounded(px(crate::ui::RADIUS))
             .border_1()
             .border_color(cx.theme().border)
             .overflow_hidden()
@@ -45,7 +45,7 @@ impl Render for ShellCode {
                             .role(Role::Label)
                             .aria_label("Shell configuration")
                             .test_support()
-                            .text_size(px(11.))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .text_color(cx.theme().muted_foreground)
                             .child("Shell configuration"),
                     )
@@ -86,7 +86,7 @@ impl Render for ShellCode {
                         cx.theme().mono_font_family.clone()
                     })
                     .font_weight(FontWeight::NORMAL)
-                    .text_size(px(11.))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .line_height(relative(1.5))
                     .p(px(12.)),
             )

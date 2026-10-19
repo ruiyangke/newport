@@ -4,13 +4,40 @@ use crate::hover::HoverExt as _;
 use crate::selectable_log::SelectableLog;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{prelude::*, *};
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tone {
     Normal,
     Warning,
     Error,
+}
+
+/// Colour spans of one message, relative to the message text.
+pub(crate) type Styles = Option<Rc<[crate::git_log_text::Span]>>;
+
+/// Escape-free messages and their styling, parsed once per distinct message.
+#[derive(Default)]
+pub(crate) struct Ansi {
+    cache: HashMap<String, (String, Rc<[crate::git_log_text::Span]>)>,
+}
+impl Ansi {
+    /// Replaces `message` with its plain text and returns its styling, if any.
+    pub(crate) fn strip(&mut self, message: &mut String) -> Styles {
+        if !message.contains('\x1b') {
+            return None;
+        }
+        // Bounded logs hold a few thousand lines; start over rather than track use.
+        if self.cache.len() > 8192 {
+            self.cache.clear();
+        }
+        let (plain, spans) = self.cache.entry(message.clone()).or_insert_with(|| {
+            let line = crate::git_log_text::message(message);
+            (line.text, line.spans.into())
+        });
+        *message = plain.clone();
+        (!spans.is_empty()).then(|| spans.clone())
+    }
 }
 
 /// `source` is an already formatted prefix, including its trailing separator.
@@ -21,6 +48,7 @@ pub(crate) struct LogLine<'a> {
     pub(crate) time: Option<&'a str>,
     pub(crate) source: &'a str,
     pub(crate) message: &'a str,
+    pub(crate) styles: Option<&'a [crate::git_log_text::Span]>,
     pub(crate) tone: Tone,
 }
 
@@ -34,22 +62,40 @@ pub(crate) fn render(
 ) -> AnyElement {
     let text = format!("{}{}", line.source, line.message);
     let message_start = line.time.map_or(0, |time| time.len() + 1);
-    let mut highlights = vec![(
-        0..line.source.len(),
+    let offset = line.source.len();
+    let styled = std::iter::once((
+        0..offset,
         HighlightStyle {
             color: Some(cx.theme().muted_foreground),
             ..Default::default()
         },
-    )];
-    highlights.extend(matches(&text, query).into_iter().map(|range| {
-        (
-            range,
-            HighlightStyle {
-                background_color: Some(cx.theme().primary.opacity(0.16)),
-                ..Default::default()
-            },
-        )
-    }));
+    ))
+    .chain(line.styles.into_iter().flatten().map(|span| {
+        let mut style = crate::git_log_view::highlight(&span.style, cx);
+        // Default-coloured spans (bold, underline) keep the row's tone.
+        if span.style.foreground == crate::git_log_text::LogColor::Palette(256)
+            && !span.style.inverse
+            && !span.style.dim
+        {
+            style.color = None;
+        }
+        (span.range.start + offset..span.range.end + offset, style)
+    }))
+    .filter(|(range, _)| !range.is_empty())
+    .collect::<Vec<_>>();
+    let found = matches(&text, query)
+        .into_iter()
+        .map(|range| {
+            (
+                range,
+                HighlightStyle {
+                    background_color: Some(cx.theme().primary.opacity(0.16)),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let highlights = combine_highlights(styled, found).collect::<Vec<_>>();
     let accent = match line.tone {
         Tone::Normal => None,
         Tone::Warning => Some(crate::theme::warning(cx.theme().is_dark())),
@@ -75,7 +121,7 @@ pub(crate) fn render(
         .pl(px(8.))
         .py(px(1.))
         .font_family(cx.theme().mono_font_family.clone())
-        .text_size(px(11.5))
+        .text_size(px(crate::ui::FONT_SIZE))
         .line_height(relative(1.6))
         .when_some(line.time, |v, time| {
             v.child(
@@ -119,7 +165,7 @@ pub(crate) fn day_strip(day: &str, cx: &App) -> Div {
         .px(px(10.))
         .py(px(2.))
         .font_family(crate::theme::UI_FONT)
-        .text_size(px(10.5))
+        .text_size(px(crate::ui::FONT_SIZE))
         .line_height(relative(1.6))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(cx.theme().muted_foreground)
@@ -295,6 +341,7 @@ mod tests {
                                         time: (index == 1).then_some(TIME),
                                         source: SOURCE,
                                         message: MESSAGE,
+                                        styles: None,
                                         tone: Tone::Normal,
                                     },
                                     "café",

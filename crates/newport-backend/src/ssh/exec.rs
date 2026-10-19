@@ -91,6 +91,29 @@ where
 }
 
 impl Connection {
+    /// Retry only channel admission, before any command or mutation is sent.
+    /// A live SSH connection can hit sshd's MaxSessions limit. Let cached,
+    /// currently unused feature channels yield without interrupting active work.
+    pub(super) async fn open_session(&self) -> Result<russh::Channel<russh::client::Msg>> {
+        let _opening = self.session_open.lock().await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.handle.channel_open_session().await {
+                Ok(channel) => return Ok(channel),
+                Err(error) if channel_capacity_error(&error) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(anyhow::Error::new(error).context(
+                            "SSH session capacity unavailable. The server refused another channel; retry after active operations finish",
+                        ));
+                    }
+                    self.channel_pressure
+                        .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
     async fn command(&self, command: &str, input: Option<&[u8]>) -> Result<CommandResult> {
         self.command_with_progress(command, input, None, None).await
     }
@@ -101,9 +124,14 @@ impl Connection {
         progress: Option<&(dyn Fn(usize) + Send + Sync)>,
         mut resource: Option<crate::agent_payload::Upload>,
     ) -> Result<CommandResult> {
-        let channel = self.handle.channel_open_session().await?;
-        channel.exec(true, command).await?;
+        let channel = self.open_session().await?;
         let (mut reader, writer) = channel.split();
+        // Deadlines and caller cancellation must release the session slot too.
+        let writer = super::SessionChannel {
+            writer: Some(writer),
+            connection: self,
+        };
+        writer.exec(true, command).await?;
         let upload_done = tokio::sync::Notify::new();
         let send = async {
             if let Some(resource) = &mut resource {
@@ -179,6 +207,15 @@ impl Connection {
     }
 }
 
+fn channel_capacity_error(error: &russh::Error) -> bool {
+    matches!(
+        error,
+        russh::Error::ChannelOpenFailure(
+            russh::ChannelOpenFailure::ConnectFailed | russh::ChannelOpenFailure::ResourceShortage
+        )
+    )
+}
+
 // Preserve retryable setup failures before turning errors into UI strings.
 fn session_error(error: anyhow::Error) -> String {
     let transient = super::is_transient_connection_error(&error);
@@ -200,11 +237,16 @@ pub(crate) struct ConnectFailure {
     pub retryable: bool,
 }
 impl ExecSession {
-    pub(crate) async fn sftp(&self) -> Result<russh_sftp::client::RawSftpSession> {
-        let channel = self.0.handle.channel_open_session().await?;
-        channel.request_subsystem(true, "sftp").await?;
-        let session = russh_sftp::client::RawSftpSession::new(channel.into_stream());
-        session.init().await?;
+    pub(crate) fn channel_pressure(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.0.channel_pressure.subscribe()
+    }
+    pub(crate) async fn sftp(&self) -> Result<std::sync::Arc<super::sftp::Session>> {
+        let mut cached = self.0.sftp.lock().await;
+        if let Some(session) = cached.upgrade().filter(|s| !s.is_closed()) {
+            return Ok(session);
+        }
+        let session = std::sync::Arc::new(super::sftp::Session::open(&self.0).await?);
+        *cached = std::sync::Arc::downgrade(&session);
         Ok(session)
     }
     pub(crate) async fn terminal(
@@ -312,13 +354,13 @@ impl ExecSession {
         command: &str,
     ) -> Result<russh::ChannelStream<russh::client::Msg>, String> {
         tokio::time::timeout(COMMAND_TIMEOUT, async {
-            let channel = self.0.handle.channel_open_session().await?;
+            let channel = self.0.open_session().await?;
             channel.exec(true, command).await?;
-            Ok::<_, russh::Error>(channel.into_stream())
+            Ok::<_, anyhow::Error>(channel.into_stream())
         })
         .await
         .map_err(|_| "SSH command timed out starting agent".to_owned())?
-        .map_err(|e| session_error(e.into()))
+        .map_err(session_error)
     }
 
     pub fn is_closed(&self) -> bool {
@@ -340,6 +382,207 @@ impl ExecSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "Run with npm run test:ssh -- ssh::exec::tests::session_capacity"]
+    async fn session_capacity_concurrent_sftp_uses_one_slot_and_replaces_closed_stream() {
+        let session = std::sync::Arc::new(
+            ExecSession::connect(&super::super::integration_tests::server())
+                .await
+                .unwrap(),
+        );
+        let mut held = Vec::new();
+        for _ in 0..9 {
+            held.push(
+                session
+                    .0
+                    .handle
+                    .channel_open_session()
+                    .await
+                    .unwrap()
+                    .into_stream(),
+            );
+        }
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..16 {
+            let session = session.clone();
+            requests.spawn(async move {
+                let sftp = session.sftp().await.unwrap();
+                assert!(!sftp.realpath(".").await.unwrap().files.is_empty());
+                sftp
+            });
+        }
+        let mut clients = Vec::new();
+        while let Some(result) = requests.join_next().await {
+            clients.push(result.unwrap());
+        }
+        assert!(
+            clients
+                .iter()
+                .all(|client| std::sync::Arc::ptr_eq(client, &clients[0]))
+        );
+        assert!(!session.is_closed());
+        clients[0].close_session().unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !clients[0].is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let replacement = session.sftp().await.unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&replacement, &clients[0]));
+        replacement.realpath(".").await.unwrap();
+        drop(replacement);
+        drop(clients);
+        assert_eq!(session.execute("printf ok", None).await.unwrap(), "ok");
+        drop(held);
+        session.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "Run with npm run test:ssh -- ssh::exec::tests::session_capacity"]
+    async fn session_capacity_waits_for_release_and_cancellation_preserves_transport() {
+        let session = std::sync::Arc::new(
+            ExecSession::connect(&super::super::integration_tests::server())
+                .await
+                .unwrap(),
+        );
+        let mut held = Vec::new();
+        for _ in 0..10 {
+            held.push(
+                session
+                    .0
+                    .handle
+                    .channel_open_session()
+                    .await
+                    .unwrap()
+                    .into_stream(),
+            );
+        }
+        // A cancelled request must release channel admission without closing
+        // any active channel or re-authenticating the shared connection.
+        let mut pressure = session.channel_pressure();
+        let pending = {
+            let session = session.clone();
+            tokio::spawn(async move { session.execute("printf ok", None).await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), pressure.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        let pending = {
+            let session = session.clone();
+            tokio::spawn(async move { session.execute("printf ok", None).await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), pressure.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(held.pop());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), pending)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            "ok"
+        );
+        assert!(session.responsive().await);
+        drop(held);
+        session.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "Run with npm run test:ssh -- session_capacity"]
+    async fn session_capacity_cancelled_exec_releases_its_slot() {
+        let session = std::sync::Arc::new(
+            ExecSession::connect(&super::super::integration_tests::server())
+                .await
+                .unwrap(),
+        );
+        let mut held = Vec::new();
+        for _ in 0..9 {
+            held.push(
+                session
+                    .0
+                    .handle
+                    .channel_open_session()
+                    .await
+                    .unwrap()
+                    .into_stream(),
+            );
+        }
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let command = {
+            let session = session.clone();
+            let started = started.clone();
+            tokio::spawn(async move {
+                let progress = |_| started.notify_one();
+                session
+                    .0
+                    .command_with_progress(
+                        "stall-until-close",
+                        Some(b"input"),
+                        Some(&progress),
+                        None,
+                    )
+                    .await
+            })
+        };
+        // The upload callback proves exec and input were sent. Cancellation
+        // now tests an in-flight command, not just waiting for admission.
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        command.abort();
+        assert!(command.await.unwrap_err().is_cancelled());
+        assert_eq!(session.execute("printf ok", None).await.unwrap(), "ok");
+        assert!(session.responsive().await);
+        drop(held);
+        session.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "Run with npm run test:ssh -- ssh::exec::tests::session_capacity"]
+    async fn session_capacity_reclaims_idle_git_and_keeps_active_workers() {
+        struct Identity;
+        impl crate::git::ClientIdentity for Identity {
+            fn git_client_id(&self) -> crate::git::IdentityFuture {
+                Box::pin(std::future::ready(Ok(uuid::Uuid::new_v4().to_string())))
+            }
+        }
+        let server = super::super::integration_tests::server();
+        let directory = tempfile::tempdir().unwrap();
+        let mut manager =
+            crate::manager::Manager::new(crate::profile::Store::for_test(directory.path().into()));
+        manager.config.servers.push(server.clone());
+        let owner = manager.sessions.session(&server, 0);
+        let state = crate::manager::share(manager);
+        crate::git::git_connect(&Identity, &state, server.id)
+            .await
+            .unwrap();
+        let lease = owner.acquire(&server).await.unwrap();
+        let generation = owner.transport_snapshot().generation;
+        let mut held = Vec::new();
+        for _ in 0..8 {
+            let stream = lease.launch(crate::agent::Service::Git).await.unwrap().0;
+            held.push(crate::git::client::Client::start(stream).await.unwrap().0);
+        }
+        assert_eq!(lease.execute("printf ok", None).await.unwrap(), "ok");
+        assert_eq!(owner.transport_snapshot().generation, generation);
+        // These uncached workers cannot be reclaimed. They remain usable after
+        // the idle Git lane makes room for the command on the same transport.
+        for mut client in held {
+            client.ping().await.unwrap();
+        }
+        crate::git::git_connect(&Identity, &state, server.id)
+            .await
+            .unwrap();
+        state.sessions.shutdown().await;
+    }
 
     #[tokio::test(start_paused = true)]
     async fn command_deadline_starts_after_slow_agent_approval() {

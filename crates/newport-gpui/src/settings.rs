@@ -24,7 +24,9 @@ impl SelectItem for ThemeChoice {
         &self.0
     }
     fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        div().text_size(px(12.)).child(self.title())
+        div()
+            .text_size(px(crate::ui::FONT_SIZE))
+            .child(self.title())
     }
 }
 type ThemeSelect = SelectState<Vec<ThemeChoice>>;
@@ -162,7 +164,6 @@ impl SettingsUi {
                     this.settings_ui.appearance_error = None;
                     this.appearance = *value;
                     theme::install(value.is_dark(window.appearance()), cx);
-                    material::sync(window, value.is_dark(window.appearance()));
                 }
                 Err(_) => {
                     this.settings_ui.appearance_error =
@@ -479,7 +480,7 @@ impl SettingsView {
                         crate::controls::select(&self.theme)
                             .accessibility_label("Theme")
                             .w(px(160.))
-                            .rounded(px(7.))
+                            .rounded(px(crate::ui::RADIUS))
                             .menu_item_min_height(px(28.))
                             .menu_width(px(160.)),
                     )
@@ -757,7 +758,7 @@ impl RenderOnce for SettingsView {
                     .w_full()
                     .max_w(px(720.))
                     .mx_auto()
-                    .text_size(px(12.))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .line_height(relative(1.428571))
                     .child(self.appearance(cx))
                     .child(self.startup(cx))
@@ -823,7 +824,7 @@ fn section(id: &'static str, title: &'static str, first: bool, cx: &App) -> Stat
                 .role(accesskit::Role::Heading)
                 .aria_label(title)
                 .mb(px(16.))
-                .text_size(px(13.))
+                .text_size(px(crate::ui::FONT_SIZE))
                 .font_weight(FontWeight::SEMIBOLD)
                 .line_height(relative(1.428571))
                 .child(title),
@@ -835,11 +836,11 @@ fn row() -> Div {
         .items_center()
         .justify_between()
         .gap_x(px(24.))
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
 }
 fn message(value: impl Into<String>, cx: &App) -> Div {
     div()
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .line_height(relative(1.6))
         .text_color(cx.theme().muted_foreground)
         .child(value.into())
@@ -853,7 +854,7 @@ fn error(id: &'static str, value: String, cx: &App) -> impl IntoElement + Styled
         .test_support()
         .role(accesskit::Role::Alert)
         .aria_label(value.clone())
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .line_height(relative(1.6))
         .text_color(theme::error(cx.theme().is_dark()))
         .child(value)
@@ -867,7 +868,12 @@ fn skeleton(id: &'static str, width: Pixels) -> Stateful<Div> {
         .w(width)
         .max_w_full()
         .h(px(16.))
-        .child(Skeleton::new().w_full().h(px(12.)).rounded(px(4.)))
+        .child(
+            Skeleton::new()
+                .w_full()
+                .h(px(12.))
+                .rounded(px(crate::ui::RADIUS)),
+        )
 }
 fn action_button(
     id: &'static str,
@@ -879,7 +885,7 @@ fn action_button(
     let callback = handler.clone();
     let button = crate::controls::button(id)
         .label(title)
-        .rounded(px(7.))
+        .rounded(px(crate::ui::RADIUS))
         .on_click(move |_, window, cx| callback(action, window, cx));
     RevealedButton {
         button,

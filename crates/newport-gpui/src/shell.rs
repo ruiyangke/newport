@@ -71,7 +71,7 @@ impl Newport {
                             .sidebar_layout
                             .width(f32::from(window.viewport_size().width))
                     })
-                    .unwrap_or(204.);
+                    .unwrap_or(sidebar_layout::DEFAULT_WIDTH);
                 Some(
                     div()
                         .relative()
@@ -82,7 +82,7 @@ impl Newport {
                                 .id("sidebar-width")
                                 .absolute()
                                 .left(px(-4.))
-                                .top(px(52.))
+                                .top_0()
                                 .bottom_0()
                                 .w(px(9.))
                                 .role(accesskit::Role::Splitter)
@@ -137,7 +137,9 @@ impl Newport {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if window.has_active_dialog(cx) {
+        // The icon rail has a fixed width; resizing would only change the
+        // remembered full width without any visible effect.
+        if window.has_active_dialog(cx) || self.sidebar_layout.compact() {
             return;
         }
         let viewport = f32::from(window.viewport_size().width);
@@ -213,7 +215,7 @@ impl Newport {
         let Some(server) = self.selected_server() else {
             return;
         };
-        let id = text(&server, "id");
+        let id = text(server, "id");
         if self
             .resources
             .get(&format!("server-delete:{id}"))
@@ -221,7 +223,7 @@ impl Newport {
         {
             return;
         }
-        let name = text(&server, "name");
+        let name = text(server, "name");
         let view = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let id = id.clone();
@@ -246,7 +248,6 @@ impl Newport {
                 .resources
                 .get(&format!("server-delete:{}", self.server))
                 .is_some_and(|r| r.pending);
-        let view = cx.entity().downgrade();
         div()
             .flex()
             .flex_shrink_0()
@@ -275,31 +276,6 @@ impl Newport {
                                         .is_some_and(|r| r.pending),
                             )
                             .on_click(cx.listener(|this, _, _, cx| this.test_server(cx))),
-                    )
-                    .child(div().w(px(1.)).h(px(16.)).mx(px(5.)).bg(cx.theme().border))
-                    .child(
-                        crate::controls::icon_button("edit-server")
-                            .icon(IconName::Settings2)
-                            .accessibility_label("Edit server")
-                            .tooltip("Edit server")
-                            .ghost()
-                            .text_color(cx.theme().muted_foreground)
-                            .disabled(disabled)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if let Some(server) = this.selected_server() {
-                                    this.edit_server(Some(server.clone()), window, cx);
-                                }
-                            })),
-                    )
-                    .child(
-                        crate::controls::icon_button("server-actions")
-                            .icon(IconName::Ellipsis)
-                            .accessibility_label("Server actions")
-                            .tooltip("Server actions")
-                            .ghost()
-                            .text_color(cx.theme().muted_foreground)
-                            .disabled(disabled)
-                            .dropdown_menu(move |menu, _, cx| server_menu(menu, view.clone(), cx)),
                     )
                 },
             )

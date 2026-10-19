@@ -11,14 +11,15 @@ pub mod rpc;
 
 use newport_domain::model;
 pub mod agent_keys;
-pub mod connectivity;
 mod connection_state;
+pub mod connectivity;
 pub mod credentials;
 pub mod known_hosts;
 pub mod recovery;
 #[path = "../../../tools/agent/src/serialization.rs"]
 mod serialization;
 pub mod ssh;
+pub mod ssh_config_import;
 pub mod terminal;
 
 pub mod agent;

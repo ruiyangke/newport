@@ -250,8 +250,7 @@ impl Files {
                     .flex_shrink_0()
                     .child(alert("compose-files-read-error", error.clone(), cx).test_support())
                     .child(
-                        crate::controls::compact_button("compose-files-retry")
-                            .ghost()
+                        crate::controls::button("compose-files-retry")
                             .label("Retry files")
                             .disabled(self.pending)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -280,7 +279,7 @@ impl Files {
             view = view.child(
                 div()
                     .flex_shrink_0()
-                    .rounded(px(8.))
+                    .rounded(px(crate::ui::RADIUS))
                     .border_1()
                     .border_color(cx.theme().danger.opacity(0.3))
                     .bg(cx.theme().danger.opacity(0.05))
@@ -301,7 +300,7 @@ impl Files {
                             .role(accesskit::Role::Label)
                             .aria_label(error.clone())
                             .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(11.5))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .test_support(),
                     ),
             );
@@ -311,7 +310,7 @@ impl Files {
             let paths: Vec<_> = self.tabs.iter().map(|(path, _)| path.clone()).collect();
             view = view.child(
                 crate::controls::tabs("compose-file-tabs")
-                    .segmented()
+                    .gap_0()
                     .menu(true)
                     .accessibility_label("Compose files")
                     .track_scroll(&self.tab_scroll)
@@ -376,7 +375,7 @@ impl Files {
                 .id("compose-file-path")
                 .role(accesskit::Role::Label)
                 .aria_label(file.path.clone())
-                .text_size(px(11.5))
+                .text_size(px(crate::ui::FONT_SIZE))
                 .font_family(cx.theme().mono_font_family.clone())
                 .text_color(cx.theme().muted_foreground)
                 .flex_shrink_0()
@@ -408,7 +407,7 @@ impl Files {
                             .readonly(true)
                             .aria_label(file.path.clone())
                             .h_full()
-                            .text_size(px(12.)),
+                            .text_size(px(crate::ui::FONT_SIZE)),
                     ),
             );
         } else if file.error.is_none() {
@@ -419,8 +418,7 @@ impl Files {
 
     fn retry_button(&self, project: &str, cx: &mut Context<ContainersPanel>) -> AnyElement {
         let project = project.to_owned();
-        crate::controls::compact_button("compose-files-retry")
-            .ghost()
+        crate::controls::button("compose-files-retry")
             .label("Retry files")
             .disabled(self.pending)
             .on_click(cx.listener(move |this, _, _, cx| {

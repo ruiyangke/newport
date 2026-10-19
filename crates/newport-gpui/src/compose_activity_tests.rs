@@ -441,7 +441,7 @@ fn start_opens_its_activity_once_but_never_steals_navigation(cx: &mut TestAppCon
     );
     refresh_jobs(&panel, cx);
     click(cx, "Logs");
-    click(cx, "More");
+    click(cx, "More Compose actions");
     click(cx, "Pull images only");
     wait_for(&panel, cx, || backend.held_actions() == 1);
     panel.update_in(cx, |p, window, cx| p.select("c:cache".into(), window, cx));
@@ -513,7 +513,10 @@ fn late_start_does_not_reopen_activity_after_the_page_was_hidden(cx: &mut TestAp
     }
     assert!(!panel.read_with(cx, |p, _| p.client.compose_run_pending()));
     settle(&panel, cx);
-    assert_eq!(panel.read_with(cx, |p, _| p.tab), 0);
+    assert_eq!(
+        panel.read_with(cx, |p, _| p.tab),
+        crate::containers::PROJECT_SERVICES
+    );
     assert_eq!(
         panel.read_with(cx, |p, _| p.selected.clone()),
         Some("p:stack".into())

@@ -119,7 +119,7 @@ impl ContainersPanel {
                             .min_w_0()
                             .debug_selector(|| "inspect-command".into())
                             .bg(cx.theme().muted)
-                            .rounded(px(6.))
+                            .rounded(px(crate::ui::RADIUS))
                             .px(px(8.))
                             .py(px(6.)),
                         )
@@ -274,7 +274,7 @@ impl ContainersPanel {
                         )
                         .child(
                             quiet(if mount.rw { "read-write" } else { "read-only" }, cx)
-                                .text_size(px(11.))
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .flex_shrink_0(),
                         )
                 })),
@@ -315,7 +315,7 @@ impl ContainersPanel {
                             .aria_label(command)
                             .test_support()
                             .bg(cx.theme().muted)
-                            .rounded(px(6.))
+                            .rounded(px(crate::ui::RADIUS))
                             .px(px(8.))
                             .py(px(6.)),
                     )
@@ -425,7 +425,7 @@ fn section(title: &str, count: Option<usize>) -> gpui_kit::base::ObservedElement
         .gap(px(6.))
         .child(
             div()
-                .text_size(px(12.))
+                .text_size(px(crate::ui::FONT_SIZE))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(format!(
                     "{title}{}",
@@ -454,7 +454,7 @@ fn row(cx: &App) -> Div {
         .border_b_1()
         .border_color(cx.theme().border)
         .py(px(5.))
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
 }
 fn mono(cx: &App, value: impl Into<SharedString>) -> Div {
     div()
@@ -462,6 +462,6 @@ fn mono(cx: &App, value: impl Into<SharedString>) -> Div {
         .max_w_full()
         .whitespace_normal()
         .font_family(cx.theme().mono_font_family.clone())
-        .text_size(px(11.5))
+        .text_size(px(crate::ui::FONT_SIZE))
         .child(value.into())
 }

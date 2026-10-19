@@ -66,7 +66,9 @@ fn disk_inventory_exposes_cells_summary_and_compact_metadata(cx: &mut TestAppCon
 fn disk_cards_keep_equal_columns_in_incomplete_rows_and_at_compact_widths(cx: &mut TestAppContext) {
     let (panel, cx, backend) = fixture(cx);
     select(&panel, cx, "disk");
-    for width in [980., 900., 800., 620., 560., 1200.] {
+    // Columns follow the measured pane: beside a 220px list, 840 and 800
+    // leave room for three cards.
+    for width in [980., 840., 800., 620., 560., 1200.] {
         cx.simulate_resize(size(px(width), px(1000.)));
         draw(cx);
         let pane = cx.debug_bounds("containers-disk").unwrap();
@@ -88,7 +90,7 @@ fn disk_cards_keep_equal_columns_in_incomplete_rows_and_at_compact_widths(cx: &m
                 "cards should fit the pane at width{width}"
             );
         }
-        if width == 900. || width == 800. {
+        if width == 840. || width == 800. {
             assert_eq!(
                 cards[0].top(),
                 cards[2].top(),

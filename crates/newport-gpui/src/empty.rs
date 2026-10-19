@@ -10,7 +10,7 @@ pub(super) fn compact(message: impl Into<SharedString>, cx: &App) -> Div {
         .min_w_0()
         .px(px(12.))
         .py(px(16.))
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .line_height(px(18.))
         .text_color(cx.theme().muted_foreground)
         .child(
@@ -70,7 +70,7 @@ pub(super) fn content(
                 .when(!description.is_empty(), |view| {
                     view.child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .line_height(px(18.))
                             .text_color(cx.theme().muted_foreground)
                             .child(description),

@@ -85,6 +85,8 @@ struct Buffer {
     changed: std::cell::Cell<bool>,
     page: Option<document::Page>,
     error: Option<String>,
+    /// Why this file could not be opened; the tab shows it instead of text.
+    failure: Option<String>,
     _subscription: Subscription,
 }
 impl Buffer {
@@ -323,7 +325,8 @@ impl CodeWorkspace {
         self.requested = Some(path.clone());
         self.reveal_target = None;
         self.reveal_notice = None;
-        if let Some(index) = self.buffers.iter().position(|b| b.path == path) {
+        let existing = self.buffers.iter().position(|b| b.path == path);
+        if let Some(index) = existing.filter(|i| self.buffers[*i].failure.is_none()) {
             self.active = Some(index);
             self.reviewing = false;
             if self.narrow {
@@ -336,10 +339,15 @@ impl CodeWorkspace {
             cx.notify();
             return;
         }
+        // A failed tab retries in place rather than opening a second tab.
+        if let Some(index) = existing {
+            self.active = Some(index);
+            cx.notify();
+        }
         if !self.available || self.opening.len() >= 4 || !self.opening.insert(path.clone()) {
             return;
         }
-        if self.buffers.len() + self.opening.len() > 20 {
+        if existing.is_none() && self.buffers.len() + self.opening.len() > 20 {
             self.opening.remove(&path);
             self.error = Some(
                 "Close an editor tab before opening another file (20 tabs per worktree).".into(),
@@ -366,41 +374,52 @@ impl CodeWorkspace {
                             return;
                         }
                         let cached=value["cached"]==true;
-                        let buffer = match Self::document_buffer(path.clone(), value, window, cx) {
-                            Ok(buffer) => buffer,
-                            Err(error) => {
-                                this.failed_read = Some(("file", path.clone()));
-                                this.error =
-                                    Some(format!("{}: {error}", this.relative_path(&path)));
-                                return;
-                            }
-                        };
-                        let activate = this.requested.as_ref() == Some(&path);
-                        this.buffers.push(buffer);
-                        if activate {
-                            this.active = Some(this.buffers.len() - 1);
-                            this.reviewing = false;
-                            if this.narrow {
-                                this.show_tree = false;
-                            }
-                            if this.visible {
-                                this.buffers
-                                    .last()
-                                    .unwrap()
-                                    .editor
-                                    .update(cx, |editor, cx| editor.focus(window, cx));
-                            }
-                            this.reveal_active(false, window, cx);
-                        }
-                        if cached { this.refresh_external(path.clone(),window,cx); }
+                        let (buffer, succeeded) =
+                            match Self::document_buffer(path.clone(), value, window, cx) {
+                                Ok(buffer) => (buffer, true),
+                                Err(error) => {
+                                    (Self::failed_buffer(path.clone(), error, window, cx), false)
+                                }
+                            };
+                        this.place_buffer(buffer, window, cx);
+                        if cached && succeeded { this.refresh_external(path.clone(),window,cx); }
                     }
                     Err(error) => {
-                        this.error = Some(format!("{}: {error}", this.relative_path(&path)));
-                        this.failed_read = Some(("file", path));
+                        let buffer = Self::failed_buffer(path.clone(), error, window, cx);
+                        this.place_buffer(buffer, window, cx);
                     }
                 }
             },
         );
+        cx.notify();
+    }
+    /// Add an opened (or failed) file as a tab, replacing a failed tab for the
+    /// same path, and activate it when it is still the requested file.
+    fn place_buffer(&mut self, buffer: Buffer, window: &mut Window, cx: &mut Context<Self>) {
+        let path = buffer.path.clone();
+        let index = match self.buffers.iter().position(|b| b.path == path) {
+            Some(index) => {
+                self.buffers[index] = buffer;
+                index
+            }
+            None => {
+                self.buffers.push(buffer);
+                self.buffers.len() - 1
+            }
+        };
+        if self.requested.as_ref() == Some(&path) {
+            self.active = Some(index);
+            self.reviewing = false;
+            if self.narrow {
+                self.show_tree = false;
+            }
+            if self.visible && self.buffers[index].failure.is_none() {
+                self.buffers[index]
+                    .editor
+                    .update(cx, |editor, cx| editor.focus(window, cx));
+            }
+            self.reveal_active(false, window, cx);
+        }
         cx.notify();
     }
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -619,16 +638,16 @@ impl CodeWorkspace {
             .min_w_0()
             .when(header, |view| {
                 view.child(
-                    crate::project_ui::header()
+                    crate::ui::header()
                         .px_3()
-                        .child(crate::project_ui::header_rule(cx))
+                        .child(crate::ui::header_rule(cx))
                         .justify_between()
                         .child(
                             div()
                                 .min_w_0()
                                 .flex_1()
                                 .truncate()
-                                .text_size(px(crate::project_ui::FONT_SIZE))
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(self.root.rsplit('/').next().unwrap_or("Files").to_owned()),
                         )
@@ -663,48 +682,57 @@ impl CodeWorkspace {
                 )
             })
             .when(self.narrow || !header, |view| {
-                view.when_some(self.error.clone().filter(|_| self.narrow && self.show_tree || self.failed_read.as_ref().is_some_and(|(kind, _)| *kind == "folder")), |view, error| {
-                    let panel = div()
-                        .p_3()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .text_size(px(crate::project_ui::FONT_SIZE))
-                        .child(
-                            div()
-                                .id("code-read-error")
-                                .role(accesskit::Role::Alert)
-                                .aria_label(error.clone())
-                                .text_color(cx.theme().danger)
-                                .child(error)
-                                .test_support(),
-                        )
-                        .when_some(self.failed_read.clone(), |panel, (kind, path)| {
-                            panel.child(
-                                crate::project_ui::compact_button("code-retry-read")
-                                    .label("Retry")
-                                    .disabled(
-                                        !self.available
-                                            || !self.loading.is_empty()
-                                            || !self.opening.is_empty(),
-                                    )
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        if kind == "folder" {
-                                            this.list(path.clone(), window, cx);
-                                        } else {
-                                            this.open(path.clone(), window, cx);
-                                        }
-                                    })),
+                view.when_some(
+                    self.error.clone().filter(|_| {
+                        self.narrow && self.show_tree
+                            || self
+                                .failed_read
+                                .as_ref()
+                                .is_some_and(|(kind, _)| *kind == "folder")
+                    }),
+                    |view, error| {
+                        let panel = div()
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .text_size(px(crate::ui::FONT_SIZE))
+                            .child(
+                                div()
+                                    .id("code-read-error")
+                                    .role(accesskit::Role::Alert)
+                                    .aria_label(error.clone())
+                                    .text_color(cx.theme().danger)
+                                    .child(error)
+                                    .test_support(),
                             )
-                        });
-                    view.child(panel)
-                })
+                            .when_some(self.failed_read.clone(), |panel, (kind, path)| {
+                                panel.child(
+                                    crate::controls::compact_button("code-retry-read")
+                                        .label("Retry")
+                                        .disabled(
+                                            !self.available
+                                                || !self.loading.is_empty()
+                                                || !self.opening.is_empty(),
+                                        )
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            if kind == "folder" {
+                                                this.list(path.clone(), window, cx);
+                                            } else {
+                                                this.open(path.clone(), window, cx);
+                                            }
+                                        })),
+                                )
+                            });
+                        view.child(panel)
+                    },
+                )
             })
             .when_some(self.reveal_notice.clone(), |view, notice| {
                 view.child(
                     div()
                         .p_3()
-                        .text_size(px(crate::project_ui::FONT_SIZE))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .text_color(cx.theme().muted_foreground)
                         .id("code-reveal-notice")
                         .role(accesskit::Role::Status)
@@ -748,7 +776,7 @@ impl CodeWorkspace {
                                             return div()
                                                 .h(px(24.))
                                                 .pl(px(28.))
-                                                .text_size(px(crate::project_ui::FONT_SIZE))
+                                                .text_size(px(crate::ui::FONT_SIZE))
                                                 .text_color(cx.theme().muted_foreground)
                                                 .child("No files in this folder");
                                         }
@@ -861,9 +889,7 @@ impl CodeWorkspace {
                                                             div()
                                                                 .min_w_0()
                                                                 .truncate()
-                                                                .text_size(px(
-                                                                    crate::project_ui::FONT_SIZE,
-                                                                ))
+                                                                .text_size(px(crate::ui::FONT_SIZE))
                                                                 .text_color(label_color)
                                                                 .child(row.name),
                                                         )
@@ -871,7 +897,9 @@ impl CodeWorkspace {
                                                             item.child(div().flex_1().min_w(px(4.)))
                                                                 .child(
                                                                     div()
-                                                                        .text_size(px(crate::project_ui::FONT_SIZE))
+                                                                        .text_size(px(
+                                                                            crate::ui::FONT_SIZE,
+                                                                        ))
                                                                         .text_color(state.color(cx))
                                                                         .child(state.mark()),
                                                                 )
@@ -931,13 +959,19 @@ impl CodeWorkspace {
         {
             self.tab_scroll.scroll_to_item(index);
         }
-        crate::project_ui::header()
+        crate::ui::header()
             .min_w_0()
             .bg(cx.theme().muted)
-            .child(crate::project_ui::header_rule(cx))
+            .child(crate::ui::header_rule(cx))
             .child(
                 crate::controls::compact_icon_button("code-toggle-tree")
                     .ghost()
+                    .h(px(crate::ui::HEADER_HEIGHT))
+                    .min_h(px(crate::ui::HEADER_HEIGHT))
+                    .max_h(px(crate::ui::HEADER_HEIGHT))
+                    .rounded_none()
+                    .border_r_1()
+                    .border_color(cx.theme().border)
                     .icon(IconName::PanelLeft)
                     .accessibility_label("Toggle project panel")
                     .tooltip("Toggle project panel")
@@ -975,7 +1009,7 @@ impl CodeWorkspace {
                         let active = !self.reviewing && self.active == Some(i);
                         project_workspace::document_tab_surface(("code-tab-surface", i), active, cx)
                             .child(
-                                crate::project_ui::compact_button(("code-tab", i))
+                                crate::controls::compact_button(("code-tab", i))
                                     .text()
                                     .cursor_default()
                                     .text_color(if active {
@@ -1068,7 +1102,7 @@ impl CodeWorkspace {
                                 ),
                         )
                         .child(
-                            crate::project_ui::compact_button("code-save")
+                            crate::controls::compact_button("code-save")
                                 .ghost()
                                 .label(if self.active.is_some_and(|i| self.buffers[i].saving) {
                                     "Saving…"
@@ -1118,29 +1152,15 @@ impl CodeWorkspace {
                         .role(accesskit::Role::Alert)
                         .aria_label(error.clone())
                         .p_3()
-                        .text_size(px(crate::project_ui::FONT_SIZE))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .text_color(cx.theme().danger)
-                        .child(error)
-                        .when_some(
-                            self.failed_read.clone().filter(|(kind, _)| *kind == "file"),
-                            |panel, (_, path)| {
-                                panel.child(
-                                    crate::project_ui::compact_button("code-retry-file")
-                                        .label("Retry")
-                                        .ghost()
-                                        .disabled(!self.available || self.opening.contains(&path))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.open(path.clone(), window, cx)
-                                        })),
-                                )
-                            },
-                        ),
+                        .child(error),
                 )
             })
             .child(
                 div()
-                    .h(px(crate::project_ui::PATH_ROW_HEIGHT))
-                    .min_h(px(crate::project_ui::PATH_ROW_HEIGHT))
+                    .h(px(crate::ui::PATH_ROW_HEIGHT))
+                    .min_h(px(crate::ui::PATH_ROW_HEIGHT))
                     .px_3()
                     .flex_shrink_0()
                     .flex()
@@ -1148,7 +1168,7 @@ impl CodeWorkspace {
                     .gap_3()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .text_size(px(crate::project_ui::FONT_SIZE))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .line_height(px(20.))
                     .text_color(cx.theme().muted_foreground)
                     .child(
@@ -1165,7 +1185,7 @@ impl CodeWorkspace {
                                     .unwrap_or_default(),
                             ),
                     )
-                    .when_some(active, |view, buffer| {
+                    .when_some(active.filter(|b| b.failure.is_none()), |view, buffer| {
                         view.when(buffer.dirty(cx), |view| {
                             view.child(div().flex_shrink_0().child("Unsaved"))
                         })
@@ -1183,52 +1203,102 @@ impl CodeWorkspace {
                 active.and_then(|b| b.page.as_ref().map(|p| (b, p))),
                 |view, (buffer, page)| view.child(self.section_controls(buffer, page, cx)),
             )
-            .child(if let Some(buffer) = active {
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(
-                        Editor::new(
-                            buffer
-                                .conflict
-                                .as_ref()
-                                .and_then(|c| c.preview())
-                                .unwrap_or(&buffer.editor),
-                        )
-                        .appearance(false)
-                        .bordered(false)
-                        .aria_label(if buffer.conflict.as_ref().is_some_and(|c| c.show_remote) {
-                            "Remote version (read only)"
-                        } else if buffer.page.is_some() {
-                            "Read-only file section"
-                        } else {
-                            "Code editor"
-                        })
-                        .readonly(
-                            buffer.page.is_some()
-                                || buffer.conflict.as_ref().is_some_and(|c| c.show_remote),
-                        )
-                        .h_full()
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .text_size(px(crate::project_ui::FONT_SIZE))
-                        .line_height(relative(1.6))
+            .child(
+                if let Some((buffer, failure)) =
+                    active.and_then(|b| b.failure.as_ref().map(|f| (b, f)))
+                {
+                    // Binary files will fail the same way again; reads can recover.
+                    let retry = !failure.contains("binary file");
+                    let path = buffer.path.clone();
+                    div()
+                        .id("code-document-failure")
+                        .test_support()
+                        .role(accesskit::Role::Alert)
+                        .aria_label(failure.clone())
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
                         .bg(cx.theme().background)
-                        .px(px(12.))
-                        .pt_0()
-                        .pb(px(8.)),
-                    )
-                    .into_any_element()
-            } else {
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(empty::compact("Select a file to start editing", cx))
-                    .into_any_element()
-            })
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap_3()
+                        .p_6()
+                        .child(
+                            Icon::new(IconName::FileExclamationPoint)
+                                .size(px(24.))
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(
+                            div()
+                                .max_w(px(460.))
+                                .text_center()
+                                .text_size(px(crate::ui::FONT_SIZE))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(failure.clone()),
+                        )
+                        .when(retry, |view| {
+                            view.child(
+                                crate::controls::button("code-retry-file")
+                                    .label("Retry")
+                                    .disabled(!self.available || self.opening.contains(&path))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.open(path.clone(), window, cx)
+                                    })),
+                            )
+                        })
+                        .into_any_element()
+                } else if let Some(buffer) = active {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .child(
+                            Editor::new(
+                                buffer
+                                    .conflict
+                                    .as_ref()
+                                    .and_then(|c| c.preview())
+                                    .unwrap_or(&buffer.editor),
+                            )
+                            // The smallest input tier removes the text engine's vertical
+                            // inset; explicit typography below keeps code at 14 px.
+                            .xsmall()
+                            .appearance(false)
+                            .bordered(false)
+                            .aria_label(
+                                if buffer.conflict.as_ref().is_some_and(|c| c.show_remote) {
+                                    "Remote version (read only)"
+                                } else if buffer.page.is_some() {
+                                    "Read-only file section"
+                                } else {
+                                    "Code editor"
+                                },
+                            )
+                            .readonly(
+                                buffer.page.is_some()
+                                    || buffer.conflict.as_ref().is_some_and(|c| c.show_remote),
+                            )
+                            .h_full()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(crate::ui::FONT_SIZE))
+                            .line_height(relative(1.6))
+                            .bg(cx.theme().background)
+                            .p_0(),
+                        )
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(empty::compact("Select a file to start editing", cx))
+                        .into_any_element()
+                },
+            )
     }
 }
 impl CodeWorkspace {
@@ -1346,6 +1416,8 @@ impl CodeWorkspace {
             if let Some(key) = self.navigator.documents.active.clone() {
                 self.close_review(&key, cx);
                 self.focus_document(window, cx);
+            } else {
+                cx.emit(project_documents::Event::CloseRepository);
             }
         } else if let Some(buffer) = self.active.and_then(|i| self.buffers.get(i)) {
             self.close(buffer.path.clone(), window, cx);
@@ -1472,7 +1544,7 @@ impl CodeWorkspace {
                                 .border_color(cx.theme().border)
                                 .children(self.terminal.clone().filter(|_| self.available))
                                 .when(!self.available, |dock| {
-                                    dock.child(div().p_3().text_size(px(crate::project_ui::FONT_SIZE)).child(
+                                    dock.child(div().p_3().text_size(px(crate::ui::FONT_SIZE)).child(
                                         "Terminal paused: this project connection is unavailable.",
                                     ))
                                 }),
@@ -1680,7 +1752,7 @@ impl Newport {
         let Some(server) = self.selected_server() else {
             return;
         };
-        let connection = terminal_scope::connection(&server, &self.snapshot);
+        let connection = terminal_scope::connection(server, &self.snapshot);
         if let Some(retained) = self
             .code_workspaces
             .iter()
@@ -1782,6 +1854,9 @@ impl Newport {
                 match event {
                     project_documents::Event::Open(document) => {
                         this.project_open_document(document.clone(), cx)
+                    }
+                    project_documents::Event::CloseRepository => {
+                        this.project_close_repository_tab(cx)
                     }
                     project_documents::Event::Stage {
                         snapshot,
@@ -1888,6 +1963,8 @@ mod interaction_tests {
         cx.update(|cx| {
             gpui::component::init(cx);
             crate::theme::install(false, cx);
+            // Dialogs close at once, so a loaded test run can't race their animation.
+            cx.set_reduce_motion(true);
             super::install_shortcuts(cx);
             crate::navigation::install_workspace_shortcuts(cx);
             // The application installs this fallback after project bindings.
@@ -2074,9 +2151,28 @@ mod interaction_tests {
             }))
         });
         open(&view, cx, "/repo/report.pdf");
-        view.read_with(cx, |v, _| {
-            assert!(v.buffers.is_empty());
-            assert!(v.error.as_ref().unwrap().contains("binary"));
+        view.read_with(cx, |v, cx| {
+            // The file still gets a tab, but it never holds the binary text.
+            assert_eq!(v.buffers.len(), 1);
+            assert_eq!(v.active, Some(0));
+            assert!(v.buffers[0].failure.as_ref().unwrap().contains("binary"));
+            assert_eq!(v.buffers[0].editor.read(cx).text().len(), 0);
+            assert!(
+                v.error.is_none(),
+                "the failure lives in its tab, not a banner"
+            );
+        });
+        cx.update(|window, _| {
+            let elements = gpui::base::test_support::snapshots(window);
+            assert!(
+                elements
+                    .iter()
+                    .any(|e| e.label().is_some_and(|l| l.contains("binary file")))
+            );
+            assert!(
+                !elements.iter().any(|e| e.label() == Some("Retry")),
+                "a binary file fails the same way again"
+            );
         });
     }
     #[gpui::test]
@@ -2676,6 +2772,10 @@ mod interaction_tests {
                 .bounds()
                 .center()
         });
+        assert!(
+            cancel.y >= px(0.) && cancel.y <= cx.update(|window, _| window.viewport_size().height),
+            "cancel outside viewport: {cancel:?}"
+        );
         cx.simulate_click(cancel, Default::default());
         draw(cx);
         // Re-focus a clean source, then close it through the production key binding.
@@ -2780,6 +2880,10 @@ mod interaction_tests {
                 .bounds()
                 .center()
         });
+        assert!(
+            cancel.y >= px(0.) && cancel.y <= cx.update(|window, _| window.viewport_size().height),
+            "cancel outside viewport: {cancel:?}"
+        );
         cx.simulate_click(cancel, Default::default());
         draw(cx);
         view.update_in(cx, |v, window, cx| {
@@ -2831,7 +2935,13 @@ mod interaction_tests {
                     editor: view.clone(),
                     _subscription: cx.subscribe(&view, |_, _, _: &super::Saved, _| {}),
                     _observe: cx.observe(&view, |_, _, cx| cx.notify()),
-                    _documents: cx.subscribe(&view, |o, _, event: &project_documents::Event, cx| { if let project_documents::Event::Open(document) = event { o.project_open_document(document.clone(), cx); } }),
+                    _documents: cx.subscribe(&view, |o, _, event: &project_documents::Event, cx| {
+                        match event {
+                            project_documents::Event::Open(document) => o.project_open_document(document.clone(), cx),
+                            project_documents::Event::CloseRepository => o.project_close_repository_tab(cx),
+                            _ => {},
+                        }
+                    }),
                 });
             });
             let clone = owner.clone();
@@ -2921,8 +3031,40 @@ mod interaction_tests {
         click(cx, "Review working.rs · Diff");
         click(cx, "Files");
         assert!(view.read_with(cx, |v, _| v.reviewing && v.files));
+        // Every repository tool has a close action and returns to a retained review.
+        for (tab, title) in [
+            (3, "Stashes"),
+            (4, "Tags"),
+            (6, "Remotes"),
+            (2, "Repository"),
+        ] {
+            owner.update(cx, |o, cx| o.git_navigate(tab, cx));
+            assert!(view.read_with(cx, |v, _| v.navigator.documents.active.is_none()));
+            click(cx, &format!("Close {title}"));
+            assert_eq!(owner.read_with(cx, |o, _| o.git.tab), 0);
+            assert!(view.read_with(cx, |v, cx| v.reviewing && v.dirty(cx)));
+            assert_eq!(
+                view.read_with(cx, |v, _| v.navigator.documents.reviews.len()),
+                1
+            );
+        }
         click(cx, "Close working.rs · Diff");
         assert!(view.read_with(cx, |v, cx| !v.reviewing && v.dirty(cx)));
+        // Closing an inactive tool must not steal the editor or discard its contents.
+        owner.update(cx, |o, cx| o.git_navigate(3, cx));
+        click(cx, "main.rs •");
+        click(cx, "Close Stashes");
+        assert!(view.read_with(cx, |v, cx| !v.reviewing && v.dirty(cx)));
+        // The close-tab command also closes a tool without a review identity.
+        owner.update(cx, |o, cx| o.git_navigate(4, cx));
+        view.update_in(cx, |v, window, cx| v.close_active_tab(window, cx));
+        draw(cx);
+        assert_eq!(owner.read_with(cx, |o, _| o.git.tab), 0);
+        assert!(view.read_with(cx, |v, cx| !v.reviewing && v.dirty(cx)));
+        assert_eq!(
+            editor.read_with(cx, |e, _| e.value().to_string()),
+            "unsaved source"
+        );
         // Compact navigation leaves a route back to the retained dirty source.
         cx.simulate_resize(size(px(450.), px(650.)));
         owner.update(cx, |o, _| o.content_width = 450.);
@@ -3032,6 +3174,10 @@ mod interaction_tests {
                 .bounds()
                 .center()
         });
+        assert!(
+            cancel.y >= px(0.) && cancel.y <= cx.update(|window, _| window.viewport_size().height),
+            "cancel outside viewport: {cancel:?}"
+        );
         cx.simulate_click(cancel, Default::default());
         draw(cx);
         assert!(view.read_with(cx, |v, cx| v.dirty(cx)));
@@ -3100,11 +3246,30 @@ mod interaction_tests {
             v.test_rpc = Some(Arc::new(|_, _| Err("Cannot read this file".into())))
         });
         open(&view, cx, "/repo/main.rs");
-        assert!(view.read_with(cx, |v, _| v.show_tree));
-        cx.update(|window, _| {
+        // The failed file opens as its own tab, which the narrow layout shows.
+        assert!(!view.read_with(cx, |v, _| v.show_tree));
+        let retry = cx.update(|window, _| {
             let elements = gpui::base::test_support::snapshots(window);
-            visible_feedback(&elements, "main.rs: Cannot read this file");
+            visible_feedback(&elements, "Cannot read this file");
             visible_feedback(&elements, "Retry");
+            elements
+                .iter()
+                .find(|e| e.label() == Some("Retry"))
+                .unwrap()
+                .bounds()
+                .center()
+        });
+        view.update(cx, |v, _| {
+            v.test_rpc = Some(Arc::new(|_, _| {
+                Ok(json!({"content":"fn main() {}\n", "revision":"r"}))
+            }))
+        });
+        cx.simulate_click(retry, Default::default());
+        draw(cx);
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.buffers.len(), 1, "retry replaces the failed tab in place");
+            assert!(v.buffers[0].failure.is_none());
+            assert_eq!(v.buffers[0].editor.read(cx).text(), "fn main() {}\n");
         });
     }
     #[gpui::test]

@@ -569,6 +569,40 @@ fn size(value: &Value) -> Option<u64> {
     value.as_i64().and_then(|n| u64::try_from(n).ok())
 }
 
+/// Volumes as `/system/df` lists them, but without sizes: names, drivers and
+/// labels from `GET /volumes`, references counted from container mounts.
+fn unmeasured_volumes(listed: &Value, containers: &Value) -> Value {
+    let mut references: HashMap<&str, i64> = HashMap::new();
+    for container in containers.as_array().into_iter().flatten() {
+        for mount in container["Mounts"].as_array().into_iter().flatten() {
+            if mount["Type"] == "volume" {
+                if let Some(name) = mount["Name"].as_str() {
+                    *references.entry(name).or_default() += 1;
+                }
+            }
+        }
+    }
+    Value::Array(
+        listed["Volumes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|volume| {
+                let name = volume["Name"].as_str().unwrap_or_default();
+                json!({
+                    "Name": name,
+                    "Driver": volume["Driver"],
+                    "Labels": volume["Labels"],
+                    "UsageData": {
+                        "Size": -1,
+                        "RefCount": references.get(name).copied().unwrap_or(0),
+                    },
+                })
+            })
+            .collect(),
+    )
+}
+
 /// `GET /system/df`, in the contract's shape.
 pub fn disk_json(df: &Value) -> Value {
     let images_raw = df["Images"].as_array().cloned().unwrap_or_default();
@@ -1232,8 +1266,36 @@ impl Containers {
         })
     }
 
-    pub fn disk(&self) -> Result<Value, String> {
-        self.with_engine(|engine| Ok(disk_json(&engine.get("/system/df", DF_TIMEOUT)?)))
+    /// `GET /system/df`, split so the slow volume scan never holds up the
+    /// rest. Sizing volumes walks every volume on disk (seconds on a busy
+    /// engine); images, containers and build cache come from the engine's own
+    /// bookkeeping in milliseconds. `quick` lists volumes unmeasured,
+    /// `volumes` measures only them, and no part answers everything at once.
+    pub fn disk(&self, request: &Value) -> Result<Value, String> {
+        self.with_engine(|engine| match request["part"].as_str() {
+            Some("quick") => {
+                let mut df = engine.get(
+                    "/system/df?type=image&type=container&type=build-cache",
+                    DF_TIMEOUT,
+                )?;
+                // Engines before API 1.42 ignore `type` and measure volumes anyway.
+                let measured = df["Volumes"].is_array();
+                if !measured {
+                    let listed = engine.get("/volumes", DF_TIMEOUT)?;
+                    df["Volumes"] = unmeasured_volumes(&listed, &df["Containers"]);
+                }
+                let mut reply = disk_json(&df);
+                reply["volumesMeasured"] = measured.into();
+                Ok(reply)
+            }
+            Some("volumes") => {
+                let mut reply = disk_json(&engine.get("/system/df?type=volume", DF_TIMEOUT)?);
+                reply["volumesMeasured"] = true.into();
+                Ok(reply)
+            }
+            Some(other) => Err(format!("Unknown disk part: {other}")),
+            None => Ok(disk_json(&engine.get("/system/df", DF_TIMEOUT)?)),
+        })
     }
 
     pub fn prune(&self, request: &Value) -> Result<Value, String> {
@@ -1276,7 +1338,7 @@ impl Containers {
             "container_action" => self.action(request),
             "project_action" => self.project_action(request),
             "containers_remove" => self.remove(request),
-            "docker_disk" => self.disk(),
+            "docker_disk" => self.disk(request),
             "docker_prune" => self.prune(request),
             _ => return None,
         };
@@ -1633,6 +1695,56 @@ mod tests {
             prune_json(&json!({"ContainersDeleted": null, "SpaceReclaimed": 0})),
             json!({"removed": 0, "reclaimed": 0})
         );
+    }
+
+    #[test]
+    fn quick_disk_never_waits_for_the_volume_scan() {
+        let fake = fake(|_, path| match path {
+            "/version" => version(),
+            "/info" => info(),
+            p if p.starts_with("/system/df?type=image&type=container&type=build-cache") => {
+                json_reply(json!({
+                    "Images": [{"Id": "sha256:1", "RepoTags": ["a:1"], "Size": 5, "Containers": 1}],
+                    "Containers": [
+                        {"Id": A, "SizeRw": 3, "State": "running", "Mounts": [{"Type": "volume", "Name": "data"}]},
+                        {"Id": B, "SizeRw": 1, "State": "exited", "Mounts": [{"Type": "bind", "Source": "/x"}]}
+                    ],
+                    "BuildCache": []
+                }))
+            }
+            "/volumes" => json_reply(json!({"Volumes": [
+                {"Name": "data", "Driver": "local", "Labels": {"com.docker.compose.project": "app"}},
+                {"Name": B, "Driver": "local", "Labels": null}
+            ]})),
+            "/system/df?type=volume" => json_reply(json!({"Volumes": [
+                {"Name": "data", "Driver": "local", "Labels": {}, "UsageData": {"Size": 70, "RefCount": 1}}
+            ]})),
+            _ => (404, "application/json", b"{}".to_vec()),
+        });
+        let c = containers(&fake);
+        let quick = c.disk(&json!({"part": "quick"})).unwrap();
+        assert_eq!(quick["volumesMeasured"], false);
+        assert_eq!(quick["totals"]["images"]["size"], 5);
+        assert_eq!(quick["totals"]["containers"]["count"], 2);
+        let volumes = quick["volumes"].as_array().unwrap();
+        assert_eq!(volumes.len(), 2);
+        let data = volumes.iter().find(|v| v["name"] == "data").unwrap();
+        assert_eq!(data["size"], Value::Null, "unmeasured, not zero");
+        assert_eq!(data["refCount"], 1, "counted from container mounts");
+        assert_eq!(data["compose"], "app");
+        assert!(
+            !fake
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.contains("/system/df ") || r.contains("type=volume")),
+            "the quick reading never asks the engine to size volumes"
+        );
+        let measured = c.disk(&json!({"part": "volumes"})).unwrap();
+        assert_eq!(measured["volumesMeasured"], true);
+        assert_eq!(measured["totals"]["volumes"]["size"], 70);
+        assert!(c.disk(&json!({"part": "nope"})).is_err());
     }
 
     #[test]

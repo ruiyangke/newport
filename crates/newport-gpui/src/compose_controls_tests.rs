@@ -47,7 +47,7 @@ fn detail(
     settle(panel, cx);
 }
 fn down(cx: &mut VisualTestContext) {
-    click(cx, "More");
+    click(cx, "More Compose actions");
     click(cx, "Down…");
 }
 fn field(panel: &Entity<ContainersPanel>, cx: &mut VisualTestContext, value: &str, replicas: bool) {
@@ -97,7 +97,7 @@ fn compose_direct_commands_match_reference_and_inspection_errors_do_not_block(
     ] {
         let before = backend.count("compose_run");
         if label != "Up" {
-            click(cx, "More");
+            click(cx, "More Compose actions");
         }
         click(cx, label);
         wait_action(&panel, cx, &backend);
@@ -117,7 +117,7 @@ fn compose_direct_commands_match_reference_and_inspection_errors_do_not_block(
     let mut data = compose_project();
     data["services"][1]["build"] = json!(false);
     detail(&panel, cx, &backend, data);
-    click(cx, "More");
+    click(cx, "More Compose actions");
     assert!(!has(cx, "Build images only"));
     assert!(!has(cx, "Rebuild & up"));
     key(cx, "escape");
@@ -306,7 +306,7 @@ fn no_cli_offers_existing_container_actions_with_the_complete_membership(cx: &mu
     data["cliError"] = json!("Compose is not installed");
     detail(&panel, cx, &backend, data);
     assert!(!has(cx, "Up"));
-    assert!(!has(cx, "More"));
+    assert!(!has(cx, "More Compose actions"));
     assert!(has(cx, "Start the rest"));
     backend.hold_actions();
     click(cx, "Start the rest");

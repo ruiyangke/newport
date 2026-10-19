@@ -339,7 +339,7 @@ impl Newport {
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(review.title.clone()),
                 )
-                .child(crate::project_ui::label(review.detail.clone()))
+                .child(crate::label(review.detail.clone()))
                 .when(review.mainline.is_some(), |view| {
                     view.child(self.mainline_review_controls(review, stale, cx))
                 })
@@ -347,13 +347,13 @@ impl Newport {
                     view.child(self.reset_review_controls(review, cx))
                 })
                 .when(stale, |view| {
-                    view.child(crate::project_ui::label(
+                    view.child(crate::label(
                         "Repository state changed. Cancel and review again.",
                     ))
                 })
                 .when_some(review.message.as_ref(), |view, message| {
                     view.child(
-                        crate::project_ui::textarea(message)
+                        crate::controls::textarea(message)
                             .h(px(88.))
                             .aria_label(if review.action["kind"] == "commit.amend" {
                                 "Replacement commit message"
@@ -366,7 +366,7 @@ impl Newport {
                 .child(
                     project_dialog::actions()
                         .child(
-                            crate::project_ui::button("cancel-integration")
+                            crate::controls::button("cancel-integration")
                                 .label("Cancel")
                                 .disabled(self.git_mutation_blocks_write())
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -375,7 +375,7 @@ impl Newport {
                                 })),
                         )
                         .child(
-                            crate::project_ui::button("confirm-integration")
+                            crate::controls::button("confirm-integration")
                                 .loading(self.git_write_pending())
                                 .label(match review.action["kind"].as_str() {
                                     Some("merge") => "Merge",
@@ -480,7 +480,7 @@ fn recovery_banner(
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(recovery_heading(status)),
             )
-            .child(crate::project_ui::label(detail).text_size(px(crate::project_ui::FONT_SIZE))),
+            .child(crate::label(detail).text_size(px(crate::ui::FONT_SIZE))),
     );
     if show_controls && managed {
         let on_action = std::rc::Rc::new(on_action);
@@ -496,7 +496,7 @@ fn recovery_banner(
             if recovery_supported(status, kind) {
                 let on_action = on_action.clone();
                 controls = controls.child(
-                    crate::project_ui::button(kind)
+                    crate::controls::button(kind)
                         .label(title)
                         .disabled(disabled || !recovery_allowed(status, kind))
                         .on_click(move |_, window, cx| on_action(kind, window, cx)),
@@ -527,9 +527,9 @@ fn mainline_control(
         .flex()
         .flex_col()
         .gap_1()
-        .child(crate::project_ui::label("Mainline parent"))
+        .child(crate::label("Mainline parent"))
         .child(
-            crate::project_ui::button("git-replay-parent")
+            crate::controls::button("git-replay-parent")
                 .accessibility_label(format!("Mainline parent: {title}"))
                 .label(title)
                 .disabled(disabled)
@@ -546,10 +546,8 @@ fn mainline_control(
                 }),
         )
         .child(
-            crate::project_ui::label(
-                "Use the changes relative to this parent of the merge commit.",
-            )
-            .text_size(px(crate::project_ui::FONT_SIZE)),
+            crate::label("Use the changes relative to this parent of the merge commit.")
+                .text_size(px(crate::ui::FONT_SIZE)),
         )
         .into_any_element()
 }

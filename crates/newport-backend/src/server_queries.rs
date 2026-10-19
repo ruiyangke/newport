@@ -8,13 +8,39 @@ use crate::{
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 
+/// Which part of Docker's disk usage to read. Volume sizes take seconds to
+/// measure, so the page reads them apart from everything else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum DiskPart {
+    Full,
+    Quick,
+    Volumes,
+}
+impl DiskPart {
+    pub fn parse(part: Option<&str>) -> Result<Self, String> {
+        match part {
+            None => Ok(Self::Full),
+            Some("quick") => Ok(Self::Quick),
+            Some("volumes") => Ok(Self::Volumes),
+            Some(other) => Err(format!("Unknown disk part: {other}")),
+        }
+    }
+    pub fn name(self) -> Option<&'static str> {
+        match self {
+            Self::Full => None,
+            Self::Quick => Some("quick"),
+            Self::Volumes => Some("volumes"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Read {
     Services,
     UnitFile { unit: String, user: bool },
     Containers,
     Inspect(String),
-    Disk,
+    Disk(DiskPart),
     Compose(String),
 }
 impl Read {
@@ -25,6 +51,8 @@ impl Read {
         let seconds = match self {
             Self::Services | Self::Containers => 5,
             Self::UnitFile { .. } => 10,
+            // Measuring volumes walks them on disk; reuse a recent reading.
+            Self::Disk(DiskPart::Volumes) => 60,
             _ => 5,
         };
         Policy {
@@ -47,7 +75,7 @@ impl Read {
             }
             Self::Containers => crate::containers::snapshot(owner).await,
             Self::Inspect(id) => crate::containers::inspect(owner, id).await,
-            Self::Disk => crate::containers::disk(owner).await,
+            Self::Disk(part) => crate::containers::disk(owner, *part).await,
             Self::Compose(project) => crate::compose::project(owner, project).await,
         }
     }
@@ -129,6 +157,19 @@ mod tests {
     };
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn disk_parts_parse_and_volume_sizes_stay_fresh_longer() {
+        assert_eq!(DiskPart::parse(None), Ok(DiskPart::Full));
+        assert_eq!(DiskPart::parse(Some("quick")), Ok(DiskPart::Quick));
+        assert_eq!(DiskPart::parse(Some("volumes")), Ok(DiskPart::Volumes));
+        assert!(DiskPart::parse(Some("images")).is_err());
+        assert_eq!(DiskPart::Full.name(), None);
+        assert!(
+            Read::Disk(DiskPart::Volumes).policy().stale_after
+                > Read::Disk(DiskPart::Quick).policy().stale_after
+        );
+    }
 
     #[tokio::test]
     async fn features_and_servers_read_independently_while_profile_writer_is_busy() {

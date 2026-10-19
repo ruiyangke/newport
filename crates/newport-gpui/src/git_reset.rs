@@ -21,7 +21,7 @@ impl Newport {
         let mode = review.action["mode"].as_str().unwrap_or_default();
         let busy = self.git_mutation_blocks_write();
         div().flex().flex_col().gap_2()
-            .child(crate::project_ui::tabs("git-reset-mode").segmented()
+            .child(crate::controls::tabs("git-reset-mode").gap_0()
                 .selected_index(MODES.iter().position(|value| *value == mode).unwrap_or(0))
                 .children(["Soft", "Mixed", "Hard"].into_iter().map(|name| Tab::new().label(name)))
                 .on_click(cx.listener(|this, index: &usize, _, cx| {
@@ -34,14 +34,14 @@ impl Newport {
                         cx.notify();
                     }
                 })))
-            .child(crate::project_ui::label(match mode {
+            .child(crate::label(match mode {
                 "soft" => "Moves HEAD only. Staging and working files stay unchanged.",
                 "mixed" => "Resets staging to the selected commit. Working files stay unchanged; differences become unstaged.",
                 "hard" => "Replaces tracked working files and staging with the selected commit. Uncommitted tracked changes will be lost. Untracked files obstructing target paths may also be removed.",
                 _ => "Select a reset mode.",
             }))
             .when(mode == "hard", |view| view.child(
-                crate::project_ui::checkbox("git-confirm-hard-reset")
+                crate::controls::checkbox("git-confirm-hard-reset")
                     .label("I understand tracked edits and obstructing untracked files may be lost")
                     .checked(review.reset_confirmed)
                     .disabled(busy)

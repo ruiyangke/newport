@@ -15,7 +15,7 @@ pub(super) fn description(
         .aria_label(content)
         .test_support()
         .min_w_0()
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .line_height(px(18.))
 }
 
@@ -51,7 +51,7 @@ pub(super) fn field(title: &'static str) -> Div {
         .flex()
         .flex_col()
         .gap(px(6.))
-        .child(div().text_size(px(13.)).child(title))
+        .child(div().text_size(px(crate::ui::FONT_SIZE)).child(title))
 }
 
 /// Client validation belongs to the current form, not the backend resource.
@@ -64,7 +64,7 @@ pub(super) fn validation_error(message: impl Into<String>, cx: &App) -> impl Int
         .role(accesskit::Role::Alert)
         .aria_label(message.clone())
         .min_w_0()
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .line_height(px(18.))
         .text_color(cx.theme().danger)
         .child(message)
@@ -391,7 +391,7 @@ impl Newport {
                         }))
                         .max_w((window.viewport_size().width - px(32.)).max(px(240.)))
                         .centered(true)
-                        .rounded(px(14.))
+                        .rounded(px(crate::ui::RADIUS))
                         .border_0()
                         .p_4()
                         .when(library_form, |dialog| dialog.p_0())

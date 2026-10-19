@@ -115,7 +115,7 @@ fn library_feedback(notice: LibraryNotice<'_>, cx: &App) -> AnyElement {
         .aria_label(message.clone())
         .w_full()
         .min_w_0()
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .text_color(cx.theme().muted_foreground)
         .when(failed, |view| view.p_3().bg(cx.theme().muted))
         .child(message)
@@ -328,12 +328,18 @@ impl Newport {
             preferences.favorites_only,
         );
         let loading = notice == Some(LibraryNotice::Loading);
+        // No bookmarks at all, rather than none matching a search or Favorites.
+        let empty_library = self.resources.get("page").is_some_and(|page| {
+            page.error.is_none()
+                && !page.display_pending()
+                && page.value.as_array().is_some_and(Vec::is_empty)
+        });
         let form_open = self.project_add.is_some()
             || self.project_create.is_some()
             || self.project_edit.is_some();
         div().id("projects-scroll").flex_1().min_h_0().max_w(px(1240.)).p(px(crate::controls::PAGE_PADDING)).flex().flex_col().gap_3()
-            .child(div().flex().flex_wrap().items_center().gap_2().child(div().w(px(260.)).max_w_full().min_w(px(120.)).child(crate::controls::input(&filter).aria_label("Search projects").prefix(Icon::new(IconName::Search).size(px(14.)))))
-                .child(crate::controls::tabs("project-library-filter").segmented().selected_index(usize::from(preferences.favorites_only)).children(["All","Favorites"].into_iter().map(|name|Tab::new().label(name))).on_click(cx.listener(|this,index:&usize,_,cx|{this.project_preferences.entry(this.server.clone()).or_default().favorites_only=*index==1;this.project_preferences_changed();cx.notify();})))
+            .when(!empty_library, |v| v.child(div().flex().flex_wrap().items_center().gap_2().child(div().w(px(260.)).max_w_full().min_w(px(120.)).child(crate::controls::input(&filter).aria_label("Search projects").prefix(Icon::new(IconName::Search).size(px(14.)))))
+                .child(crate::controls::tabs("project-library-filter").gap_0().selected_index(usize::from(preferences.favorites_only)).children(["All","Favorites"].into_iter().map(|name|Tab::new().label(name))).on_click(cx.listener(|this,index:&usize,_,cx|{this.project_preferences.entry(this.server.clone()).or_default().favorites_only=*index==1;this.project_preferences_changed();cx.notify();})))
                 .child(div().ml_auto().min_w_0().max_w_full().flex().flex_wrap().gap_2()
                 .child(crate::controls::button("refresh-project-library").label("Refresh").icon(IconName::RefreshCw)
                     .disabled(self.resources.get("page").is_some_and(|r|r.pending))
@@ -348,9 +354,10 @@ impl Newport {
                         }
                     }))
                 )
-            )
+            ))
             .when(self.project_create.is_none() && self.project_creation_save_owner.as_ref().is_some_and(|(_,server)| server == &self.server) && self.resources.get("project-created-save").is_some_and(|r|r.error.is_some()), |v|v.child(label("Repository created, but its bookmark could not be saved. Add the existing repository; do not repeat creation.")).child(self.status("project-created-save",cx)))
-            .when_some(notice.filter(|notice| *notice != LibraryNotice::Loading), |view, notice| view.child(library_feedback(notice,cx)))
+            .when(empty_library, |view| view.child(self.empty_library(busy || form_open, cx)))
+            .when_some(notice.filter(|notice| *notice != LibraryNotice::Loading && !empty_library), |view, notice| view.child(library_feedback(notice,cx)))
             .when(loading,|view|view.child(project_loading::library(self.content_width.min(1240.) - crate::controls::PAGE_PADDING * 2.,cx)))
             .when(!loading && count > 0,|view|view.child(div().flex().flex_col().min_h_0().overflow_hidden()
                 .flex_1()
@@ -409,6 +416,117 @@ impl Edit {
 
     pub(super) fn initial_focus(&self, cx: &App) -> Option<FocusHandle> {
         (!self.remove).then(|| self.name.read(cx).focus_handle(cx))
+    }
+}
+
+impl Newport {
+    /// An empty library offers the Add project choices in place, instead of
+    /// pointing at the menu in the corner.
+    fn empty_library(&self, disabled: bool, cx: &mut Context<Self>) -> AnyElement {
+        let server = self
+            .selected_server()
+            .and_then(|server| server["name"].as_str())
+            .unwrap_or("this server")
+            .to_owned();
+        let narrow = self.content_width < 640.;
+        let card =
+            |id: &'static str,
+             icon: IconName,
+             title: &'static str,
+             text: String,
+             action: fn(&mut Newport, &mut Window, &mut Context<Newport>)| {
+                div()
+                    .id(id)
+                    .debug_selector(move || id.into())
+                    .role(accesskit::Role::Button)
+                    .aria_label(title)
+                    .test_support()
+                    .flex_1()
+                    .min_w_0()
+                    .p(px(14.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(px(crate::ui::RADIUS))
+                    .text_size(px(crate::ui::FONT_SIZE))
+                    .when(!disabled, |card| {
+                        card.cursor_pointer()
+                            .hover(|card| card.bg(theme::row_hover(cx)))
+                            .on_click(
+                                cx.listener(move |this, _, window, cx| action(this, window, cx)),
+                            )
+                    })
+                    .when(disabled, |card| card.opacity(0.5))
+                    .child(
+                        Icon::new(icon)
+                            .size(px(18.))
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(div().font_weight(FontWeight::MEDIUM).child(title))
+                    .child(
+                        div()
+                            .line_height(relative(1.5))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(text),
+                    )
+            };
+        div()
+            .id("projects-empty")
+            .debug_selector(|| "projects-empty".into())
+            .w_full()
+            .max_w(px(640.))
+            .mx_auto()
+            .pt(px(32.))
+            .flex()
+            .flex_col()
+            .gap(px(20.))
+            .child(
+                div()
+                    .child(
+                        div()
+                            .text_size(px(18.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!("Bring a project to {server}")),
+                    )
+                    .child(
+                        div()
+                            .mt(px(4.))
+                            .text_size(px(crate::ui::FONT_SIZE))
+                            .line_height(relative(1.6))
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Projects are Git repositories on this server. Edit files, run commands, and commit without leaving Newport."),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .when(narrow, |v| v.flex_col())
+                    .gap(px(12.))
+                    .child(card(
+                        "projects-empty-add",
+                        IconName::Folder,
+                        "Add a repository",
+                        format!("Pick a Git folder that’s already on {server}."),
+                        |this, window, cx| this.begin_project_add(window, cx),
+                    ))
+                    .child(card(
+                        "projects-empty-clone",
+                        IconName::Download,
+                        "Clone a repository",
+                        "From GitHub, GitLab, or any Git URL.".into(),
+                        |this, window, cx| this.begin_project_create(true, window, cx),
+                    ))
+                    .child(card(
+                        "projects-empty-create",
+                        IconName::Plus,
+                        "Create a repository",
+                        "Start a new one in a folder you choose.".into(),
+                        |this, window, cx| this.begin_project_create(false, window, cx),
+                    )),
+            )
+            .into_any_element()
     }
 }
 

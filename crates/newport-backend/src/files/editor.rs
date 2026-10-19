@@ -336,14 +336,14 @@ pub async fn dispatch(
                     owner
                         .files
                         .documents
-                        .invalidate(|root, path| root == &request.root && path == &request.path);
+                        .invalidate(|root, path| root == request.root && path == request.path);
                     let result = save(operations, sftp, &request).await;
                     // Even a successful save is revalidated before a later cached open.
                     // Its old base cannot survive a failed or uncertain write either.
                     owner
                         .files
                         .documents
-                        .invalidate(|root, path| root == &request.root && path == &request.path);
+                        .invalidate(|root, path| root == request.root && path == request.path);
                     if let Ok(document) = &result {
                         owner.files.documents.saved(&request.root, document.clone());
                     }
@@ -356,6 +356,23 @@ pub async fn dispatch(
             },
         )
         .await
+}
+
+/// Recheck the size at read time: a stale listing must not cause a large download.
+pub(super) async fn prefetch_document(
+    owner: &Arc<crate::server_session::ServerSession>,
+    root: &str,
+    path: &str,
+    limit: usize,
+) -> Result<Document> {
+    let sftp = Sftp::shared(owner).await?;
+    let path = target(&sftp, root, path).await?;
+    let (document, _) = read_bounded(&sftp, &path, limit).await?;
+    ensure!(
+        !newport_domain::text_file::has_long_lines(&document.content),
+        "Skip generated long-line files."
+    );
+    Ok(document)
 }
 #[cfg(test)]
 mod tests {
@@ -519,21 +536,4 @@ mod tests {
         assert_ne!(original, fingerprint("same length", &executable));
         assert_eq!(original, fingerprint("same length", &attrs));
     }
-}
-
-/// Recheck the size at read time: a stale listing must not cause a large download.
-pub(super) async fn prefetch_document(
-    owner: &Arc<crate::server_session::ServerSession>,
-    root: &str,
-    path: &str,
-    limit: usize,
-) -> Result<Document> {
-    let sftp = Sftp::shared(owner).await?;
-    let path = target(&sftp, root, path).await?;
-    let (document, _) = read_bounded(&sftp, &path, limit).await?;
-    ensure!(
-        !newport_domain::text_file::has_long_lines(&document.content),
-        "Skip generated long-line files."
-    );
-    Ok(document)
 }

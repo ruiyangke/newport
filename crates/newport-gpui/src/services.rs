@@ -37,6 +37,7 @@ pub(super) struct Preferences {
     query: String,
     selected: Option<Selection>,
     system_open: bool,
+    collapsed: std::collections::BTreeSet<String>,
     tab: usize,
     log_level: String,
     live: bool,
@@ -58,7 +59,9 @@ struct Row {
     user: bool,
     heading: bool,
     count: usize,
-    collapsible: bool,
+    reveal: bool,
+    /// For headings: whether the group's rows follow.
+    open: bool,
     accessible: String,
 }
 #[derive(Clone)]
@@ -68,7 +71,7 @@ enum RowClock {
 }
 #[derive(Default)]
 struct ListCache {
-    key: Option<(u64, String, bool)>,
+    key: Option<(u64, String, bool, std::collections::BTreeSet<String>)>,
     rows: Rc<Vec<Row>>,
     fallback: Option<Selection>,
 }
@@ -90,28 +93,27 @@ impl Row {
     }
     fn note_at(&self, now: i64) -> String {
         match &self.clock {
-            Some(RowClock::Since(since)) => domain::duration(now.saturating_sub(*since)),
+            Some(RowClock::Since(since)) => {
+                format!("up {}", domain::duration(now.saturating_sub(*since)))
+            }
             Some(RowClock::Timer(timer)) => domain::timer_note(timer, now),
             None => self.note.clone(),
         }
     }
 
-    fn heading(name: &str, count: usize, collapsible: bool) -> Self {
+    fn heading(name: &str, count: usize, open: bool) -> Self {
         Self {
             key: None,
             name: name.into(),
             note: String::new(),
             clock: None,
-            tone: if name == "Problems" {
-                Tone::Danger
-            } else {
-                Tone::Muted
-            },
+            tone: Tone::Muted,
             user: false,
             heading: true,
             count,
-            collapsible,
-            accessible: name.into(),
+            reveal: false,
+            open,
+            accessible: format!("{name} {count}"),
         }
     }
 }
@@ -129,6 +131,8 @@ pub(super) struct ServicesPanel {
     selected: Option<Selection>,
     reveal_restored_selection: bool,
     system_open: bool,
+    /// Folded list groups by heading name; a search shows every group.
+    collapsed: std::collections::BTreeSet<String>,
     tab: usize,
     width: f32,
     detail_tab_focus: [FocusHandle; 2],
@@ -198,6 +202,7 @@ impl ServicesPanel {
             selected: None,
             reveal_restored_selection: false,
             system_open: false,
+            collapsed: Default::default(),
             tab: 0,
             width: 800.,
             detail_tab_focus: std::array::from_fn(|_| cx.focus_handle()),
@@ -224,6 +229,7 @@ impl ServicesPanel {
             query: self.search.read(cx).value().to_string(),
             selected: self.selected.clone(),
             system_open: self.system_open,
+            collapsed: self.collapsed.clone(),
             tab: self.tab,
             log_level: self.logs.priority().unwrap_or_else(|| "all".into()),
             live: self.logs.live,
@@ -242,6 +248,7 @@ impl ServicesPanel {
         self.selected = preferences.selected;
         self.reveal_restored_selection = true;
         self.system_open = preferences.system_open;
+        self.collapsed = preferences.collapsed;
         self.tab = preferences.tab.min(1);
         self.logs.restore_preferences(
             preferences.log_level,
@@ -343,6 +350,7 @@ impl ServicesPanel {
                 .map_or(0, |r| r.data_revision),
             self.search.read(cx).value().trim().to_lowercase(),
             self.system_open,
+            self.collapsed.clone(),
         );
         let mut cache = self.list_cache.borrow_mut();
         if cache.key.as_ref() != Some(&key) {
@@ -350,33 +358,14 @@ impl ServicesPanel {
                 .client
                 .snapshot()
                 .map(|snapshot| {
-                    let services: Vec<_> = snapshot
-                        .services
-                        .iter()
-                        .filter(|u| {
-                            format!("{} {} {} {}", u.name, u.description, u.active, u.sub)
-                                .to_lowercase()
-                                .contains(&key.1)
-                        })
-                        .cloned()
-                        .collect();
-                    let groups = domain::group_services(&services);
-                    let fallback = groups
-                        .problems
-                        .first()
-                        .or(groups.owned.first())
-                        .or(groups.system.first())
-                        .map(|u| Selection::Unit(u.key()))
+                    let now = chrono::Local::now().timestamp_millis();
+                    // The default follows what the filter shows, not what's
+                    // folded, so folding a group never changes the detail.
+                    let fallback = master_rows(snapshot, &key.1, key.2, &Default::default(), now)
+                        .into_iter()
+                        .find_map(|row| row.key)
                         .unwrap_or(Selection::Journal);
-                    (
-                        master_rows(
-                            snapshot,
-                            &key.1,
-                            key.2,
-                            chrono::Local::now().timestamp_millis(),
-                        ),
-                        fallback,
-                    )
+                    (master_rows(snapshot, &key.1, key.2, &key.3, now), fallback)
                 })
                 .unwrap_or_else(|| (vec![], Selection::Journal));
             cache.rows = Rc::new(rows);
@@ -533,6 +522,180 @@ impl ServicesPanel {
         self.client.action(unit, scope, verb);
         cx.notify();
     }
+    fn toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::connections_selector::{Choice, Selector};
+        let (yours, total) = self.client.snapshot().map_or((0, 0), |snapshot| {
+            let groups = domain::group_services(&snapshot.services);
+            (
+                groups.problems.len() + groups.owned.len() + snapshot.timers.len(),
+                snapshot.services.len() + snapshot.timers.len(),
+            )
+        });
+        let owner = cx.weak_entity();
+        let journal = self.effective_selection(cx) == Selection::Journal;
+        div()
+            .id("services-toolbar")
+            .debug_selector(|| "services-toolbar".into())
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(44.))
+            .px(px(crate::controls::PAGE_PADDING - 4.))
+            .flex_shrink_0()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div().w(px(260.)).min_w(px(120.)).flex_shrink(1.).child(
+                    crate::controls::input(&self.search)
+                        .prefix(Icon::new(IconName::Search).size(px(14.)))
+                        .cleanable(true)
+                        .aria_label("Find a service"),
+                ),
+            )
+            .child(Selector::new(
+                "services-filter",
+                "Show",
+                usize::from(self.system_open),
+                vec![
+                    Choice {
+                        count: Some(yours),
+                        tooltip: Some(
+                            "Your services, timers, and any service that needs attention",
+                        ),
+                        ..Choice::text(0, "Yours")
+                    },
+                    Choice {
+                        count: Some(total),
+                        tooltip: Some("Include the services the system ships with"),
+                        ..Choice::text(1, "All")
+                    },
+                ],
+                move |index, _, cx| {
+                    let _ = owner.update(cx, |this, cx| {
+                        this.system_open = index == 1;
+                        cx.notify();
+                    });
+                },
+            ))
+            .child(div().flex_1())
+            .child(
+                crate::controls::button("services-journal")
+                    .ghost()
+                    .icon(IconName::ScrollText)
+                    .label("System journal")
+                    .selected(journal)
+                    .toggled(journal)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.select_from_list(Selection::Journal, window, cx)
+                    })),
+            )
+            .child(
+                crate::controls::icon_button("services-refresh")
+                    .ghost()
+                    .icon(IconName::RefreshCw)
+                    .tooltip("Refresh")
+                    .accessibility_label("Refresh services")
+                    .loading(self.pending("snapshot"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.client.refresh();
+                        // Logs and unit files have no refresh of their own.
+                        match this.active_data {
+                            ActiveData::Logs(..) => this.client.retry_logs(),
+                            ActiveData::File(..) => this.client.retry_unit_file(),
+                            ActiveData::None => {}
+                        }
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+    fn status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(snapshot) = self.client.snapshot() else {
+            return div().into_any_element();
+        };
+        let running = snapshot
+            .services
+            .iter()
+            .filter(|u| u.active == "active" && u.sub == "running")
+            .count();
+        let failed = snapshot
+            .services
+            .iter()
+            .filter(|u| u.active == "failed")
+            .count();
+        let timers = snapshot.timers.len();
+        let summary = format!(
+            "{running} running · {failed} failed · {timers} {}",
+            if timers == 1 { "timer" } else { "timers" }
+        );
+        // Who may change what; the full explanation is a hover away.
+        let (access, explanation) = match snapshot.privilege {
+            Privilege::Root => (
+                "root",
+                "Newport signs in as root and can change any service.",
+            ),
+            Privilege::Sudo => (
+                "sudo",
+                "System services change through sudo without a password.",
+            ),
+            Privilege::Password => (
+                "sudo needs your password",
+                "System services need your sudo password to change; those actions open in the Terminal. Your user services change directly.",
+            ),
+            Privilege::None => (
+                "system services read-only",
+                "This account can’t change system services. Your user services change directly.",
+            ),
+        };
+        let user = (!snapshot.user.available).then(|| {
+            snapshot
+                .user
+                .reason
+                .clone()
+                .filter(|reason| !reason.is_empty())
+                .map_or_else(
+                    || "User services aren’t shown.".to_owned(),
+                    |reason| format!("User services aren’t shown: {reason}"),
+                )
+        });
+        div()
+            .id("services-status")
+            .debug_selector(|| "services-status".into())
+            .flex_shrink_0()
+            .child(
+                crate::controls::status_bar(cx)
+                    .left(
+                        div()
+                            .id("services-summary")
+                            .role(accesskit::Role::Status)
+                            .aria_label(summary.clone())
+                            .child(summary),
+                    )
+                    .right(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .when_some(user, |v, reason| {
+                                v.child(
+                                    div()
+                                        .id("services-user-unavailable")
+                                        .aria_label(reason.clone())
+                                        .hover_hint(reason)
+                                        .child("no user services ·"),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .id("services-privilege")
+                                    .aria_label(explanation)
+                                    .hover_hint(explanation)
+                                    .child(access),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
     fn list(&self, cx: &mut Context<Self>) -> AnyElement {
         let rows = self.rows(cx);
         let selected = self.effective_selection(cx);
@@ -547,24 +710,13 @@ impl ServicesPanel {
             .min_h_0()
             .min_w_0()
             .h_full()
-            .p(px(crate::controls::PAGE_PADDING))
-            .when(self.width > 600., |v| {
-                v.border_r_1().border_color(cx.theme().border)
-            })
-            .when(self.width > 600., |v| v.w(px(280.)).flex_shrink_0())
+            .py(px(6.))
+            // Beside the detail, the resizable split owns width and divider.
+            .when(self.width > 600., |v| v.size_full())
             .when(self.width <= 600., |v| v.flex_1())
-            .child(
-                div()
-                    .h(px(crate::controls::CONTROL_HEIGHT))
-                    .flex_shrink_0()
-                    .mb(px(8.))
-                    .child(
-                        crate::controls::input(&self.search)
-                            .prefix(Icon::new(IconName::Search).size(px(14.)))
-                            .aria_label("Find a service"),
-                    ),
-            )
-            .when(initial, |v| v.child(list_skeleton()))
+            .when(initial, |v| {
+                v.child(div().px(px(14.)).child(list_skeleton()))
+            })
             .when(!initial, |v| {
                 v.child(
                     div()
@@ -574,14 +726,13 @@ impl ServicesPanel {
                         .role(accesskit::Role::ListBox)
                         .aria_label("Services")
                         .track_focus(&self.list_focus)
-                        .rounded(px(6.))
                         .focus_visible(|style| {
                             style.shadow(vec![BoxShadow {
                                 color: cx.theme().ring,
                                 offset: point(px(0.), px(0.)),
                                 blur_radius: px(0.),
                                 spread_radius: px(2.),
-                                inset: false,
+                                inset: true,
                             }])
                         })
                         .on_key_down(cx.listener(Self::navigate))
@@ -614,57 +765,67 @@ impl ServicesPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if row.heading {
-            let text = format!("{}  {}", row.name, row.count);
-            if row.collapsible {
-                return div()
-                    .h(px(28.))
-                    .pt(px(2.))
-                    .child(
-                        crate::controls::compact_button("services-system-toggle")
-                            .label(text)
-                            .icon(if self.system_open {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .ghost()
-                            .expanded(self.system_open)
-                            .w_full()
-                            .justify_start()
-                            .text_size(px(10.5))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.system_open = !this.system_open;
-                                cx.notify();
-                            })),
-                    )
-                    .into_any_element();
-            }
+            let name = row.name.clone();
             return div()
                 .h(px(28.))
-                .px(px(8.))
-                .pt(px(8.))
-                .text_size(px(10.5))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(tone_color(row.tone, cx))
-                .child(text.to_uppercase())
+                .pt(px(4.))
+                .child(
+                    crate::controls::group_heading(
+                        SharedString::from(format!("services-group-{}", name.to_lowercase())),
+                        &row.name,
+                        row.count,
+                        row.open,
+                        cx,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.collapsed.remove(&name) {
+                            this.collapsed.insert(name.clone());
+                        }
+                        cx.notify();
+                    })),
+                )
+                .into_any_element();
+        }
+        if row.reveal {
+            return div()
+                .id("services-system-hidden")
+                .role(accesskit::Role::Button)
+                .aria_label(row.accessible.clone())
+                .test_support()
+                .h(px(28.))
+                .pl(px(14.))
+                .pr(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .cursor_pointer()
+                .text_size(px(crate::ui::FONT_SIZE))
+                .text_color(cx.theme().muted_foreground)
+                .hover(|v| v.bg(theme::row_hover(cx)).text_color(cx.theme().foreground))
+                .child(div().flex_1().min_w_0().truncate().child(row.name.clone()))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.system_open = true;
+                    cx.notify();
+                }))
                 .into_any_element();
         }
         let Some(key) = row.key.clone() else {
             return crate::empty::compact(row.name.clone(), cx)
                 .h(px(28.))
                 .py(px(5.))
-                .px(px(8.))
+                .px(px(14.))
                 .overflow_hidden()
                 .into_any_element();
         };
         let now = self.clock.now();
         let note = match &row.clock {
-            Some(RowClock::Since(at)) => self.clock.elapsed(*at),
+            Some(RowClock::Since(at)) => format!("up {}", self.clock.elapsed(*at)),
             Some(RowClock::Timer(timer)) => self.clock.timer(timer),
             None => row.note.clone(),
         };
         let active = selected == &key;
         let name = row.name.clone();
+        let timer = matches!(row.clock, Some(RowClock::Timer(_)));
         let id = match &key {
             Selection::Journal => "services-option-journal".to_owned(),
             Selection::Unit(key) => format!("services-option-{key}"),
@@ -678,30 +839,30 @@ impl ServicesPanel {
             .when(active, |v| v.aria_active_descendant())
             .h(px(28.))
             .w_full()
-            .rounded(px(6.))
-            .px(px(8.))
+            .pl(px(14.))
+            .pr(px(8.))
             .flex()
             .items_center()
             .gap(px(8.))
-            .text_size(px(12.5))
+            .text_size(px(crate::ui::FONT_SIZE))
             .cursor_pointer()
-            .when(active, |v| v.bg(cx.theme().sidebar_accent))
+            .when(active, |v| v.bg(theme::selected_fill(cx.theme().is_dark())))
             .when(!active, |v| v.hover(|v| v.bg(theme::row_hover(cx))))
-            .child(if key == Selection::Journal {
-                Icon::new(IconName::ScrollText)
-                    .size(px(13.))
+            .child(if timer {
+                Icon::new(IconName::Clock)
+                    .size(px(12.))
                     .text_color(cx.theme().muted_foreground)
                     .into_any_element()
             } else {
                 dot(row.tone, cx).into_any_element()
             })
             .child(div().flex_1().min_w_0().truncate().child(name))
-            .when(row.user, |v| v.child(badge("user", cx)))
+            .when(row.user, |v| v.child(crate::controls::tag("user", cx)))
             .when(!note.is_empty(), |v| {
                 v.child(
                     div()
                         .flex_shrink_0()
-                        .text_size(px(11.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .text_color(tone_color(
                             if matches!(row.tone, Tone::Danger | Tone::Warning) {
                                 row.tone
@@ -736,17 +897,105 @@ impl Render for ServicesPanel {
         let compact = self.width <= 600.;
         let show_detail = !compact || self.selected.is_some();
         let show_list = !compact || self.selected.is_none();
-        div().id("services-page").debug_selector(||"services-page".into()).relative().flex_1().size_full().min_w_0().min_h_0().flex().flex_col().overflow_hidden()
-            .child(canvas(move|bounds,window,cx|{let width=f32::from(bounds.size.width);let _=owner.update(cx,|this,cx|{if this.width!=width{this.width=width;window.refresh();cx.notify();}});},|_,_,_,_|{}).absolute().size_full().left_0().top_0())
-            .when(snapshot.is_some(),|v|v
-                .when_some(problem.clone(),|v,error|v.child(alert("services-stale",format!("{error} Showing the last reading."),cx).mb(px(12.))))
-                .when_some(snapshot.filter(|s|!s.user.available).and_then(|s|s.user.reason.clone()).filter(|reason|!reason.is_empty()),|v,reason|v.child(quiet(format!("User services aren’t shown: {reason}"),cx).mb(px(12.))))
-                .when(snapshot.is_some_and(|s|s.privilege==Privilege::Password),|v|v.child(quiet("System services need your sudo password to change; those actions open in the Terminal. Your user services change directly.",cx).mb(px(12.)))))
-            .when(snapshot.is_none()&&problem.is_some(),|v|v.child(crate::empty::pane(IconName::ServerOff, "Services aren’t available here", problem.unwrap_or_default(), cx).child(crate::controls::button("services-retry").label("Try again").loading(self.pending("snapshot")).disabled(self.pending("snapshot")).on_click(cx.listener(|this,_,_,cx|this.refresh(cx))))))
-            .when(snapshot.is_some()||initial,|v|v.child(div().flex_1().min_h_0().min_w_0().flex().when(show_list,|v|v.child(self.list(cx))).when(show_detail,|v|v.child(self.detail(cx)))))
+        div()
+            .id("services-page")
+            .debug_selector(|| "services-page".into())
+            .relative()
+            .flex_1()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(
+                canvas(
+                    move |bounds, window, cx| {
+                        let width = f32::from(bounds.size.width);
+                        let _ = owner.update(cx, |this, cx| {
+                            if this.width != width {
+                                this.width = width;
+                                window.refresh();
+                                cx.notify();
+                            }
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full()
+                .left_0()
+                .top_0(),
+            )
+            .when(snapshot.is_some(), |v| {
+                v.when_some(problem.clone(), |v, error| {
+                    v.child(
+                        alert(
+                            "services-stale",
+                            format!("{error} Showing the last reading."),
+                            cx,
+                        )
+                        .m(px(8.)),
+                    )
+                })
+            })
+            .when(snapshot.is_none() && problem.is_some(), |v| {
+                v.child(
+                    crate::empty::pane(
+                        IconName::ServerOff,
+                        "Services aren’t available here",
+                        problem.unwrap_or_default(),
+                        cx,
+                    )
+                    .child(
+                        crate::controls::button("services-retry")
+                            .label("Try again")
+                            .loading(self.pending("snapshot"))
+                            .disabled(self.pending("snapshot"))
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                    ),
+                )
+            })
+            .when(snapshot.is_some() || initial, |v| v.child(self.toolbar(cx)))
+            .when(snapshot.is_some() || initial, |v| {
+                v.child(div().flex_1().min_h_0().min_w_0().flex().map(|v| {
+                    if compact {
+                        v.when(show_list, |v| v.child(self.list(cx)))
+                            .when(show_detail, |v| v.child(self.detail(cx)))
+                    } else {
+                        let key = SharedString::from("services-split");
+                        let layout = crate::controls::split_state(&key, window, cx);
+                        v.child(
+                            gpui_kit::component::resizable::h_resizable(key)
+                                .with_state(&layout)
+                                .child(
+                                    gpui_kit::component::resizable::resizable_panel()
+                                        .size(px(280.))
+                                        .size_range(px(220.)..px(520.))
+                                        .flex_none()
+                                        .child(self.list(cx)),
+                                )
+                                .child(
+                                    gpui_kit::component::resizable::resizable_panel()
+                                        .size_range(px(360.)..Pixels::MAX)
+                                        .child(self.detail(cx)),
+                                ),
+                        )
+                    }
+                }))
+            })
+            .when(snapshot.is_some(), |v| v.child(self.status_bar(cx)))
     }
 }
-fn master_rows(snapshot: &ServicesSnapshot, query: &str, system_open: bool, now: i64) -> Vec<Row> {
+/// Problems, your services and timers. System services follow under "All",
+/// or behind one row that reveals them; a search always includes them.
+fn master_rows(
+    snapshot: &ServicesSnapshot,
+    query: &str,
+    system_open: bool,
+    collapsed: &std::collections::BTreeSet<String>,
+    now: i64,
+) -> Vec<Row> {
     let needle = query.trim().to_lowercase();
     let services: Vec<_> = snapshot
         .services
@@ -759,22 +1008,14 @@ fn master_rows(snapshot: &ServicesSnapshot, query: &str, system_open: bool, now:
         .cloned()
         .collect();
     let groups = domain::group_services(&services);
-    let mut rows = vec![Row {
-        key: Some(Selection::Journal),
-        name: "System journal".into(),
-        note: String::new(),
-        clock: None,
-        tone: Tone::Muted,
-        user: false,
-        heading: false,
-        count: 0,
-        collapsible: false,
-        accessible: "System journal".into(),
-    }];
+    let open = |title: &str| !needle.is_empty() || !collapsed.contains(title);
+    let mut rows = vec![];
     for (title, units) in [("Problems", &groups.problems), ("Services", &groups.owned)] {
         if !units.is_empty() {
-            rows.push(Row::heading(title, units.len(), false));
-            rows.extend(units.iter().map(|u| service_row(u, now)));
+            rows.push(Row::heading(title, units.len(), open(title)));
+            if open(title) {
+                rows.extend(units.iter().map(|u| service_row(u, now)));
+            }
         }
     }
     let mut timers: Vec<_> = snapshot
@@ -788,8 +1029,8 @@ fn master_rows(snapshot: &ServicesSnapshot, query: &str, system_open: bool, now:
         .collect();
     timers.sort_by_key(|t| t.next.unwrap_or(i64::MAX));
     if !timers.is_empty() {
-        rows.push(Row::heading("Timers", timers.len(), false));
-        rows.extend(timers.iter().map(|t| Row {
+        rows.push(Row::heading("Timers", timers.len(), open("Timers")));
+        rows.extend(timers.iter().filter(|_| open("Timers")).map(|t| Row {
             key: Some(Selection::Unit(t.key())),
             name: domain::short_name(&t.name).into(),
             note: domain::timer_note(t, now),
@@ -802,7 +1043,8 @@ fn master_rows(snapshot: &ServicesSnapshot, query: &str, system_open: bool, now:
             user: t.scope == Scope::User,
             heading: false,
             count: 0,
-            collapsible: false,
+            reveal: false,
+            open: true,
             accessible: format!(
                 "{}{}: timer, {}",
                 t.name,
@@ -816,27 +1058,50 @@ fn master_rows(snapshot: &ServicesSnapshot, query: &str, system_open: bool, now:
         }));
     }
     if !groups.system.is_empty() {
-        rows.push(Row::heading(
-            "System",
-            groups.system.len(),
-            needle.is_empty(),
-        ));
         if system_open || !needle.is_empty() {
-            rows.extend(groups.system.iter().map(|u| service_row(u, now)));
+            rows.push(Row::heading("System", groups.system.len(), open("System")));
+            if open("System") {
+                rows.extend(groups.system.iter().map(|u| service_row(u, now)));
+            }
+        } else {
+            let count = groups.system.len();
+            let name = format!(
+                "{count} system {} · Show all",
+                if count == 1 { "service" } else { "services" }
+            );
+            rows.push(Row {
+                key: None,
+                name: name.clone(),
+                note: String::new(),
+                clock: None,
+                tone: Tone::Muted,
+                user: false,
+                heading: false,
+                count,
+                reveal: true,
+                open: true,
+                accessible: name,
+            });
         }
     }
-    if !needle.is_empty() && services.is_empty() && timers.is_empty() {
+    if services.is_empty() && timers.is_empty() {
+        let name = if needle.is_empty() {
+            "No services or timers here."
+        } else {
+            "No services or timers match."
+        };
         rows.push(Row {
             key: None,
-            name: "No services or timers match.".into(),
+            name: name.into(),
             note: String::new(),
             clock: None,
             tone: Tone::Muted,
             user: false,
             heading: false,
             count: 0,
-            collapsible: false,
-            accessible: "No services or timers match.".into(),
+            reveal: false,
+            open: true,
+            accessible: name.into(),
         });
     }
     rows
@@ -854,7 +1119,8 @@ fn service_row(unit: &ServiceUnit, now: i64) -> Row {
         user: unit.scope == Scope::User,
         heading: false,
         count: 0,
-        collapsible: false,
+        reveal: false,
+        open: true,
         accessible: format!(
             "{}{}: {}",
             unit.name,
@@ -877,19 +1143,9 @@ fn tone_color(tone: Tone, cx: &App) -> Hsla {
 }
 fn quiet(value: impl Into<SharedString>, cx: &App) -> Div {
     div()
-        .text_size(px(11.5))
+        .text_size(px(crate::ui::FONT_SIZE))
         .text_color(cx.theme().muted_foreground)
         .child(value.into())
-}
-fn badge(value: &'static str, cx: &App) -> Div {
-    div()
-        .flex_shrink_0()
-        .rounded(px(4.))
-        .bg(cx.theme().muted)
-        .px(px(4.))
-        .text_size(px(10.))
-        .text_color(cx.theme().muted_foreground)
-        .child(value)
 }
 fn dot(tone: Tone, cx: &App) -> Div {
     div()
@@ -908,7 +1164,7 @@ fn alert(id: impl Into<ElementId>, value: impl Into<SharedString>, cx: &App) -> 
         .id(id)
         .role(accesskit::Role::Alert)
         .aria_label(value.clone())
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .text_color(cx.theme().danger)
         .child(value)
 }
@@ -929,7 +1185,7 @@ fn list_skeleton() -> AnyElement {
                     Skeleton::new()
                         .h(px(10.))
                         .w(relative([0.46, 0.38, 0.58, 0.52][i % 4]))
-                        .rounded(px(3.)),
+                        .rounded(px(crate::ui::RADIUS)),
                 )
         }))
         .into_any_element()

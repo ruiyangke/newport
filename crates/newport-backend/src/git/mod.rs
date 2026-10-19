@@ -177,6 +177,14 @@ async fn ping_lanes<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     );
 }
 
+fn release_idle_lanes<T>(lanes: &[Mutex<Option<T>>]) {
+    for lane in lanes {
+        if let Ok(mut client) = lane.try_lock() {
+            *client = None;
+        }
+    }
+}
+
 // Keep related paginated reads on the same agent so its bounded caches remain useful.
 fn request_lane(request: &Request) -> usize {
     match request {
@@ -345,18 +353,31 @@ async fn connection(
     }
     *open = Some(session.clone());
     let weak = Arc::downgrade(&session);
+    let mut pressure = session.connection.channel_pressure();
     let mut maintenance = slot.maintenance.lock().unwrap();
     if let Some(previous) = maintenance.take() {
         previous.abort();
     }
     *maintenance = Some(tokio::spawn(async move {
         loop {
-            tokio::time::sleep(KEEPALIVE).await;
+            let reclaim = tokio::select! {
+                _ = tokio::time::sleep(KEEPALIVE) => false,
+                changed = pressure.changed() => {
+                    if changed.is_err() { break; }
+                    true
+                }
+            };
             let Some(session) = weak.upgrade() else {
                 break;
             };
             if *session.cancelled.borrow() {
                 break;
+            }
+            if reclaim {
+                // Lane locks span whole requests, including mutations. Drop
+                // only idle cached streams; the next request reopens its lane.
+                release_idle_lanes(&session.clients);
+                continue;
             }
             // Only close for inactivity when no operation is using the session.
             if let Ok(_access) = session.access.try_write() {
@@ -1119,6 +1140,18 @@ mod connection_tests {
         tokio::time::timeout(Duration::from_millis(100), ping_idle(&lane))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_pressure_releases_idle_lanes_without_interrupting_inflight_work() {
+        let lanes = [Mutex::new(Some("mutation")), Mutex::new(Some("idle read"))];
+        let active = lanes[0].lock().await;
+        release_idle_lanes(&lanes);
+        assert_eq!(*active, Some("mutation"));
+        assert_eq!(*lanes[1].lock().await, None);
+        drop(active);
+        release_idle_lanes(&lanes);
+        assert_eq!(*lanes[0].lock().await, None);
     }
 
     #[test]

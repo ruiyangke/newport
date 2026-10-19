@@ -73,6 +73,7 @@ impl Pty {
         channel: Channel<Msg>,
         home: PathBuf,
         integration: Option<uuid::Uuid>,
+        connection: uuid::Uuid,
     ) -> io::Result<JoinHandle<()>> {
         let slave = self
             .slave
@@ -86,6 +87,7 @@ impl Pty {
             .env("PS1", "fixture> ")
             .env("TERM", "xterm-256color")
             .env("HISTFILE", "/dev/null")
+            .env("NEWPORT_FIXTURE_CONNECTION", connection.to_string())
             .stdin(slave.try_clone()?)
             .stdout(slave.try_clone()?)
             .stderr(slave);

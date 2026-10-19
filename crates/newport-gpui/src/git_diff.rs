@@ -37,7 +37,7 @@ impl Presentation {
                     system
                         .shape_line(
                             text.clone(),
-                            px(crate::project_ui::FONT_SIZE),
+                            px(crate::ui::FONT_SIZE),
                             &[TextRun {
                                 len: text.len(),
                                 font: font(cx.theme().mono_font_family.clone()),
@@ -485,7 +485,7 @@ impl Newport {
                                     .aria_label(format!("{adds} additions, {dels} deletions"))
                                     .flex()
                                     .gap_1()
-                                    .text_size(px(crate::project_ui::FONT_SIZE))
+                                    .text_size(px(crate::ui::FONT_SIZE))
                                     .font_family(cx.theme().mono_font_family.clone())
                                     .child(
                                         div()
@@ -503,8 +503,8 @@ impl Newport {
             )
             .when(mixed, |view| {
                 view.child(
-                    crate::project_ui::tabs("diff-comparison")
-                        .segmented()
+                    crate::controls::tabs("diff-comparison")
+                        .gap_0()
                         .selected_index(usize::from(!self.git.diff_staged))
                         .children(
                             ["Staged", "Unstaged"]
@@ -530,7 +530,7 @@ impl Newport {
                     }),
                 |view, (editor, path)| {
                     view.child(
-                        crate::project_ui::compact_button("project-edit-change")
+                        crate::controls::compact_button("project-edit-change")
                             .ghost()
                             .icon(IconName::File)
                             .label("Edit file")
@@ -546,7 +546,7 @@ impl Newport {
                         || self.git.selected["untracked"] == true),
                 |view| {
                     view.child(
-                        crate::project_ui::compact_button("git-stage-file")
+                        crate::controls::compact_button("git-stage-file")
                             .label(git_changes::index_action_label(true, &self.git.selected))
                             .disabled(!self.git_can_change_index(true))
                             .on_click(
@@ -557,7 +557,7 @@ impl Newport {
             )
             .when(working && self.git.selected["staged"] == true, |view| {
                 view.child(
-                    crate::project_ui::compact_button("git-unstage-file")
+                    crate::controls::compact_button("git-unstage-file")
                         .label(git_changes::index_action_label(false, &self.git.selected))
                         .disabled(!self.git_can_change_index(false))
                         .on_click(cx.listener(|this, _, _, cx| this.git_change_index(false, cx))),
@@ -778,25 +778,21 @@ impl Newport {
             .when_some(selection_bar, |view, bar| view.child(bar))
             .child(self.status(first_key, cx))
             .child(self.status(more_key, cx))
-            .when_some(error, |view, error| {
-                view.child(crate::project_ui::label(error).p_3())
-            })
+            .when_some(error, |view, error| view.child(crate::label(error).p_3()))
             .when_some(partial_hint.filter(|_| !empty), |view, hint| {
                 view.child(
-                    crate::project_ui::label(hint)
+                    crate::label(hint)
                         .px_3()
                         .py_2()
-                        .text_size(px(crate::project_ui::FONT_SIZE))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .bg(cx.theme().muted),
                 )
             })
             .when(page["metadata"]["truncated"] == true, |view| {
                 view.child(
-                    crate::project_ui::label(
-                        "The diff exceeds the agent’s limit. Some changes are not shown.",
-                    )
-                    .px_3()
-                    .py_2(),
+                    crate::label("The diff exceeds the agent’s limit. Some changes are not shown.")
+                        .px_3()
+                        .py_2(),
                 )
             })
             .when(footer == Footer::Loading, |view| {
@@ -840,12 +836,12 @@ impl Newport {
                         .px_3()
                         .py_2()
                         .flex_shrink_0()
-                        .child(crate::project_ui::label(footer.label()).flex_1())
+                        .child(crate::label(footer.label()).flex_1())
                         .when(
                             matches!(footer, Footer::Failed | Footer::Unavailable),
                             |view| {
                                 view.child(
-                                    crate::project_ui::compact_button("git-diff-retry")
+                                    crate::controls::compact_button("git-diff-retry")
                                         .label("Refresh")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.git_refresh();
@@ -887,7 +883,7 @@ pub(super) fn render_unified<T: 'static>(
                         .min_w_full()
                         .flex()
                         .items_center()
-                        .text_size(px(crate::project_ui::FONT_SIZE))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .font_family(cx.theme().mono_font_family.clone())
                         .bg(if row.heading {
                             theme::diff_hunk(cx.theme().is_dark())

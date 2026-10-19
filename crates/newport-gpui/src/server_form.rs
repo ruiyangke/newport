@@ -269,7 +269,7 @@ impl ServerForm {
                 .w(px(480.))
                 .p_0()
                 .gap_0()
-                .rounded(px(14.))
+                .rounded(px(crate::ui::RADIUS))
                 .border_0()
                 .centered(true)
                 .on_cancel(move |_, _, cx| !cancel.read(cx).pending)
@@ -520,7 +520,7 @@ impl ServerForm {
         let input = crate::controls::form_input(&self.fields[index])
             .aria_label(title.to_owned())
             .disabled(self.pending)
-            .rounded(px(7.))
+            .rounded(px(crate::ui::RADIUS))
             .bg(control_background(cx))
             .border_color(cx.theme().border);
         field(title).child(input).when_some(
@@ -536,29 +536,56 @@ impl ServerForm {
             .disabled(self.pending)
             .w_full()
             .menu_item_min_height(px(28.))
-            .rounded(px(7.))
+            .rounded(px(crate::ui::RADIUS))
             .bg(control_background(cx))
             .border_color(cx.theme().border)
     }
     fn footer(form: &Entity<Self>, window: &Window, cx: &App) -> Div {
         let pending = form.read(cx).pending;
+        let existing = form.read(cx).existing;
         let cancel = form.clone();
         let submit = form.clone();
+        let remove = form.clone();
         let compact = compact(window);
+        let danger = theme::error(cx.theme().is_dark());
         div()
             .debug_selector(|| "server-editor-footer".into())
+            .w_full()
             .flex()
-            .flex_wrap()
-            .justify_end()
+            .items_center()
             .gap(px(8.))
             .px(px(if compact { 18. } else { 24. }))
             .pt(px(if compact { 10. } else { 12. }))
             .pb(px(if compact { 14. } else { 20. }))
+            // Deleting a server is done where the server is edited, apart
+            // from Save and behind its own confirmation -- not one click from
+            // the switcher used many times a day.
+            .when(existing, |footer| {
+                footer.child(
+                    crate::controls::form_button("delete-server")
+                        .ghost()
+                        .label("Delete server…")
+                        .accessibility_label("Delete server")
+                        .text_color(danger)
+                        .rounded(px(crate::ui::RADIUS))
+                        .disabled(pending)
+                        .on_click(move |_, window, cx| {
+                            let owner = remove.read(cx).owner.clone();
+                            Self::close(&remove, window, cx);
+                            window.defer(cx, move |window, cx| {
+                                let _ = owner.update(cx, |owner, cx| {
+                                    owner.confirm_delete_server(window, cx)
+                                });
+                            });
+                        }),
+                )
+            })
+            .child(div().flex_1())
             .child(
                 crate::controls::form_button("cancel-server")
                     .label("Cancel")
                     .min_w(px(76.))
-                    .rounded(px(7.))
+                    .rounded(px(crate::ui::RADIUS))
                     .disabled(pending)
                     .on_click(move |_, window, cx| Self::close(&cancel, window, cx)),
             )
@@ -567,7 +594,7 @@ impl ServerForm {
                     .primary()
                     .label(if pending { "Saving…" } else { "Save server" })
                     .min_w(px(76.))
-                    .rounded(px(7.))
+                    .rounded(px(crate::ui::RADIUS))
                     .loading(pending)
                     .disabled(pending)
                     .on_click(move |_, window, cx| {
@@ -593,7 +620,7 @@ impl Render for ServerForm {
             .px(px(if compact { 18. } else { 24. }))
             .pt(px(8.))
             .pb(px(if compact { 14. } else { 20. }))
-            .text_size(px(12.))
+            .text_size(px(crate::ui::FONT_SIZE))
             .child(self.scroll.row(0, legend("Connection", cx)))
             .child(
                 self.scroll
@@ -664,7 +691,7 @@ impl Render for ServerForm {
                             .child(
                                 crate::controls::form_button("refresh-agent-keys")
                                     .label("Refresh agent keys")
-                                    .rounded(px(7.))
+                                    .rounded(px(crate::ui::RADIUS))
                                     .disabled(self.pending || self.keys_loading)
                                     .on_click(cx.listener(|this, _, _, cx| this.refresh_keys(cx))),
                             )
@@ -802,14 +829,14 @@ fn field(title: &str) -> Div {
     div().flex().flex_col().min_w_0().gap(px(7.)).child(
         div()
             .line_height(relative(1.))
-            .text_size(px(12.))
+            .text_size(px(crate::ui::FONT_SIZE))
             .font_weight(FontWeight::MEDIUM)
             .child(title.to_owned()),
     )
 }
 fn legend(title: &'static str, cx: &App) -> Div {
     div()
-        .text_size(px(11.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .font_weight(FontWeight::MEDIUM)
         .text_color(cx.theme().muted_foreground)
         .line_height(relative(1.))
@@ -829,7 +856,7 @@ fn error_message(message: String, cx: &App) -> impl IntoElement {
         .debug_selector(|| "server-editor-error".into())
         .role(accesskit::Role::Alert)
         .aria_label(message.clone())
-        .text_size(px(12.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .line_height(relative(1.65))
         .text_color(crate::theme::error(cx.theme().is_dark()))
         .child(message)

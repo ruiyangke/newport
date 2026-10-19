@@ -1,14 +1,35 @@
 //! Kit's base tabs provide vertical-tab semantics without imposing horizontal styling.
 use super::*;
 
-/// Footer actions share the navigation rows' hover and selected surfaces.
-pub(super) fn sidebar_action_style(
+/// The selected row's edge marker. Callers place it on the full-width row,
+/// never inside a control's padded content.
+pub(super) fn selection_marker(cx: &App) -> Div {
+    div()
+        .absolute()
+        .left_0()
+        .top_0()
+        .bottom_0()
+        .w(px(1.))
+        .bg(cx.theme().muted_foreground)
+}
+
+pub(super) fn icon_color(selected: bool, cx: &App) -> Hsla {
+    if selected {
+        cx.theme().foreground
+    } else {
+        cx.theme().muted_foreground
+    }
+}
+
+/// Settings is a page like the navigation rows, so it shares their surfaces
+/// and label colour rather than a dimmer action style.
+pub(super) fn sidebar_page_style(
     selected: bool,
     cx: &App,
 ) -> gpui_kit::component::button::ButtonCustomVariant {
     let selection = theme::sidebar_selection(cx.theme().is_dark());
     gpui_kit::component::button::ButtonCustomVariant::new(cx)
-        .foreground(theme::sidebar_action(cx.theme().is_dark()))
+        .foreground(theme::sidebar_foreground(cx.theme().is_dark()))
         .color(if selected {
             selection
         } else {
@@ -211,13 +232,13 @@ pub(super) fn install_workspace_shortcuts(cx: &mut App) {
 }
 pub(super) const VIEWS: [(Page, IconName); 8] = [
     (Page::Overview, IconName::Activity),
-    (Page::Ports, IconName::Cable),
+    (Page::Ports, IconName::Link),
     (Page::Services, IconName::Layers),
-    (Page::Containers, IconName::Boxes),
+    (Page::Containers, IconName::Box),
     (Page::Terminal, IconName::Terminal),
-    (Page::Files, IconName::FolderOpen),
-    (Page::Projects, IconName::FolderGit2),
-    (Page::Integration, IconName::Plug),
+    (Page::Files, IconName::Folder),
+    (Page::Projects, IconName::FolderCode),
+    (Page::Integration, IconName::LayoutGrid),
 ];
 fn destination(index: usize, key: &str, count: usize) -> Option<usize> {
     if count == 0 {
@@ -233,7 +254,7 @@ fn destination(index: usize, key: &str, count: usize) -> Option<usize> {
     }
 }
 impl Newport {
-    pub(super) fn navigation(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn navigation(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let tunnel_count = rows(&self.snapshot["config"]["tunnels"])
             .iter()
             .filter(|tunnel| text(tunnel, "serverId") == self.server)
@@ -250,8 +271,19 @@ impl Newport {
             .flex_col()
             .flex_shrink_0()
             .w_full()
-            .children(VIEWS.into_iter().enumerate().map(|(i, (page, icon))| {
-                Tab::new(("nav", i))
+            .children(VIEWS.into_iter().enumerate().flat_map(|(i, (page, icon))| {
+                let separator = matches!(page, Page::Terminal | Page::Integration).then(|| {
+                    div()
+                        .id(("navigation-separator", i))
+                        .role(accesskit::Role::Splitter)
+                        .h(px(1.))
+                        .flex_shrink_0()
+                        .my(px(8.))
+                        .mx(px(if compact { 8. } else { 12. }))
+                        .bg(cx.theme().border)
+                        .into_any_element()
+                });
+                let tab = Tab::new(("nav", i))
                     .accessibility_label(page.title())
                     .selected(page == self.page)
                     .set_position(i + 1, VIEWS.len())
@@ -267,20 +299,20 @@ impl Newport {
                     .track_focus(&self.navigation_focus[i])
                     .tab_stop(!disabled && i == current)
                     .w_full()
-                    .h(px(32.))
-                    .when(i + 1 < VIEWS.len(), |tab| tab.mb(px(2.)))
-                    .px(px(8.))
+                    .relative()
+                    .h(px(if compact { 40. } else { 36. }))
+                    .flex_shrink_0()
+                    .px(px(if compact { 0. } else { 16. }))
                     .border_1()
                     .border_color(gpui_kit::transparent_black())
-                    .rounded(px(6.))
-                    .text_size(px(13.))
-                    .when(!cx.theme().is_dark(), |tab| {
-                        tab.font_weight(FontWeight::MEDIUM)
-                    })
+                    .rounded(px(crate::ui::RADIUS))
+                    .text_size(px(crate::ui::FONT_SIZE))
+                    .font_weight(FontWeight::NORMAL)
                     .justify_start()
                     .when(page == self.page, |tab| {
                         tab.bg(theme::sidebar_selection(cx.theme().is_dark()))
                             .font_weight(FontWeight::MEDIUM)
+                            .child(selection_marker(cx))
                     })
                     .when(!disabled, |tab| {
                         tab.hover(|style| {
@@ -298,21 +330,18 @@ impl Newport {
                             .w_full()
                             .flex()
                             .items_center()
-                            .gap(px(9.))
+                            .gap(px(11.))
+                            .when(compact, |row| row.justify_center())
                             .child(
                                 Icon::new(icon)
-                                    .size(px(16.))
-                                    .text_color(if page == self.page {
-                                        cx.theme().primary
-                                    } else {
-                                        theme::sidebar_muted(cx.theme().is_dark())
-                                    }),
+                                    .size(px(crate::controls::ICON_SIZE))
+                                    .text_color(icon_color(page == self.page, cx)),
                             )
-                            .child(page.title())
-                            .when(page == Page::Ports && tunnel_count > 0, |row| {
+                            .when(!compact, |row| row.child(page.title()))
+                            .when(!compact && page == Page::Ports && tunnel_count > 0, |row| {
                                 row.child(div().flex_1()).child(
                                     div()
-                                        .text_size(px(11.))
+                                        .text_size(px(crate::ui::FONT_SIZE))
                                         .text_color(if page == self.page {
                                             theme::sidebar_foreground(cx.theme().is_dark())
                                         } else {
@@ -322,6 +351,7 @@ impl Newport {
                                 )
                             }),
                     )
+                    .when(compact, |tab| tab.hover_hint(page.title()))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if window.has_active_dialog(cx) {
                             return;
@@ -350,6 +380,8 @@ impl Newport {
                         this.navigate(VIEWS[next].0, cx);
                         this.navigation_focus[next].focus(window, cx);
                     }))
+                    .into_any_element();
+                separator.into_iter().chain(std::iter::once(tab))
             }))
             .into_any_element()
     }

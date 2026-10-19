@@ -87,7 +87,7 @@ impl Newport {
         ] {
             let id = server_id.clone();
             let label_id = server_id.clone();
-            let expected = crate::terminal_scope::connection(&server, &self.snapshot);
+            let expected = crate::terminal_scope::connection(server, &self.snapshot);
             let label_expected = expected.clone();
             let feature_disabled = if checked {
                 self.server_form.is_some()
@@ -170,7 +170,7 @@ impl Newport {
                                                     .role(Role::Status)
                                                     .test_support()
                                                     .aria_label(format!("{title}: {feature_state}"))
-                                                    .text_size(px(12.))
+                                                    .text_size(px(crate::ui::FONT_SIZE))
                                                     .text_color(muted)
                                                     .child(feature_state),
                                             )
@@ -186,7 +186,7 @@ impl Newport {
                                     .test_support()
                                     .aria_label(description)
                                     .mt(px(4.))
-                                    .text_size(px(13.))
+                                    .text_size(px(crate::ui::FONT_SIZE))
                                     .line_height(relative(1.6))
                                     .text_color(muted)
                                     .child(description),
@@ -230,7 +230,7 @@ impl Newport {
                     .role(Role::Status)
                     .test_support()
                     .aria_label(format!("Sharing connection: {connection_status}"))
-                    .text_size(px(13.))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .text_color(tone)
                     .child(format!("Sharing connection: {connection_status}")),
             );
@@ -253,7 +253,7 @@ impl Newport {
                         .test_support()
                         .aria_label(error.to_owned())
                         .mb(px(12.))
-                        .text_size(px(13.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .line_height(relative(1.6))
                         .text_color(cx.theme().danger)
                         .child(error.to_owned()),
@@ -261,7 +261,7 @@ impl Newport {
             }
             if permissions["error"].is_string() {
                 let id = server_id.clone();
-                let expected = crate::terminal_scope::connection(&server, &self.snapshot);
+                let expected = crate::terminal_scope::connection(server, &self.snapshot);
                 connection = connection.child(
                     div().flex().child(
                         crate::controls::button("integration-apply-permissions")
@@ -421,7 +421,7 @@ impl Newport {
                         .role(Role::Status)
                         .test_support()
                         .aria_label(format!("Terminal commands: {terminal_status}"))
-                        .text_size(px(12.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .text_color(muted)
                         .child(terminal_status),
                 ),
@@ -476,7 +476,7 @@ impl Newport {
                             .role(Role::Status)
                             .test_support()
                             .aria_label(format!("Needle agent: {summary}"))
-                            .text_size(px(12.))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .text_color(muted)
                             .child(summary),
                     ),

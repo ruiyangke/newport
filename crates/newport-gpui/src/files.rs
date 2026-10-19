@@ -1,6 +1,8 @@
 //! Remote file browsing. New selections supersede in-flight reads.
 use super::*;
+use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::Selectable;
+use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use newport_client::file_transfer::Direction;
 use std::{cell::RefCell, rc::Rc};
 #[path = "file_list.rs"]
@@ -10,15 +12,17 @@ mod list;
 #[path = "file_poll_tests.rs"]
 mod poll_tests;
 
-fn tree_width(content_width: f32) -> f32 {
-    if content_width < 800. { 140. } else { 180. }
+/// The places panel hides itself below this width; the toolbar can still show it.
+const PLACES_MIN_CONTENT: f32 = 640.;
+/// Below this width the preview replaces the list instead of sitting beside it.
+const PREVIEW_SIDE_MIN_CONTENT: f32 = 760.;
+
+fn places_width(content_width: f32) -> f32 {
+    if content_width < 900. { 160. } else { 188. }
 }
 
-const PAGE_SIZE: usize = 40;
-
-fn page_range(count: usize, page: usize) -> std::ops::Range<usize> {
-    let start = page.min(count.saturating_sub(1) / PAGE_SIZE) * PAGE_SIZE;
-    start..(start + PAGE_SIZE).min(count)
+fn preview_width(content_width: f32) -> f32 {
+    (content_width * 0.42).clamp(320., 620.)
 }
 
 /// Identity painted into a file control. Retained callbacks must not resolve
@@ -90,14 +94,6 @@ impl FileTarget {
     }
 }
 
-fn modified_date(value: &Value) -> String {
-    value
-        .as_i64()
-        .and_then(|seconds| seconds.checked_mul(1000))
-        .map(crate::localized_time::file_date)
-        .unwrap_or_else(|| "—".into())
-}
-
 pub struct Browser {
     pub connection: Value,
     controls_connection: Value,
@@ -106,17 +102,20 @@ pub struct Browser {
     path: Entity<InputState>,
     filter: Entity<InputState>,
     hidden: bool,
-    tree_visible: bool,
-    pub(super) tree: Entity<file_tree::FolderTree>,
+    places_visible: bool,
+    /// The breadcrumb is replaced by the path field while typing a location.
+    editing_path: bool,
+    sort: list::Sort,
+    selected: Option<String>,
+    pub(super) list_focus: FocusHandle,
     home: Option<String>,
-    page: usize,
     project_path: Option<String>,
     projection: RefCell<Option<Projection>>,
     pub directory: String,
     pub(super) requested: String,
     pub canonical: Option<String>,
     reset_filter: bool,
-    scroll: modal::FormScroll,
+    scroll: UniformListScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -124,23 +123,34 @@ struct Projection {
     revision: u64,
     query: String,
     hidden: bool,
+    sort: list::Sort,
     entries: Rc<Vec<Value>>,
 }
 impl Browser {
+    /// The filter as matched; surrounding whitespace never narrows a folder.
+    fn query(&self, cx: &App) -> String {
+        self.filter.read(cx).value().trim().to_owned()
+    }
+
     fn entries(&self, cx: &App) -> Rc<Vec<Value>> {
         let revision = self.reads.listing_data_revision();
-        let query = self.filter.read(cx).value().to_string();
+        let query = self.query(cx);
         let mut cached = self.projection.borrow_mut();
         if cached.as_ref().is_none_or(|cache| {
-            cache.revision != revision || cache.query != query || cache.hidden != self.hidden
+            cache.revision != revision
+                || cache.query != query
+                || cache.hidden != self.hidden
+                || cache.sort != self.sort
         }) {
-            let entries = self.reads.listing().map_or_else(Vec::new, |listing| {
+            let mut entries = self.reads.listing().map_or_else(Vec::new, |listing| {
                 visible_entries(listing, &query, self.hidden)
             });
+            list::sort_entries(&mut entries, self.sort);
             *cached = Some(Projection {
                 revision,
                 query,
                 hidden: self.hidden,
+                sort: self.sort,
                 entries: Rc::new(entries),
             });
         }
@@ -158,15 +168,6 @@ pub(super) struct PreviewTarget {
     path: String,
     render_revision: u64,
     pending: bool,
-}
-
-impl PreviewTarget {
-    fn same_selection(&self, other: &Self) -> bool {
-        self.server == other.server
-            && self.connection == other.connection
-            && self.token == other.token
-            && self.path == other.path
-    }
 }
 
 fn parent(path: &str) -> &str {
@@ -205,7 +206,7 @@ impl Newport {
                 .get(server)
                 .is_some_and(|browser| browser.active && &browser.connection == connection)
             && self.selected_server().is_some_and(|profile| {
-                terminal_scope::connection(&profile, &self.snapshot) == *connection
+                terminal_scope::connection(profile, &self.snapshot) == *connection
             })
     }
     pub(super) fn file_connection_changed(&mut self, id: &str, connection: Value) {
@@ -256,11 +257,6 @@ impl Newport {
         self.file_preview_target().as_ref() == Some(target)
     }
 
-    pub(super) fn file_preview_selection_current(&self, target: &PreviewTarget) -> bool {
-        self.file_preview_target()
-            .is_some_and(|current| current.same_selection(target))
-    }
-
     pub(super) fn close_file_preview(&mut self) {
         if let Some(browser) = self.file_browsers.get_mut(&self.server) {
             browser.reads.close_preview();
@@ -273,7 +269,7 @@ impl Newport {
         self.file_preview_viewport = file_preview::Viewport::default();
     }
 
-    pub(super) fn poll_file_browsers(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(super) fn poll_file_browsers(&mut self, _cx: &mut Context<Self>) -> bool {
         let available = self.configuration_available();
         let mut changed = false;
         let mut payload = None;
@@ -294,18 +290,6 @@ impl Newport {
                     browser.home = Some(path.to_owned());
                 }
             }
-            browser.tree.update(cx, |tree, cx| {
-                tree.configure(
-                    browser.home.clone(),
-                    browser.directory.clone(),
-                    browser.hidden,
-                    visible && browser.tree_visible,
-                    cx,
-                );
-                // The retained tree notifies its own subscribers. Its child
-                // rows do not require rebuilding the Files page as well.
-                tree.poll(cx);
-            });
             if visible
                 && let Some(preview) = browser.reads.preview()
                 && !preview.pending
@@ -376,7 +360,7 @@ impl Newport {
             return None;
         }
         let server = self.selected_server()?;
-        let connection = terminal_scope::connection(&server, &self.snapshot);
+        let connection = terminal_scope::connection(server, &self.snapshot);
         if self.file_browsers.get(&self.server)?.connection != connection {
             return None;
         }
@@ -431,16 +415,14 @@ impl Newport {
             browser.active = true;
             browser.requested = browser.directory.clone();
             browser.reads.navigate(browser.directory.clone());
-            browser.tree.update(cx, |tree, cx| {
-                tree.configure(
-                    browser.home.clone(),
-                    browser.directory.clone(),
-                    browser.hidden,
-                    browser.tree_visible,
-                    cx,
-                )
-            });
             self.files_refresh_requested = false;
+            // Saved projects become shortcuts in the places panel.
+            let server = self.server.clone();
+            self.request_refresh(
+                "file-places",
+                "git_projects_list",
+                json!({"serverId":server}),
+            );
         }
     }
 
@@ -458,8 +440,8 @@ impl Newport {
             let Some(profile) = self.selected_server() else {
                 return;
             };
-            let connection = terminal_scope::connection(&profile, &self.snapshot);
-            let (directory, path_text, query, hidden, tree_visible, page) = self
+            let connection = terminal_scope::connection(profile, &self.snapshot);
+            let (directory, path_text, query, hidden, places_visible, sort) = self
                 .file_browsers
                 .get(&self.server)
                 .map(|browser| {
@@ -468,11 +450,20 @@ impl Newport {
                         browser.path.read(cx).value().to_string(),
                         browser.filter.read(cx).value().to_string(),
                         browser.hidden,
-                        browser.tree_visible,
-                        browser.page,
+                        browser.places_visible,
+                        browser.sort,
                     )
                 })
-                .unwrap_or_else(|| (".".into(), ".".into(), String::new(), false, true, 0));
+                .unwrap_or_else(|| {
+                    (
+                        ".".into(),
+                        ".".into(),
+                        String::new(),
+                        false,
+                        true,
+                        list::Sort::default(),
+                    )
+                });
             let path = cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder("Go to folder…")
@@ -480,32 +471,13 @@ impl Newport {
             });
             let filter = cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder("Filter this folder…")
+                    .placeholder("Filter")
                     .default_value(query)
             });
             let server = self.server.clone();
             let input_connection = connection.clone();
             let filter_server = server.clone();
             let filter_connection = connection.clone();
-            let guard_view = cx.entity().downgrade();
-            let guard_server = server.clone();
-            let guard_connection = connection.clone();
-            let tree = cx.new(|_| {
-                file_tree::FolderTree::new(newport_client::file_browser::folders::Folders::new(
-                    backend::Backend::discover(),
-                    server.clone(),
-                    connection.clone(),
-                ))
-                .with_scope_guard(move |cx| {
-                    guard_view.upgrade().is_some_and(|view| {
-                        let this = view.read(cx);
-                        this.file_browser_current(&guard_server, &guard_connection)
-                            && this.file_browsers[&guard_server].tree_visible
-                    })
-                })
-            });
-            let tree_server = server.clone();
-            let tree_connection = connection.clone();
             let subscriptions = vec![
                 cx.subscribe(&filter, move |this, _, event, cx| {
                     if !matches!(event, gpui_kit::component::input::InputEvent::Change)
@@ -514,22 +486,11 @@ impl Newport {
                         return;
                     }
                     if let Some(browser) = this.file_browsers.get_mut(&filter_server) {
-                        browser.scroll.handle.scroll_to_top_of_item(0);
-                        browser.page = 0;
+                        browser.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                        browser.selected = None;
                     }
                     cx.notify();
                 }),
-                cx.subscribe_in(
-                    &tree,
-                    window,
-                    move |this, _, event: &file_tree::Navigate, window, cx| {
-                        if this.file_browser_current(&tree_server, &tree_connection)
-                            && this.file_browsers[&tree_server].tree_visible
-                        {
-                            this.files_navigate(event.0.clone(), window, cx);
-                        }
-                    },
-                ),
                 cx.subscribe_in(
                     &path,
                     window,
@@ -538,13 +499,17 @@ impl Newport {
                           event: &gpui_kit::component::input::InputEvent,
                           window,
                           cx| {
-                        if this.file_browser_current(&server, &input_connection)
-                            && matches!(
-                                event,
-                                gpui_kit::component::input::InputEvent::PressEnter { .. }
-                            )
-                        {
-                            this.files_navigate(input.read(cx).value().to_string(), window, cx);
+                        if !this.file_browser_current(&server, &input_connection) {
+                            return;
+                        }
+                        match event {
+                            gpui_kit::component::input::InputEvent::PressEnter { .. } => {
+                                this.files_navigate(input.read(cx).value().to_string(), window, cx);
+                            }
+                            gpui_kit::component::input::InputEvent::Blur => {
+                                this.files_stop_editing_path(window, cx);
+                            }
+                            _ => {}
                         }
                     },
                 ),
@@ -563,17 +528,19 @@ impl Newport {
                     path,
                     filter,
                     hidden,
-                    tree_visible,
-                    tree,
+                    places_visible,
+                    editing_path: false,
+                    sort,
+                    selected: None,
+                    list_focus: cx.focus_handle(),
                     home: None,
-                    page,
                     project_path: None,
                     projection: RefCell::new(None),
                     directory,
                     requested: String::new(),
                     canonical: None,
                     reset_filter: false,
-                    scroll: modal::FormScroll::new(PAGE_SIZE, window, cx),
+                    scroll: UniformListScrollHandle::new(),
                     _subscriptions: subscriptions,
                 },
             );
@@ -581,8 +548,8 @@ impl Newport {
         let browser = self.file_browsers.get_mut(&self.server).unwrap();
         if browser.reset_filter {
             browser.reset_filter = false;
-            browser.page = 0;
-            browser.scroll.handle.scroll_to_top_of_item(0);
+            browser.selected = None;
+            browser.scroll.scroll_to_item(0, ScrollStrategy::Top);
             browser
                 .filter
                 .update(cx, |input, cx| input.set_value("", window, cx));
@@ -595,15 +562,6 @@ impl Newport {
                     .update(cx, |input, cx| input.set_value(path, window, cx));
             }
         }
-        browser.tree.update(cx, |tree, cx| {
-            tree.configure(
-                browser.home.clone(),
-                browser.directory.clone(),
-                browser.hidden,
-                browser.active && browser.tree_visible,
-                cx,
-            )
-        });
     }
     pub(super) fn files_navigate(
         &mut self,
@@ -622,6 +580,9 @@ impl Newport {
             return;
         };
         browser.active = true;
+        browser.editing_path = false;
+        browser.selected = None;
+        browser.scroll.scroll_to_item(0, ScrollStrategy::Top);
         self.files_refresh_requested = false;
         browser.requested = path.clone();
         browser.canonical = None;
@@ -632,9 +593,6 @@ impl Newport {
         cx.notify();
     }
     fn files_preview(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
-        if window.has_active_dialog(cx) {
-            return;
-        }
         let Some(entry) = self
             .file_browsers
             .get(&self.server)
@@ -645,6 +603,9 @@ impl Newport {
         else {
             return;
         };
+        if self.file_preview_path.as_deref() == Some(path.as_str()) {
+            return;
+        }
         self.close_file_preview();
         let Some(browser) = self.file_browsers.get_mut(&self.server) else {
             return;
@@ -653,9 +614,693 @@ impl Newport {
             return;
         }
         self.file_preview_path = Some(path);
-        self.open_file_preview_dialog(entry, window, cx);
+        self.prepare_file_preview(&entry, window, cx);
         cx.notify();
     }
+    /// Select an entry without opening it. A preview that is already showing
+    /// follows the selection; selecting a folder closes it.
+    fn files_select(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(browser) = self.file_browsers.get_mut(&self.server) else {
+            return;
+        };
+        let entries = browser.entries(cx);
+        let Some(index) = entries.iter().position(|entry| entry["path"] == path) else {
+            return;
+        };
+        browser.selected = Some(path.clone());
+        browser
+            .scroll
+            .scroll_to_item(index, ScrollStrategy::Nearest);
+        if self.file_preview_path.is_some() {
+            if entries[index]["kind"] == "directory" {
+                self.close_file_preview();
+            } else {
+                self.files_preview(path, window, cx);
+            }
+        }
+        cx.notify();
+    }
+    /// Click or Enter: a folder opens in place, a file opens in the preview.
+    pub(super) fn files_activate(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(browser) = self.file_browsers.get_mut(&self.server) else {
+            return;
+        };
+        browser.list_focus.focus(window, cx);
+        let directory = browser
+            .entries(cx)
+            .iter()
+            .find(|entry| entry["path"] == path)
+            .map(|entry| entry["kind"] == "directory");
+        match directory {
+            Some(true) => self.files_navigate(path, window, cx),
+            Some(false) => {
+                browser.selected = Some(path.clone());
+                self.files_preview(path, window, cx);
+                // A preview that replaces the list takes keyboard focus with it.
+                if !self.files_preview_beside()
+                    && let Some(focus) = &self.file_preview_viewport.content_focus
+                {
+                    focus.focus(window, cx);
+                }
+                cx.notify();
+            }
+            None => {}
+        }
+    }
+    pub(super) fn files_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(browser) = self.file_browsers.get(&self.server) else {
+            return;
+        };
+        let scope = (self.server.clone(), browser.connection.clone());
+        if !self.file_browser_current(&scope.0, &scope.1) {
+            return;
+        }
+        let keystroke = &event.keystroke;
+        let entries = browser.entries(cx);
+        let current = browser
+            .selected
+            .as_ref()
+            .and_then(|path| entries.iter().position(|entry| entry["path"] == *path));
+        let path_at = |index: usize| entries.get(index).map(|entry| text(entry, "path"));
+        let parent_key =
+            keystroke.key == "backspace" || (keystroke.key == "up" && keystroke.modifiers.platform);
+        if parent_key {
+            let path = browser
+                .reads
+                .canonical_path()
+                .unwrap_or_default()
+                .to_owned();
+            if !path.is_empty() && path != "/" {
+                self.files_navigate(parent(&path).to_owned(), window, cx);
+            }
+        } else if keystroke.modifiers.platform
+            || keystroke.modifiers.control
+            || keystroke.modifiers.alt
+        {
+            return;
+        } else {
+            let last = entries.len().checked_sub(1);
+            let target = match keystroke.key.as_str() {
+                "down" => current.map_or(Some(0), |index| Some((index + 1).min(last.unwrap_or(0)))),
+                "up" => current.map_or(last, |index| Some(index.saturating_sub(1))),
+                "home" => Some(0),
+                "end" => last,
+                "enter" => {
+                    if let Some(path) = current.and_then(path_at) {
+                        self.files_activate(path, window, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                "escape" => {
+                    if self.file_preview_path.is_some() {
+                        self.close_file_preview();
+                    } else if let Some(browser) = self.file_browsers.get_mut(&self.server) {
+                        browser.selected = None;
+                    }
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                _ => return,
+            };
+            if let Some(path) = target.filter(|_| !entries.is_empty()).and_then(path_at) {
+                self.files_select(path, window, cx);
+            }
+        }
+        cx.stop_propagation();
+        window.prevent_default();
+    }
+    fn files_start_editing_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(browser) = self.file_browsers.get_mut(&self.server) {
+            browser.editing_path = true;
+            let input = browser.path.clone();
+            input.update(cx, |input, cx| input.select_all(window, cx));
+            crate::controls::focus_editor(&input, window, cx);
+            cx.notify();
+        }
+    }
+    fn files_stop_editing_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(browser) = self.file_browsers.get_mut(&self.server)
+            && browser.editing_path
+        {
+            browser.editing_path = false;
+            let current = browser
+                .reads
+                .canonical_path()
+                .unwrap_or_default()
+                .to_owned();
+            if !current.is_empty() {
+                browser
+                    .path
+                    .update(cx, |input, cx| input.set_value(current, window, cx));
+            }
+            cx.notify();
+        }
+    }
+    fn files_places_shown(&self) -> bool {
+        self.file_browsers
+            .get(&self.server)
+            .is_some_and(|browser| browser.places_visible)
+            && self.content_width >= PLACES_MIN_CONTENT
+    }
+    fn files_preview_beside(&self) -> bool {
+        self.file_preview_path.is_some() && self.content_width >= PREVIEW_SIDE_MIN_CONTENT
+    }
+    /// Width left for the list, which decides whether Modified fits.
+    pub(super) fn files_list_width(&self) -> f32 {
+        let mut width = self.content_width;
+        if self.files_places_shown() {
+            width -= places_width(self.content_width);
+        }
+        if self.files_preview_beside() {
+            width -= preview_width(self.content_width);
+        }
+        width
+    }
+
+    fn files_breadcrumb(
+        &self,
+        browser: &Browser,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let (server, connection) = (self.server.clone(), browser.connection.clone());
+        let home = browser
+            .home
+            .as_deref()
+            .filter(|home| path == *home || path.starts_with(&format!("{home}/")));
+        // Each crumb is (label, destination). Home collapses to its icon.
+        let mut crumbs: Vec<(String, String)> = Vec::new();
+        let rest = match home {
+            Some(home) => {
+                crumbs.push(("~".into(), home.to_owned()));
+                &path[home.len()..]
+            }
+            None => {
+                crumbs.push(("/".into(), "/".into()));
+                path
+            }
+        };
+        let mut so_far = crumbs[0].1.trim_end_matches('/').to_owned();
+        for segment in rest.split('/').filter(|segment| !segment.is_empty()) {
+            so_far = format!("{so_far}/{segment}");
+            crumbs.push((segment.to_owned(), so_far.clone()));
+        }
+        // Long paths keep their root and the last three folders.
+        let hidden = crumbs.len().saturating_sub(4);
+        let last = crumbs.len() - 1;
+        let mut row = div()
+            .id("files-breadcrumb")
+            .debug_selector(|| "files-breadcrumb".into())
+            .role(Role::Navigation)
+            .aria_label(format!("Location: {path}"))
+            .flex_1()
+            .min_w_0()
+            .h(px(crate::controls::CONTROL_HEIGHT))
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .cursor_text();
+        for (index, (label, destination)) in crumbs.into_iter().enumerate() {
+            if index > 0 && index <= hidden {
+                if index == 1 {
+                    row = row.child(crumb_separator(cx)).child(
+                        div()
+                            .px(px(4.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child("…"),
+                    );
+                }
+                continue;
+            }
+            if index > 0 {
+                row = row.child(crumb_separator(cx));
+            }
+            let current = index == last;
+            let (server, connection) = (server.clone(), connection.clone());
+            let button = crate::controls::compact_button(("files-crumb", index))
+                .ghost()
+                .flex_shrink_0()
+                .max_w(px(220.))
+                .accessibility_label(if label == "~" {
+                    "Home folder".to_owned()
+                } else if label == "/" {
+                    "Server root".to_owned()
+                } else {
+                    label.clone()
+                })
+                .when(label == "~", |button| {
+                    button.icon(IconName::House).child("Home")
+                })
+                .when(label == "/", |button| {
+                    button.icon(IconName::HardDrive).child("Server root")
+                })
+                .when(label != "~" && label != "/", |button| {
+                    button.child(div().truncate().child(label.clone()))
+                })
+                .text_color(if current {
+                    cx.theme().foreground
+                } else {
+                    cx.theme().muted_foreground
+                })
+                .when(current, |button| button.font_weight(FontWeight::MEDIUM))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if this.file_browser_current(&server, &connection) {
+                        this.files_navigate(destination.clone(), window, cx);
+                    }
+                }));
+            row = row.child(button);
+        }
+        // Empty space after the last folder turns the breadcrumb into a field.
+        row.child(
+            div()
+                .id("files-breadcrumb-edit")
+                .flex_1()
+                .h_full()
+                .min_w(px(24.))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if this.file_browser_current(&server, &connection) {
+                        this.files_start_editing_path(window, cx);
+                    }
+                })),
+        )
+    }
+
+    fn files_toolbar(&self, browser: &Browser, path: &str, cx: &mut Context<Self>) -> AnyElement {
+        let pending = browser.reads.listing_pending();
+        let scope = (self.server.clone(), browser.connection.clone());
+        let directory_target = self.file_action_target(path);
+        let up = parent(path).to_owned();
+        let project_pending = self
+            .resources
+            .get("file-project")
+            .is_some_and(|row| row.pending);
+        let toggle = |id: &'static str, on: bool, icon: IconName, label: &'static str| {
+            crate::controls::icon_button(id)
+                .ghost()
+                .icon(icon)
+                .tooltip(label)
+                .accessibility_label(label)
+                .selected(on)
+                .toggled(on)
+        };
+        div()
+            .id("files-toolbar")
+            .debug_selector(|| "files-toolbar".into())
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .h(px(44.))
+            .px(px(crate::controls::PAGE_PADDING - 6.))
+            .flex_shrink_0()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                toggle(
+                    "files-places",
+                    self.files_places_shown(),
+                    IconName::PanelLeft,
+                    "Places",
+                )
+                .disabled(self.content_width < PLACES_MIN_CONTENT)
+                .on_click({
+                    let (server, connection) = scope.clone();
+                    cx.listener(move |this, _, _, cx| {
+                        if this.file_browser_current(&server, &connection)
+                            && let Some(browser) = this.file_browsers.get_mut(&server)
+                        {
+                            browser.places_visible = !browser.places_visible;
+                            cx.notify();
+                        }
+                    })
+                }),
+            )
+            .child(
+                crate::controls::icon_button("files-parent")
+                    .ghost()
+                    .icon(IconName::ArrowUp)
+                    .tooltip("Enclosing folder")
+                    .accessibility_label("Parent folder")
+                    .disabled(pending || path.is_empty() || path == "/")
+                    .on_click({
+                        let target = directory_target.clone();
+                        cx.listener(move |this, _, window, cx| {
+                            if target
+                                .as_ref()
+                                .is_some_and(|target| this.file_target_current(target))
+                            {
+                                this.files_navigate(up.clone(), window, cx);
+                            }
+                        })
+                    }),
+            )
+            .child(if browser.editing_path || path.is_empty() {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(crate::controls::input(&browser.path).aria_label("Go to folder"))
+                    .into_any_element()
+            } else {
+                self.files_breadcrumb(browser, path, cx).into_any_element()
+            })
+            .child(
+                div()
+                    .w(px(220_f32.min(self.content_width * 0.28)))
+                    .min_w(px(120.))
+                    .child(
+                        crate::controls::input(&browser.filter)
+                            .aria_label("Filter files")
+                            .prefix(Icon::new(IconName::Search).size(px(14.)))
+                            .cleanable(true),
+                    ),
+            )
+            .child(
+                toggle(
+                    "files-hidden",
+                    browser.hidden,
+                    if browser.hidden {
+                        IconName::Eye
+                    } else {
+                        IconName::EyeOff
+                    },
+                    "Hidden files",
+                )
+                .on_click({
+                    let (server, connection) = scope.clone();
+                    cx.listener(move |this, _, _, cx| {
+                        if this.file_browser_current(&server, &connection)
+                            && let Some(browser) = this.file_browsers.get_mut(&server)
+                        {
+                            browser.hidden = !browser.hidden;
+                            browser.selected = None;
+                            cx.notify();
+                        }
+                    })
+                }),
+            )
+            .child(
+                crate::controls::icon_button("files-refresh")
+                    .ghost()
+                    .icon(IconName::RefreshCw)
+                    .tooltip("Refresh")
+                    .accessibility_label("Refresh folder")
+                    .disabled(pending || path.is_empty())
+                    .on_click({
+                        let target = directory_target.clone();
+                        let path = path.to_owned();
+                        cx.listener(move |this, _, window, cx| {
+                            if target
+                                .as_ref()
+                                .is_some_and(|target| this.file_target_current(target))
+                            {
+                                this.files_navigate(path.clone(), window, cx);
+                            }
+                        })
+                    }),
+            )
+            .child(
+                crate::controls::icon_button("files-upload")
+                    .ghost()
+                    .icon(IconName::Upload)
+                    .tooltip("Upload to this folder")
+                    .accessibility_label("Upload")
+                    .disabled(directory_target.is_none() || self.file_transfer_busy())
+                    .on_click({
+                        let target = directory_target.clone();
+                        cx.listener(move |this, _, _, cx| {
+                            if let Some(target) = &target {
+                                this.start_file_transfer(target, Direction::Upload, cx);
+                            }
+                        })
+                    }),
+            )
+            .child({
+                let view = cx.weak_entity();
+                let target = directory_target.clone();
+                let path = path.to_owned();
+                let (server, connection) = scope.clone();
+                crate::controls::icon_button("files-more")
+                    .ghost()
+                    .icon(IconName::Ellipsis)
+                    .accessibility_label("More folder actions")
+                    .loading(
+                        project_pending && browser.project_path.as_deref() == Some(path.as_str()),
+                    )
+                    .dropdown_menu(move |menu, _, _| {
+                        let project = view.clone();
+                        let project_target = target.clone();
+                        let copy = path.clone();
+                        let edit = view.clone();
+                        let (server, connection) = (server.clone(), connection.clone());
+                        menu.item(
+                            PopupMenuItem::new("Open this folder as project")
+                                .icon(IconName::FolderGit2)
+                                .disabled(project_target.is_none() || project_pending)
+                                .on_click(move |_, _, cx| {
+                                    let _ = project.update(cx, |this, cx| {
+                                        if let Some(target) = &project_target {
+                                            this.file_open_project(target, cx);
+                                        }
+                                    });
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Copy path")
+                                .icon(IconName::Copy)
+                                .disabled(copy.is_empty())
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Go to folder…")
+                                .icon(IconName::CornerDownRight)
+                                .on_click(move |_, window, cx| {
+                                    let _ = edit.update(cx, |this, cx| {
+                                        if this.file_browser_current(&server, &connection) {
+                                            this.files_start_editing_path(window, cx);
+                                        }
+                                    });
+                                }),
+                        )
+                    })
+            })
+            .into_any_element()
+    }
+
+    fn files_places(&self, browser: &Browser, path: &str, cx: &mut Context<Self>) -> AnyElement {
+        let scope = (self.server.clone(), browser.connection.clone());
+        let home = browser.home.clone().unwrap_or_else(|| ".".into());
+        let projects: Vec<(String, String)> = self
+            .resources
+            .get("file-places")
+            .and_then(|row| row.value.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|project| project["serverId"] == self.server.as_str())
+            .filter_map(|project| {
+                let path = project["path"]["display"].as_str()?.to_owned();
+                let name = project["name"]
+                    .as_str()
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(&path).to_owned());
+                Some((name, path))
+            })
+            .collect();
+        let place = |id: SharedString, icon: IconName, label: String, destination: String| {
+            let current = destination == path
+                || (destination == "." && browser.home.as_deref() == Some(path));
+            let (server, connection) = scope.clone();
+            // Rows match the file list: full width, the shared selected fill
+            // and row hover, no inset highlight.
+            div()
+                .id(id)
+                .role(Role::Link)
+                .aria_label(label.clone())
+                .aria_selected(current)
+                .test_support()
+                .h(px(list::ROW_HEIGHT))
+                .flex_shrink_0()
+                .px(px(crate::controls::PAGE_PADDING))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .cursor_pointer()
+                .text_color(cx.theme().foreground)
+                .when(current, |row| {
+                    row.bg(theme::selected_fill(cx.theme().is_dark()))
+                        .font_weight(FontWeight::MEDIUM)
+                })
+                .when(!current, |row| {
+                    row.hover(|row| row.bg(theme::row_hover(cx)))
+                })
+                .child(
+                    Icon::new(icon)
+                        .size(px(crate::controls::ICON_SIZE))
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(div().min_w_0().truncate().child(label))
+                .hover_hint(destination.clone())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if this.file_browser_current(&server, &connection) {
+                        this.files_navigate(destination.clone(), window, cx);
+                    }
+                }))
+        };
+        div()
+            .id("files-places")
+            .debug_selector(|| "files-places".into())
+            .role(Role::Navigation)
+            .aria_label("Places")
+            .size_full()
+            .min_h_0()
+            .overflow_y_scroll()
+            .py(px(6.))
+            .flex()
+            .flex_col()
+            .child(place(
+                "files-place-home".into(),
+                IconName::House,
+                "Home".into(),
+                home,
+            ))
+            .child(place(
+                "files-place-root".into(),
+                IconName::HardDrive,
+                "Server root".into(),
+                "/".into(),
+            ))
+            .when(!projects.is_empty(), |panel| {
+                panel
+                    .child(
+                        div()
+                            .mt(px(10.))
+                            .mb(px(2.))
+                            .px(px(crate::controls::PAGE_PADDING))
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Projects"),
+                    )
+                    .children(
+                        projects
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, (name, path))| {
+                                place(
+                                    SharedString::from(format!("files-place-project-{index}")),
+                                    IconName::FolderGit2,
+                                    name,
+                                    path,
+                                )
+                            }),
+                    )
+            })
+            .into_any_element()
+    }
+
+    /// Places, list and preview share one resizable row. Places and preview
+    /// keep their dragged widths while the list absorbs window resizes; each
+    /// combination of visible panes remembers its own widths.
+    fn files_body(
+        &self,
+        browser: &Browser,
+        path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let places = self.files_places_shown();
+        let preview_beside = self.files_preview_beside();
+        let preview_only = self.file_preview_path.is_some() && !preview_beside;
+        let preview_pane = |window: &mut Window, cx: &mut Context<Self>| {
+            div()
+                .id("files-preview-pane")
+                .debug_selector(|| "files-preview-pane".into())
+                .size_full()
+                .flex()
+                .flex_col()
+                .min_h_0()
+                .min_w_0()
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.close_file_preview();
+                        if let Some(browser) = this.file_browsers.get(&this.server) {
+                            browser.list_focus.focus(window, cx);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }))
+                .child(self.file_preview_side(window, cx))
+        };
+        if preview_only {
+            return div()
+                .id("files-layout")
+                .debug_selector(|| "files-layout".into())
+                .flex()
+                .flex_1()
+                .min_h_0()
+                .child(preview_pane(window, cx))
+                .into_any_element();
+        }
+        let key = SharedString::from(format!(
+            "files-split-{}-{}",
+            u8::from(places),
+            u8::from(preview_beside)
+        ));
+        let layout = crate::controls::split_state(&key, window, cx);
+        let list_width = layout
+            .read(cx)
+            .sizes()
+            .get(usize::from(places))
+            .map(|width| f32::from(*width))
+            .unwrap_or_else(|| self.files_list_width());
+        div()
+            .id("files-layout")
+            .debug_selector(|| "files-layout".into())
+            .flex()
+            .flex_1()
+            .min_h_0()
+            .child(
+                h_resizable(key)
+                    .with_state(&layout)
+                    .when(places, |group| {
+                        group.child(
+                            resizable_panel()
+                                .size(px(places_width(self.content_width)))
+                                .size_range(px(140.)..px(360.))
+                                .flex_none()
+                                .child(self.files_places(browser, path, cx)),
+                        )
+                    })
+                    .child(
+                        resizable_panel()
+                            .size_range(px(320.)..Pixels::MAX)
+                            .child(self.file_listing(list_width, window, cx)),
+                    )
+                    .when(preview_beside, |group| {
+                        group.child(
+                            resizable_panel()
+                                .size(px(preview_width(self.content_width)))
+                                .size_range(px(280.)..px(960.))
+                                .flex_none()
+                                .child(preview_pane(window, cx)),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn files(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(browser) = self.file_browsers.get(&self.server) else {
             return div().into_any_element();
@@ -665,20 +1310,12 @@ impl Newport {
             .canonical_path()
             .unwrap_or_default()
             .to_owned();
-        let pending = browser.reads.listing_pending();
-        let up = parent(&path).to_owned();
-        let refresh = path.clone();
-        let upload = self.file_action_target(&path);
-        let project = upload.clone();
-        let parent_target = upload.clone();
-        let refresh_target = upload.clone();
-        let server_for_refresh = self.server.clone();
-        let navigation_scope = (self.server.clone(), browser.connection.clone());
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
+            .child(self.files_toolbar(browser, &path, cx))
             .child(self.status("file-project", cx))
             .when_some(browser.reads.listing_error(), |view, error| {
                 let attempted = browser.reads.attempted_path().unwrap_or(".").to_owned();
@@ -693,8 +1330,11 @@ impl Newport {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .p(px(crate::controls::PAGE_PADDING))
+                        .px(px(crate::controls::PAGE_PADDING))
+                        .py(px(8.))
                         .flex_shrink_0()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
                         .child(
                             div()
                                 .flex_1()
@@ -717,229 +1357,19 @@ impl Newport {
                         ),
                 )
             })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px(px(crate::controls::PAGE_PADDING))
-                    .py(px(6.))
-                    .flex_shrink_0()
-                    .child(
-                        crate::controls::icon_button("files-home")
-                            .icon(IconName::House)
-                            .accessibility_label("Home folder")
-                            .disabled(pending)
-                            .on_click({
-                                let (server, connection) = navigation_scope.clone();
-                                cx.listener(move |this, _, window, cx| {
-                                    if this.file_browser_current(&server, &connection) {
-                                        this.files_navigate(".".into(), window, cx);
-                                    }
-                                })
-                            }),
-                    )
-                    .child(
-                        crate::controls::icon_button("files-parent")
-                            .icon(IconName::ArrowUp)
-                            .accessibility_label("Parent folder")
-                            .disabled(pending || path.is_empty() || path == "/")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if parent_target
-                                    .as_ref()
-                                    .is_some_and(|target| this.file_target_current(target))
-                                {
-                                    this.files_navigate(up.clone(), window, cx);
-                                }
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(crate::controls::input(&browser.path).aria_label("Remote path")),
-                    )
-                    .child(
-                        crate::controls::icon_button("files-refresh")
-                            .icon(IconName::RefreshCw)
-                            .accessibility_label("Refresh folder")
-                            .disabled(pending || path.is_empty())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if refresh_target
-                                    .as_ref()
-                                    .is_some_and(|target| this.file_target_current(target))
-                                {
-                                    this.file_browsers[&server_for_refresh]
-                                        .tree
-                                        .update(cx, |tree, cx| tree.clear(cx));
-                                    this.files_navigate(refresh.clone(), window, cx);
-                                }
-                            })),
-                    )
-                    .child(
-                        crate::controls::button("files-upload")
-                            .icon(IconName::Upload)
-                            .label("Upload")
-                            .disabled(upload.is_none() || self.file_transfer_busy())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(target) = &upload {
-                                    this.start_file_transfer(target, Direction::Upload, cx);
-                                }
-                            })),
-                    )
-                    .child(
-                        crate::controls::icon_button("files-open-project")
-                            .icon(IconName::FolderGit2)
-                            .accessibility_label("Open this folder as project")
-                            .loading(
-                                browser.project_path.as_deref() == Some(path.as_str())
-                                    && self
-                                        .resources
-                                        .get("file-project")
-                                        .is_some_and(|row| row.pending),
-                            )
-                            .disabled(
-                                project.is_none()
-                                    || self
-                                        .resources
-                                        .get("file-project")
-                                        .is_some_and(|row| row.pending),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(target) = &project {
-                                    this.file_open_project(target, cx);
-                                }
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .gap_2()
-                    .items_center()
-                    .px(px(crate::controls::PAGE_PADDING))
-                    .py(px(6.))
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        crate::controls::button("files-folders")
-                            .label("Folders")
-                            .ghost()
-                            .toggled(browser.tree_visible)
-                            .selected(browser.tree_visible)
-                            .on_click({
-                                let (server, connection) = navigation_scope.clone();
-                                cx.listener(move |this, _, _, cx| {
-                                    if this.file_browser_current(&server, &connection)
-                                        && let Some(browser) = this.file_browsers.get_mut(&server)
-                                    {
-                                        browser.tree_visible = !browser.tree_visible;
-                                        browser.tree.update(cx, |tree, cx| {
-                                            tree.configure(
-                                                browser.home.clone(),
-                                                browser.directory.clone(),
-                                                browser.hidden,
-                                                browser.tree_visible,
-                                                cx,
-                                            )
-                                        });
-                                        cx.notify();
-                                    }
-                                })
-                            }),
-                    )
-                    .child(
-                        div()
-                            .w(px(240_f32.min(self.content_width * 0.45)))
-                            .min_w_0()
-                            .child(
-                                crate::controls::input(&browser.filter).aria_label("Filter files"),
-                            ),
-                    )
-                    .when(!browser.filter.read(cx).value().is_empty(), |view| {
-                        view.child(
-                            crate::controls::button("files-clear-filter")
-                                .ghost()
-                                .label("Clear filter")
-                                .on_click({
-                                    let (server, connection) = navigation_scope.clone();
-                                    cx.listener(move |this, _, window, cx| {
-                                        if this.file_browser_current(&server, &connection)
-                                            && let Some(browser) =
-                                                this.file_browsers.get_mut(&server)
-                                        {
-                                            browser.page = 0;
-                                            browser.scroll.handle.scroll_to_top_of_item(0);
-                                            browser.filter.update(cx, |input, cx| {
-                                                input.set_value("", window, cx)
-                                            });
-                                            cx.notify();
-                                        }
-                                    })
-                                }),
-                        )
-                    })
-                    .child(div().flex_1())
-                    .child(
-                        crate::controls::button("files-hidden")
-                            .label("Hidden files")
-                            .ghost()
-                            .toggled(browser.hidden)
-                            .selected(browser.hidden)
-                            .on_click({
-                                let (server, connection) = navigation_scope.clone();
-                                cx.listener(move |this, _, _, cx| {
-                                    if this.file_browser_current(&server, &connection)
-                                        && let Some(browser) = this.file_browsers.get_mut(&server)
-                                    {
-                                        browser.hidden = !browser.hidden;
-                                        browser.page = 0;
-                                        browser.scroll.handle.scroll_to_top_of_item(0);
-                                        browser.tree.update(cx, |tree, cx| {
-                                            tree.configure(
-                                                browser.home.clone(),
-                                                browser.directory.clone(),
-                                                browser.hidden,
-                                                browser.tree_visible,
-                                                cx,
-                                            )
-                                        });
-                                        cx.notify();
-                                    }
-                                })
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .id("files-layout")
-                    .debug_selector(|| "files-layout".into())
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .border_y_1()
-                    .border_color(cx.theme().border)
-                    .when(browser.tree_visible, |view| {
-                        view.child(
-                            div()
-                                .w(px(tree_width(self.content_width)))
-                                .flex_shrink_0()
-                                .min_h_0()
-                                .border_r_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().muted.opacity(0.35))
-                                .child(browser.tree.clone()),
-                        )
-                    })
-                    .child(self.file_listing(window, cx)),
-            )
-            .child(self.file_listing_footer(cx))
+            .child(self.files_body(browser, &path, window, cx))
             .when(self.file_preview_path.is_none(), |view| {
                 view.child(self.transfer_status(cx))
             })
+            .child(self.file_listing_footer(cx))
             .into_any_element()
     }
+}
+
+fn crumb_separator(cx: &App) -> Icon {
+    Icon::new(IconName::ChevronRight)
+        .size(px(12.))
+        .text_color(cx.theme().muted_foreground)
 }
 
 fn file_menu(
@@ -1019,12 +1449,13 @@ fn file_menu(
 
 #[cfg(test)]
 mod tests {
-    use super::{Direction, FileTarget, PreviewTarget, page_range, parent, visible_entries};
+    use super::list::{Sort, SortColumn, folder_summary, sort_entries};
+    use super::{Direction, FileTarget, PreviewTarget, parent, visible_entries};
     use crate::text;
     use serde_json::json;
 
     #[test]
-    fn preview_modal_lifetime_follows_selection_while_controls_follow_render() {
+    fn preview_controls_reject_a_replaced_render_or_selection() {
         let opening = PreviewTarget {
             server: "a".into(),
             connection: json!(["connection-a"]),
@@ -1036,48 +1467,99 @@ mod tests {
         let mut loaded = opening.clone();
         loaded.pending = false;
         loaded.render_revision = 4;
-        assert!(
-            opening.same_selection(&loaded),
-            "loading must not retire its own modal"
-        );
-        assert!(
-            opening != loaded,
-            "retained controls still reject a replaced render"
-        );
-        let mut replacement = loaded.clone();
-        replacement.token = 2;
-        assert!(
-            !opening.same_selection(&replacement),
-            "A → B → A is a new preview"
-        );
-        replacement = loaded.clone();
-        replacement.server = "b".into();
-        assert!(!opening.same_selection(&replacement));
-        replacement = loaded.clone();
-        replacement.connection = json!(["connection-b"]);
-        assert!(!opening.same_selection(&replacement));
-        replacement = loaded;
-        replacement.path = "/work/other".into();
-        assert!(!opening.same_selection(&replacement));
+        assert!(opening != loaded, "controls reject a replaced render");
+        for change in [
+            |t: &mut PreviewTarget| t.token = 2,
+            |t: &mut PreviewTarget| t.server = "b".into(),
+            |t: &mut PreviewTarget| t.connection = json!(["connection-b"]),
+            |t: &mut PreviewTarget| t.path = "/work/other".into(),
+        ] {
+            let mut replacement = loaded.clone();
+            change(&mut replacement);
+            assert!(loaded != replacement);
+        }
     }
 
     #[test]
-    fn four_hundred_files_form_ten_pages_and_search_includes_later_pages() {
-        let listing = json!({"entries": (0..400).rev().map(|i| json!({
-            "name": format!("file-{i:03}"), "path": format!("/work/{i}"), "kind": "file"
-        })).collect::<Vec<_>>()});
-        let all = visible_entries(&listing, "", false);
-        let pages: Vec<_> = (0..10)
-            .map(|page| &all[page_range(all.len(), page)])
-            .collect();
-        assert!(pages.iter().all(|page| page.len() == 40));
-        assert_eq!(text(&pages[9][39], "name"), "file-399");
-        let found = visible_entries(&listing, "file-399", false);
-        assert_eq!(found.len(), 1);
+    fn sorting_keeps_folders_first_and_flips_the_active_column() {
+        let mut entries = vec![
+            json!({"name":"b.log","kind":"file","size":10,"modified":3}),
+            json!({"name":"src","kind":"directory","modified":1}),
+            json!({"name":"A.txt","kind":"file","size":300,"modified":1}),
+            json!({"name":".env","kind":"file","size":2,"modified":2}),
+            json!({"name":"docs","kind":"directory","modified":9}),
+        ];
+        let names = |entries: &[serde_json::Value]| {
+            entries.iter().map(|e| text(e, "name")).collect::<Vec<_>>()
+        };
+        sort_entries(&mut entries, Sort::default());
+        assert_eq!(names(&entries), ["docs", "src", ".env", "A.txt", "b.log"]);
+        let newest = Sort::default().choose(SortColumn::Modified);
+        assert!(newest.descending, "a new column starts newest first");
+        sort_entries(&mut entries, newest);
+        assert_eq!(names(&entries), ["docs", "src", "b.log", ".env", "A.txt"]);
+        let largest = newest.choose(SortColumn::Size);
+        sort_entries(&mut entries, largest);
+        assert_eq!(names(&entries), ["src", "docs", "A.txt", "b.log", ".env"]);
+        let smallest = largest.choose(SortColumn::Size);
+        assert!(!smallest.descending, "choosing the active column flips it");
+        sort_entries(&mut entries, smallest);
+        assert_eq!(names(&entries)[2..], [".env", "b.log", "A.txt"]);
+    }
+
+    #[test]
+    fn size_order_ignores_folder_attribute_sizes() {
+        let mut entries = vec![
+            json!({"name":"zeta","kind":"directory","size":4096}),
+            json!({"name":"big.bin","kind":"file","size":900}),
+            json!({"name":"Alpha","kind":"directory","size":12288}),
+            json!({"name":"beta","kind":"directory","size":8192}),
+            json!({"name":"tiny","kind":"file","size":1}),
+        ];
+        let names = |entries: &[serde_json::Value]| {
+            entries.iter().map(|e| text(e, "name")).collect::<Vec<_>>()
+        };
+        let smallest = Sort {
+            column: SortColumn::Size,
+            descending: false,
+        };
+        sort_entries(&mut entries, smallest);
         assert_eq!(
-            text(&found[page_range(found.len(), 9)][0], "name"),
-            "file-399"
+            names(&entries),
+            ["Alpha", "beta", "zeta", "tiny", "big.bin"]
         );
+        sort_entries(&mut entries, smallest.choose(SortColumn::Size));
+        assert_eq!(
+            names(&entries),
+            ["zeta", "beta", "Alpha", "big.bin", "tiny"]
+        );
+    }
+
+    #[test]
+    fn summary_counts_folders_files_hidden_and_filtered_share() {
+        let listing = json!({"entries":[
+            {"name":"src","kind":"directory"},
+            {"name":"a.txt","kind":"file"},
+            {"name":"b.txt","kind":"file"},
+            {"name":".git","kind":"directory"}
+        ]});
+        let shown = visible_entries(&listing, "", false);
+        assert_eq!(
+            folder_summary(&listing, &shown, "", false),
+            "3 items · 1 folder, 2 files · 1 hidden"
+        );
+        let all = visible_entries(&listing, "", true);
+        assert_eq!(
+            folder_summary(&listing, &all, "", true),
+            "4 items · 2 folders, 2 files"
+        );
+        let matches = visible_entries(&listing, "a", false);
+        assert_eq!(
+            folder_summary(&listing, &matches, "a", false),
+            "1 of 3 items match"
+        );
+        let empty = json!({"entries":[]});
+        assert_eq!(folder_summary(&empty, &[], "", false), "0 items");
     }
 
     #[test]
@@ -1135,15 +1617,6 @@ mod tests {
             Some(&file),
             FileTarget::from_listing("a".into(), connection, &changed, &file.path).as_ref()
         );
-    }
-
-    #[test]
-    fn file_pages_clamp_after_filtering_and_never_skip_the_last_item() {
-        assert_eq!(page_range(0, usize::MAX), 0..0);
-        assert_eq!(page_range(40, 1), 0..40);
-        assert_eq!(page_range(41, 1), 40..41);
-        assert_eq!(page_range(201, usize::MAX), 200..201);
-        assert_eq!(page_range(9, 2), 0..9);
     }
 
     #[test]

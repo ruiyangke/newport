@@ -521,30 +521,30 @@ impl Newport {
             loading && form.choices.is_none() && !form.selector.read(cx).is_open();
         div().id("branch-review").flex().flex_col().gap_2().px_4().py_3().border_b_1().border_color(cx.theme().border)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{} · {}", if form.kind == Kind::Delete { "Delete local branch" } else { "Upstream for" }, form.review.name())))
-            .child(crate::project_ui::label(format!("Reviewed commit {}", form.review.oid())).text_size(px(crate::project_ui::FONT_SIZE)))
+            .child(crate::label(format!("Reviewed commit {}", form.review.oid())).text_size(px(crate::ui::FONT_SIZE)))
             .when(form.kind == Kind::Delete, |view| view
-                .child(crate::project_ui::label("Git refuses branches with unmerged commits or branches checked out in a worktree. Remote branches are kept."))
-                .child(crate::project_ui::checkbox("branch-delete-force").label("Delete even if it contains unmerged commits").checked(form.force).disabled(busy || stale)
+                .child(crate::label("Git refuses branches with unmerged commits or branches checked out in a worktree. Remote branches are kept."))
+                .child(crate::controls::checkbox("branch-delete-force").label("Delete even if it contains unmerged commits").checked(form.force).disabled(busy || stale)
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                         if this.git_mutation_blocks_write() { return; }
                         if let Some(form) = this.git.branch_manage.as_mut() && !form.needs_review { form.force = *checked; cx.notify(); }
                     })))
                 .when(form.force, |view| view.child(div().text_color(cx.theme().danger).child("Commits reachable only from this branch become unreferenced. A worktree using the branch still blocks deletion."))))
             .when(form.kind == Kind::Upstream, |view| view
-                .child(crate::project_ui::label(format!("Current upstream: {}", form.review.upstream().unwrap_or("None"))))
+                .child(crate::label(format!("Current upstream: {}", form.review.upstream().unwrap_or("None"))))
                 .child(div().w_full().max_w(px(560.))
                     .when(initial_loading, |view| view.child(project_loading::selector("upstream branches")))
-                    .when(!initial_loading, |view| view.child(crate::project_ui::select(&form.selector).accessibility_label("Upstream branch").disabled(busy || stale))))
-                .child(crate::project_ui::label("Only stored branches are listed. Fetch to discover newer remote branches.").text_size(px(crate::project_ui::FONT_SIZE)))
-                .when(form.error.is_some(), |view| view.child(crate::project_ui::button("branch-upstreams-retry").label("Reload upstream branches").disabled(busy || stale || loading).on_click(cx.listener(|this, _, _, cx| { this.load_branch_choices(false); cx.notify(); }))))
-                .when(!form.upstream.is_empty() && form.action().is_err() && !stale, |view| view.child(crate::project_ui::label("The selected upstream is not loaded or is unavailable. Scroll the branch list to load more, or choose another."))))
+                    .when(!initial_loading, |view| view.child(crate::controls::select(&form.selector).accessibility_label("Upstream branch").disabled(busy || stale))))
+                .child(crate::label("Only stored branches are listed. Fetch to discover newer remote branches.").text_size(px(crate::ui::FONT_SIZE)))
+                .when(form.error.is_some(), |view| view.child(crate::controls::button("branch-upstreams-retry").label("Reload upstream branches").disabled(busy || stale || loading).on_click(cx.listener(|this, _, _, cx| { this.load_branch_choices(false); cx.notify(); }))))
+                .when(!form.upstream.is_empty() && form.action().is_err() && !stale, |view| view.child(crate::label("The selected upstream is not loaded or is unavailable. Scroll the branch list to load more, or choose another."))))
             .when_some(form.error.clone(), |view, error| view.child(div().text_color(cx.theme().danger).child(error)))
             .when(stale, |view| view.child(div().text_color(cx.theme().danger).child("The repository changed. Cancel, refresh, and select the branch again.")))
             .child(project_dialog::actions()
-                .child(crate::project_ui::button("branch-manage-cancel").label("Cancel").disabled(busy).on_click(cx.listener(|this, _, _, cx| {
+                .child(crate::controls::button("branch-manage-cancel").label("Cancel").disabled(busy).on_click(cx.listener(|this, _, _, cx| {
                     this.git.branch_manage = None; this.resources.invalidate(CHOICES); this.resources.invalidate(MORE); cx.notify();
                 })))
-                .child(crate::project_ui::button("branch-manage-submit").loading(self.git_write_pending()).label(if form.kind == Kind::Delete { "Delete local branch" } else { "Save upstream" }).when(form.kind == Kind::Delete, |button| button.danger()).disabled(!ready)
+                .child(crate::controls::button("branch-manage-submit").loading(self.git_write_pending()).label(if form.kind == Kind::Delete { "Delete local branch" } else { "Save upstream" }).when(form.kind == Kind::Delete, |button| button.danger()).disabled(!ready)
                     .on_click(cx.listener(|this, _, _, cx| this.submit_branch_manage(cx)))))
             .into_any_element()
     }

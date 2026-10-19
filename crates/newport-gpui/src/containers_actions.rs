@@ -70,7 +70,7 @@ impl ContainersPanel {
                         ContainerVerb::Pause => IconName::Pause,
                     })
                     .when(
-                        matches!(verb, ContainerVerb::Start | ContainerVerb::Restart),
+                        matches!(verb, ContainerVerb::Start | ContainerVerb::Unpause),
                         |b| b.primary(),
                     )
                     .loading(self.action_running(&action))
@@ -103,32 +103,20 @@ impl ContainersPanel {
                     })),
             );
         }
-        if domain::can_remove_container(c) {
-            let (id, name) = (c.id.clone(), c.name.clone());
-            let action = Action::Remove {
-                containers: vec![id.clone()],
-                names: vec![name.clone()],
-            };
-            commands = commands.child(
-                crate::controls::button("container-remove")
-                    .ghost()
-                    .icon(IconName::Trash)
-                    .label("Remove")
-                    .loading(self.action_running(&action))
-                    .disabled(!self.client.can_action(&action))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if this.selected_container_is(&id, &name) {
-                            this.review_action(action.clone(), window, cx);
-                        }
-                    })),
-            );
-        }
+        let remove = domain::can_remove_container(c).then(|| Action::Remove {
+            containers: vec![c.id.clone()],
+            names: vec![c.name.clone()],
+        });
         let compose_target = ContainerComposeTarget::from_container(c);
         let compose_builds = compose_target
             .as_ref()
             .and_then(|target| self.container_compose_builds(target));
-        if c.state == domain::ContainerState::Running || compose_builds.is_some() {
+        if c.state == domain::ContainerState::Running
+            || compose_builds.is_some()
+            || remove.is_some()
+        {
             let pause = c.state == domain::ContainerState::Running;
+            let (id, name) = (c.id.clone(), c.name.clone());
             let action = Action::Container {
                 container: c.id.clone(),
                 name: c.name.clone(),
@@ -186,6 +174,29 @@ impl ContainersPanel {
                                         }),
                                 );
                             }
+                        }
+                        if let Some(remove) = &remove {
+                            if pause || compose_target.is_some() && compose_builds.is_some() {
+                                menu = menu.separator();
+                            }
+                            let enabled = weak.upgrade().is_some_and(|panel| {
+                                let panel = panel.read(cx);
+                                !panel.action_running(remove) && panel.client.can_action(remove)
+                            });
+                            let (weak, remove, id, name) =
+                                (weak.clone(), remove.clone(), id.clone(), name.clone());
+                            menu = menu.item(
+                                PopupMenuItem::new("Remove…")
+                                    .icon(IconName::Trash)
+                                    .disabled(!enabled)
+                                    .on_click(move |_, window, cx| {
+                                        let _ = weak.update(cx, |this, cx| {
+                                            if this.selected_container_is(&id, &name) {
+                                                this.review_action(remove.clone(), window, cx);
+                                            }
+                                        });
+                                    }),
+                            );
                         }
                         menu
                     }),
@@ -438,7 +449,7 @@ impl ContainersPanel {
                 .w(px(480.))
                 .max_w((window.viewport_size().width - px(32.)).max(px(240.)))
                 .p(px(24.))
-                .rounded(px(14.))
+                .rounded(px(crate::ui::RADIUS))
                 .border_0()
                 .centered(true)
                 .overlay_closable(false)

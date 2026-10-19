@@ -14,6 +14,7 @@ impl ContainersPanel {
         let project = self.client.selected_project();
         div().id("containers-detail").debug_selector(||"containers-detail".into()).role(accesskit::Role::Region).aria_label("Container detail").track_focus(&self.detail_focus).tab_stop(false)
             .flex_1().min_w_0().min_h_0().h_full().overflow_y_scroll().track_scroll(&self.detail_scroll)
+            .child(self.measure_detail(cx))
             .child(div().min_h_full().flex().flex_col().p(px(crate::controls::PAGE_PADDING)).gap(px(12.))
             .when(self.width<=600.,|v|v.child(div().flex().items_start().child(crate::controls::compact_button("all-containers").ghost().icon(IconName::ArrowLeft).label("All containers").on_click(cx.listener(|this,_,window,cx|{this.selected=None;this.sync_selection(cx);this.list_focus.focus(window,cx);cx.notify();})))))
             .when(self.client.snapshot().is_none(),|v|v.child(detail_skeleton()))
@@ -22,10 +23,10 @@ impl ContainersPanel {
             .when(self.client.snapshot().is_some()&&container.is_none()&&project.is_none(),|v|v.child(crate::empty::pane(IconName::Boxes, if self.selected.is_some(){"Container unavailable"}else{"Choose a container"}, if self.selected.is_some(){"It may have been removed or recreated. Choose another container or refresh the list."}else{"Select a container to inspect its status, logs, and configuration."},cx)))
             .when(container.is_some()||project.is_some(),|v|v
                 .when(self.review.is_none()&&self.error("action").is_some(),|v|v.child(self.status("action",cx)))
-                .when(container.is_none(),|v|v.child(self.compose_job_controls(cx)).child(self.project_services(window,cx)))
+                .when(container.is_none(),|v|v.child(self.compose_job_controls(cx)))
                 .child(div().flex().flex_col().flex_1().min_h(px(360.))
                     .child(self.detail_bar(container.is_some(),cx))
-                    .child(if self.tab==0 {self.logs_view(cx)}else if container.is_some(){self.inspect_view(cx)}else if self.tab==1 {self.compose_activity_view(cx)}else{self.files.view(cx)}))))
+                    .child(if container.is_none()&&self.tab==PROJECT_SERVICES {self.project_services(window,cx)}else if self.tab==0 {self.logs_view(cx)}else if container.is_some(){self.inspect_view(cx)}else if self.tab==1 {self.compose_activity_view(cx)}else{self.files.view(cx)}))))
             .into_any_element()
     }
     fn container_header(&self, c: &Container, cx: &mut Context<Self>) -> AnyElement {
@@ -54,6 +55,18 @@ impl ContainersPanel {
             |context| format!("{status_label} {context}"),
         );
         let problem = container_status::problem_context(c, self.client.inspect());
+        // Configuration that rarely changes rides along the status line.
+        let meta = format!(
+            "· created {} ago{}",
+            newport_domain::services::duration(
+                self.updated.unwrap_or(c.created).saturating_sub(c.created)
+            ),
+            c.restart_policy
+                .as_deref()
+                .filter(|policy| *policy != "no")
+                .map(|policy| format!(" · restart {policy}"))
+                .unwrap_or_default()
+        );
         let (observed_id, observed_name) = (c.id.clone(), c.name.clone());
         div()
             .flex()
@@ -105,7 +118,7 @@ impl ContainersPanel {
                             .max_w_full()
                             .whitespace_normal()
                             .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(11.5)),
+                            .text_size(px(crate::ui::FONT_SIZE)),
                     ),
             )
             .child(
@@ -129,7 +142,7 @@ impl ContainersPanel {
                     })
                     .child(
                         div()
-                            .text_size(px(12.5))
+                            .text_size(px(crate::ui::FONT_SIZE))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(if progress.is_some() {
                                 cx.theme().muted_foreground
@@ -161,7 +174,8 @@ impl ContainersPanel {
                                 })),
                         )
                     })
-                    .when_some(lifecycle, |view, text| view.child(quiet(text, cx))),
+                    .when_some(lifecycle, |view, text| view.child(quiet(text, cx)))
+                    .child(quiet(meta, cx)),
             )
             .when_some(problem, |v, problem| {
                 let description = format!(
@@ -186,7 +200,7 @@ impl ContainersPanel {
                         .role(accesskit::Role::Alert)
                         .aria_label(format!("{description} {detail}").trim().to_owned())
                         .test_support()
-                        .mt(px(12.))
+                        .mt(px(8.))
                         .text_color(tone_color(warning_tone, cx))
                         .flex()
                         .items_start()
@@ -206,7 +220,7 @@ impl ContainersPanel {
                                 .min_w_0()
                                 .child(
                                     div()
-                                        .text_size(px(12.5))
+                                        .text_size(px(crate::ui::FONT_SIZE))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .child(description),
                                 )
@@ -221,7 +235,7 @@ impl ContainersPanel {
                                                 view.font_family(
                                                     cx.theme().mono_font_family.clone(),
                                                 )
-                                                .text_size(px(11.5))
+                                                .text_size(px(crate::ui::FONT_SIZE))
                                             }),
                                     )
                                 }),
@@ -259,21 +273,28 @@ impl ContainersPanel {
     }
     fn container_facts(&self, c: &Container, cx: &mut Context<Self>) -> AnyElement {
         let history = self.client.stats_history(&c.id);
+        let running = c.state == domain::ContainerState::Running;
+        let ports = self.port_links(c, cx);
+        if !running && c.restart_count == 0 && ports.is_none() {
+            return div().children(self.port_errors(c, cx)).into_any_element();
+        }
         div()
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(px(8.))
             .py(px(10.))
             .border_t_1()
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
                 div()
+                    .id("container-facts")
+                    .debug_selector(|| "container-facts".into())
                     .flex()
                     .flex_wrap()
                     .gap_x(px(28.))
                     .gap_y(px(10.))
-                    .when(c.state == domain::ContainerState::Running, |v| {
+                    .when(running, |v| {
                         v.child(
                             fact(
                                 "CPU",
@@ -310,26 +331,9 @@ impl ContainersPanel {
                     .when(c.restart_count > 0, |v| {
                         v.child(fact("Restarts", c.restart_count.to_string(), cx))
                     })
-                    .child(fact(
-                        "Restart policy",
-                        c.restart_policy
-                            .as_deref()
-                            .filter(|p| *p != "no")
-                            .unwrap_or("never"),
-                        cx,
-                    ))
-                    .child(fact(
-                        "Created",
-                        format!(
-                            "{} ago",
-                            newport_domain::services::duration(
-                                self.updated.unwrap_or(c.created).saturating_sub(c.created)
-                            )
-                        ),
-                        cx,
-                    )),
+                    .children(ports),
             )
-            .child(self.port_links(c, cx))
+            .children(self.port_errors(c, cx))
             .into_any_element()
     }
     fn project_header(&self, name: &str, cx: &mut Context<Self>) -> AnyElement {
@@ -396,14 +400,7 @@ impl ContainersPanel {
                     .items_center()
                     .gap(px(8.))
                     .child(heading(name.to_owned(), 2))
-                    .child(
-                        div()
-                            .rounded(px(4.))
-                            .bg(cx.theme().muted)
-                            .px(px(5.))
-                            .text_size(px(10.5))
-                            .child("Compose project"),
-                    ),
+                    .child(crate::controls::tag("Compose project", cx)),
             )
             .when_some(project.working_dir, |v, path| {
                 v.child(
@@ -415,7 +412,7 @@ impl ContainersPanel {
                         .max_w_full()
                         .whitespace_normal()
                         .font_family(cx.theme().mono_font_family.clone())
-                        .text_size(px(11.5)),
+                        .text_size(px(crate::ui::FONT_SIZE)),
                 )
             })
             .child(
@@ -430,7 +427,7 @@ impl ContainersPanel {
                     .flex_wrap()
                     .items_center()
                     .gap(px(8.))
-                    .text_size(px(12.5))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .when(progress.is_some(), |view| {
                         view.child(
                             Spinner::new()
@@ -480,16 +477,45 @@ impl ContainersPanel {
             serde_json::from_value(self.compose_value()).ok();
         self.compose_services_table(group, detail.as_ref(), window, cx)
     }
+    /// Records the detail pane's width after layout, so content sized to it
+    /// follows the resizable list rather than an assumed list width.
+    pub(super) fn measure_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let owner = cx.weak_entity();
+        canvas(
+            move |bounds, window, cx| {
+                let width = f32::from(bounds.size.width);
+                let _ = owner.update(cx, |this, cx| {
+                    if this.detail_width != width {
+                        this.detail_width = width;
+                        window.refresh();
+                        cx.notify();
+                    }
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+        .left_0()
+        .top_0()
+    }
+    /// The detail pane's content width, inside its padding. Until the first
+    /// layout measures it, assume the default 280px list.
+    pub(super) fn detail_content_width(&self) -> f32 {
+        let padding = 2. * crate::controls::PAGE_PADDING;
+        if self.detail_width > 0. {
+            self.detail_width - padding
+        } else if self.width > 600. {
+            self.width - 280. - padding
+        } else {
+            self.width - padding
+        }
+    }
     fn detail_bar(&self, container: bool, cx: &mut Context<Self>) -> AnyElement {
         // Stack log controls when the detail pane is narrow. Other tabs have
-        // no controls row to reserve. The master pane is 280px and detail
-        // content has 16px padding per side.
-        let detail_width = if self.width > 600. {
-            self.width - 312.
-        } else {
-            self.width - 32.
-        };
-        let stacked = detail_width <= 720.;
+        // no controls row to reserve.
+        let detail_width = self.detail_content_width();
+        let stacked = detail_width <= 840.;
         div()
             .id("container-detail-bar")
             .debug_selector(|| "container-detail-bar".into())
@@ -538,48 +564,69 @@ impl ContainersPanel {
             .into_any_element()
     }
     fn detail_tabs(&self, container: bool, cx: &mut Context<Self>) -> AnyElement {
-        let choices: &[&str] = if container {
-            &["Logs", "Inspect"]
+        // Display order → retained tab index.
+        let choices: &[(&str, usize)] = if container {
+            &[("Logs", 0), ("Inspect", 1)]
         } else {
-            &["Logs", "Activity", "Compose files"]
+            &[
+                ("Services", PROJECT_SERVICES),
+                ("Logs", 0),
+                ("Activity", 1),
+                ("Compose files", 2),
+            ]
         };
+        let order: Rc<Vec<usize>> = Rc::new(choices.iter().map(|(_, tab)| *tab).collect());
         let count = choices.len();
+        let selected = order.iter().position(|tab| *tab == self.tab).unwrap_or(0);
+        let clicked = order.clone();
         crate::controls::tabs("container-detail-tabs")
             .underline()
-            .label_size(px(12.5))
+            .label_size(px(crate::ui::FONT_SIZE))
             .accessibility_label("Container details")
-            .selected_index(self.tab)
-            .children(choices.iter().copied().enumerate().map(|(index, name)| {
-                Tab::new()
-                    .label(name)
-                    .track_focus(&self.tab_focus[index].clone().tab_stop(index == self.tab))
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                        if event.keystroke.modifiers.modified() || window.has_active_dialog(cx) {
-                            return;
-                        }
-                        let next = match event.keystroke.key.as_str() {
-                            "left" => (index + count - 1) % count,
-                            "right" => (index + 1) % count,
-                            "home" => 0,
-                            "end" => count - 1,
-                            "enter" | "space" => index,
-                            _ => return,
-                        };
-                        this.compose_state.show_activity_for = None;
-                        this.tab = next;
-                        this.client.revalidate_details();
-                        this.tab_focus[next].focus(window, cx);
-                        this.sync_selection(cx);
-                        window.prevent_default();
-                        cx.stop_propagation();
-                        cx.notify();
-                    }))
-            }))
-            .on_click(cx.listener(|this, index: &usize, window, cx| {
+            .selected_index(selected)
+            .children(
+                choices
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(position, (name, tab))| {
+                        let order = order.clone();
+                        Tab::new()
+                            .label(name)
+                            .track_focus(&self.tab_focus[tab].clone().tab_stop(tab == self.tab))
+                            .on_key_down(cx.listener(
+                                move |this, event: &KeyDownEvent, window, cx| {
+                                    if event.keystroke.modifiers.modified()
+                                        || window.has_active_dialog(cx)
+                                    {
+                                        return;
+                                    }
+                                    let next = order[match event.keystroke.key.as_str() {
+                                        "left" => (position + count - 1) % count,
+                                        "right" => (position + 1) % count,
+                                        "home" => 0,
+                                        "end" => count - 1,
+                                        "enter" | "space" => position,
+                                        _ => return,
+                                    }];
+                                    this.compose_state.show_activity_for = None;
+                                    this.tab = next;
+                                    this.client.revalidate_details();
+                                    this.tab_focus[next].focus(window, cx);
+                                    this.sync_selection(cx);
+                                    window.prevent_default();
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                },
+                            ))
+                    }),
+            )
+            .on_click(cx.listener(move |this, position: &usize, window, cx| {
+                let tab = clicked[*position];
                 this.compose_state.show_activity_for = None;
-                this.tab = *index;
+                this.tab = tab;
                 this.client.revalidate_details();
-                this.tab_focus[*index].focus(window, cx);
+                this.tab_focus[tab].focus(window, cx);
                 this.sync_selection(cx);
                 cx.notify();
             }))
@@ -592,7 +639,7 @@ fn fact(name: &str, value: impl Into<SharedString>, cx: &App) -> Div {
         .flex()
         .flex_col()
         .gap(px(4.))
-        .child(quiet(name.to_owned(), cx).text_size(px(11.)))
+        .child(quiet(name.to_owned(), cx).text_size(px(crate::ui::FONT_SIZE)))
         .child(
             div()
                 .id(SharedString::from(format!(
@@ -601,7 +648,7 @@ fn fact(name: &str, value: impl Into<SharedString>, cx: &App) -> Div {
                 )))
                 .role(accesskit::Role::Label)
                 .aria_label(value.clone())
-                .text_size(px(12.5))
+                .text_size(px(crate::ui::FONT_SIZE))
                 .child(value)
                 .test_support(),
         )

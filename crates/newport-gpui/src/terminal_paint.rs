@@ -4,7 +4,7 @@ use gpui_kit::{prelude::*, *};
 use newport_terminal::{CellWide, CursorVisualStyle, Frame, Position, Style, Underline};
 use std::collections::HashMap;
 
-const FONT_SIZE: f32 = 12.;
+const FONT_SIZE: f32 = crate::ui::FONT_SIZE;
 
 pub use crate::terminal_color::theme;
 use crate::terminal_color::{from_hex, hex, resolve};

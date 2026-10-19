@@ -100,14 +100,14 @@ impl Sessions {
         if sessions.contains_key(&id) {
             return Err("Terminal session already exists.".into());
         }
-        if sessions.len() >= 8 {
+        if sessions.len() >= newport_domain::terminal::MAX_TERMINALS {
             return Err("Close an existing terminal before opening another.".into());
         }
         let (input, rx) = mpsc::channel(32);
         let (tx, output) = mpsc::channel(32);
         let server_id = server.id;
-        // Opening/reopening a tab is an explicit retry after a permanent error.
-        owner.retry_transport();
+        // Every tab owns a fresh transport and retry lifecycle. Opening a tab
+        // must not retry or replace the connection used by app services.
         let task_owner = owner.clone();
         let task = tokio::spawn(async move {
             if let Err(error) =
@@ -430,6 +430,55 @@ mod tests {
             setup_complete: true,
         }
     }
+    #[tokio::test]
+    async fn closing_terminal_cancels_handshake_and_releases_next_terminal_without_app_transport() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id":Uuid::new_v4(),"name":"Pending terminal","sshHost":"127.0.0.1",
+            "sshUser":"fixture","sshPort":listener.local_addr().unwrap().port()
+        }))
+        .unwrap();
+        let registry = crate::server_session::Registry::default();
+        let owner = registry.session(&server, 0);
+        let sessions = Sessions::default();
+        let id = Uuid::new_v4();
+        sessions
+            .open_bound(id, server.clone(), 80, 24, owner.clone())
+            .unwrap();
+        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let queued = Uuid::new_v4();
+        sessions
+            .open_bound(queued, server, 80, 24, owner.clone())
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+        sessions.close(id).await;
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(3), socket.read_to_end(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        sessions.close(queued).await;
+        tokio::time::timeout(Duration::from_secs(3), socket.read_to_end(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.transport_snapshot().generation, 0);
+        assert_eq!(owner.transport_snapshot().demand, 0);
+        registry.shutdown().await;
+    }
+
     async fn until(sessions: &Sessions, id: Uuid, needle: &str) -> String {
         tokio::time::timeout(Duration::from_secs(8), async {
             let mut text = String::new();
@@ -545,9 +594,117 @@ mod tests {
         sessions.close(cancelled).await;
         assert!(sessions.inner.entries.lock().unwrap().is_empty());
     }
+    async fn fixture_connection(sessions: &Sessions, id: Uuid) -> Uuid {
+        sessions
+            .send(
+                id,
+                Input::Data(
+                    b"printf '\\nconnection=%s\\n' \"$NEWPORT_FIXTURE_CONNECTION\"\r".to_vec(),
+                ),
+            )
+            .await
+            .unwrap();
+        let output = until(sessions, id, "fixture> ").await;
+        output
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("connection=")
+                    .and_then(|value| Uuid::parse_str(value).ok())
+            })
+            .unwrap_or_else(|| panic!("Missing fixture connection ID: {output}"))
+    }
+
     #[tokio::test]
     #[ignore = "Run with npm run test:ssh -- terminal::tests"]
-    async fn terminals_share_transport_without_needle_and_close_only_their_shell() {
+    async fn twelve_terminals_keep_independent_connections_while_app_session_slots_are_full() {
+        let sessions = Sessions::default();
+        let server = fixture();
+        let registry = crate::server_session::Registry::default();
+        let owner = registry.session(&server, 0);
+        let lease = owner.acquire(&server).await.unwrap();
+        let state = registry.connections.subscribe();
+        let revision = state.borrow().revision;
+        let mut workers = Vec::new();
+        // Eight workers, Needle control, and SFTP occupy all ten app slots.
+        for _ in 0..8 {
+            workers.push(lease.launch(crate::agent::Service::Git).await.unwrap().0);
+        }
+        let sftp = lease.sftp().await.unwrap();
+        sftp.realpath(".").await.unwrap();
+        let permissions = serde_json::to_value(owner.permissions.snapshot()).unwrap();
+        let ids: Vec<_> = (0..12).map(|_| Uuid::new_v4()).collect();
+        for id in &ids {
+            sessions
+                .open_bound(*id, server.clone(), 80, 24, owner.clone())
+                .unwrap();
+        }
+        let mut connections = std::collections::HashSet::new();
+        let mut first = Uuid::nil();
+        for id in &ids {
+            until(&sessions, *id, "fixture> ").await;
+            let connection = fixture_connection(&sessions, *id).await;
+            assert!(
+                connections.insert(connection),
+                "two terminals shared an SSH connection"
+            );
+            if *id == ids[0] {
+                first = connection;
+            }
+        }
+        assert_eq!(owner.transport_snapshot().demand, 1);
+        // Make room for a control command on the still-healthy app connection.
+        drop(workers.pop());
+        lease
+            .execute(&format!("drop-connection {first}"), None)
+            .await
+            .unwrap();
+        until(&sessions, ids[0], "fixture> ").await;
+        assert!(!connections.contains(&fixture_connection(&sessions, ids[0]).await));
+        for id in &ids[1..] {
+            assert!(connections.remove(&fixture_connection(&sessions, *id).await));
+        }
+        // A refused PTY is terminal-local and must not cause a reconnect loop.
+        let refused = Uuid::new_v4();
+        sessions
+            .open_bound(refused, server, 13, 24, owner.clone())
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match sessions.read(refused).await.unwrap() {
+                    Some(Event::Error(error)) => {
+                        assert!(error.contains("refused"));
+                        break;
+                    }
+                    Some(Event::Reconnecting { .. } | Event::Ready) => {
+                        panic!("refused PTY retried")
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        sessions.close(refused).await;
+        sftp.realpath(".").await.unwrap();
+        assert_eq!(lease.execute("printf ok", None).await.unwrap(), "ok");
+        assert_eq!(owner.transport_snapshot().generation, 1);
+        assert_eq!(state.borrow().revision, revision);
+        assert_eq!(
+            serde_json::to_value(owner.permissions.snapshot()).unwrap(),
+            permissions
+        );
+        sessions.close_server(None).await;
+        assert_eq!(lease.execute("printf ok", None).await.unwrap(), "ok");
+        drop(sftp);
+        drop(workers);
+        drop(lease);
+        registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "Run with npm run test:ssh -- terminal::tests"]
+    async fn terminals_use_dedicated_transports_without_needle_and_close_only_their_shell() {
         let sessions = Sessions::default();
         let mut server = fixture();
         server.agent_install_approved = false;
@@ -564,6 +721,8 @@ mod tests {
             .unwrap();
         until(&sessions, a, "fixture> ").await;
         until(&sessions, b, "fixture> ").await;
+        assert_eq!(owner.transport_snapshot().generation, 0);
+        assert_eq!(owner.transport_snapshot().demand, 0);
         let lease = owner.acquire(&server).await.unwrap();
         assert_eq!(owner.transport_snapshot().generation, 1);
         assert!(owner.agent_runtime.snapshot().hello.is_none());
@@ -655,7 +814,7 @@ mod tests {
             .await
             .unwrap();
         until(&sessions, id, "new-shell").await;
-        assert_eq!(owner.transport_snapshot().generation, 2);
+        assert_eq!(owner.transport_snapshot().generation, 0);
         sessions.close(id).await;
         registry.shutdown().await;
     }

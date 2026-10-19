@@ -1,5 +1,5 @@
 use super::{ContainerLogEntry, ContainersPanel, LogWindow, Row, log_line};
-use crate::containers::tests::{click, draw, element, fixture, select, settle};
+use crate::containers::tests::{click, draw, element, fixture, select, select_logs, settle};
 use gpui::{
     Entity, Focusable, ListOffset, Modifiers, MouseButton, TestAppContext, VisualTestContext,
     point, px,
@@ -41,7 +41,7 @@ fn inject(
 fn hidden_container_logs_defer_projection_until_return(cx: &mut TestAppContext) {
     use std::{rc::Rc, thread, time::Duration};
     let (panel, cx, backend) = fixture(cx);
-    select(&panel, cx, "p:stack");
+    select_logs(&panel, cx, "p:stack");
     click(cx, "Logs");
     settle(&panel, cx);
     let previous = panel.read_with(cx, |p, _| p.logs.rows.clone());
@@ -119,7 +119,7 @@ fn short_logs_start_at_top_while_following_new_output(cx: &mut TestAppContext) {
 #[gpui::test]
 fn filters_search_copy_and_failed_refresh_use_the_same_retained_lines(cx: &mut TestAppContext) {
     let (panel, cx, backend) = fixture(cx);
-    select(&panel, cx, "p:stack");
+    select_logs(&panel, cx, "p:stack");
     let mut normal = entry("connected successfully");
     normal.stream = LogStream::Stderr;
     normal.container = Some("api".into());
@@ -164,7 +164,7 @@ fn filters_search_copy_and_failed_refresh_use_the_same_retained_lines(cx: &mut T
             .ends_with("worker: ERROR Café request failed")
     );
     backend.set_logs(Err("fixture connection lost".into()));
-    click(cx, "Refresh container logs");
+    click(cx, "Refresh containers");
     settle(&panel, cx);
     assert_eq!(
         panel.read_with(cx, |p, _| p.logs.rows.len()),
@@ -184,7 +184,7 @@ fn identical_lines_keep_anchor_and_exact_unseen_count_through_bounded_eviction(
     cx: &mut TestAppContext,
 ) {
     let (panel, cx, _backend) = fixture(cx);
-    select(&panel, cx, "p:stack");
+    select_logs(&panel, cx, "p:stack");
     let entries = vec![entry("repeated heartbeat"); 2_000];
     inject(&panel, cx, &entries, 700, 0, 2_000);
     panel.update(cx, |p, cx| {
@@ -267,7 +267,7 @@ fn wrapped_literal_text_supports_drag_copy_and_clears_selection_on_scope_change(
     cx: &mut TestAppContext,
 ) {
     let (panel, cx, _backend) = fixture(cx);
-    select(&panel, cx, "p:stack");
+    select_logs(&panel, cx, "p:stack");
     let mut first = entry(&format!(
         "Café **literal** <tag> 🦀 {} tail",
         "longword".repeat(20)
@@ -321,7 +321,7 @@ fn wrapped_literal_text_supports_drag_copy_and_clears_selection_on_scope_change(
 #[gpui::test]
 fn keyboard_scroll_is_contained_and_dataset_loading_clears_old_output(cx: &mut TestAppContext) {
     let (panel, cx, _backend) = fixture(cx);
-    select(&panel, cx, "p:stack");
+    select_logs(&panel, cx, "p:stack");
     let entries = (0..300)
         .map(|i| entry(&format!("row {i}")))
         .collect::<Vec<_>>();
@@ -346,4 +346,42 @@ fn keyboard_scroll_is_contained_and_dataset_loading_clears_old_output(cx: &mut T
     assert_eq!(panel.read_with(cx, |p, _| p.logs.rows.len()), 0);
     assert_eq!(panel.read_with(cx, |p, _| p.logs.source.len()), 0);
     assert_eq!(panel.read_with(cx, |p, _| p.logs.list.item_count()), 0);
+}
+
+#[gpui::test]
+fn ansi_lines_show_plain_text_with_their_colors(cx: &mut TestAppContext) {
+    let (panel, cx, backend) = fixture(cx);
+    select_logs(&panel, cx, "p:stack");
+    backend.set_logs(Ok(ContainerLogPage {
+        entries: vec![
+            entry("\u{1b}[31mERROR\u{1b}[0m request failed"),
+            entry("plain line"),
+        ],
+        cursor: Some("next".into()),
+    }));
+    panel.update(cx, |p, cx| {
+        p.client.reset_logs();
+        p.sync_selection(cx);
+    });
+    settle(&panel, cx);
+    panel.read_with(cx, |p, _| {
+        let Row::Line {
+            entry,
+            styles,
+            tone,
+            ..
+        } = &p.logs.rows[0]
+        else {
+            panic!("expected a line")
+        };
+        assert_eq!(entry.message, "ERROR request failed");
+        assert_eq!(*tone, log_line::Tone::Error);
+        assert_eq!(styles.as_deref().unwrap()[0].range, 0..5);
+        assert!(matches!(&p.logs.rows[1], Row::Line { styles: None, .. }));
+    });
+    click(cx, "Copy visible logs");
+    assert!(
+        cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()).unwrap())
+            .contains("ERROR request failed")
+    );
 }

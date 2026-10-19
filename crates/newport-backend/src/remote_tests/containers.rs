@@ -898,9 +898,12 @@ async fn disk_usage_and_prune() {
         ))
         .await;
 
-    let disk = containers::disk(&crate::remote_tests::owner(&server))
-        .await
-        .unwrap();
+    let disk = containers::disk(
+        &crate::remote_tests::owner(&server),
+        crate::server_queries::DiskPart::Full,
+    )
+    .await
+    .unwrap();
     let images = disk["images"].as_array().unwrap();
     let busybox = images.iter().find(|i| i["tags"] == json!([IMAGE])).unwrap();
     assert!(busybox["size"].as_u64().is_some_and(|s| s > 0));

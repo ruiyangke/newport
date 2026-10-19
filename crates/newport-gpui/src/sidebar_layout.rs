@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const DEFAULT_WIDTH: f32 = 204.;
+pub const DEFAULT_WIDTH: f32 = 184.;
 pub const MIN_WIDTH: f32 = 176.;
 
 pub fn maximum(viewport: f32) -> f32 {
@@ -29,6 +29,8 @@ fn clamp_width(width: f32, viewport: f32) -> f32 {
 #[derive(Serialize, Deserialize)]
 struct Preferences {
     sidebar_width: f32,
+    #[serde(default)]
+    compact: bool,
 }
 
 fn load_width(path: Option<&Path>) -> io::Result<f32> {
@@ -46,12 +48,13 @@ fn load_width(path: Option<&Path>) -> io::Result<f32> {
     }
 }
 
-fn save_width(path: &Path, width: f32) -> io::Result<()> {
+fn save_preferences(path: &Path, width: f32, compact: bool) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec_pretty(&Preferences {
         sidebar_width: width,
+        compact,
     })?;
     let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| {
@@ -70,9 +73,20 @@ fn save_width(path: &Path, width: f32) -> io::Result<()> {
     result
 }
 
+fn load_compact(path: Option<&Path>) -> bool {
+    path.and_then(|path| fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<Preferences>(&bytes).ok())
+        .is_some_and(|preferences| preferences.compact)
+}
+#[cfg(test)]
+fn save_width(path: &Path, width: f32) -> io::Result<()> {
+    save_preferences(path, width, false)
+}
+
 pub struct SidebarLayout {
     pub state: Entity<ResizableState>,
     preferred_width: f32,
+    compact: bool,
     viewport: Option<f32>,
     preferences_path: Option<PathBuf>,
 }
@@ -92,6 +106,7 @@ impl SidebarLayout {
             Self {
                 state: cx.new(|_| ResizableState::default()),
                 preferred_width,
+                compact: load_compact(preferences_path.as_deref()),
                 viewport: None,
                 preferences_path,
             },
@@ -99,6 +114,25 @@ impl SidebarLayout {
         )
     }
 
+    /// UI tests must never load or overwrite the running app's preferences.
+    #[cfg(test)]
+    pub(crate) fn isolated(cx: &mut App) -> Self {
+        Self {
+            state: cx.new(|_| ResizableState::default()),
+            preferred_width: DEFAULT_WIDTH,
+            compact: false,
+            viewport: None,
+            preferences_path: None,
+        }
+    }
+
+    pub fn compact(&self) -> bool {
+        self.compact
+    }
+    pub fn set_compact(&mut self, compact: bool) -> io::Result<()> {
+        self.compact = compact;
+        self.save()
+    }
     pub fn width(&self, viewport: f32) -> f32 {
         clamp_width(self.preferred_width, viewport)
     }
@@ -155,13 +189,15 @@ impl SidebarLayout {
         let Some(path) = &self.preferences_path else {
             return Ok(());
         };
-        save_width(path, self.preferred_width)
+        save_preferences(path, self.preferred_width, self.compact)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_WIDTH, clamp_width, load_width, maximum, save_width};
+    use super::{
+        DEFAULT_WIDTH, clamp_width, load_compact, load_width, maximum, save_preferences, save_width,
+    };
     use std::{fs, io, path::PathBuf};
 
     struct TestDirectory(PathBuf);
@@ -197,6 +233,23 @@ mod tests {
         save_width(&path, 999.).unwrap();
         assert_eq!(load_width(Some(&path)).unwrap(), 300.);
         assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn navigation_mode_round_trips_and_accepts_existing_preferences() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        fs::write(&path, r#"{"sidebar_width":240}"#).unwrap();
+        assert!(!load_compact(Some(&path)));
+        assert_eq!(load_width(Some(&path)).unwrap(), 240.);
+        save_preferences(&path, 240., true).unwrap();
+        assert!(load_compact(Some(&path)));
+        assert_eq!(load_width(Some(&path)).unwrap(), 240.);
+        save_preferences(&path, 260., true).unwrap();
+        assert!(load_compact(Some(&path)));
+        assert_eq!(load_width(Some(&path)).unwrap(), 260.);
+        save_preferences(&path, 260., false).unwrap();
+        assert!(!load_compact(Some(&path)));
     }
 
     #[test]

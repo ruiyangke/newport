@@ -71,7 +71,7 @@ fn note(id: impl Into<ElementId>, text: impl Into<String>, alert: bool, cx: &App
         .test_support()
         .aria_label(text.clone())
         .min_w_0()
-        .text_size(px(13.))
+        .text_size(px(crate::ui::FONT_SIZE))
         .line_height(relative(1.6))
         .text_color(if alert {
             theme::error(cx.theme().is_dark())
@@ -89,7 +89,7 @@ impl Newport {
     fn helper_scope_matches(&self, review: &Review) -> bool {
         self.selected_server().is_some_and(|s| {
             s["id"] == review.server["id"]
-                && crate::terminal_scope::connection(&s, &self.snapshot) == review.scope
+                && crate::terminal_scope::connection(s, &self.snapshot) == review.scope
         })
     }
     fn helper_actions_blocked(&self) -> bool {
@@ -196,7 +196,7 @@ impl Newport {
         if self.helper_actions_blocked()
             || !self.selected_server().is_some_and(|s| {
                 s["id"] == server["id"]
-                    && crate::terminal_scope::connection(&s, &self.snapshot) == scope
+                    && crate::terminal_scope::connection(s, &self.snapshot) == scope
             })
         {
             return;
@@ -234,7 +234,7 @@ impl Newport {
                     .test_support()
                     .aria_level(3)
                     .aria_label("Shell changes")
-                    .text_size(px(13.))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Shell changes"),
             );
@@ -279,10 +279,10 @@ impl Newport {
                 text(&review.server, "sshHost"),
                 short(&review.id)
             );
-            content = content.child(div().id("needle-helper-state").role(Role::Status).test_support().aria_label(title).flex().items_center().gap_2().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD)
+            content = content.child(div().id("needle-helper-state").role(Role::Status).test_support().aria_label(title).flex().items_center().gap_2().text_size(px(crate::ui::FONT_SIZE)).font_weight(FontWeight::SEMIBOLD)
                 .when(running, |r| r.child(gpui_kit::component::spinner::Spinner::new().small())).child(title))
                 .child(div().id("needle-helper-target").role(Role::Paragraph).test_support().aria_label(target.clone())
-                    .min_w_0().w_full().whitespace_normal().text_size(px(13.)).text_color(cx.theme().muted_foreground)
+                    .min_w_0().w_full().whitespace_normal().text_size(px(crate::ui::FONT_SIZE)).text_color(cx.theme().muted_foreground)
                     .child(target))
                 .child(note("needle-helper-impact", if running { "You can leave this page. Newport will keep the restoration running." } else { "Restore the files recorded by this shell setup. Changed files will need review. Shell commands may stop using Newport; Needle, metrics, and Git stay available." },false,cx));
             if stale {

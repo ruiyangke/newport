@@ -122,7 +122,7 @@ fn transfer_strip(
                         .gap(px(3.))
                         .child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_ellipsis()
                                 .child(summary),
@@ -132,7 +132,7 @@ fn transfer_strip(
                                 .id("file-transfer-progress")
                                 .role(Role::Label)
                                 .aria_label(detail.clone())
-                                .text_size(px(11.))
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .text_color(cx.theme().muted_foreground)
                                 .child(detail)
                                 .test_support(),
@@ -162,7 +162,7 @@ fn transfer_strip(
                     .role(Role::Alert)
                     .aria_label(error.to_owned())
                     .text_color(cx.theme().danger)
-                    .text_size(px(12.))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .child(error.to_owned())
                     .test_support(),
             )
@@ -247,7 +247,7 @@ impl Newport {
         ));
     }
 
-    pub(super) fn poll_file_transfer(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(super) fn poll_file_transfer(&mut self, _cx: &mut Context<Self>) -> bool {
         let configuration_available = self.configuration_available();
         // A profile outage is not retirement. Leave the owned worker's result
         // queued until its captured connection can be revalidated, otherwise a
@@ -284,7 +284,6 @@ impl Newport {
                 .completion
                 .as_ref()
                 .is_some_and(|result| matches!(result, Ok(Some(_))));
-        let tree_server = uploaded.then(|| transfer.server().to_owned());
         let refresh = uploaded
             && self.page == Page::Files
             && self.server == transfer.server()
@@ -303,11 +302,6 @@ impl Newport {
             };
         }
         self.file_transfer = None;
-        if let Some(browser) = tree_server.and_then(|server| self.file_browsers.get(&server)) {
-            // The upload may finish after navigating away from its folder.
-            // Invalidate that server's tree even when its table needs no refresh.
-            browser.tree.update(cx, |tree, cx| tree.clear(cx));
-        }
         if let Some(destination) = destination {
             // Supersede and cancel the pre-upload read, retaining visible rows/filter.
             self.close_file_preview();

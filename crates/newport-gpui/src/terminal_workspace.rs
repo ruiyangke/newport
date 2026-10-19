@@ -1,16 +1,46 @@
-use crate::{terminal_view::TerminalView, *};
-use gpui_kit::component::tab::Tab;
+use crate::{terminal_status::Phase, terminal_view::TerminalView, *};
+use gpui_kit::base::Tab;
 use newport_client::terminal_command::CommandDraft;
+use std::time::{Duration, Instant};
 
-const MAX_TERMINALS: usize = 8;
+use newport_domain::terminal::MAX_TERMINALS;
 
 struct TerminalTab {
     id: usize,
     focus: FocusHandle,
     custom: Option<String>,
     view: Entity<TerminalView>,
+    exit: ExitPolicy,
     _observer: Subscription,
     _links: Subscription,
+}
+
+/// A shell that ends this soon after becoming ready failed to start.
+const STARTUP_EXIT: Duration = Duration::from_secs(2);
+
+/// Exits after use close their tab. A startup exit (nologin, a profile that
+/// exits) keeps it, so the output and exit status explain what happened.
+#[derive(Default)]
+struct ExitPolicy {
+    ready_at: Option<Instant>,
+    keep: bool,
+}
+impl ExitPolicy {
+    fn observe(&mut self, phase: &Phase) {
+        match phase {
+            Phase::Connecting => *self = Self::default(),
+            Phase::Connected => {
+                *self = Self {
+                    ready_at: Some(Instant::now()),
+                    keep: false,
+                }
+            }
+            Phase::Exited(_) => {
+                self.keep = self.ready_at.is_none_or(|at| at.elapsed() < STARTUP_EXIT);
+            }
+            _ => {}
+        }
+    }
 }
 
 struct Rename {
@@ -31,6 +61,8 @@ pub struct Workspace {
     next: usize,
     rename: Option<Rename>,
     context_tab: Option<usize>,
+    tab_scroll: ScrollHandle,
+    revealed_tab: Option<(usize, usize)>,
 }
 
 impl Workspace {
@@ -285,6 +317,8 @@ impl Workspace {
             next: 0,
             rename: None,
             context_tab: None,
+            tab_scroll: ScrollHandle::new(),
+            revealed_tab: None,
         }
     }
 
@@ -301,10 +335,16 @@ impl Workspace {
         }
         // Output, selection and pointer changes repaint the terminal itself.
         // Only presentation changes need to rebuild the surrounding tab bar.
+        let id = self.next;
         let mut previous = view.read(cx).tab_presentation();
-        let observer = cx.observe(&view, move |_, view, cx| {
+        let observer = cx.observe(&view, move |this, view, cx| {
             let next = view.read(cx).tab_presentation();
             if next != previous {
+                if next.1.phase != previous.1.phase
+                    && let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == id)
+                {
+                    tab.exit.observe(&next.1.phase);
+                }
                 previous = next;
                 cx.notify();
             }
@@ -316,10 +356,11 @@ impl Workspace {
             },
         );
         self.tabs.push(TerminalTab {
-            id: self.next,
+            id,
             focus: cx.focus_handle(),
             custom: None,
             view,
+            exit: ExitPolicy::default(),
             _observer: observer,
             _links: links,
         });
@@ -386,6 +427,45 @@ impl Workspace {
         }
     }
 
+    fn close_exited_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut restore_focus = false;
+        // Exit is final. Failures, explicit disconnects and startup exits
+        // retain their tabs. Walk backwards so each surviving session keeps
+        // its identity and selection.
+        for index in (0..self.tabs.len()).rev() {
+            let tab = &self.tabs[index];
+            if tab.exit.keep || !matches!(tab.view.read(cx).status.phase, Phase::Exited(_)) {
+                continue;
+            }
+            restore_focus |= tab.focus.contains_focused(window, cx)
+                || tab.view.read(cx).focus.contains_focused(window, cx);
+            if self
+                .rename
+                .as_ref()
+                .is_some_and(|rename| rename.id == tab.id)
+            {
+                restore_focus |= self
+                    .rename
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .contains_focused(window, cx);
+                self.rename = None;
+            }
+            if self.context_tab == Some(tab.id) {
+                self.context_tab = None;
+            }
+            tab.view.update(cx, |view, _| view.close());
+            self.tabs.remove(index);
+            self.active = selected_after_close(self.active, index, self.tabs.len());
+        }
+        if restore_focus {
+            self.focus_active(window, cx);
+        }
+    }
+
     fn tab_key(
         &mut self,
         id: usize,
@@ -418,6 +498,62 @@ impl Workspace {
         cx.stop_propagation();
         cx.notify();
     }
+}
+
+// Only shorten the recognizable user@host:path prompt format. Command titles
+// and explicitly named tabs keep their meaning; the full OSC title stays available.
+fn automatic_tab_title(title: &str, id: usize) -> String {
+    let title = title.trim();
+    let prompt_path = title.split_once(':').filter(|(host, path)| {
+        host.contains('@') && (path.starts_with('/') || path.starts_with('~'))
+    });
+    let base = if let Some((host, path)) = prompt_path {
+        path.trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty() && *name != "~")
+            .unwrap_or_else(|| host.rsplit('@').next().unwrap_or(host))
+    } else if title.is_empty() || title == "Terminal" {
+        "Terminal"
+    } else {
+        return title.to_owned();
+    };
+    if id == 0 {
+        base.to_owned()
+    } else {
+        format!("{base} {}", id + 1)
+    }
+}
+
+fn session_tab(id: usize, active: bool, cx: &App) -> Tab {
+    let background = if active {
+        cx.theme().background
+    } else {
+        cx.theme().muted
+    };
+    let hover = if active {
+        background
+    } else {
+        theme::row_hover(cx)
+    };
+    Tab::new(("terminal-tab", id))
+        .selected(active)
+        .h(px(crate::ui::HEADER_HEIGHT))
+        .flex_shrink_0()
+        .max_w(px(260.))
+        .px(px(12.))
+        .gap(px(8.))
+        .text_size(px(crate::ui::FONT_SIZE))
+        .text_color(if active {
+            cx.theme().foreground
+        } else {
+            cx.theme().muted_foreground
+        })
+        .bg(background)
+        .border_r_1()
+        .when(!active, |tab| tab.border_b_1())
+        .border_color(cx.theme().border)
+        .hover(move |tab| tab.bg(hover))
 }
 
 fn custom_name(value: &str) -> Option<String> {
@@ -454,6 +590,7 @@ fn selected_after_close(active: usize, removed: usize, remaining: usize) -> usiz
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.close_exited_tabs(window, cx);
         for (index, tab) in self.tabs.iter().enumerate() {
             if index != self.active {
                 tab.view.update(cx, |view, cx| view.deactivate(window, cx));
@@ -481,7 +618,15 @@ impl Render for Workspace {
                         .or_else(|| view.input_error.clone())
                 })
             });
+        let selected = (self.active, self.tabs.len());
+        if self.revealed_tab != Some(selected) {
+            self.revealed_tab = Some(selected);
+            self.tab_scroll.scroll_to_item(self.active);
+        }
         let menu_view = cx.entity().downgrade();
+        // Only windowed immersive mode shares this row with the native Mac
+        // window controls. Fullscreen hides those controls.
+        let inset = self.immersive && cfg!(target_os = "macos") && !window.is_fullscreen();
         div()
             .size_full()
             .relative()
@@ -493,17 +638,14 @@ impl Render for Workspace {
                 div()
                     .debug_selector(|| "terminal-tab-row".into())
                     .flex()
-                    .h(px(36.))
+                    .h(px(crate::ui::HEADER_HEIGHT))
                     .flex_shrink_0()
-                    .px(px(8.))
-                    // Only windowed immersive mode shares this row with the
-                    // native Mac window controls. Fullscreen hides those controls.
-                    .when(self.immersive && cfg!(target_os = "macos") && !window.is_fullscreen(), |bar| {
-                        bar.pl(px(96.))
-                    })
+                    .px_0()
+                    .when(inset, |bar| bar.pl(px(96.)))
                     .items_center()
-                    .border_b_1()
-                    .border_color(cx.theme().border.opacity(0.65))
+                    .relative()
+                    .bg(cx.theme().muted)
+                    .child(crate::ui::header_rule(cx))
                     .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, _| {
                         if event.button == MouseButton::Right {
                             this.context_tab = None;
@@ -511,29 +653,27 @@ impl Render for Workspace {
                     }))
                     .child(
                         div()
+                            .id("terminal-tabs")
                             .debug_selector(|| "terminal-tab-bar".into())
+                            .role(Role::TabList)
+                            .aria_label("Terminal sessions")
+                            .flex()
                             .min_w_0()
-                            .child(crate::project_ui::tabs("terminal-tabs")
-                            .subtle()
-                            // Kit's subtle bar defaults to 38px. Leave the
-                            // row's bottom border outside its painted bounds.
-                            .h(px(35.))
-                            .min_h(px(35.))
-                            .max_h(px(35.))
-                            .accessibility_label("Terminal sessions")
-                            .bg(cx.theme().background)
-                            .min_w_0()
-                            .max_width(px(180.))
-                            .selected_index(self.active)
+                            .h_full()
+                            .overflow_x_scroll()
+                            .track_scroll(&self.tab_scroll)
                             .children(self.tabs.iter().enumerate().map(|(index, tab)| {
                                 let id = tab.id;
                                 if let Some(rename) =
                                     self.rename.as_ref().filter(|rename| rename.id == id)
                                 {
-                                    return Tab::new().quiet()
+                                    return session_tab(id, index == self.active, cx)
+                                        .when(index == 0 && inset, |tab| tab.border_l_1())
+                                        .set_position(index + 1, self.tabs.len())
+                                        .accessibility_label(format!("Rename Terminal {}", id + 1))
                                         .debug_selector(move || format!("terminal-tab-{id}"))
                                         .child(
-                                            Styled::h(crate::project_ui::input(&rename.input), px(26.))
+                                            Styled::h(crate::controls::input(&rename.input), px(26.))
                                                 .min_h(px(26.))
                                                 .max_h(px(26.))
                                                 .w(px(132.))
@@ -552,12 +692,29 @@ impl Render for Workspace {
                                             },
                                         ));
                                 }
-                                let title = tab
-                                    .custom
-                                    .clone()
-                                    .unwrap_or_else(|| tab.view.read(cx).title.clone());
+                                let remote_title = tab.view.read(cx).title.clone();
+                                let title = tab.custom.clone()
+                                    .unwrap_or_else(|| automatic_tab_title(&remote_title, id));
+                                let startup_exit = {
+                                    let status = &tab.view.read(cx).status;
+                                    (tab.exit.keep && matches!(status.phase, Phase::Exited(_)))
+                                        .then(|| status.label())
+                                };
+                                let hint = startup_exit.clone().or_else(|| {
+                                    (tab.custom.is_none() && title != remote_title && remote_title.contains('@') && remote_title.contains(':'))
+                                        .then(|| remote_title.clone())
+                                });
                                 let group = SharedString::from(format!("terminal-tab-{id}"));
-                                Tab::new().quiet()
+                                session_tab(id, index == self.active, cx)
+                                    // Inset beside the window controls, the first tab
+                                    // needs its own leading edge.
+                                    .when(index == 0 && inset, |tab| tab.border_l_1())
+                                    .set_position(index + 1, self.tabs.len())
+                                    .accessibility_label(match &startup_exit {
+                                        Some(exit) => format!("{title}, {exit}"),
+                                        None => title.clone(),
+                                    })
+                                    .when_some(hint, |tab, hint| tab.hover_hint(hint))
                                     .group(group.clone())
                                     .debug_selector(move || format!("terminal-tab-{id}"))
                                     .on_mouse_down(
@@ -615,13 +772,18 @@ impl Render for Workspace {
                                             }
                                         },
                                     ))
-                                    .label(if title.is_empty() {
-                                        format!("Terminal {}", id + 1)
-                                    } else {
-                                        title
+                                    .child(Icon::new(IconName::Terminal).size(px(16.)).flex_shrink_0())
+                                    .child(div().min_w_0().truncate().child(title))
+                                    .when_some(startup_exit, |tab, exit| {
+                                        tab.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(exit),
+                                        )
                                     })
                                     .when(self.tabs.len() > 1, |tab| {
-                                        tab.suffix(
+                                        tab.child(
                                             crate::controls::compact_icon_button((
                                                 "close-terminal",
                                                 id,
@@ -630,7 +792,7 @@ impl Render for Workspace {
                                             .w(px(20.)).min_w(px(20.)).max_w(px(20.))
                                             .h(px(20.)).min_h(px(20.)).max_h(px(20.))
                                             .ghost()
-                                            .opacity(0.65)
+                                            .opacity(if index == self.active { 0.65 } else { 0. })
                                             .group_hover(group.clone(), |style| style.opacity(1.))
                                             .focus(|style| style.opacity(1.))
                                             .accessibility_label("Close terminal")
@@ -647,12 +809,16 @@ impl Render for Workspace {
                                             )),
                                         )
                                     })
-                            }))),
+                            })),
                     )
                     .child(
                         crate::controls::icon_button("new-terminal")
-                            .icon(Icon::new(IconName::Plus).size(px(13.)).text_color(cx.theme().muted_foreground))
+                            .icon(Icon::new(IconName::Plus).size(px(16.)).text_color(cx.theme().muted_foreground))
                             .ghost()
+                            .w(px(crate::ui::HEADER_HEIGHT)).min_w(px(crate::ui::HEADER_HEIGHT)).max_w(px(crate::ui::HEADER_HEIGHT))
+                            .h(px(crate::ui::HEADER_HEIGHT)).min_h(px(crate::ui::HEADER_HEIGHT)).max_h(px(crate::ui::HEADER_HEIGHT))
+                            .rounded_none()
+                            .border_b_1().border_color(cx.theme().border)
                             .accessibility_label("New terminal")
                             .disabled(self.tabs.len() >= MAX_TERMINALS)
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -682,7 +848,7 @@ impl Render for Workspace {
                                 .id("terminal-state")
                                 .role(Role::Status)
                                 .aria_label(transport_wait.as_ref().map(|connection| connection.phase.label().to_owned()).unwrap_or_else(|| state.label()))
-                                .text_size(px(crate::project_ui::FONT_SIZE))
+                                .text_size(px(crate::ui::FONT_SIZE))
                                 .text_color(if error.is_some() {
                                     cx.theme().danger
                                 } else {
@@ -735,7 +901,7 @@ impl Render for Workspace {
                         .aria_label(error.clone())
                         .px(px(12.))
                         .py(px(9.))
-                        .text_size(px(crate::project_ui::FONT_SIZE))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .text_color(cx.theme().danger)
                         .bg(cx.theme().danger.opacity(0.06))
                         .border_b_1()
@@ -760,12 +926,17 @@ impl Render for Workspace {
                                     .is_some_and(|state| state.cancel_label().is_some());
                                 let failed =
                                     state.as_ref().is_some_and(|state| state.error().is_some());
-                                let title = if connecting {
-                                    "Connecting…"
+                                let exited = state
+                                    .as_ref()
+                                    .filter(|state| matches!(state.phase, Phase::Exited(_)));
+                                let title: SharedString = if connecting {
+                                    "Connecting…".into()
                                 } else if failed {
-                                    "Connection failed"
+                                    "Connection failed".into()
+                                } else if let Some(state) = exited {
+                                    state.label().into()
                                 } else {
-                                    "Open a remote shell"
+                                    "Open a remote shell".into()
                                 };
                                 frame.child(
                                     div()
@@ -787,7 +958,7 @@ impl Render for Workspace {
                                             div()
                                                 .id("terminal-welcome")
                                                 .role(Role::Status)
-                                                .aria_label(title)
+                                                .aria_label(title.clone())
                                                 .text_size(px(15.))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .child(title),
@@ -795,7 +966,7 @@ impl Render for Workspace {
                                         .child(
                                             div()
                                                 .font_family(cx.theme().mono_font_family.clone())
-                                                .text_size(px(crate::project_ui::FONT_SIZE))
+                                                .text_size(px(crate::ui::FONT_SIZE))
                                                 .text_color(cx.theme().muted_foreground)
                                                 .child(self.endpoint.clone()),
                                         ),
@@ -820,8 +991,10 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandDraft, MAX_TERMINALS, Workspace, custom_name, selected_after_close, tab_destination,
+        CommandDraft, MAX_TERMINALS, STARTUP_EXIT, Workspace, custom_name, selected_after_close,
+        tab_destination,
     };
+    use crate::terminal_view::TerminalView;
     use gpui_kit::{
         self as gpui, AppContext, Entity, Modifiers, MouseButton, MouseDownEvent, TestAppContext,
         VisualTestContext, px, size,
@@ -954,6 +1127,22 @@ mod tests {
                 assert!(workspace.session_ids(cx).is_empty());
             });
         });
+    }
+
+    #[test]
+    fn prompt_tab_names_keep_directory_and_stable_session_number() {
+        assert_eq!(
+            super::automatic_tab_title("ruiyang@azure:~/Projects/marketplace-service", 0),
+            "marketplace-service"
+        );
+        assert_eq!(
+            super::automatic_tab_title("ruiyang@azure:~/Projects/marketplace-service", 2),
+            "marketplace-service 3"
+        );
+        assert_eq!(super::automatic_tab_title("dev@host:~", 1), "host 2");
+        assert_eq!(super::automatic_tab_title("dev@host:/", 0), "host");
+        assert_eq!(super::automatic_tab_title("cargo test", 2), "cargo test");
+        assert_eq!(super::automatic_tab_title("", 1), "Terminal 2");
     }
 
     #[test]
@@ -1164,7 +1353,7 @@ mod tests {
                 let sidebar_visible = cx.update(|window, _| {
                     gpui::base::test_support::snapshots(window)
                         .iter()
-                        .any(|e| e.label() == Some("Hide sidebar"))
+                        .any(|e| e.label() == Some("Use icons-only navigation"))
                 });
                 assert_eq!(sidebar_visible, !immersive);
             }
@@ -1174,6 +1363,14 @@ mod tests {
     #[gpui::test]
     fn terminal_tabs_stay_inside_the_row_above_its_border(cx: &mut TestAppContext) {
         let (workspace, cx) = visual_fixture(cx);
+        workspace.update(cx, |w, cx| {
+            for tab in &w.tabs {
+                tab.view.update(cx, |v, cx| {
+                    v.title = "dev@host:~/Projects/marketplace-service".into();
+                    cx.notify();
+                });
+            }
+        });
         for width in [440., 700., 1100.] {
             cx.simulate_resize(size(px(width), px(400.)));
             for active in 0..3 {
@@ -1184,14 +1381,38 @@ mod tests {
                 draw(cx);
                 let row = cx.debug_bounds("terminal-tab-row").unwrap();
                 let bar = cx.debug_bounds("terminal-tab-bar").unwrap();
-                assert_eq!(row.size.height, px(36.));
+                assert_eq!(row.size.height, px(crate::ui::HEADER_HEIGHT));
                 assert!(bar.top() >= row.top(), "tab bar overlaps frame border");
-                assert!(bar.bottom() <= row.bottom() - px(1.));
+                assert_eq!(
+                    bar.bottom(),
+                    row.bottom(),
+                    "active tab joins the terminal canvas"
+                );
                 let tab = cx
                     .debug_bounds(["terminal-tab-0", "terminal-tab-1", "terminal-tab-2"][active])
                     .unwrap();
                 assert!(tab.top() >= bar.top());
                 assert!(tab.bottom() <= bar.bottom());
+                assert!(
+                    tab.left() >= bar.left() - px(1.),
+                    "active tab is revealed after keyboard navigation"
+                );
+                assert!(
+                    tab.right() <= bar.right() + px(1.),
+                    "active tab is not clipped"
+                );
+                let add = cx.update(|window, _| {
+                    gpui::base::test_support::snapshots(window)
+                        .iter()
+                        .find(|e| e.label() == Some("New terminal"))
+                        .unwrap()
+                        .bounds()
+                });
+                assert!(
+                    (add.left() - bar.right()).abs() <= px(1.),
+                    "add stays adjacent to tabs"
+                );
+                assert_eq!(add.size.height, px(crate::ui::HEADER_HEIGHT));
             }
         }
     }
@@ -1353,7 +1574,10 @@ mod tests {
         let editor = cx.update(|window, _| {
             gpui::base::test_support::snapshots(window)
                 .into_iter()
-                .find(|node| node.label() == Some("Rename Terminal 1"))
+                .find(|node| {
+                    node.label() == Some("Rename Terminal 1")
+                        && node.role() == Some(gpui::Role::TextInput)
+                })
                 .expect("inline rename input")
                 .bounds()
         });
@@ -1449,6 +1673,153 @@ mod tests {
             assert!(workspace.session_ids(cx).is_empty());
         });
         cx.simulate_keystrokes("escape");
+    }
+
+    /// Mark a shell ready long enough ago that its exit is a normal one.
+    fn used(
+        workspace: &Entity<Workspace>,
+        view: &Entity<TerminalView>,
+        cx: &mut VisualTestContext,
+    ) {
+        view.update(cx, |v, cx| {
+            v.status.ready();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        workspace.update(cx, |w, _| {
+            let tab = w.tabs.iter_mut().find(|t| t.view == *view).unwrap();
+            let ready = tab.exit.ready_at.expect("observed ready shell");
+            tab.exit.ready_at = Some(ready - STARTUP_EXIT * 2);
+        });
+    }
+
+    #[gpui::test]
+    fn shell_exit_closes_only_finished_tabs_including_the_last(cx: &mut TestAppContext) {
+        let (workspace, cx) = visual_fixture(cx);
+        let original = workspace.read_with(cx, |w, _| {
+            w.tabs.iter().map(|t| t.view.clone()).collect::<Vec<_>>()
+        });
+        for view in &original {
+            used(&workspace, view, cx);
+        }
+        workspace.update_in(cx, |w, window, cx| {
+            w.active = 1;
+            w.focus_active(window, cx);
+            w.tabs[0].view.update(cx, |v, cx| {
+                v.status.exited(Some(0));
+                cx.notify();
+            });
+        });
+        draw(cx);
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(w.tabs.len(), 2);
+            assert_eq!(
+                w.tabs[w.active].view, original[1],
+                "background exit keeps active session"
+            );
+            assert_eq!(w.next, 3, "exiting must not create a replacement shell");
+            assert!(w.session_ids(cx).is_empty());
+        });
+        original[1].update(cx, |v, cx| {
+            v.status.exited(Some(1));
+            cx.notify();
+        });
+        draw(cx);
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.tabs.len(), 1);
+            assert_eq!(w.tabs[0].view, original[2]);
+        });
+        original[2].update(cx, |v, cx| {
+            v.status.failed("connection lost");
+            cx.notify();
+        });
+        draw(cx);
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w.tabs.len()),
+            1,
+            "failure stays retryable"
+        );
+        original[2].update(cx, |v, cx| {
+            v.status.exited(None);
+            cx.notify();
+        });
+        draw(cx);
+        assert!(workspace.read_with(cx, |w, _| w.tabs.is_empty()));
+        assert_eq!(workspace.read_with(cx, |w, _| w.next), 3);
+        let add = cx.update(|window, _| {
+            gpui::base::test_support::snapshots(window)
+                .iter()
+                .find(|e| e.label() == Some("New terminal"))
+                .unwrap()
+                .bounds()
+                .center()
+        });
+        cx.simulate_click(add, Default::default());
+        draw(cx);
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w.tabs.len()),
+            1,
+            "new terminal works after last exit"
+        );
+    }
+
+    #[gpui::test]
+    fn startup_exits_keep_their_tab_and_show_the_exit_status(cx: &mut TestAppContext) {
+        let (workspace, cx) = visual_fixture(cx);
+        let original = workspace.read_with(cx, |w, _| {
+            w.tabs.iter().map(|t| t.view.clone()).collect::<Vec<_>>()
+        });
+        // A nologin shell becomes ready and exits at once; another never got ready.
+        original[0].update(cx, |v, cx| {
+            v.status.ready();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        original[0].update(cx, |v, cx| {
+            v.status.exited(Some(1));
+            cx.notify();
+        });
+        original[1].update(cx, |v, cx| {
+            v.status.exited(None);
+            cx.notify();
+        });
+        draw(cx);
+        let labels = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| {
+                gpui::base::test_support::snapshots(window)
+                    .iter()
+                    .filter_map(|e| e.label().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(workspace.read_with(cx, |w, _| w.tabs.len()), 3);
+        let shown = labels(cx);
+        assert!(shown.iter().any(|l| l == "Terminal, Shell exited · 1"));
+        assert!(shown.iter().any(|l| l == "Terminal 2, Shell closed"));
+        // The decision is made at exit; time passing does not close the tab later.
+        workspace.update(cx, |w, _| {
+            for tab in &mut w.tabs {
+                tab.exit.ready_at = tab.exit.ready_at.map(|at| at - STARTUP_EXIT * 2);
+            }
+        });
+        draw(cx);
+        assert_eq!(workspace.read_with(cx, |w, _| w.tabs.len()), 3);
+        // Reconnecting starts over: a later exit after use closes as usual.
+        original[0].update(cx, |v, cx| {
+            v.status.begin();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        used(&workspace, &original[0], cx);
+        original[0].update(cx, |v, cx| {
+            v.status.exited(Some(0));
+            cx.notify();
+        });
+        draw(cx);
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.tabs.len(), 2);
+            assert!(w.tabs.iter().all(|t| t.view != original[0]));
+        });
     }
 
     #[gpui::test]

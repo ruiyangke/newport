@@ -243,7 +243,7 @@ impl Newport {
         let width = WindowTextSystem::new(cx.text_system().clone())
             .shape_line(
                 prefix.clone(),
-                px(crate::project_ui::FONT_SIZE),
+                px(crate::ui::FONT_SIZE),
                 &[TextRun {
                     len: prefix.len(),
                     font: font(cx.theme().mono_font_family.clone()),
@@ -286,7 +286,7 @@ impl Newport {
                 }),
             )
             .child(
-                crate::project_ui::input(&controls.input)
+                crate::controls::input(&controls.input)
                     .w(px(200.))
                     .aria_label("Find in diff"),
             )
@@ -298,7 +298,7 @@ impl Newport {
                 ]
                 .into_iter()
                 .map(|(index, title, name, selected)| {
-                    crate::project_ui::compact_button(("diff-find-option", index))
+                    crate::controls::compact_button(("diff-find-option", index))
                         .label(title)
                         .ghost()
                         .selected(selected)
@@ -325,7 +325,7 @@ impl Newport {
                     .role(Role::Status)
                     .aria_label(status.clone())
                     .flex_1()
-                    .text_size(px(crate::project_ui::FONT_SIZE))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .child(status),
             )
             .children(
