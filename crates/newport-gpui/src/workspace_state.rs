@@ -10,9 +10,7 @@ use std::{
 #[derive(Serialize, Deserialize)]
 pub(super) struct Selection {
     pub server: String,
-    #[serde(deserialize_with = "known_page")]
     pub page: Page,
-    #[serde(deserialize_with = "known_page")]
     pub workspace_page: Page,
     #[serde(default)]
     pub git: Option<GitDestination>,
@@ -46,12 +44,6 @@ pub(super) struct GitDestination {
     project_path: serde_json::Value,
     root: serde_json::Value,
     tab: usize,
-}
-/// Another Newport build may have saved a page this one doesn't have. Open
-/// Overview instead of discarding the whole workspace with its server.
-fn known_page<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Page, D::Error> {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value(value).unwrap_or(Page::Overview))
 }
 fn valid_path(value: &serde_json::Value) -> bool {
     use base64::Engine as _;
@@ -233,16 +225,6 @@ mod connection_recovery_tests;
 mod tests {
     use super::{Selection, decode};
     use crate::Page;
-    #[test]
-    fn a_page_from_another_build_opens_overview_and_keeps_the_server() {
-        let input = serde_json::json!({
-            "server": "fixture", "page": "remote_apps", "workspace_page": "remote_apps"
-        });
-        let restored = decode(&serde_json::to_vec(&input).unwrap()).unwrap();
-        assert!(restored.page == Page::Overview);
-        assert!(restored.workspace_page == Page::Overview);
-        assert_eq!(restored.server, "fixture");
-    }
     #[test]
     fn container_session_choices_never_enter_persistent_workspace_state() {
         let input = serde_json::json!({
