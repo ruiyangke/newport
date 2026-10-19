@@ -192,6 +192,9 @@ mod tests {
         }
         assert!(allowed("/repo", vec![], "fatal: not a repository").is_none());
     }
+    // Runs the server's script through a local `sh` and Git, standing in for
+    // the Linux host; Windows paths aren't server paths.
+    #[cfg(unix)]
     #[test]
     fn git_rules_include_nested_global_and_info_excludes_with_safe_filenames() {
         use std::{

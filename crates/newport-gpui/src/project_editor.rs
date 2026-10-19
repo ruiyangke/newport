@@ -2068,7 +2068,12 @@ mod interaction_tests {
         crate::test_shortcuts(cx, "cmd-z");
         draw(cx);
         assert!(view.read_with(cx, |v, cx| v.buffers[0].dirty(cx)));
-        crate::test_shortcuts(cx, "cmd-shift-z");
+        // Redo is ⇧⌘Z on macOS and Ctrl+Y elsewhere.
+        if cfg!(target_os = "macos") {
+            cx.simulate_keystrokes("cmd-shift-z");
+        } else {
+            cx.simulate_keystrokes("ctrl-y");
+        }
         draw(cx);
         assert!(!view.read_with(cx, |v, cx| v.buffers[0].dirty(cx)));
     }

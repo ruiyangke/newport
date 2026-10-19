@@ -116,6 +116,9 @@ mod tests {
         assert!(parse("NPI1\0\0").unwrap().paths.is_empty());
         assert!(command("relative").is_err());
     }
+    // Runs the server's script through a local `sh` and Git, standing in for
+    // the Linux host; Windows paths aren't server paths.
+    #[cfg(unix)]
     #[test]
     fn actual_git_index_honors_ignores_untracked_and_deleted_files() {
         use std::{fs, process::Command};

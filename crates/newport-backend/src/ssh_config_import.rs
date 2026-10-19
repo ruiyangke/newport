@@ -52,7 +52,10 @@ pub fn read() -> Result<ConfigHosts, String> {
         Err(error) => return Err(format!("Couldn’t read {display}: {error}")),
     };
     let config = parse(&text).map_err(|error| format!("Couldn’t read {display}: {error}"))?;
-    let user = std::env::var("USER").unwrap_or_default();
+    // ssh defaults to the local account name, which Windows keeps in USERNAME.
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default();
     Ok(ConfigHosts {
         path: display,
         hosts: hosts(&config, &user, &home),
