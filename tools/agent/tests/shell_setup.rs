@@ -6,6 +6,26 @@ use std::{
 };
 const BIN: &str = env!("CARGO_BIN_EXE_newport-agent");
 
+/// Tests run binaries they've just copied. A parallel test's fork can briefly
+/// hold the copy's write descriptor, and Linux then refuses to execute it
+/// (ETXTBSY) until that child execs. Retry instead of failing the test.
+trait RunOutput {
+    fn run_output(&mut self) -> std::process::Output;
+}
+impl RunOutput for Command {
+    fn run_output(&mut self) -> std::process::Output {
+        for _ in 0..100 {
+            match self.output() {
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => return result.unwrap(),
+            }
+        }
+        self.output().unwrap()
+    }
+}
+
 #[test]
 fn removal_plan_composes_install_history_without_mutating_targets_or_receipts() {
     let home = tempfile::tempdir().unwrap();
@@ -16,8 +36,7 @@ fn removal_plan_composes_install_history_without_mutating_targets_or_receipts() 
             .env("SHELL", "/bin/bash")
             .env_remove("ZDOTDIR")
             .env_remove("XDG_CONFIG_HOME")
-            .output()
-            .unwrap()
+            .run_output()
     };
     let protocol = run(&["deployment", "protocol"]);
     let protocol: serde_json::Value = serde_json::from_slice(&protocol.stdout).unwrap();
@@ -136,8 +155,7 @@ fn installed_blocks_are_repeatable_and_survive_agent_removal() {
                 .env("SHELL", format!("/bin/{shell}"))
                 .env_remove("ZDOTDIR")
                 .env_remove("XDG_CONFIG_HOME")
-                .output()
-                .unwrap()
+                .run_output()
         };
         assert!(install().status.success());
         let rc = home.path().join(match shell {
@@ -198,7 +216,7 @@ fn installed_blocks_are_repeatable_and_survive_agent_removal() {
             if let Some(display) = display {
                 cmd.env("DISPLAY", display);
             }
-            cmd.output().unwrap()
+            cmd.run_output()
         };
         let result = run(script, None);
         assert!(
@@ -220,8 +238,7 @@ fn installed_blocks_are_repeatable_and_survive_agent_removal() {
             .arg("env")
             .env("HOME", home.path())
             .env_remove("NEWPORT_SESSION")
-            .output()
-            .unwrap()
+            .run_output()
             .status
             .success());
         fs::remove_file(&agent).unwrap();
@@ -263,8 +280,7 @@ fn invalid_shell_configuration_fails_before_alias_or_legacy_changes() {
             .arg("install")
             .env("HOME", home.path())
             .env("SHELL", "/bin/bash")
-            .output()
-            .unwrap();
+            .run_output();
         assert!(!result.status.success());
         assert_eq!(
             fs::read_link(bin.join("xclip")).unwrap(),
@@ -292,8 +308,7 @@ fn journaled_activation_records_helper_ownership_and_never_replays_completed_ins
             .env("SHELL", "/bin/bash")
             .env_remove("ZDOTDIR")
             .env_remove("XDG_CONFIG_HOME")
-            .output()
-            .unwrap()
+            .run_output()
     };
     let prepare = run(&["deployment", "prepare", &hash]);
     assert!(
@@ -354,8 +369,7 @@ fn helper_only_operation_preserves_the_installed_entry_and_recovers_by_id() {
             .args(args)
             .env("HOME", home.path())
             .env("SHELL", "/bin/bash")
-            .output()
-            .unwrap()
+            .run_output()
     };
     let protocol = run(&["deployment", "protocol"]);
     let value: serde_json::Value = serde_json::from_slice(&protocol.stdout).unwrap();
@@ -489,8 +503,7 @@ fn managed_shell_files_keep_agent_active_and_report_durable_manual_setup() {
                 )
                 .env_remove("ZDOTDIR")
                 .env_remove("XDG_CONFIG_HOME")
-                .output()
-                .unwrap();
+                .run_output();
             assert!(
                 output.status.success(),
                 "{}",
@@ -563,8 +576,7 @@ fn unwritable_shell_parent_is_skipped_without_creating_missing_directories() {
             .env("HOME", home.path())
             .env("SHELL", "/bin/zsh")
             .env("ZDOTDIR", &zdotdir)
-            .output()
-            .unwrap();
+            .run_output();
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(
             output.status.success(),
@@ -600,8 +612,7 @@ fn cancelled_shell_plan_does_not_require_recovery_or_replace_agent() {
             .args(args)
             .env("HOME", home.path())
             .env("SHELL", "/bin/bash")
-            .output()
-            .unwrap();
+            .run_output();
         assert!(
             output.status.success(),
             "{}",
