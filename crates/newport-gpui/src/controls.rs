@@ -103,6 +103,104 @@ fn sized_input(state: &Entity<InputState>, height: f32) -> Input {
 pub fn input(state: &Entity<InputState>) -> Input {
     sized_input(state, CONTROL_HEIGHT)
 }
+/// A page title: 24px semibold, with an optional muted description 6px below.
+pub fn page_title(
+    title: impl Into<SharedString>,
+    description: Option<SharedString>,
+    cx: &App,
+) -> Div {
+    use gpui_kit::prelude::FluentBuilder as _;
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(
+            div()
+                .text_size(px(crate::ui::PAGE_TITLE))
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .child(title.into()),
+        )
+        .when_some(description, |v, description| {
+            v.child(
+                div()
+                    .text_size(px(FONT_SIZE))
+                    .line_height(gpui_kit::relative(1.6))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(description),
+            )
+        })
+}
+
+/// The title of a detail pane, announced as a heading.
+pub fn detail_title(
+    id: impl Into<ElementId>,
+    title: impl Into<SharedString>,
+) -> gpui_kit::Stateful<Div> {
+    use gpui_kit::{InteractiveElement as _, prelude::*};
+    let title = title.into();
+    div()
+        .id(id)
+        .role(gpui_kit::accesskit::Role::Heading)
+        .aria_level(2)
+        .aria_label(title.clone())
+        .text_size(px(crate::ui::DETAIL_TITLE))
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+        .child(title)
+}
+
+/// A dialog title, or a step or section heading that reads like one.
+pub fn dialog_title(title: impl Into<SharedString>) -> Div {
+    div()
+        .text_size(px(crate::ui::DIALOG_TITLE))
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+        .child(title.into())
+}
+
+/// An inline error: error-coloured text announced as an alert. Callers place
+/// it; it carries no padding, border or tint of its own.
+pub fn alert(
+    id: impl Into<ElementId>,
+    message: impl Into<SharedString>,
+    cx: &App,
+) -> gpui_kit::Stateful<Div> {
+    use gpui_kit::{InteractiveElement as _, prelude::*};
+    let message = message.into();
+    div()
+        .id(id)
+        .role(gpui_kit::accesskit::Role::Alert)
+        .aria_label(message.clone())
+        .text_size(px(FONT_SIZE))
+        .line_height(gpui_kit::relative(1.5))
+        .text_color(crate::theme::error(cx.theme().is_dark()))
+        .child(message)
+}
+
+/// A 7px status dot. `None` draws the hollow "inactive" ring.
+pub fn status_dot(color: Option<gpui_kit::Hsla>, cx: &App) -> Div {
+    let dot = div()
+        .size(px(crate::ui::DOT_SIZE))
+        .flex_shrink_0()
+        .rounded_full();
+    match color {
+        Some(color) => dot.bg(color),
+        None => dot
+            .border(px(1.5))
+            .border_color(cx.theme().muted_foreground.opacity(0.4)),
+    }
+}
+
+/// A list's keyboard-focus outline, drawn inside its edges so the rows keep
+/// the full width instead of making room for a border.
+pub fn inset_focus_ring(style: gpui_kit::StyleRefinement, cx: &App) -> gpui_kit::StyleRefinement {
+    style.shadow(vec![gpui_kit::BoxShadow {
+        color: cx.theme().ring,
+        offset: gpui_kit::point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(2.),
+        inset: true,
+    }])
+}
+
 /// A search field: the shared input with a muted 14px search icon and a
 /// clear button, so every page's search reads the same.
 pub fn search_input(state: &Entity<InputState>, cx: &App) -> Input {

@@ -98,7 +98,7 @@ impl Preview {
         let mut body = div().flex().flex_col().gap(px(12.));
         if self.failed {
             return body.text_size(px(crate::ui::FONT_SIZE)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground)
-                .child(if self.installing { "Retry will send the incomplete transfer again. Integrations haven’t been enabled." } else { "Nothing has been installed. You can retry the inspection." }).into_any_element();
+                .child(if self.installing { "Try again to resend the incomplete transfer. Integrations haven’t been enabled." } else { "Nothing has been installed. You can try the inspection again." }).into_any_element();
         }
         match self.step {
             0 => {
@@ -237,25 +237,50 @@ impl Preview {
         } else {
             self.clipboard
         };
-        div().p(px(16.)).rounded(px(crate::ui::RADIUS)).border_1().border_color(if checked { cx.theme().primary } else { cx.theme().border })
-            .flex().flex_col().gap(px(8.))
-            .child(crate::controls::checkbox(if browser { "setup-browser" } else { "setup-clipboard" })
-                .label(if browser { "Browser integration" } else { "Clipboard integration" }).checked(checked)
-                .on_click(cx.listener(move |this, checked: &bool, _, cx| { if browser { this.browser = *checked; } else { this.clipboard = *checked; } cx.notify(); })))
-            .child(div().pl(px(24.)).text_size(px(crate::ui::FONT_SIZE)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground)
-                .child(if browser { "Open links from remote commands in your local browser." } else { "Let remote commands read and write your local clipboard. Enable only for servers you trust." }))
+        let label = if browser {
+            "Open server links in your browser"
+        } else {
+            "Share your clipboard with this server"
+        };
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(16.))
+            .py(px(8.))
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(crate::ui::FONT_SIZE))
+                    .child(label),
+            )
+            .child(
+                crate::controls::switch(if browser {
+                    "setup-browser"
+                } else {
+                    "setup-clipboard"
+                })
+                .accessibility_label(label)
+                .checked(checked)
+                .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                    if browser {
+                        this.browser = *checked;
+                    } else {
+                        this.clipboard = *checked;
+                    }
+                    cx.notify();
+                })),
+            )
             .into_any_element()
     }
     fn actions(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut row = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .justify_end()
-            .gap(px(8.));
+        // Mirrors the setup flow: 28px buttons, primary action first.
+        let mut row = div().flex().flex_wrap().items_center().gap(px(6.));
         if self.failed {
             row = row.child(
-                crate::controls::form_button("setup-retry")
+                crate::controls::button("setup-retry")
                     .primary()
                     .label("Try again")
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -266,7 +291,7 @@ impl Preview {
             );
         } else if self.busy() {
             row = row.child(
-                crate::controls::form_button("setup-waiting")
+                crate::controls::button("setup-waiting")
                     .disabled(true)
                     .label(if self.installing {
                         "Installing…"
@@ -278,7 +303,7 @@ impl Preview {
             match self.step {
                 0 => {
                     row = row.child(
-                        crate::controls::form_button("setup-continue")
+                        crate::controls::button("setup-continue")
                             .primary()
                             .label("Continue")
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -291,39 +316,26 @@ impl Preview {
                 1 => {
                     row = row
                         .child(
-                            crate::controls::form_button("setup-back")
-                                .label("Back")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.step = 0;
-                                    this.elapsed = 3;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(div().flex_1())
-                        .child(
-                            crate::controls::form_button("setup-decline")
-                                .label("Not now")
-                                .on_click(|_, _, cx| cx.quit()),
-                        )
-                        .child(
-                            crate::controls::form_button("setup-consent")
+                            crate::controls::button("setup-consent")
                                 .primary()
-                                .label("Allow and install Needle")
+                                .label("Allow")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.consent();
                                     cx.notify();
                                 })),
                         )
+                        .child(
+                            crate::controls::button("setup-decline")
+                                .ghost()
+                                .label("Skip")
+                                .on_click(|_, _, cx| cx.quit()),
+                        )
                 }
                 2 => {
                     row = row.child(
-                        crate::controls::form_button("setup-finish")
+                        crate::controls::button("setup-finish")
                             .primary()
-                            .label(if self.browser || self.clipboard {
-                                "Enable selected and finish"
-                            } else {
-                                "Finish without integrations"
-                            })
+                            .label("Save and finish")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.step = 3;
                                 cx.notify();
@@ -332,7 +344,7 @@ impl Preview {
                 }
                 _ => {
                     row = row.child(
-                        crate::controls::form_button("setup-restart")
+                        crate::controls::button("setup-restart")
                             .label("Restart preview")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let dark = this.dark;
@@ -426,21 +438,21 @@ impl Render for Preview {
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .gap(px(10.))
+                                    .gap(px(6.))
                                     .child(
                                         div()
                                             .id("setup-title")
                                             .role(Role::Status)
                                             .test_support()
                                             .aria_label(self.title())
-                                            .text_size(px(24.))
+                                            .text_size(px(crate::ui::PAGE_TITLE))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child(self.title()),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(crate::ui::FONT_SIZE))
-                                            .line_height(relative(1.5))
+                                            .line_height(relative(1.6))
                                             .text_color(cx.theme().muted_foreground)
                                             .child(self.description()),
                                     ),
@@ -660,14 +672,12 @@ mod tests {
             ("Try again", "Inspecting your server"),
             ("Complete operation", "Server inspection complete"),
             ("Continue", "May we install Needle?"),
-            ("Back", "Server inspection complete"),
-            ("Continue", "May we install Needle?"),
-            ("Allow and install Needle", "Copying Needle to your server"),
+            ("Allow", "Copying Needle to your server"),
             ("Simulate failure", "Needle installation stopped"),
             ("Try again", "Copying Needle to your server"),
             ("Complete operation", "Make this server feel local"),
             ("Dark theme", "Make this server feel local"),
-            ("Finish without integrations", "Your server is ready"),
+            ("Save and finish", "Your server is ready"),
         ] {
             visual.update(|window, cx| window.draw(cx).clear(cx));
             let target = visual.update(|window, _| {

@@ -3,7 +3,7 @@
 use super::*;
 use gpui_kit::base::Selectable;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Group {
     Conflicted,
     Staged,
@@ -62,10 +62,17 @@ pub(super) struct Changes {
     query: String,
     group: Option<Group>,
     pending: Option<Instant>,
+    /// Folded groups keep their heading; only their file rows are hidden.
+    collapsed: std::collections::HashSet<Group>,
 }
 impl Changes {
     pub(super) fn row_count(&self, page: &Value) -> usize {
-        row_count(page, self.group)
+        row_count(page, self.group, &self.collapsed)
+    }
+    fn toggle(&mut self, group: Group) {
+        if !self.collapsed.remove(&group) {
+            self.collapsed.insert(group);
+        }
     }
     fn owns_input(&self, tab: usize, input: &Entity<InputState>) -> bool {
         tab == 0 && self.input.as_ref() == Some(input)
@@ -98,7 +105,11 @@ enum Row {
     Header { group: Group, entries: Vec<Value> },
     File { group: Group, entry: Value },
 }
-fn grouped(page: &Value, only: Option<Group>) -> Vec<Row> {
+fn grouped(
+    page: &Value,
+    only: Option<Group>,
+    collapsed: &std::collections::HashSet<Group>,
+) -> Vec<Row> {
     let entries = rows(&page["entries"]);
     let mut result = Vec::new();
     for group in Group::ALL {
@@ -117,12 +128,18 @@ fn grouped(page: &Value, only: Option<Group>) -> Vec<Row> {
             group,
             entries: entries.clone(),
         });
-        result.extend(entries.into_iter().map(|entry| Row::File { group, entry }));
+        if !collapsed.contains(&group) {
+            result.extend(entries.into_iter().map(|entry| Row::File { group, entry }));
+        }
     }
     result
 }
 /// Count the actual virtual rows, including headers and both sides of a file.
-pub(super) fn row_count(page: &Value, only: Option<Group>) -> usize {
+pub(super) fn row_count(
+    page: &Value,
+    only: Option<Group>,
+    collapsed: &std::collections::HashSet<Group>,
+) -> usize {
     let Some(entries) = page["entries"].as_array() else {
         return 0;
     };
@@ -131,7 +148,13 @@ pub(super) fn row_count(page: &Value, only: Option<Group>) -> usize {
         .filter(|group| only.is_none_or(|only| only == *group))
         .map(|group| {
             let count = entries.iter().filter(|entry| group.holds(entry)).count();
-            count + usize::from(count > 0)
+            if count == 0 {
+                0
+            } else if collapsed.contains(&group) {
+                1
+            } else {
+                count + 1
+            }
         })
         .sum()
 }
@@ -161,38 +184,44 @@ impl Newport {
         let selected = entries.to_vec();
 
         let total = self.git.page["metadata"]["groupCounts"][group.key()].as_u64();
-        let count = if scope != "all" {
-            format!(
-                "{} {}{}",
-                entries.len(),
-                scope,
-                total.map(|n| format!(" of {n}")).unwrap_or_default()
-            )
-        } else {
-            entries.len().to_string()
-        };
+        let open = !self.git.changes.collapsed.contains(&group);
         div()
-            .h(px(28.))
+            .h(px(crate::ui::ROW_HEIGHT))
             .w_full()
             .bg(cx.theme().background)
             .flex()
             .items_center()
-            .px_3()
-            .gap_2()
+            .gap(px(4.))
             .child(
-                crate::label(group.title())
-                    .text_size(px(crate::ui::FONT_SIZE))
-                    .font_weight(FontWeight::SEMIBOLD),
+                crate::controls::group_heading(
+                    ("change-group", index),
+                    group.title(),
+                    entries.len(),
+                    open,
+                    cx,
+                )
+                .flex_1()
+                .min_w_0()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.git.changes.toggle(group);
+                    cx.notify();
+                })),
             )
-            .child(
-                crate::label(count)
-                    .text_size(px(crate::ui::FONT_SIZE))
-                    .flex_1(),
-            )
+            .when(scope != "all", |view| {
+                view.child(
+                    crate::label(format!(
+                        "{scope}{}",
+                        total.map(|n| format!(" of {n}")).unwrap_or_default()
+                    ))
+                    .flex_shrink_0()
+                    .text_size(px(crate::ui::FONT_SIZE)),
+                )
+            })
             .when(group != Group::Conflicted, |view| {
                 view.child(
                     crate::controls::compact_button(("change-group-action", index))
                         .ghost()
+                        .flex_shrink_0()
                         .label(format!(
                             "{} {scope}",
                             if stage { "Stage" } else { "Unstage" }
@@ -220,7 +249,7 @@ impl Newport {
         {
             return;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter files"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find a changed file"));
         let subscription = cx.observe(&input, |this, input, cx| {
             if this.page != Page::Projects {
                 return;
@@ -286,7 +315,11 @@ impl Newport {
         );
     }
     pub(super) fn git_changes_list(&self, cx: &mut Context<Self>) -> AnyElement {
-        let display = grouped(&self.git.page, self.git.changes.group);
+        let display = grouped(
+            &self.git.page,
+            self.git.changes.group,
+            &self.git.changes.collapsed,
+        );
         let scope = scope(&self.git.page, self.git.changes.filtering());
         let scroll_key = git_page_demand::identity(&self.git.page);
         let headers: Vec<_> = display
@@ -323,85 +356,70 @@ impl Newport {
             .min_h_0()
             .when_some(self.git.changes.input.as_ref(), |view, input| {
                 view.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .px(px(10.))
-                        .pt(px(8.))
-                        .pb(px(6.))
-                        .child(
-                            crate::controls::input(input)
-                                .aria_label("Filter changed files")
-                                .prefix(
-                                    Icon::new(IconName::Search)
-                                        .size(px(14.))
-                                        .text_color(cx.theme().muted_foreground),
-                                )
-                                .suffix(
-                                    crate::controls::compact_icon_button("change-group-filter")
-                                        .ghost()
-                                        .icon(IconName::ListFilter)
-                                        .accessibility_label("Filter change groups")
-                                        .tooltip("Filter change groups")
-                                        .disabled(
-                                            self.git_write_pending() || self.project_dialog_open,
-                                        )
-                                        .when(self.git.changes.group.is_some(), |button| {
-                                            button.text_color(cx.theme().primary)
-                                        })
-                                        .dropdown_menu_with_anchor(gpui_kit::Anchor::TopRight, {
-                                            let weak = cx.entity().downgrade();
-                                            let input = input.clone();
-                                            let current_group = self.git.changes.group;
-                                            move |mut menu, _, _| {
-                                                menu = menu
-                                                    .min_w(px(180.))
-                                                    .check_side(gpui_kit::component::Side::Right)
-                                                    .label("Show");
-                                                for (group, title) in
-                                                    std::iter::once((None, "All changes")).chain(
-                                                        Group::ALL
-                                                            .into_iter()
-                                                            .map(|g| (Some(g), g.title())),
-                                                    )
-                                                {
-                                                    let owner = weak.clone();
-                                                    let input = input.clone();
-                                                    menu = menu.item(
-                                                        PopupMenuItem::new(if group.is_some() {
-                                                            format!("{title} only")
-                                                        } else {
-                                                            title.to_owned()
-                                                        })
-                                                        .checked(group == current_group)
-                                                        .on_click(move |_, _, cx| {
-                                                            let _ = owner.update(cx, |this, cx| {
-                                                                if this.page == Page::Projects
-                                                                    && this.git.changes.owns_input(
-                                                                        this.git.tab,
-                                                                        &input,
-                                                                    )
-                                                                    && !this.git_write_pending()
-                                                                    && !this.project_dialog_open
-                                                                    && this.git.changes.group
-                                                                        != group
-                                                                {
-                                                                    this.git.changes.group = group;
-                                                                    this.git.changes.pending = None;
-                                                                    this.git_reset_changes_filter();
-                                                                    this.git_load();
-                                                                    cx.notify();
-                                                                }
-                                                            });
-                                                        }),
-                                                    );
-                                                }
-                                                menu
+                    git_layout::search_bar().child(
+                        crate::controls::search_input(input, cx)
+                            .aria_label("Filter changed files")
+                            .suffix(
+                                crate::controls::compact_icon_button("change-group-filter")
+                                    .ghost()
+                                    .icon(IconName::ListFilter)
+                                    .accessibility_label("Filter change groups")
+                                    .tooltip("Filter change groups")
+                                    .disabled(self.git_write_pending() || self.project_dialog_open)
+                                    .when(self.git.changes.group.is_some(), |button| {
+                                        button.text_color(cx.theme().primary)
+                                    })
+                                    .dropdown_menu_with_anchor(gpui_kit::Anchor::TopRight, {
+                                        let weak = cx.entity().downgrade();
+                                        let input = input.clone();
+                                        let current_group = self.git.changes.group;
+                                        move |mut menu, _, _| {
+                                            menu = menu
+                                                .min_w(px(180.))
+                                                .check_side(gpui_kit::component::Side::Right)
+                                                .label("Show");
+                                            for (group, title) in
+                                                std::iter::once((None, "All changes")).chain(
+                                                    Group::ALL
+                                                        .into_iter()
+                                                        .map(|g| (Some(g), g.title())),
+                                                )
+                                            {
+                                                let owner = weak.clone();
+                                                let input = input.clone();
+                                                menu = menu.item(
+                                                    PopupMenuItem::new(if group.is_some() {
+                                                        format!("{title} only")
+                                                    } else {
+                                                        title.to_owned()
+                                                    })
+                                                    .checked(group == current_group)
+                                                    .on_click(move |_, _, cx| {
+                                                        let _ = owner.update(cx, |this, cx| {
+                                                            if this.page == Page::Projects
+                                                                && this.git.changes.owns_input(
+                                                                    this.git.tab,
+                                                                    &input,
+                                                                )
+                                                                && !this.git_write_pending()
+                                                                && !this.project_dialog_open
+                                                                && this.git.changes.group != group
+                                                            {
+                                                                this.git.changes.group = group;
+                                                                this.git.changes.pending = None;
+                                                                this.git_reset_changes_filter();
+                                                                this.git_load();
+                                                                cx.notify();
+                                                            }
+                                                        });
+                                                    }),
+                                                );
                                             }
-                                        }),
-                                ),
-                        ),
+                                            menu
+                                        }
+                                    }),
+                            ),
+                    ),
                 )
             })
             .when(
@@ -436,7 +454,7 @@ impl Newport {
                     if self.git.changes.filtering() {
                         "No files match these filters."
                     } else {
-                        "No changed files loaded."
+                        "No changes."
                     },
                     cx,
                 ))
@@ -448,7 +466,9 @@ impl Newport {
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .map(|index| match &display[index] {
-                                Row::Header { .. } => div().h(px(28.)).into_any_element(),
+                                Row::Header { .. } => {
+                                    div().h(px(crate::ui::ROW_HEIGHT)).into_any_element()
+                                }
                                 Row::File { group, entry } => {
                                     let path = text(&entry["path"], "display");
                                     let group = *group;
@@ -474,7 +494,7 @@ impl Newport {
                                         .tab_group()
                                         .tab_index(index as isize)
                                         .tab_stop(false)
-                                        .h(px(28.))
+                                        .h(px(crate::ui::ROW_HEIGHT))
                                         .w_full()
                                         .flex()
                                         .items_center()
@@ -485,39 +505,41 @@ impl Newport {
                                             view.hover(|style| style.bg(theme::row_hover(cx)))
                                         })
                                         .when(active, |view| {
-                                            view.bg(theme::git_selection(cx.theme().is_dark()))
+                                            view.bg(theme::selected_fill(cx.theme().is_dark()))
                                         })
                                         .child(
-                                            crate::controls::button(("change-file", index))
-                                                .custom(git_file_row::selection_style(active, cx))
-                                                .selected(active)
-                                                .h_full()
-                                                .pl(px(10.))
-                                                .pr(px(6.))
-                                                .flex_1()
-                                                .min_w_0()
-                                                .toggled(active)
-                                                .accessibility_label(accessible_description)
-                                                .hover_hint(description)
-                                                .child(git_file_row::badge(group.mark(entry), cx))
-                                                .child(git_file_row::path(path.clone(), cx))
-                                                .when_some(
-                                                    git_file_row::origin(entry),
-                                                    |button, origin| {
-                                                        button.child(
-                                                            div()
-                                                                .min_w_0()
-                                                                .flex_shrink(1000.)
-                                                                .truncate()
-                                                                .text_size(px(crate::ui::FONT_SIZE))
-                                                                .text_color(
-                                                                    cx.theme().muted_foreground,
-                                                                )
-                                                                .child(format!("from {origin}")),
-                                                        )
-                                                    },
-                                                )
-                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                            git_file_row::row_focus(
+                                                crate::controls::button(("change-file", index)),
+                                                cx,
+                                            )
+                                            .custom(git_file_row::selection_style(active, cx))
+                                            .selected(active)
+                                            .h_full()
+                                            .pl(px(10.))
+                                            .pr(px(6.))
+                                            .flex_1()
+                                            .min_w_0()
+                                            .toggled(active)
+                                            .accessibility_label(accessible_description)
+                                            .hover_hint(description)
+                                            .child(git_file_row::badge(group.mark(entry), cx))
+                                            .child(git_file_row::path(path.clone(), cx))
+                                            .when_some(
+                                                git_file_row::origin(entry),
+                                                |button, origin| {
+                                                    button.child(
+                                                        div()
+                                                            .min_w_0()
+                                                            .flex_shrink(1000.)
+                                                            .truncate()
+                                                            .text_size(px(crate::ui::FONT_SIZE))
+                                                            .text_color(cx.theme().muted_foreground)
+                                                            .child(format!("from {origin}")),
+                                                    )
+                                                },
+                                            )
+                                            .on_click(
+                                                cx.listener(move |this, _, _, cx| {
                                                     if !rows(&this.git.page["entries"])
                                                         .contains(&selected)
                                                     {
@@ -528,7 +550,8 @@ impl Newport {
                                                     this.git_select_side(!stage);
                                                     this.project_show_review(cx);
                                                     cx.notify();
-                                                })),
+                                                }),
+                                            ),
                                         )
                                         .when(group != Group::Conflicted, |view| {
                                             view.child(
@@ -572,7 +595,12 @@ impl Newport {
                     }),
                 )
                 .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, _| {
-                    if event.delta.pixel_delta(px(20.)).y < px(0.) {
+                    // A short list counts as "at the end". With a group folded,
+                    // a new page may add no visible rows, so the list never grows
+                    // and every wheel event would fetch another page.
+                    if event.delta.pixel_delta(px(20.)).y < px(0.)
+                        && this.git.changes.collapsed.is_empty()
+                    {
                         this.git.listing.demand.arm(scroll_key.clone());
                     }
                 }))
@@ -608,9 +636,11 @@ mod tests {
     use gpui_kit::component::input::InputState;
     use gpui_kit::{self as gpui, AppContext, Context, IntoElement, Render, Window, div};
     use serde_json::json;
+    use std::collections::HashSet;
 
     #[test]
     fn pagination_counts_group_headers_and_files_with_both_sides() {
+        let open = HashSet::new();
         let page = json!({"entries":[
             {"staged":true,"unstaged":true},
             {"untracked":true},
@@ -624,10 +654,24 @@ mod tests {
             Some(Group::Untracked),
             Some(Group::Conflicted),
         ] {
-            assert_eq!(super::row_count(&page, only), grouped(&page, only).len());
+            assert_eq!(
+                super::row_count(&page, only, &open),
+                grouped(&page, only, &open).len()
+            );
         }
-        assert_eq!(super::row_count(&page, None), 9);
-        assert_eq!(super::row_count(&json!({"entries":[]}), None), 0);
+        assert_eq!(super::row_count(&page, None, &open), 9);
+        assert_eq!(super::row_count(&json!({"entries":[]}), None, &open), 0);
+        // A folded group keeps its heading; its file rows leave the list.
+        let folded = HashSet::from([Group::Staged, Group::Untracked]);
+        assert_eq!(super::row_count(&page, None, &folded), 6);
+        assert_eq!(grouped(&page, None, &folded).len(), 6);
+        assert!(matches!(
+            grouped(&page, Some(Group::Staged), &folded).as_slice(),
+            [Row::Header {
+                group: Group::Staged,
+                ..
+            }]
+        ));
     }
 
     struct FilterTest;
@@ -716,7 +760,7 @@ mod tests {
     fn mixed_file_has_two_comparisons_and_side_specific_marks() {
         let entry = json!({"entryId":"mixed","staged":true,"unstaged":true,"flags":513});
         let page = json!({"entries":[entry]});
-        let rows = grouped(&page, None);
+        let rows = grouped(&page, None, &HashSet::new());
         assert_eq!(rows.len(), 4);
         assert!(matches!(
             &rows[1],
@@ -738,7 +782,7 @@ mod tests {
     #[test]
     fn conflicts_and_untracked_do_not_leak_into_other_groups() {
         let page = json!({"entries":[{"conflicted":true,"staged":true,"unstaged":true},{"untracked":true,"unstaged":true}]});
-        let rows = grouped(&page, None);
+        let rows = grouped(&page, None, &HashSet::new());
         assert_eq!(rows.len(), 4);
         assert!(matches!(
             &rows[1],
@@ -754,7 +798,7 @@ mod tests {
                 ..
             }
         ));
-        assert!(grouped(&page, Some(Group::Staged)).is_empty());
+        assert!(grouped(&page, Some(Group::Staged), &HashSet::new()).is_empty());
     }
     #[test]
     fn bulk_scope_never_claims_all_when_filtered_or_partial() {

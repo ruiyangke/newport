@@ -536,15 +536,15 @@ impl Newport {
                     .when(initial_loading, |view| view.child(project_loading::selector("upstream branches")))
                     .when(!initial_loading, |view| view.child(crate::controls::select(&form.selector).accessibility_label("Upstream branch").disabled(busy || stale))))
                 .child(crate::label("Only stored branches are listed. Fetch to discover newer remote branches.").text_size(px(crate::ui::FONT_SIZE)))
-                .when(form.error.is_some(), |view| view.child(crate::controls::button("branch-upstreams-retry").label("Reload upstream branches").disabled(busy || stale || loading).on_click(cx.listener(|this, _, _, cx| { this.load_branch_choices(false); cx.notify(); }))))
+                .when(form.error.is_some(), |view| view.child(crate::controls::button("branch-upstreams-retry").label("Try again").accessibility_label("Try loading upstream branches again").disabled(busy || stale || loading).on_click(cx.listener(|this, _, _, cx| { this.load_branch_choices(false); cx.notify(); }))))
                 .when(!form.upstream.is_empty() && form.action().is_err() && !stale, |view| view.child(crate::label("The selected upstream is not loaded or is unavailable. Scroll the branch list to load more, or choose another."))))
-            .when_some(form.error.clone(), |view, error| view.child(div().text_color(cx.theme().danger).child(error)))
-            .when(stale, |view| view.child(div().text_color(cx.theme().danger).child("The repository changed. Cancel, refresh, and select the branch again.")))
+            .when_some(form.error.clone(), |view, error| view.child(crate::controls::alert("branch-manage-error", error, cx)))
+            .when(stale, |view| view.child(crate::controls::alert("branch-manage-stale", "The repository changed. Cancel, refresh, and select the branch again.", cx)))
             .child(project_dialog::actions()
                 .child(crate::controls::button("branch-manage-cancel").label("Cancel").disabled(busy).on_click(cx.listener(|this, _, _, cx| {
                     this.git.branch_manage = None; this.resources.invalidate(CHOICES); this.resources.invalidate(MORE); cx.notify();
                 })))
-                .child(crate::controls::button("branch-manage-submit").loading(self.git_write_pending()).label(if form.kind == Kind::Delete { "Delete local branch" } else { "Save upstream" }).when(form.kind == Kind::Delete, |button| button.danger()).disabled(!ready)
+                .child(crate::controls::button("branch-manage-submit").loading(self.git_write_pending()).label(if form.kind == Kind::Delete { "Delete local branch" } else { "Save upstream" }).when(form.kind == Kind::Delete, |button| button.danger()).when(form.kind != Kind::Delete, |button| button.primary()).disabled(!ready)
                     .on_click(cx.listener(|this, _, _, cx| this.submit_branch_manage(cx)))))
             .into_any_element()
     }

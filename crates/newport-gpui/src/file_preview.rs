@@ -36,21 +36,16 @@ impl Identity {
     }
 }
 
-/// One row, the height of the list's column header beside it. The full path
-/// is on hover; the folder is already the page's location.
+/// The pane's header row. The full path is on hover; the folder is already the
+/// page's location.
 fn header(identity: &Identity, actions: AnyElement, cx: &App) -> AnyElement {
-    div()
+    crate::ui::header()
         .id("file-preview-header")
         .debug_selector(|| "file-preview-header".into())
-        .h(px(28.))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
         .gap(px(8.))
         .pl(px(12.))
         .pr(px(4.))
-        .border_b_1()
-        .border_color(cx.theme().border)
+        .child(crate::ui::header_rule(cx))
         .child(
             div()
                 .flex_shrink_0()
@@ -66,8 +61,6 @@ fn header(identity: &Identity, actions: AnyElement, cx: &App) -> AnyElement {
                 .aria_description(identity.path.clone())
                 .flex_1()
                 .min_w_0()
-                .text_size(px(crate::ui::FONT_SIZE))
-                .font_weight(FontWeight::MEDIUM)
                 .truncate()
                 .child(identity.name.clone())
                 .hover_hint(identity.path.clone())
@@ -78,32 +71,25 @@ fn header(identity: &Identity, actions: AnyElement, cx: &App) -> AnyElement {
 }
 
 fn footer(identity: &Identity, actions: AnyElement, cx: &App) -> AnyElement {
-    div()
-        .id("file-preview-footer")
-        .debug_selector(|| "file-preview-footer".into())
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(8.))
-        .h(px(32.))
+    let bar = crate::controls::pane_status_bar(cx)
+        // Beneath edge-to-edge content, the bar keeps the header's inset and rule.
         .px(px(12.))
-        .flex_shrink_0()
         .border_t_1()
-        .border_color(cx.theme().border)
-        .text_size(px(crate::ui::FONT_SIZE))
-        .text_color(cx.theme().muted_foreground)
         .child(
             div()
                 .id("file-preview-metadata")
                 .role(Role::Label)
                 .aria_label(identity.metadata.clone())
                 .min_w_0()
-                .flex_1()
                 .text_ellipsis()
                 .child(identity.metadata.clone())
                 .test_support(),
         )
-        .child(actions)
+        .right(actions);
+    div()
+        .debug_selector(|| "file-preview-footer".into())
+        .flex_shrink_0()
+        .child(bar)
         .into_any_element()
 }
 
@@ -130,7 +116,33 @@ fn panel_frame(
         .into_any_element()
 }
 
-fn message(error: Option<&str>, cx: &App) -> AnyElement {
+/// Loading lines, or why there is no preview with the way forward beneath it.
+fn message(error: Option<&str>, retry: Option<AnyElement>, cx: &App) -> AnyElement {
+    if let Some(error) = error {
+        // A long reply in a short pane scrolls rather than clipping its retry.
+        return div()
+            .id("file-preview-message-scroll")
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .overflow_y_scroll()
+            .child(
+                empty::pane(
+                    IconName::FileExclamationPoint,
+                    "No preview available",
+                    format!(
+                        "{}. Download to open on your computer.",
+                        error.trim_end().trim_end_matches('.')
+                    ),
+                    cx,
+                )
+                .min_h_full()
+                .debug_selector(|| "file-preview-message".into())
+                .when_some(retry, |pane, retry| pane.child(retry)),
+            )
+            .into_any_element();
+    }
     div()
         .id("file-preview-message")
         .debug_selector(|| "file-preview-message".into())
@@ -139,47 +151,17 @@ fn message(error: Option<&str>, cx: &App) -> AnyElement {
         .flex()
         .items_center()
         .justify_center()
-        .overflow_y_scroll()
         .p(px(28.))
-        .text_size(px(crate::ui::FONT_SIZE))
         .child(
             div()
+                .id("file-preview-loading")
+                .role(Role::Status)
+                .aria_label("Loading preview…")
+                .debug_selector(|| "file-preview-skeleton".into())
                 .w_full()
                 .max_w(px(560.))
-                .text_center()
-                .text_color(cx.theme().muted_foreground)
-                .when_some(error, |view, error| {
-                    view.child(
-                        div()
-                            .id("file-preview-error")
-                            .role(Role::Alert)
-                            .aria_label(error.to_owned())
-                            .pb(px(8.))
-                            .text_color(cx.theme().danger)
-                            .child(error.to_owned())
-                            .test_support(),
-                    )
-                    .child(
-                        div()
-                            .id("file-preview-recovery")
-                            .role(Role::Label)
-                            .aria_label("Download to open on your computer.")
-                            .child("Download to open on your computer.")
-                            .test_support(),
-                    )
-                })
-                .when(error.is_none(), |view| {
-                    view.child(
-                        div()
-                            .id("file-preview-loading")
-                            .role(Role::Status)
-                            .aria_label("Loading preview…")
-                            .debug_selector(|| "file-preview-skeleton".into())
-                            .w_full()
-                            .child(loading::lines("file-preview", 3))
-                            .test_support(),
-                    )
-                }),
+                .child(loading::lines("file-preview", 3))
+                .test_support(),
         )
         .into_any_element()
 }
@@ -345,27 +327,25 @@ impl Newport {
         let error = self.file_preview_error();
         let body = content
             .when(data.is_null() || error.is_some(), |view| {
-                view.child(message(error, cx)).when(
-                    error.is_some_and(|error| {
+                let retry = error
+                    .is_some_and(|error| {
                         !error.contains("Only text and supported images can be previewed")
-                    }),
-                    |view| {
-                        view.child(
-                            div().flex().justify_center().pb_4().child(
-                                crate::controls::button("file-preview-retry")
-                                    .label("Retry preview")
-                                    .on_click({
-                                        let target = target.clone();
-                                        cx.listener(move |this, _, window, cx| {
-                                            if this.file_preview_target_current(&target) {
-                                                this.retry_file_preview(window, cx);
-                                            }
-                                        })
-                                    }),
-                            ),
-                        )
-                    },
-                )
+                    })
+                    .then(|| {
+                        crate::controls::button("file-preview-retry")
+                            .label("Try again")
+                            .accessibility_label("Try loading the preview again")
+                            .on_click({
+                                let target = target.clone();
+                                cx.listener(move |this, _, window, cx| {
+                                    if this.file_preview_target_current(&target) {
+                                        this.retry_file_preview(window, cx);
+                                    }
+                                })
+                            })
+                            .into_any_element()
+                    });
+                view.child(message(error, retry, cx))
             })
             .when(error.is_none() && data["truncated"] == true, |panel| {
                 panel.child(
@@ -490,6 +470,7 @@ impl Newport {
                                         .icon(IconName::ZoomOut)
                                         .ghost()
                                         .accessibility_label("Zoom out")
+                                        .tooltip("Zoom out")
                                         .disabled(zoom == Some(25))
                                         .on_click({
                                             let target = target.clone();
@@ -514,6 +495,7 @@ impl Newport {
                                         .icon(IconName::ZoomIn)
                                         .ghost()
                                         .accessibility_label("Zoom in")
+                                        .tooltip("Zoom in")
                                         .disabled(zoom == Some(400))
                                         .on_click({
                                             let target = target.clone();

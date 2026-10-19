@@ -167,7 +167,7 @@ impl SettingsUi {
                 }
                 Err(_) => {
                     this.settings_ui.appearance_error =
-                        Some("Could not save your appearance preference. Try again.".into());
+                        Some("Couldn’t save your appearance preference. Try again.".into());
                     let previous = this.appearance;
                     this.settings_ui.theme.update(cx, |select, cx| {
                         select.set_selected_value(&previous, window, cx);
@@ -495,49 +495,45 @@ impl SettingsView {
         let available = startup.value["available"] == true;
         let callback = self.on_action.clone();
         let content = section("startup", "Startup", false, cx).child(
-            self.reveal
-                .wrap(
-                    FocusTarget::Startup,
-                    crate::controls::checkbox("launch-at-login")
-                        .accessibility_label("Launch at login")
-                        .checked(startup.value["enabled"] == true)
-                        .disabled(!available || pending)
-                        .w_full()
-                        .flex_row_reverse()
-                        .items_center()
-                        .gap(px(24.))
-                        .text_color(cx.theme().foreground)
+            row()
+                .child(
+                    div()
+                        .min_w_0()
+                        .line_height(relative(1.428571))
+                        .child("Launch at login")
                         .child(
-                            div()
-                                .min_w_0()
-                                .line_height(relative(1.428571))
-                                .child("Launch at login")
-                                .child(
-                                    help(
-                                        if pending {
-                                            "Saving…"
-                                        } else if startup.loaded() && !available {
-                                            "Available in the installed app."
-                                        } else {
-                                            "Start in the background when you sign in."
-                                        },
-                                        cx,
-                                    )
-                                    .id("startup-feedback")
-                                    .role(accesskit::Role::Status)
-                                    .aria_label(if pending {
-                                        "Saving startup preference"
-                                    } else {
-                                        ""
-                                    })
-                                    .test_support(),
-                                ),
-                        )
-                        .on_click(move |checked, window, cx| {
-                            callback(Action::Startup(*checked), window, cx)
-                        }),
+                            help(
+                                if pending {
+                                    "Saving…"
+                                } else if startup.loaded() && !available {
+                                    "Available in the installed app."
+                                } else {
+                                    "Start in the background when you sign in."
+                                },
+                                cx,
+                            )
+                            .id("startup-feedback")
+                            .role(accesskit::Role::Status)
+                            .aria_label(if pending {
+                                "Saving startup preference"
+                            } else {
+                                ""
+                            })
+                            .test_support(),
+                        ),
                 )
-                .w_full(),
+                .child(
+                    self.reveal.wrap(
+                        FocusTarget::Startup,
+                        crate::controls::switch("launch-at-login")
+                            .accessibility_label("Launch at login")
+                            .checked(startup.value["enabled"] == true)
+                            .disabled(!available || pending)
+                            .on_click(move |checked, window, cx| {
+                                callback(Action::Startup(*checked), window, cx)
+                            }),
+                    ),
+                ),
         );
         if startup.loading() && !pending {
             content.child(skeleton("startup", px(160.)))
@@ -712,13 +708,19 @@ impl SettingsView {
             if cache.error.is_some() {
                 content = content.child(
                     div().mt(px(8.)).child(
-                        action_button(
-                            "retry-cache",
-                            "Retry cache size",
-                            Action::RetryCache,
-                            &self.on_action,
-                            &self.reveal,
-                        )
+                        {
+                            let mut retry = action_button(
+                                "retry-cache",
+                                "Try again",
+                                Action::RetryCache,
+                                &self.on_action,
+                                &self.reveal,
+                            );
+                            retry.button = retry
+                                .button
+                                .accessibility_label("Try reading the cache size again");
+                            retry
+                        }
                         .disabled(cache.pending),
                     ),
                 );
@@ -760,6 +762,7 @@ impl RenderOnce for SettingsView {
                     .mx_auto()
                     .text_size(px(crate::ui::FONT_SIZE))
                     .line_height(relative(1.428571))
+                    .child(crate::controls::page_title("Settings", None, cx).mb(px(16.)))
                     .child(self.appearance(cx))
                     .child(self.startup(cx))
                     .child(self.updates(cx))
@@ -774,7 +777,7 @@ impl RenderOnce for SettingsView {
                                         div().mt(px(8.)).child(
                                             action_button(
                                                 "retry-startup",
-                                                "Retry",
+                                                "Try again",
                                                 Action::RetryStartup,
                                                 &self.on_action,
                                                 &self.reveal,
@@ -1068,7 +1071,7 @@ mod tests {
         let mut state = loaded();
         state.update.value["phase"] = json!("ready");
         state.update.value["version"] = json!("0.4.0");
-        state.cache.error = Some("Could not refresh the cache size.".into());
+        state.cache.error = Some("Couldn’t refresh the cache size.".into());
         let (view, cx) = harness(cx, state);
         cx.simulate_resize(size(px(360.), px(220.)));
         view.update(cx, |view, cx| {
@@ -1085,7 +1088,7 @@ mod tests {
             "Later",
             "Restart now",
             "Clear cache",
-            "Retry cache size",
+            "Try reading the cache size again",
         ] {
             key(cx, "tab");
             focused_and_visible(&view, label, cx);
@@ -1105,11 +1108,11 @@ mod tests {
             key(cx, "shift-tab");
             focused_and_visible(&view, label, cx);
         }
-        // Initial startup failures hide its disabled checkbox from tab order and
-        // add Retry after Cache. The dynamic final control must reveal as well.
+        // Initial startup failures hide its disabled switch from tab order and
+        // add Try again after Cache. The dynamic final control must reveal as well.
         view.update(cx, |view, cx| {
             view.state.startup.value = serde_json::Value::Null;
-            view.state.startup.error = Some("Could not read login settings.".into());
+            view.state.startup.error = Some("Couldn’t read login settings.".into());
             cx.notify();
         });
         draw(cx);
@@ -1118,14 +1121,14 @@ mod tests {
             "Later",
             "Restart now",
             "Clear cache",
-            "Retry cache size",
-            "Retry",
+            "Try reading the cache size again",
+            "Try again",
         ] {
             key(cx, "tab");
             focused_and_visible(&view, label, cx);
         }
         for label in [
-            "Retry cache size",
+            "Try reading the cache size again",
             "Clear cache",
             "Restart now",
             "Later",
@@ -1204,8 +1207,8 @@ mod tests {
         ] {
             assert_eq!(element(cx, problem).role(), Some(gpui::Role::Alert));
         }
-        click(cx, "Retry");
-        click(cx, "Retry cache size");
+        click(cx, "Try again");
+        click(cx, "Try reading the cache size again");
         assert_eq!(
             view.read_with(cx, |view, _| view.actions.clone()),
             vec![Action::RetryStartup, Action::RetryCache]

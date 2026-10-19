@@ -93,8 +93,10 @@ async fn new_discovery_and_batch_commits_keep_stable_ids_and_do_not_duplicate_sa
         41012,
     )
     .unwrap();
+    // Only guards against a hang: the encrypted profile save alone takes
+    // seconds in debug builds, longer while the whole suite runs.
     let result = tokio::time::timeout(
-        Duration::from_secs(15),
+        Duration::from_secs(60),
         commands::forward_tunnel_batch(
             &state,
             existing.server_id,

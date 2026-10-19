@@ -235,8 +235,9 @@ impl Newport {
             }
             actions = actions.child(
                 crate::controls::button("needle-removal-restore")
+                    .when(restoring, |b| b.accessibility_label("Try restoring again"))
                     .label(if restoring {
-                        "Retry restore"
+                        "Try again"
                     } else if removed {
                         "Restore Needle"
                     } else {
@@ -336,9 +337,12 @@ impl Newport {
             actions = actions.child(
                 crate::controls::button("needle-removal-confirm")
                     .label(if review.action.is_some() {
-                        "Retry removal"
+                        "Try again"
                     } else {
                         "Remove Needle"
+                    })
+                    .when(review.action.is_some(), |b| {
+                        b.accessibility_label("Try removing Needle again")
                     })
                     .danger()
                     .disabled(disabled || stale || unfinished_operation(state).is_some())
@@ -403,14 +407,8 @@ fn status_line(title: &str, pending: bool, cx: &App) -> AnyElement {
 }
 
 fn error_line(error: &str, cx: &App) -> AnyElement {
-    div()
-        .id("needle-removal-error")
-        .role(Role::Alert)
+    crate::controls::alert("needle-removal-error", error.to_owned(), cx)
         .test_support()
-        .aria_label(error.to_owned())
-        .text_size(px(crate::ui::FONT_SIZE))
         .line_height(relative(1.6))
-        .text_color(cx.theme().danger)
-        .child(error.to_owned())
         .into_any_element()
 }

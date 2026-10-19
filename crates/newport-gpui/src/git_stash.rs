@@ -261,6 +261,7 @@ impl Newport {
                         )
                         .child(
                             crate::controls::button("save-stash-confirm")
+                                .primary()
                                 .loading(self.git_write_pending())
                                 .label("Save stash")
                                 .disabled(!self.can_save_stash())
@@ -305,6 +306,9 @@ impl Newport {
                                     .loading(self.git_write_pending())
                                     .when(review.mode == backend::StashMode::Drop, |button| {
                                         button.danger()
+                                    })
+                                    .when(review.mode != backend::StashMode::Drop, |button| {
+                                        button.primary()
                                     })
                                     .label(format!("{} stash", review.mode.label()))
                                     .disabled(!self.can_apply_stash())

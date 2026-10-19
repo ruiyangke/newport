@@ -381,7 +381,7 @@ fn loading_retry_and_late_reply_never_replace_another_selection(cx: &mut TestApp
         "older",
         Ok(job("older", "stack", JobState::Succeeded, "older\n")),
     );
-    click(cx, "Retry output");
+    click(cx, "Try reading output again");
     settle(&panel, cx);
     assert!(cx.debug_bounds("compose-activity-output-error").is_none());
     backend.set_compose_jobs(Err("fixture history unavailable".into()));
@@ -392,7 +392,7 @@ fn loading_retry_and_late_reply_never_replace_another_selection(cx: &mut TestApp
         &backend,
         &[job("older", "stack", JobState::Succeeded, "older\n")],
     );
-    click(cx, "Retry history");
+    click(cx, "Try reading history again");
     settle(&panel, cx);
     assert!(cx.debug_bounds("compose-activity-jobs-error").is_none());
     select(&panel, cx, "c:cache");
@@ -441,7 +441,7 @@ fn start_opens_its_activity_once_but_never_steals_navigation(cx: &mut TestAppCon
     );
     refresh_jobs(&panel, cx);
     click(cx, "Logs");
-    click(cx, "More Compose actions");
+    click(cx, "More actions for stack");
     click(cx, "Pull images only");
     wait_for(&panel, cx, || backend.held_actions() == 1);
     panel.update_in(cx, |p, window, cx| p.select("c:cache".into(), window, cx));

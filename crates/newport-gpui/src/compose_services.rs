@@ -485,7 +485,6 @@ impl ContainersPanel {
             .ghost()
             .icon(IconName::Ellipsis)
             .accessibility_label(format!("More actions for {service}"))
-            .hover_hint(format!("Actions for {service}"))
             .disabled(blocked)
             .dropdown_menu(move |mut menu, _, cx| {
                 let enabled = weak.upgrade().is_some_and(|panel| {

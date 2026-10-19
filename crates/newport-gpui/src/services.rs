@@ -1,5 +1,6 @@
 //! Services presentation. The retained client owns RPC, polling and mutations.
 use super::*;
+use crate::controls::alert;
 use gpui_kit::component::{input::InputEvent, skeleton::Skeleton};
 use newport_client::services::{LogTarget, Services};
 use newport_domain::services::{
@@ -123,6 +124,13 @@ struct Review {
     scope: Scope,
     verb: ServiceVerb,
 }
+/// The open Stop/Disable confirmation. Its Kit identity is captured so a
+/// later reconciliation can never dismiss a different dialog.
+struct ReviewDialog {
+    token: u64,
+    window: AnyWindowHandle,
+    handle: gpui_kit::component::DialogHandle,
+}
 
 pub(super) struct ServicesPanel {
     connection: Value,
@@ -142,6 +150,10 @@ pub(super) struct ServicesPanel {
     detail_scroll: ScrollHandle,
     logs: logs::Logs,
     review: Option<Review>,
+    review_dialog: Option<ReviewDialog>,
+    review_token: u64,
+    review_cancel_focus: FocusHandle,
+    review_confirm_focus: FocusHandle,
     list_cache: std::cell::RefCell<ListCache>,
     snapshot_revision: u64,
     presentation_pending: bool,
@@ -212,6 +224,10 @@ impl ServicesPanel {
             detail_scroll: ScrollHandle::new(),
             logs: logs::Logs::new(window, cx),
             review: None,
+            review_dialog: None,
+            review_token: 0,
+            review_cancel_focus: cx.focus_handle(),
+            review_confirm_focus: cx.focus_handle(),
             list_cache: Default::default(),
             snapshot_revision: 0,
             presentation_pending: false,
@@ -272,7 +288,28 @@ impl ServicesPanel {
     pub(super) fn retire(&mut self, cx: &mut Context<Self>) {
         self.retired = true;
         self.client.retire();
+        self.review = None;
+        self.sync_review_dialog(cx);
         cx.notify();
+    }
+    fn review_dialog_current(&self, token: u64) -> bool {
+        self.review_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.token == token && dialog.handle.is_active())
+    }
+    /// Close the confirmation once its review is settled elsewhere: a
+    /// completed action, a new selection or retirement.
+    fn sync_review_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.review_dialog.is_some() && (self.retired || self.review.is_none()) {
+            let dialog = self.review_dialog.take().unwrap();
+            // Polling and retirement have no Window. The captured Kit identity
+            // can never dismiss a later dialog.
+            cx.defer(move |cx| {
+                let _ = dialog.window.update(cx, |_, window, cx| {
+                    window.close_dialog_if(dialog.handle.focus_handle(), cx);
+                });
+            });
+        }
     }
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
         self.client.refresh();
@@ -320,6 +357,7 @@ impl ServicesPanel {
                 }
             }
         }
+        self.sync_review_dialog(cx);
         // Completing a hidden snapshot must not select a detail pane and start
         // new log/file reads. Reconcile once on return using the retained data.
         if !self.retired && visible {
@@ -400,6 +438,7 @@ impl ServicesPanel {
         self.reveal_selection(&selection, cx);
         self.selected = Some(selection);
         self.review = None;
+        self.sync_review_dialog(cx);
         self.detail_scroll.set_offset(point(px(0.), px(0.)));
         self.sync_selection(cx);
         cx.notify();
@@ -720,15 +759,7 @@ impl ServicesPanel {
                         .role(accesskit::Role::ListBox)
                         .aria_label("Services")
                         .track_focus(&self.list_focus)
-                        .focus_visible(|style| {
-                            style.shadow(vec![BoxShadow {
-                                color: cx.theme().ring,
-                                offset: point(px(0.), px(0.)),
-                                blur_radius: px(0.),
-                                spread_radius: px(2.),
-                                inset: true,
-                            }])
-                        })
+                        .focus_visible(|style| crate::controls::inset_focus_ring(style, cx))
                         .on_key_down(cx.listener(Self::navigate))
                         .flex_1()
                         .min_h_0()
@@ -844,11 +875,15 @@ impl ServicesPanel {
             .when(!active, |v| v.hover(|v| v.bg(theme::row_hover(cx))))
             .child(if timer {
                 Icon::new(IconName::Clock)
-                    .size(px(12.))
+                    .size(px(crate::ui::SMALL_ICON))
                     .text_color(cx.theme().muted_foreground)
                     .into_any_element()
             } else {
-                dot(row.tone, cx).into_any_element()
+                crate::controls::status_dot(
+                    (row.tone != Tone::Muted).then(|| tone_color(row.tone, cx)),
+                    cx,
+                )
+                .into_any_element()
             })
             .child(div().flex_1().min_w_0().truncate().child(name))
             .when(row.user, |v| v.child(crate::controls::tag("user", cx)))
@@ -878,6 +913,7 @@ impl Render for ServicesPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.clock
             .begin_frame(chrono::Local::now().timestamp_millis());
+        self.sync_review_dialog(cx);
         let editor_identity = match &self.active_data {
             ActiveData::File(name, scope) => Some(domain::unit_key(*scope, name)),
             _ => None,
@@ -921,24 +957,12 @@ impl Render for ServicesPanel {
                 .left_0()
                 .top_0(),
             )
-            .when(snapshot.is_some(), |v| {
-                v.when_some(problem.clone(), |v, error| {
-                    v.child(
-                        alert(
-                            "services-stale",
-                            format!("{error} Showing the last reading."),
-                            cx,
-                        )
-                        .m(px(8.)),
-                    )
-                })
-            })
             .when(snapshot.is_none() && problem.is_some(), |v| {
                 v.child(
                     crate::empty::pane(
                         IconName::ServerOff,
                         "Services aren’t available here",
-                        problem.unwrap_or_default(),
+                        problem.clone().unwrap_or_default(),
                         cx,
                     )
                     .child(
@@ -951,6 +975,20 @@ impl Render for ServicesPanel {
                 )
             })
             .when(snapshot.is_some() || initial, |v| v.child(self.toolbar(cx)))
+            .when(snapshot.is_some(), |v| {
+                v.when_some(problem.clone(), |v, error| {
+                    v.child(
+                        alert(
+                            "services-stale",
+                            format!("{error} Showing the last reading."),
+                            cx,
+                        )
+                        .flex_shrink_0()
+                        .px(px(crate::controls::TOOLBAR_INSET))
+                        .py(px(8.)),
+                    )
+                })
+            })
             .when(snapshot.is_some() || initial, |v| {
                 v.child(div().flex_1().min_h_0().min_w_0().flex().map(|v| {
                     if compact {
@@ -1140,27 +1178,6 @@ fn quiet(value: impl Into<SharedString>, cx: &App) -> Div {
         .text_size(px(crate::ui::FONT_SIZE))
         .text_color(cx.theme().muted_foreground)
         .child(value.into())
-}
-fn dot(tone: Tone, cx: &App) -> Div {
-    div()
-        .size(px(7.))
-        .flex_shrink_0()
-        .rounded_full()
-        .when(tone == Tone::Muted, |v| {
-            v.border(px(1.5))
-                .border_color(cx.theme().muted_foreground.opacity(0.4))
-        })
-        .when(tone != Tone::Muted, |v| v.bg(tone_color(tone, cx)))
-}
-fn alert(id: impl Into<ElementId>, value: impl Into<SharedString>, cx: &App) -> Stateful<Div> {
-    let value = value.into();
-    div()
-        .id(id)
-        .role(accesskit::Role::Alert)
-        .aria_label(value.clone())
-        .text_size(px(crate::ui::FONT_SIZE))
-        .text_color(cx.theme().danger)
-        .child(value)
 }
 fn list_skeleton() -> AnyElement {
     div()

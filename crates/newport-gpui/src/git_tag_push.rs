@@ -105,7 +105,7 @@ impl Newport {
             .child(form.picker.clone())
             .child(project_dialog::actions()
                 .child(crate::controls::button("cancel-push-tag").label("Cancel").disabled(self.git_write_pending()).on_click(cx.listener(|this, _, _, cx| {this.git.tag_push=None; cx.notify();})))
-                .child(crate::controls::button("confirm-push-tag").loading(self.git_write_pending()).label("Push tag").disabled(!self.can_push_tag(cx)).on_click(cx.listener(|this, _, _, cx| this.push_tag(cx)))));
+                .child(crate::controls::button("confirm-push-tag").primary().loading(self.git_write_pending()).label("Push tag").disabled(!self.can_push_tag(cx)).on_click(cx.listener(|this, _, _, cx| this.push_tag(cx)))));
         crate::git_listing::editor("Push tag", body, cx)
     }
 }

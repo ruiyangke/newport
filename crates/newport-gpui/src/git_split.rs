@@ -1,9 +1,8 @@
 //! Named keyboard-operable Git dividers, retaining Kit's pointer resize handle.
 use crate::git_layout::{LIST_WIDTH, MAX_LIST_WIDTH, MIN_LIST_WIDTH};
 use gpui::base::ElementExt;
-use gpui::component::{
-    ActiveTheme,
-    resizable::{ResizablePanel, ResizableState, h_resizable, resize_handle_appearance},
+use gpui::component::resizable::{
+    ResizablePanel, ResizableState, h_resizable, resize_handle_appearance,
 };
 use gpui::{prelude::*, *};
 use gpui_kit as gpui;
@@ -111,7 +110,7 @@ impl RenderOnce for Group {
                                 .aria_value(format!("{width:.0}"))
                                 .track_focus(&focus)
                                 .tab_stop(true)
-                                .focus_visible(|style| style.bg(cx.theme().primary.opacity(0.25)))
+                                .focus_visible(|style| crate::controls::inset_focus_ring(style, cx))
                                 .on_click(move |event, window, cx| {
                                     click_focus.focus(window, cx);
                                     if event.click_count() == 2 {

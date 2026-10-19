@@ -218,11 +218,11 @@ impl Geometry {
     }
 
     fn paint(&self, origin: gpui::Point<Pixels>, window: &mut Window, cx: &App) {
-        let colors: [Hsla; 2] = if cx.theme().is_dark() {
-            [rgb(0x3987e5).into(), rgb(0xd95926).into()]
-        } else {
-            [rgb(0x3478d4).into(), rgb(0xeb6834).into()]
-        };
+        let dark = cx.theme().is_dark();
+        let colors: [Hsla; 2] = [
+            crate::theme::chart_primary(dark),
+            crate::theme::chart_secondary(dark),
+        ];
         for primitive in &self.0 {
             match primitive {
                 Primitive::Path(path, color, opacity) => {

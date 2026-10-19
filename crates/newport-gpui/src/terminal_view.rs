@@ -122,7 +122,7 @@ impl TerminalView {
             if let Err(error) = result {
                 let _ = view.update(cx, |view, cx| {
                     if view.link_generation == generation {
-                        view.input_error = Some(format!("Could not open the link. {error}"));
+                        view.input_error = Some(format!("Couldn’t open the link. {error}"));
                         cx.notify();
                     }
                 });

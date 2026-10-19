@@ -392,7 +392,7 @@ impl ContainersPanel {
                     .min_h(px(200.))
                     .border_1()
                     .border_color(cx.theme().border)
-                    .focus_visible(|style| style.border_color(cx.theme().ring))
+                    .focus_visible(|style| crate::controls::inset_focus_ring(style, cx))
                     .rounded(px(crate::ui::RADIUS))
                     .bg(cx.theme().muted.opacity(0.35))
                     .overflow_hidden()

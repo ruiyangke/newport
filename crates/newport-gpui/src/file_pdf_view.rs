@@ -8,6 +8,11 @@ use crate::file_pdf::{Glyph, TextLayer};
 use gpui_kit::component::scroll::Scrollbar;
 use std::{cell::Cell, ops::Range, rc::Rc, sync::Arc};
 
+/// A PDF page is printed matter: it stays white paper, with a soft drop
+/// shadow, in light and dark themes alike.
+const PAPER: u32 = 0xffffff;
+const PAPER_SHADOW: u32 = 0x00000018;
+
 pub(crate) struct PdfPageView {
     focus: FocusHandle,
     scroll: ScrollHandle,
@@ -666,7 +671,6 @@ impl Render for PdfPageView {
         let accessible = self.text.clone();
         let selected = self.selection();
         let selection_color = cx.theme().ring.opacity(0.3);
-        let ring = cx.theme().ring;
         let drag = cx.weak_entity();
 
         div()
@@ -715,7 +719,7 @@ impl Render for PdfPageView {
                                 .flex_shrink_0()
                                 .w(dimensions.width)
                                 .h(dimensions.height)
-                                .bg(rgb(0xffffff))
+                                .bg(rgb(PAPER))
                                 .when(
                                     self.text
                                         .as_ref()
@@ -723,7 +727,7 @@ impl Render for PdfPageView {
                                     |sheet| sheet.cursor_text(),
                                 )
                                 .shadow(vec![BoxShadow {
-                                    color: rgba(0x00000018).into(),
+                                    color: rgba(PAPER_SHADOW).into(),
                                     offset: point(px(0.), px(2.)),
                                     blur_radius: px(8.),
                                     spread_radius: px(0.),
@@ -797,15 +801,7 @@ impl Render for PdfPageView {
                 .left_0(),
             )
             .child(Scrollbar::vertical(&self.scroll).id("pdf-page-scrollbar"))
-            .focus_visible(move |style| {
-                style.shadow(vec![BoxShadow {
-                    color: ring,
-                    offset: point(px(0.), px(0.)),
-                    blur_radius: px(0.),
-                    spread_radius: px(2.),
-                    inset: true,
-                }])
-            })
+            .focus_visible(|style| crate::controls::inset_focus_ring(style, cx))
     }
 }
 

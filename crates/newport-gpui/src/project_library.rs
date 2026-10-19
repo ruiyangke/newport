@@ -65,59 +65,61 @@ fn library_notice<'a>(
 }
 
 fn library_feedback(notice: LibraryNotice<'_>, cx: &App) -> AnyElement {
-    if notice == LibraryNotice::Loading {
-        return loading::lines("projects", 4);
-    }
-    if let LibraryNotice::Empty(message) = notice {
-        let (title, description, icon) = if message.starts_with("No projects match") {
-            (
-                "No matching projects",
-                "Try another search or clear the search field.",
-                IconName::Search,
-            )
-        } else if message.starts_with("No favorite") {
-            (
-                "No favorite projects",
-                "Choose All, then star a project to keep it here.",
-                IconName::Star,
-            )
-        } else {
-            (
-                "No saved projects",
-                "Use Add project to open, clone, or create a repository on this server.",
-                IconName::Folder,
-            )
-        };
-        return empty::pane(icon, title, description, cx).into_any_element();
-    }
-    let failed = matches!(notice, LibraryNotice::Error { .. });
-    let message = match notice {
-        LibraryNotice::Loading => unreachable!(),
-        LibraryNotice::Refreshing => "Refreshing projects…".to_owned(),
-        LibraryNotice::Error { detail, cached } => format!(
-            "{} {detail}",
-            if cached {
-                "Could not refresh projects. Showing the last saved list. Use Refresh to try again."
+    match notice {
+        LibraryNotice::Loading => loading::lines("projects", 4),
+        // A search with no match reads like the other lists: one quiet row.
+        LibraryNotice::Empty(message) if message.starts_with("No projects match") => {
+            empty::compact("No projects match.", cx)
+                .px(px(crate::controls::PAGE_PADDING))
+                .into_any_element()
+        }
+        LibraryNotice::Empty(message) => {
+            let (title, description, icon) = if message.starts_with("No favorite") {
+                (
+                    "No favorite projects",
+                    "Choose All, then star a project to keep it here.",
+                    IconName::Star,
+                )
             } else {
-                "Could not load projects. Use Refresh to try again."
-            }
-        ),
-        LibraryNotice::Empty(message) => message.to_owned(),
+                (
+                    "No saved projects",
+                    "Use Add project to open, clone, or create a repository on this server.",
+                    IconName::Folder,
+                )
+            };
+            empty::pane(icon, title, description, cx).into_any_element()
+        }
+        LibraryNotice::Refreshing => {
+            let message = "Refreshing projects…";
+            div()
+                .id("project-library-feedback")
+                .role(accesskit::Role::Status)
+                .aria_label(message)
+                .w_full()
+                .min_w_0()
+                .px(px(crate::controls::PAGE_PADDING))
+                .pt(px(8.))
+                .text_size(px(crate::ui::FONT_SIZE))
+                .text_color(cx.theme().muted_foreground)
+                .child(message)
+                .into_any_element()
+        }
+        // Errors sit directly below the toolbar; see `library_error`.
+        LibraryNotice::Error { .. } => div().into_any_element(),
+    }
+}
+
+/// A failed read, in the one style every list page uses for it.
+fn library_error(detail: &str, cached: bool, cx: &App) -> AnyElement {
+    let message = if cached {
+        format!("Couldn’t refresh projects: {detail} Showing the last saved list.")
+    } else {
+        format!("Couldn’t load projects: {detail}")
     };
-    div()
-        .id("project-library-feedback")
-        .role(if failed {
-            accesskit::Role::Alert
-        } else {
-            accesskit::Role::Status
-        })
-        .aria_label(message.clone())
-        .w_full()
-        .min_w_0()
-        .text_size(px(crate::ui::FONT_SIZE))
-        .text_color(cx.theme().muted_foreground)
-        .when(failed, |view| view.p_3().bg(cx.theme().muted))
-        .child(message)
+    crate::controls::alert("project-library-error", message, cx)
+        .flex_shrink_0()
+        .px(px(crate::controls::TOOLBAR_INSET))
+        .py(px(8.))
         .into_any_element()
 }
 
@@ -250,7 +252,7 @@ impl Newport {
                     .child(edit_description(&edit.project, edit.remove))
                     .when(!edit.remove, |v| {
                         v.child(
-                            crate::controls::input(&edit.name)
+                            crate::controls::form_input(&edit.name)
                                 .aria_label("Project name")
                                 .disabled(busy),
                         )
@@ -258,7 +260,8 @@ impl Newport {
                     .child(
                         project_dialog::actions()
                             .child(
-                                crate::controls::button("project-edit-cancel")
+                                crate::controls::form_button("project-edit-cancel")
+                                    .min_w(px(76.))
                                     .label("Cancel")
                                     .disabled(busy)
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -268,13 +271,15 @@ impl Newport {
                                     })),
                             )
                             .child(
-                                crate::controls::button("project-edit-submit")
+                                crate::controls::form_button("project-edit-submit")
+                                    .min_w(px(76.))
                                     .loading(busy)
                                     .when(edit.remove, |button| button.danger())
+                                    .when(!edit.remove, |button| button.primary())
                                     .label(if edit.remove {
                                         "Remove from list"
                                     } else {
-                                        "Save name"
+                                        "Save"
                                     })
                                     .disabled(busy || !valid)
                                     .on_click(
@@ -440,14 +445,46 @@ impl Newport {
                         }
                     }),
             );
+        let error = match notice {
+            Some(LibraryNotice::Error { detail, cached }) => {
+                Some(library_error(detail, cached, cx))
+            }
+            _ => None,
+        };
+        // Count and favorites, like the other list pages' status bars. A
+        // search or Favorites shows how many of the whole library remain.
+        let summary = {
+            let noun = |n: usize| if n == 1 { "project" } else { "projects" };
+            let mut text = if count == total {
+                format!("{total} {}", noun(total))
+            } else {
+                format!("{count} of {total} {}", noun(total))
+            };
+            if favorites > 0 {
+                text.push_str(&format!(
+                    " · {favorites} {}",
+                    if favorites == 1 {
+                        "favorite"
+                    } else {
+                        "favorites"
+                    }
+                ));
+            }
+            text
+        };
+        let has_reading = self
+            .resources
+            .get("page")
+            .is_some_and(|page| page.value.is_array());
         // The toolbar spans the page like the other list pages; the library
         // below keeps its padding for notices and empty states.
         div().id("projects-page").flex_1().min_h_0().flex().flex_col()
             .when(!empty_library, |v| v.child(toolbar))
+            .children(error)
             .child(div().id("projects-scroll").flex_1().min_h_0().flex().flex_col().gap_3()
-            .when(self.project_create.is_none() && self.project_creation_save_owner.as_ref().is_some_and(|(_,server)| server == &self.server) && self.resources.get("project-created-save").is_some_and(|r|r.error.is_some()), |v|v.child(div().px(px(crate::controls::PAGE_PADDING)).pt(px(8.)).flex().flex_col().gap_2().child(label("Repository created, but its bookmark could not be saved. Add the existing repository; do not repeat creation.")).child(self.status("project-created-save",cx))))
+            .when(self.project_create.is_none() && self.project_creation_save_owner.as_ref().is_some_and(|(_,server)| server == &self.server) && self.resources.get("project-created-save").is_some_and(|r|r.error.is_some()), |v|v.child(div().px(px(crate::controls::PAGE_PADDING)).pt(px(8.)).flex().flex_col().gap_2().child(label("Repository created, but Newport couldn’t save its bookmark. Add the existing repository; don’t repeat creation.")).child(self.status("project-created-save",cx))))
             .when(empty_library, |view| view.child(self.empty_library(busy || form_open, cx)))
-            .when_some(notice.filter(|notice| *notice != LibraryNotice::Loading && !empty_library), |view, notice| view.child(div().flex_1().flex().flex_col().px(px(crate::controls::PAGE_PADDING)).pt(px(8.)).child(library_feedback(notice,cx))))
+            .when_some(notice.filter(|notice| *notice != LibraryNotice::Loading && !matches!(notice, LibraryNotice::Error { .. }) && !empty_library), |view, notice| view.child(div().flex_1().flex().flex_col().child(library_feedback(notice,cx))))
             .when(loading,|view|view.child(div().px(px(crate::controls::PAGE_PADDING)).pt(px(8.)).child(project_loading::library(self.content_width.min(1240.) - crate::controls::PAGE_PADDING * 2.,cx))))
             .when(!loading && count > 0,|view|view.child(div().flex().flex_col().min_h_0().overflow_hidden()
                 .flex_1()
@@ -455,34 +492,37 @@ impl Newport {
                 .child(list(scroll,cx.processor(move |this,index:usize,_,cx| {
                     this.project_library_row(&projects[index],index,columns,busy || this.project_edit.is_some(),cx)
                 })).flex_1().min_h_0()))))
+            .when(!empty_library && has_reading, |view| {
+                view.child(
+                    crate::controls::status_bar(cx).left(
+                        div()
+                            .id("projects-summary")
+                            .debug_selector(|| "projects-summary".into())
+                            .role(accesskit::Role::Status)
+                            .aria_label(summary.clone())
+                            .min_w_0()
+                            .truncate()
+                            .child(summary),
+                    ),
+                )
+            })
             .into_any_element()
     }
 }
 
+/// The dialog's own title names the operation; the body names the project.
 fn edit_description(project: &Value, remove: bool) -> Div {
-    let title = format!(
-        "{} {}",
-        if remove {
-            "Remove from list:"
-        } else {
-            "Rename:"
-        },
-        text(project, "name")
-    );
     div()
         .min_w_0()
         .flex()
         .flex_col()
         .gap_2()
-        .child(
-            div()
-                .id("project-edit-title")
-                .role(accesskit::Role::Heading)
-                .aria_label(title.clone())
-                .test_support()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(title),
-        )
+        .when(remove, |view| {
+            view.child(project_dialog::description(
+                "project-edit-name",
+                text(project, "name"),
+            ))
+        })
         .child(project_dialog::description(
             "project-edit-path",
             text(&project["path"], "display"),
@@ -765,16 +805,18 @@ mod tests {
                 visual.update(|window, cx| {
                     window.draw(cx).clear(cx);
                     let nodes = snapshots(window);
-                    let title = if remove {
-                        "Remove from list: 日本語 project"
-                    } else {
-                        "Rename: 日本語 project"
-                    };
+                    // The dialog's title is the only heading; the body names
+                    // the project being removed.
                     assert!(
+                        !nodes
+                            .iter()
+                            .any(|node| node.role() == Some(gpui::Role::Heading))
+                    );
+                    assert_eq!(
                         nodes
                             .iter()
-                            .any(|node| node.role() == Some(gpui::Role::Heading)
-                                && node.label() == Some(title))
+                            .any(|node| node.label() == Some("日本語 project")),
+                        remove
                     );
                     assert!(
                         nodes

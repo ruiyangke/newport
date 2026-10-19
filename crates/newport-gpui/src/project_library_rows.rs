@@ -297,7 +297,7 @@ impl Newport {
         let summary = if pending {
             format!("{summary} · Checking…")
         } else if let Some(error) = &error {
-            format!("{summary} · Could not read status: {error}")
+            format!("{summary} · Couldn’t read status: {error}")
         } else {
             summary
         };
@@ -328,14 +328,14 @@ impl Newport {
             .when(error.is_some(), |view| {
                 view.child(
                     crate::controls::compact_button(("project-check", index))
-                        .label(if error.is_some() { "Retry" } else { "Check" })
+                        .label("Try again")
                         .opacity(if error.is_some() { 1. } else { 0. })
                         .group_hover(group.clone(), |v| v.opacity(1.))
                         .focus(|v| v.opacity(1.))
                         .link()
                         .px_0()
                         .disabled(pending)
-                        .accessibility_label(format!("Check status of {name}"))
+                        .accessibility_label(format!("Check status of {name} again"))
                         .on_click(
                             cx.listener(move |this, _, _, cx| this.check_project(&check, cx)),
                         ),
@@ -356,7 +356,7 @@ impl Newport {
                         .flex()
                         .items_center()
                         .gap(px(5.))
-                        .child(Icon::new(IconName::GitBranch).size(px(13.)))
+                        .child(Icon::new(IconName::GitBranch).size(px(crate::ui::SMALL_ICON)))
                         .child(div().min_w_0().truncate().child(facts.branch.clone())),
                 ),
                 None => v.child(unread),
@@ -367,12 +367,14 @@ impl Newport {
             .items_center()
             .gap(px(6.))
             .when_some(facts.as_ref().filter(|_| !previous), |v, facts| {
-                v.child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(
-                    if facts.changes == 0 {
-                        cx.theme().success
+                let dark = cx.theme().is_dark();
+                v.child(crate::controls::status_dot(
+                    Some(if facts.changes == 0 {
+                        theme::success(dark)
                     } else {
-                        cx.theme().warning
-                    },
+                        theme::warning(dark)
+                    }),
+                    cx,
                 ))
             })
             .child(div().min_w_0().truncate().child(if previous {
@@ -404,7 +406,7 @@ impl Newport {
                             crate::controls::compact_icon_button(("project-status-retry", index))
                                 .icon(IconName::RefreshCw)
                                 .ghost()
-                                .accessibility_label(format!("Retry status of {name}"))
+                                .accessibility_label(format!("Check status of {name} again"))
                                 .hover_hint(error.clone().unwrap_or_default())
                                 .on_click({
                                     let project = project.clone();
@@ -421,13 +423,13 @@ impl Newport {
             .debug_selector(move || format!("project-library-row-{index}"))
             .w_full()
             .min_w_0()
-            .min_h(px(54.))
+            .min_h(px(crate::ui::TWO_LINE_ROW_HEIGHT))
             .flex()
             .items_center()
             .gap(px(12.))
             .pl(px(crate::controls::PAGE_PADDING))
             .pr(px(12.))
-            .py(px(9.))
+            .py(px(4.))
             .border_b_1()
             .border_color(cx.theme().border)
             .hover(|v| v.bg(theme::row_hover(cx)))
@@ -498,8 +500,7 @@ impl Newport {
                             .icon(IconName::Ellipsis)
                             .ghost()
                             .disabled(busy)
-                            .accessibility_label(format!("Actions for {name}"))
-                            .tooltip("Project actions"),
+                            .accessibility_label(format!("More actions for {name}")),
                         builder: Box::new(move |mut menu, _, _| {
                             let p = menu_project.clone();
                             let view = weak.clone();

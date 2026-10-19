@@ -212,10 +212,10 @@ impl Footer {
         match self {
             Self::Loading => "Loading diff…",
             Self::LoadingMore => "Loading more changes…",
-            Self::Failed => "Diff incomplete. Refresh to retry.",
+            Self::Failed => "Diff incomplete.",
             Self::More => "More changes available",
             Self::Complete => "End of diff preview",
-            Self::Unavailable => "Diff preview unavailable. Refresh to retry.",
+            Self::Unavailable => "Diff preview unavailable.",
         }
     }
 }
@@ -842,7 +842,8 @@ impl Newport {
                             |view| {
                                 view.child(
                                     crate::controls::compact_button("git-diff-retry")
-                                        .label("Refresh")
+                                        .label("Try again")
+                                        .accessibility_label("Try loading the diff again")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.git_refresh();
                                             cx.notify();

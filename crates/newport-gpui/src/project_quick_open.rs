@@ -309,18 +309,16 @@ impl Render for Picker {
             .min_h_0()
             .gap_2()
             .capture_key_down(cx.listener(Self::key))
-            .child(crate::controls::input(&self.input).aria_label("Find project file"))
+            .child(crate::controls::search_input(&self.input, cx).aria_label("Find project file"))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .when_some(self.error.clone(), |v, e| {
                         v.child(
-                            div()
-                                .p_3()
-                                .text_size(px(crate::ui::FONT_SIZE))
-                                .text_color(cx.theme().danger)
-                                .child(e),
+                            crate::controls::alert("quick-open-error", e, cx)
+                                .px_3()
+                                .py_2(),
                         )
                     })
                     .when(
@@ -345,7 +343,7 @@ impl Render for Picker {
                                             Button::new(("quick-file", row))
                                                 .ghost()
                                                 .w_full()
-                                                .h(px(42.))
+                                                .h(px(crate::ui::TWO_LINE_ROW_HEIGHT))
                                                 .justify_start()
                                                 .selected(selected)
                                                 .custom(git_file_row::selection_style(selected, cx))

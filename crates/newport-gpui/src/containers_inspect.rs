@@ -71,7 +71,8 @@ impl ContainersPanel {
             .when(self.error("container-inspect").is_some(), |v| {
                 v.child(
                     crate::controls::button("retry-container-inspect")
-                        .label("Retry inspection")
+                        .label("Try again")
+                        .accessibility_label("Try inspecting again")
                         .disabled(self.pending("container-inspect"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(id) = &retry_id {
@@ -352,9 +353,9 @@ impl ContainersPanel {
                                 div()
                                     .flex_shrink_0()
                                     .text_color(if check.exit_code == 0 {
-                                        cx.theme().success
+                                        theme::success(cx.theme().is_dark())
                                     } else {
-                                        cx.theme().danger
+                                        theme::error(cx.theme().is_dark())
                                     })
                                     .child(if check.exit_code == 0 {
                                         "passed".into()

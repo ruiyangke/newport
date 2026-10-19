@@ -183,7 +183,9 @@ impl Render for Panel {
                                         .flex()
                                         .items_center()
                                         .gap(px(6.))
-                                        .focus_visible(|style| style.bg(primary.opacity(0.12)))
+                                        .focus_visible(|style| {
+                                            crate::controls::inset_focus_ring(style, cx)
+                                        })
                                         .child(
                                             div()
                                                 .size(px(14.))

@@ -22,27 +22,61 @@ pub(super) fn picker(id: impl Into<ElementId>, icon: IconName, title: String) ->
         .flex_shrink(1.)
         .content_style(
             content.style().clone(),
-            gpui_kit::component::Size::Size(px(15.)),
+            gpui_kit::component::Size::Size(px(crate::controls::ICON_SIZE)),
         )
 }
 
-/// The row owns selection and hover; nested choice buttons must stay transparent.
-pub(super) fn picker_row(
-    id: impl Into<ElementId>,
-    current: bool,
-    highlighted: bool,
-    cx: &App,
-) -> Stateful<Div> {
-    let background = if current {
-        theme::git_selection(cx.theme().is_dark())
-    } else if highlighted {
-        theme::row_hover(cx)
+/// Repository, worktree and branch pickers share one surface: width, height
+/// limit, and a header holding the search field and its "New …" action.
+pub(super) const PICKER_WIDTH: f32 = 400.;
+pub(super) const PICKER_MAX_HEIGHT: f32 = 520.;
+pub(super) const PICKER_ROW_HEIGHT: f32 = crate::ui::TWO_LINE_ROW_HEIGHT;
+
+pub(super) fn picker_surface(window: &Window) -> Div {
+    div()
+        .w(px(PICKER_WIDTH).min(window.viewport_size().width - px(32.)))
+        .max_h((window.viewport_size().height * 0.7).min(px(PICKER_MAX_HEIGHT)))
+        .flex()
+        .flex_col()
+        .min_h_0()
+}
+
+/// The inset every Git search field sits in, with any "New …" action beside it.
+pub(super) fn search_bar() -> Div {
+    div()
+        .flex()
+        .items_center()
+        .min_w_0()
+        .gap(px(8.))
+        .px(px(12.))
+        .py(px(8.))
+}
+
+/// A loading placeholder at the picker row height, so a uniform list keeps
+/// one item size while a page is pending.
+pub(super) fn picker_loading_row(name: &str, index: usize) -> AnyElement {
+    div()
+        .h(px(PICKER_ROW_HEIGHT))
+        .flex_shrink_0()
+        .overflow_hidden()
+        .flex()
+        .items_center()
+        .child(project_loading::picker_row(name, index))
+        .into_any_element()
+}
+
+/// The row owns highlight and hover; nested choice buttons stay transparent.
+/// The current choice is marked by its Check icon, not by a fill.
+pub(super) fn picker_row(id: impl Into<ElementId>, highlighted: bool, cx: &App) -> Stateful<Div> {
+    let highlight = theme::selected_fill(cx.theme().is_dark());
+    let hover = if highlighted {
+        highlight
     } else {
-        cx.theme().transparent
+        theme::row_hover(cx)
     };
     div()
         .id(id)
-        .h(px(48.))
+        .h(px(PICKER_ROW_HEIGHT))
         .w_full()
         .min_w_0()
         .flex()
@@ -50,20 +84,8 @@ pub(super) fn picker_row(
         .px_1()
         .gap_1()
         .rounded(px(crate::ui::RADIUS))
-        .border_1()
-        .border_color(if highlighted {
-            cx.theme().ring
-        } else {
-            cx.theme().transparent
-        })
-        .bg(background)
-        .hover(|row| {
-            row.bg(if current {
-                theme::git_selection(cx.theme().is_dark())
-            } else {
-                theme::row_hover(cx)
-            })
-        })
+        .when(highlighted, |row| row.bg(highlight))
+        .hover(|row| row.bg(hover))
 }
 
 pub(super) fn picker_choice(id: impl Into<ElementId>, cx: &App) -> Button {
@@ -110,18 +132,15 @@ pub(super) fn toolbar(
         }
         identity = identity.child(picker);
     }
-    div()
-        .flex()
-        .flex_shrink_0()
+    crate::controls::page_toolbar(cx)
         .min_w_0()
-        .min_h(px(38.))
-        .px(px(8.))
-        .py(px(4.))
-        .gap(px(4.))
-        .items_center()
-        .border_b_1()
-        .border_color(cx.theme().border)
-        .when(compact, |bar| bar.flex_col().gap(px(6.)))
+        .when(compact, |bar| {
+            bar.h_auto()
+                .min_h(px(crate::controls::TOOLBAR_HEIGHT))
+                .py(px(8.))
+                .flex_col()
+                .gap(px(6.))
+        })
         .child(identity)
         .child(
             div()
@@ -233,13 +252,12 @@ mod tests {
     use serde_json::json;
 
     struct PickerRow {
-        current: bool,
         highlighted: bool,
     }
     impl Render for PickerRow {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div().size_full().p(px(20.)).child(
-                super::picker_row("choice-row", self.current, self.highlighted, cx)
+                super::picker_row("choice-row", self.highlighted, cx)
                     .debug_selector(|| "choice-row".into())
                     .child(
                         super::picker_choice("choice", cx)
@@ -257,31 +275,28 @@ mod tests {
     }
 
     #[gpui::test]
-    fn picker_rows_share_hover_and_preserve_current_selection(cx: &mut TestAppContext) {
+    fn picker_rows_share_hover_and_keyboard_highlight(cx: &mut TestAppContext) {
         cx.update(gpui::component::init);
-        let (view, visual) = cx.add_window_view(|_, _| PickerRow {
-            current: false,
-            highlighted: false,
-        });
+        let (view, visual) = cx.add_window_view(|_, _| PickerRow { highlighted: false });
         visual.simulate_resize(size(px(360.), px(180.)));
         for dark in [false, true] {
             visual.update(|_, cx| crate::theme::install(dark, cx));
-            for current in [false, true] {
+            for highlighted in [false, true] {
                 view.update(visual, |view, cx| {
-                    view.current = current;
-                    view.highlighted = false;
+                    view.highlighted = highlighted;
                     cx.notify();
                 });
                 visual.update(|window, cx| window.draw(cx).clear(cx));
                 let row = visual.debug_bounds("choice-row").unwrap();
+                assert_eq!(row.size.height, px(crate::ui::TWO_LINE_ROW_HEIGHT));
                 // Hover the choice, then the separate action: both retain the row tint.
                 for marker in ["choice", "actions"] {
                     let target = visual.debug_bounds(marker).unwrap().center();
                     visual.simulate_mouse_move(target, None, Default::default());
                     visual.update(|window, cx| {
                         window.draw(cx).clear(cx);
-                        let color = if current {
-                            crate::theme::git_selection(dark)
+                        let color = if highlighted {
+                            crate::theme::selected_fill(dark)
                         } else {
                             crate::theme::row_hover(cx)
                         };
@@ -299,22 +314,15 @@ mod tests {
                     None,
                     Default::default(),
                 );
-                view.update(visual, |view, cx| {
-                    view.highlighted = true;
-                    cx.notify();
-                });
                 visual.update(|window, cx| {
                     window.draw(cx).clear(cx);
-                    let color = if current {
-                        crate::theme::git_selection(dark)
-                    } else {
-                        crate::theme::row_hover(cx)
-                    };
-                    assert!(
+                    let fill = crate::theme::selected_fill(dark);
+                    assert_eq!(
                         window
                             .painted_quads()
                             .iter()
-                            .any(|q| q.background == color.into())
+                            .any(|q| q.background == fill.into()),
+                        highlighted
                     );
                 });
                 assert_eq!(visual.debug_bounds("choice-row").unwrap(), row);
@@ -415,7 +423,10 @@ mod tests {
             } else {
                 assert_eq!(transfer.top(), branch.top());
                 assert!(branch.right() <= transfer.left());
-                assert_eq!(visual.debug_bounds("toolbar").unwrap().size.height, px(38.));
+                assert_eq!(
+                    visual.debug_bounds("toolbar").unwrap().size.height,
+                    px(crate::controls::TOOLBAR_HEIGHT)
+                );
             }
         }
     }

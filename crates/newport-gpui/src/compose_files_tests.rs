@@ -155,7 +155,7 @@ fn file_errors_keep_readable_content_and_never_leak_previous_text(cx: &mut TestA
     backend.set_compose_project(Ok(files(json!([
         {"path":SECOND,"text":"","error":null}
     ]))));
-    click(cx, "Retry files");
+    click(cx, "Try reading files again");
     settle(&panel, cx);
     assert!(!has_label(cx, "Fixture connection unavailable"));
     assert!(

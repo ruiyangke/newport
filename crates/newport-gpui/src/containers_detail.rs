@@ -77,7 +77,7 @@ impl ContainersPanel {
                     .flex_wrap()
                     .items_center()
                     .gap(px(8.))
-                    .child(heading(domain::display_name(c).to_owned(), 2))
+                    .child(heading(domain::display_name(c).to_owned()))
                     .when_some(c.compose.as_ref(), |v, compose| {
                         let key = domain::project_key(&compose.project);
                         let (id, name) = (observed_id.clone(), observed_name.clone());
@@ -399,7 +399,7 @@ impl ContainersPanel {
                     .flex_wrap()
                     .items_center()
                     .gap(px(8.))
-                    .child(heading(name.to_owned(), 2))
+                    .child(heading(name.to_owned()))
                     .child(crate::controls::tag("Compose project", cx)),
             )
             .when_some(project.working_dir, |v, path| {

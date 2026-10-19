@@ -825,17 +825,16 @@ impl Newport {
                                     let y = bounds.top()
                                         + bounds.size.height
                                             * (1. - (value / maximum.max(1.)).clamp(0., 1.)) as f32;
-                                    let color = rgb(match (cx.theme().is_dark(), index) {
-                                        (true, 0) => 0x3987e5,
-                                        (true, _) => 0xd95926,
-                                        (false, 0) => 0x3478d4,
-                                        (false, _) => 0xeb6834,
-                                    });
+                                    let color = if index == 0 {
+                                        crate::theme::chart_primary(cx.theme().is_dark())
+                                    } else {
+                                        crate::theme::chart_secondary(cx.theme().is_dark())
+                                    };
                                     chart_dot(
                                         window,
                                         point(x, y),
                                         4.,
-                                        color.into(),
+                                        color,
                                         cx.theme().background,
                                     );
                                 }
@@ -878,14 +877,9 @@ impl Newport {
                         let color = if used >= 95. {
                             theme::error(cx.theme().is_dark())
                         } else if used >= 85. {
-                            cx.theme().warning
+                            theme::warning(cx.theme().is_dark())
                         } else {
-                            rgb(if cx.theme().is_dark() {
-                                0x3987e5
-                            } else {
-                                0x3478d4
-                            })
-                            .into()
+                            crate::theme::chart_primary(cx.theme().is_dark())
                         };
                         let mount = text(&disk, "mount");
                         div()
@@ -1348,12 +1342,7 @@ impl Newport {
                         } else {
                             None
                         };
-                        let accent: Hsla = rgb(if cx.theme().is_dark() {
-                            0x3987e5
-                        } else {
-                            0x3478d4
-                        })
-                        .into();
+                        let accent = crate::theme::chart_primary(cx.theme().is_dark());
                         div()
                             .min_w_0()
                             .rounded(px(crate::ui::RADIUS))
@@ -1424,7 +1413,9 @@ impl Newport {
                                                                             cx.theme().is_dark(),
                                                                         )
                                                                     } else {
-                                                                        cx.theme().warning
+                                                                        theme::warning(
+                                                                            cx.theme().is_dark(),
+                                                                        )
                                                                     },
                                                                 ),
                                                         )
@@ -1635,20 +1626,12 @@ impl Newport {
                                 .mb_2()
                                 .child(
                                     label(format!("Receive · {}", latest(&plots[3]))).text_color(
-                                        rgb(if cx.theme().is_dark() {
-                                            0x3987e5
-                                        } else {
-                                            0x3478d4
-                                        }),
+                                        crate::theme::chart_primary(cx.theme().is_dark()),
                                     ),
                                 )
-                                .child(label(format!("Send · {}", latest(tx))).text_color(rgb(
-                                    if cx.theme().is_dark() {
-                                        0xd95926
-                                    } else {
-                                        0xeb6834
-                                    },
-                                ))),
+                                .child(label(format!("Send · {}", latest(tx))).text_color(
+                                    crate::theme::chart_secondary(cx.theme().is_dark()),
+                                )),
                         )
                     })
                     .when(!history.is_empty(), |view| {

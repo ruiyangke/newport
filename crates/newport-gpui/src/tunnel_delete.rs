@@ -43,13 +43,8 @@ impl Newport {
             let pending = form.read(cx).pending;
             let cancel_form = form.clone();
             dialog
-                .aria_label("Delete tunnel?")
-                .title(
-                    div()
-                        .text_size(px(17.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("Delete tunnel?"),
-                )
+                .aria_label("Delete forward?")
+                .title(crate::controls::dialog_title("Delete forward?"))
                 .w(px(480.))
                 .p(px(24.))
                 .rounded(px(crate::ui::RADIUS))
@@ -130,12 +125,12 @@ impl Render for Confirmation {
             self.tunnel.name.clone()
         };
         let description = format!(
-            "Delete {title}? The tunnel will disconnect and its configuration will be removed."
+            "Delete {title}? The forward will disconnect and its configuration will be removed."
         );
         div()
             .id("delete-forward-confirmation")
             .role(accesskit::Role::AlertDialog)
-            .aria_label("Delete tunnel?")
+            .aria_label("Delete forward?")
             .aria_description(description.clone())
             .flex()
             .flex_col()
@@ -154,13 +149,7 @@ impl Render for Confirmation {
                     )])),
             )
             .when_some(self.error.clone(), |view, error| {
-                view.child(
-                    div()
-                        .id("delete-forward-error")
-                        .role(accesskit::Role::Alert)
-                        .text_color(cx.theme().danger)
-                        .child(error),
-                )
+                view.child(crate::controls::alert("delete-forward-error", error, cx))
             })
             .child(
                 div()
@@ -183,7 +172,7 @@ impl Render for Confirmation {
                             .label(if self.pending {
                                 "Deleting…"
                             } else {
-                                "Delete tunnel"
+                                "Delete forward"
                             })
                             .disabled(self.pending)
                             .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),

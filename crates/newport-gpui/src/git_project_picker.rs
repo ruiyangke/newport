@@ -75,6 +75,10 @@ impl Newport {
                 let back = owner.clone();
                 let back_server = server.clone();
                 menu = menu
+                    .min_w(px(git_layout::PICKER_WIDTH))
+                    .max_w(px(git_layout::PICKER_WIDTH))
+                    .max_h(px(git_layout::PICKER_MAX_HEIGHT))
+                    .scrollable(true)
                     .item(
                         PopupMenuItem::new("All projects")
                             .icon(IconName::List)

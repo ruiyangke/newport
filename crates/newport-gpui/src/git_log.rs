@@ -241,25 +241,15 @@ impl Newport {
             .border_t_1()
             .border_color(cx.theme().border)
             .child(
-                div()
-                    .h(px(36.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .text_size(px(crate::ui::FONT_SIZE))
-                            .font_weight(FontWeight::MEDIUM)
-                            .flex_shrink_0()
-                            .child("Git output"),
-                    )
+                crate::ui::header()
+                    .gap(px(8.))
+                    .px(px(12.))
+                    .child(crate::ui::header_rule(cx))
+                    .child(div().flex_shrink_0().child("Git output"))
                     .child(
                         crate::label("Latest 100 commands · this session")
                             .text_size(px(crate::ui::FONT_SIZE))
+                            .font_weight(FontWeight::NORMAL)
                             .min_w_0()
                             .flex_1()
                             .truncate(),

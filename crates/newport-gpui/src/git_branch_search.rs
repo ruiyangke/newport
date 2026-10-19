@@ -23,7 +23,7 @@ impl Newport {
         {
             return;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter branches"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find a branch"));
         let subscription = cx.observe(&input, |this, input, cx| {
             if this.page != Page::Projects || !this.git.branches.open {
                 return;
@@ -69,25 +69,24 @@ impl Newport {
         let Some(search) = &self.git.branch_search else {
             return div().into_any_element();
         };
-        div()
-            .flex()
+        git_layout::search_bar()
             .flex_col()
-            .gap_2()
-            .px_4()
-            .py_2()
+            .items_stretch()
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap(px(8.))
                     .child(
                         div().flex_1().min_w_0().child(
-                            crate::controls::input(&search.input).aria_label("Filter branches"),
+                            crate::controls::search_input(&search.input, cx)
+                                .aria_label("Filter branches"),
                         ),
                     )
                     .child(
                         crate::controls::button("branch-picker-new")
-                            .label("New branch")
+                            .icon(IconName::Plus)
+                            .label("New branch…")
                             .disabled(!self.git_can_write_branch())
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.git_new_branch(window, cx)),

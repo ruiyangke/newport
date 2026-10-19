@@ -390,7 +390,8 @@ impl ServicesPanel {
                         .child(alert("services-logs-error", error, cx).flex_1())
                         .child(
                             crate::controls::button("services-logs-retry")
-                                .label("Retry logs")
+                                .label("Try again")
+                                .accessibility_label("Try reading logs again")
                                 .disabled(self.pending("logs"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.client.retry_logs();
@@ -422,7 +423,7 @@ impl ServicesPanel {
                     .flex_1()
                     .border_1()
                     .border_color(cx.theme().border)
-                    .focus_visible(|style| style.border_color(cx.theme().ring))
+                    .focus_visible(|style| crate::controls::inset_focus_ring(style, cx))
                     .rounded(px(crate::ui::RADIUS))
                     .bg(cx.theme().muted.opacity(0.35))
                     .overflow_hidden()

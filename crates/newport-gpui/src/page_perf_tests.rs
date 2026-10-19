@@ -33,6 +33,7 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
         needle_removal_reviews: Default::default(),
         needle_helper_ui: Default::default(),
         integration_shell: cx.new(|cx| crate::integration::ShellCode::new(window, cx)),
+        integration_scroll: gpui::ScrollHandle::new(),
         server_form: None,
         modal_open: false,
         server_picker: Newport::init_picker(window, cx),
@@ -380,6 +381,13 @@ fn server_dropdown_actions_preserve_edit_and_delete_guards(cx: &mut TestAppConte
     assert!(workspace.read_with(visual, |v, _| {
         v.resources.get("server-delete:fixture").is_none()
     }));
+    // A destructive confirmation never approves on a bare Enter.
+    visual.simulate_keystrokes("enter");
+    frame(visual);
+    assert!(visual.update(|window, cx| window.has_active_dialog(cx)));
+    assert!(workspace.read_with(visual, |v, _| {
+        v.resources.get("server-delete:fixture").is_none()
+    }));
     click(visual, "Cancel");
     assert!(workspace.read_with(visual, |v, _| v.selected_server().is_some()));
     click(visual, "Choose server");
@@ -661,7 +669,7 @@ fn integration_exposes_connection_states_and_locks_controls_during_updates(
     assert!(
         !nodes(visual)
             .iter()
-            .any(|node| node.label() == Some("Retry"))
+            .any(|node| matches!(node.label(), Some("Retry" | "Try again")))
     );
     for key in [
         "integration:feature:fixture",
@@ -760,7 +768,7 @@ fn integration_exposes_connection_states_and_locks_controls_during_updates(
     assert!(
         !nodes(visual)
             .iter()
-            .any(|node| node.label() == Some("Retry"))
+            .any(|node| matches!(node.label(), Some("Retry" | "Try again")))
     );
     let heading = nodes(visual)
         .iter()
@@ -919,7 +927,11 @@ fn integration_recovery_scopes_actions_and_preserves_retry_after_failure(cx: &mu
     });
     frame(visual);
     let snapshot = visual.update(|window, _| gpui_kit::base::test_support::snapshots(window));
-    assert!(snapshot.iter().any(|n| n.label() == Some("Retry restore")));
+    assert!(
+        snapshot
+            .iter()
+            .any(|n| n.label() == Some("Try restoring again"))
+    );
     assert!(
         !snapshot
             .iter()
@@ -932,7 +944,11 @@ fn integration_recovery_scopes_actions_and_preserves_retry_after_failure(cx: &mu
     });
     frame(visual);
     let snapshot = visual.update(|window, _| gpui_kit::base::test_support::snapshots(window));
-    assert!(!snapshot.iter().any(|n| n.label() == Some("Retry restore")));
+    assert!(
+        !snapshot
+            .iter()
+            .any(|n| n.label() == Some("Try restoring again"))
+    );
     view.update(visual, |view, cx| {
         view.snapshot["runtime"]["agentOperations"]["fixture"]["operations"][0]["phase"] =
             json!("needsResolution");
@@ -986,7 +1002,7 @@ fn integration_recovery_scopes_actions_and_preserves_retry_after_failure(cx: &mu
         visual.simulate_resize(size(px(width), px(1500.)));
         frame(visual);
         let snapshot = visual.update(|window, _| gpui_kit::base::test_support::snapshots(window));
-        for label in [&path, "Keep current file", "Retry restore"] {
+        for label in [&path, "Keep current file", "Try restoring again"] {
             let node = snapshot.iter().find(|n| n.label() == Some(label)).unwrap();
             assert!(
                 node.bounds().right() <= px(width),
@@ -1891,7 +1907,7 @@ fn connections_toolbar_wraps_and_loading_replaces_the_list_in_place(cx: &mut Tes
                 "Saved (0)",
                 "Projects view",
                 "Ports view",
-                "Discover ports",
+                "Refresh ports",
                 "New forward",
             ] {
                 let node = nodes
@@ -2000,19 +2016,24 @@ fn connections_virtualizes_single_projects_and_tables_and_preserves_focus(cx: &m
 #[gpui::test]
 fn connections_collapse_search_and_refresh_update_virtual_ranges(cx: &mut TestAppContext) {
     let (view, visual) = connections_fixture(cx, false);
-    let click = |label: &str, visual: &mut VisualTestContext| {
+    // Project headings are shared group headings: "name, count", expanded or not.
+    let click = |name: &str, expanded: bool, visual: &mut VisualTestContext| {
+        let prefix = format!("{name}, ");
         let point = visual.update(|window, _| {
             gpui_kit::base::test_support::snapshots(window)
                 .into_iter()
-                .find(|node| node.label() == Some(label))
-                .unwrap_or_else(|| panic!("missing {label}"))
+                .find(|node| {
+                    node.label().is_some_and(|label| label.starts_with(&prefix))
+                        && node.expanded() == Some(expanded)
+                })
+                .unwrap_or_else(|| panic!("missing {name} heading"))
                 .bounds()
                 .center()
         });
         visual.simulate_click(point, Default::default());
         frame(visual);
     };
-    click("Collapse project-0", visual);
+    click("project-0", true, visual);
     assert!(view.read_with(visual, |view, _| {
         view.connections_state["fixture"]
             .collapsed
@@ -2027,7 +2048,7 @@ fn connections_collapse_search_and_refresh_update_virtual_ranges(cx: &mut TestAp
             .item_count()),
         1
     );
-    click("Expand project-0", visual);
+    click("project-0", false, visual);
     assert!(visual.debug_bounds(row_selector(0)).is_some());
     let input = view.read_with(visual, |view, _| {
         view.connections_state["fixture"].input.clone().unwrap()
@@ -2063,7 +2084,7 @@ fn connections_worktree_disclosure_survives_refresh_and_search(cx: &mut TestAppC
     let point = visual.update(|window, _| {
         gpui_kit::base::test_support::snapshots(window)
             .into_iter()
-            .find(|node| node.label() == Some("Collapse worktree feature-a"))
+            .find(|node| node.label() == Some("feature-a, 60") && node.expanded() == Some(true))
             .unwrap()
             .bounds()
             .center()
@@ -2109,7 +2130,7 @@ fn connections_worktree_disclosure_survives_refresh_and_search(cx: &mut TestAppC
     let point = visual.update(|window, _| {
         gpui_kit::base::test_support::snapshots(window)
             .into_iter()
-            .find(|node| node.label() == Some("Expand worktree renamed-a"))
+            .find(|node| node.label() == Some("renamed-a, 60") && node.expanded() == Some(false))
             .unwrap()
             .bounds()
             .center()

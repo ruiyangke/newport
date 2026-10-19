@@ -228,7 +228,7 @@ impl CodeWorkspace {
                 }
                 if let Err(error) = &result {
                     buffer.error = Some(format!(
-                        "Cannot refresh file: {error}. The open buffer is kept."
+                        "Couldn’t refresh the file: {error}. The open buffer is kept."
                     ));
                     return;
                 }
@@ -261,7 +261,7 @@ impl CodeWorkspace {
                     }
                     Err(error) => {
                         this.buffers[index].error = Some(format!(
-                            "Cannot refresh file: {error}. The open buffer is kept."
+                            "Couldn’t refresh the file: {error}. The open buffer is kept."
                         ))
                     }
                 }

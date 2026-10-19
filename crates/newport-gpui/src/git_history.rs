@@ -565,7 +565,7 @@ impl Newport {
             .child(self.status("git-history-tag", cx))
             .when(failed, |view| view.child(
                 crate::controls::compact_button("retry-tag-detail")
-                    .label("Retry annotation").self_start().m_3()
+                    .label("Try again").accessibility_label("Try loading the tag annotation again").self_start().m_3()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.page == Page::Projects && this.git.tab == 4
                             && this.server == server && this.git_repository_id() == repo
@@ -629,7 +629,8 @@ impl Newport {
                 |view| {
                     view.child(
                         crate::controls::compact_button("retry-commit-detail")
-                            .label("Retry commit details")
+                            .label("Try again")
+                            .accessibility_label("Try loading commit details again")
                             .self_start()
                             .m_3()
                             .on_click(cx.listener(|this, _, _, cx| {

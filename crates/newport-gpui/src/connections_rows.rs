@@ -14,29 +14,10 @@ fn transport_dot(status: &str, cx: &App) -> AnyElement {
         "connected" => Some(theme::success(dark)),
         _ => None,
     };
-    let dot = div()
-        .relative()
-        .w(px(8.))
-        .h(px(8.))
-        .flex_shrink_0()
-        .rounded_full()
-        .when_some(tone, |v, color| v.bg(color))
-        .when(tone.is_none(), |v| {
-            v.border(px(1.5))
-                .border_color(cx.theme().muted_foreground.opacity(0.35))
-        });
+    let dot = crate::controls::status_dot(tone, cx).relative();
     if status == "connected" {
         let color = theme::success(dark);
-        // Keep the row's 8px layout slot while centering the selected 6px core.
-        let dot = div().relative().size(px(8.)).flex_shrink_0().child(
-            div()
-                .absolute()
-                .left(px(1.))
-                .top(px(1.))
-                .size(px(6.))
-                .rounded_full()
-                .bg(color),
-        );
+        let dot = crate::controls::status_dot(Some(color), cx).relative();
         if cx.reduce_motion() {
             return dot.into_any_element();
         }
@@ -60,8 +41,8 @@ fn transport_dot(status: &str, cx: &App) -> AnyElement {
                     dot.child(
                         div()
                             .absolute()
-                            .left(px((8. - diameter) / 2.))
-                            .top(px((8. - diameter) / 2.))
+                            .left(px((crate::ui::DOT_SIZE - diameter) / 2.))
+                            .top(px((crate::ui::DOT_SIZE - diameter) / 2.))
                             .size(px(diameter))
                             .rounded_full()
                             .border(px(diameter / 10.))
@@ -117,7 +98,13 @@ fn retained_transport_dot(
         }
     });
     indicator
-        .cached(div().size(px(8.)).flex_shrink_0().style().clone())
+        .cached(
+            div()
+                .size(px(crate::ui::DOT_SIZE))
+                .flex_shrink_0()
+                .style()
+                .clone(),
+        )
         .into_any_element()
 }
 
@@ -717,11 +704,7 @@ impl Newport {
                         .flex()
                         .items_center()
                         .min_h(px(34.))
-                        .bg(rgb(if cx.theme().is_dark() {
-                            0x2a292d
-                        } else {
-                            0xf5f4f6
-                        }))
+                        .bg(theme::table_header(cx.theme().is_dark()))
                         .border_b_1()
                         .border_color(cx.theme().border)
                         .child(
@@ -960,9 +943,9 @@ impl Newport {
                             .text_size(px(crate::ui::FONT_SIZE))
                             .line_height(relative(1.45))
                             .text_color(if row.problem {
-                                cx.theme().danger
+                                theme::error(cx.theme().is_dark())
                             } else if row.rank == 1 {
-                                cx.theme().warning
+                                theme::warning(cx.theme().is_dark())
                             } else {
                                 cx.theme().muted_foreground
                             })
@@ -981,7 +964,7 @@ impl Newport {
                                     )))
                                     .link()
                                     .label("Edit forward")
-                                    .text_color(cx.theme().danger)
+                                    .text_color(theme::error(cx.theme().is_dark()))
                                     .p_0()
                                     .disabled(self.port_busy(&row.entry))
                                     .accessibility_label(format!(
@@ -1053,11 +1036,14 @@ impl Newport {
             ))
             .flex()
             .items_center()
-            .min_h(px(42.))
+            .w_full()
+            .min_h(px(crate::ui::TWO_LINE_ROW_HEIGHT))
             .py(px(5.))
             .flex_shrink_0()
             .when(!table, |v| v.px_3().rounded(px(crate::ui::RADIUS)))
-            .when(nested, |v| v.ml(px(if compact { 16. } else { 32. })))
+            // Nested rows indent their content, not their fill, so hover and
+            // selection still span the list's full width.
+            .when(nested, |v| v.pl(px(12. + if compact { 16. } else { 32. })))
             .when(stripe, |v| v.bg(cx.theme().foreground.opacity(0.02)))
             .when(engaged, |v| v.bg(theme::row_hover(cx)))
             .hover(|v| v.bg(theme::row_hover(cx)))
@@ -1084,7 +1070,10 @@ impl Newport {
                     .child(if table || row.active || row.problem {
                         dot
                     } else {
-                        div().w(px(8.)).flex_shrink_0().into_any_element()
+                        div()
+                            .w(px(crate::ui::DOT_SIZE))
+                            .flex_shrink_0()
+                            .into_any_element()
                     })
                     .child(
                         div()
@@ -1135,7 +1124,10 @@ impl Newport {
                                     .items_center()
                                     .gap_1()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(Icon::new(IconName::GitBranch).size(px(10.)))
+                                    .child(
+                                        Icon::new(IconName::GitBranch)
+                                            .size(px(crate::ui::SMALL_ICON)),
+                                    )
                                     .child(
                                         div()
                                             .min_w_0()
@@ -1250,14 +1242,14 @@ impl Newport {
             id: SharedString::from(format!("actions-visibility-{}", row.key)),
             group: SharedString::from(format!("connection-row-{}", row.key)),
             engaged,
-            button: crate::controls::compact_icon_button(SharedString::from(format!(
+            button: crate::controls::icon_button(SharedString::from(format!(
                 "actions-{}",
                 row.key
             )))
             .icon(IconName::Ellipsis)
             .ghost()
             .disabled(pending)
-            .accessibility_label(format!("Actions for port {}", row.port)),
+            .accessibility_label(format!("More actions for port {}", row.port)),
             builder: Box::new(move |mut menu, _, _| {
                 if forwards.is_empty() {
                     let weak = weak.clone();

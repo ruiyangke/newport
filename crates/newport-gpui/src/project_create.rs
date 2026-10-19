@@ -181,9 +181,9 @@ impl Newport {
             .when_some(validation.err().filter(|_| form.attempted && !form.created), |view, error| view.child(project_dialog::validation_error(error, cx)))
             .when(self.resources.get("project-created-save").is_some_and(|r| r.pending || r.error.is_some()), |view| view.child(self.status("project-created-save",cx)))
             .child(project_dialog::actions()
-                .child(crate::controls::button("create-project-cancel").label(if form.created {"Close"}else{"Cancel"}).disabled(busy).on_click(cx.listener(|this,_,_,cx|{this.project_create=None;cx.notify();})))
-                .when(!form.created, |v|v.child(crate::controls::button("create-project-submit").primary().loading(busy).label(if form.clone_repo {"Clone repository"}else{"Create repository"}).disabled(busy||form.created).on_click(cx.listener(|this,_,_,cx|this.submit_project_create(cx)))))
-                .when(form.created && form.bookmark.is_some(), |v|v.child(crate::controls::button("retry-created-project-save").label("Retry saving project").disabled(busy).on_click(cx.listener(|this,_,_,cx|this.retry_project_bookmark(cx))))))
+                .child(crate::controls::form_button("create-project-cancel").min_w(px(76.)).label(if form.created {"Close"}else{"Cancel"}).disabled(busy).on_click(cx.listener(|this,_,_,cx|{this.project_create=None;cx.notify();})))
+                .when(!form.created, |v|v.child(crate::controls::form_button("create-project-submit").min_w(px(76.)).primary().loading(busy).label(if form.clone_repo {"Clone repository"}else{"Create repository"}).disabled(busy||form.created).on_click(cx.listener(|this,_,_,cx|this.submit_project_create(cx)))))
+                .when(form.created && form.bookmark.is_some(), |v|v.child(crate::controls::form_button("retry-created-project-save").min_w(px(76.)).label("Try again").accessibility_label("Try saving the project again").disabled(busy).on_click(cx.listener(|this,_,_,cx|this.retry_project_bookmark(cx))))))
             .into_any_element()
     }
 }

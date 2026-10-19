@@ -100,27 +100,27 @@ pub(super) fn render_setup(setup: Setup, cx: &App) -> AnyElement {
         "preparing" => (
             "Couldn’t check this server",
             "Check the server address and your SSH credentials, then retry setup.",
-            "Retry setup",
+            "Try setup again",
         ),
         "uploading" => (
             "Agent upload failed",
             "Check your SSH connection, then retry to send the agent again.",
-            "Retry upload",
+            "Try uploading again",
         ),
         "installing" | "verifying" | "activating" => (
             "Agent installation failed",
             "Review the error details, then retry installation.",
-            "Retry installation",
+            "Try installing again",
         ),
         "ready" => (
             "Couldn’t load server metrics",
-            "Retry to request a new reading.",
-            "Retry metrics",
+            "Try again to request a new reading.",
+            "Try reading metrics again",
         ),
         _ => (
             "Server setup needs attention",
             "Review the error details, then retry setup.",
-            "Retry setup",
+            "Try setup again",
         ),
     };
     let title = if failed {
@@ -160,23 +160,35 @@ pub(super) fn render_setup(setup: Setup, cx: &App) -> AnyElement {
         .flex_col()
         .gap(px(12.))
         .child(
+            // Title and description sit 6px apart, as in a page title.
             div()
-                .id("agent-setup-status")
-                .role(Role::Status)
-                .test_support()
-                .aria_label(title)
-                .text_size(px(if overview { 22. } else { 14. }))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(title),
-        )
-        .when(!failed, |body| {
-            body.child(
-                div()
-                    .text_size(px(crate::ui::FONT_SIZE))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(detail),
-            )
-        });
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .id("agent-setup-status")
+                        .role(Role::Status)
+                        .test_support()
+                        .aria_label(title)
+                        .text_size(px(if overview {
+                            crate::ui::PAGE_TITLE
+                        } else {
+                            crate::ui::FONT_SIZE
+                        }))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title),
+                )
+                .when(!failed, |head| {
+                    head.child(
+                        div()
+                            .text_size(px(crate::ui::FONT_SIZE))
+                            .line_height(relative(1.6))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(detail),
+                    )
+                }),
+        );
     if total > 0 && !failed && stage == "uploading" {
         let fraction = (sent as f32 / total as f32).clamp(0., 1.);
         body = body
@@ -216,14 +228,12 @@ pub(super) fn render_setup(setup: Setup, cx: &App) -> AnyElement {
     }
     if failed {
         body = body.child(
-            div()
-                .id("agent-setup-error")
-                .role(Role::Alert)
-                .test_support()
-                .aria_label(error.unwrap_or_default().to_owned())
-                .text_size(px(crate::ui::FONT_SIZE))
-                .text_color(cx.theme().danger)
-                .child(error.unwrap_or_default().to_owned()),
+            crate::controls::alert(
+                "agent-setup-error",
+                error.unwrap_or_default().to_owned(),
+                cx,
+            )
+            .test_support(),
         );
         body = body.child(
             div()
@@ -234,7 +244,8 @@ pub(super) fn render_setup(setup: Setup, cx: &App) -> AnyElement {
         body = body.child(
             div().flex().child(
                 crate::controls::button("retry-agent-installation")
-                    .label(retry_label)
+                    .label("Try again")
+                    .accessibility_label(retry_label)
                     .loading(pending)
                     .disabled(pending || !can_retry)
                     .on_click(move |_, window, cx| retry(window, cx)),

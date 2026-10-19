@@ -10,7 +10,7 @@ pub(super) fn selection_style(
     selected: bool,
     cx: &App,
 ) -> gpui_kit::component::button::ButtonCustomVariant {
-    let tint = theme::git_selection(cx.theme().is_dark());
+    let tint = theme::selected_fill(cx.theme().is_dark());
     gpui_kit::component::button::ButtonCustomVariant::new(cx)
         .color(if selected {
             tint
@@ -19,6 +19,15 @@ pub(super) fn selection_style(
         })
         .hover(if selected { tint } else { theme::row_hover(cx) })
         .active(tint)
+}
+
+/// Focusable Git list rows draw the shared inset ring rather than Kit's
+/// outer ring, which neighbouring rows and the list's clip would cut off.
+pub(super) fn row_focus(button: Button, cx: &App) -> Button {
+    use gpui_kit::component::FocusableExt as _;
+    button
+        .focus_ring(false)
+        .focus_visible(|style| crate::controls::inset_focus_ring(style, cx))
 }
 
 pub(super) fn mark(status: &str) -> &'static str {

@@ -158,7 +158,7 @@ impl Actions {
                     .disabled(!self.enabled)
                     .accessibility_label(label)
                     .size_full()
-                    .focus_visible(move |s| s.border_1().border_color(color))
+                    .focus_visible(move |s| crate::controls::inset_focus_ring(s, cx))
                     .on_change(move |_, _, _, cx| toggle(Some(&lines), cx))
                     .child(track),
                 );
@@ -542,7 +542,7 @@ pub(super) fn line_number(
         .when(actions.enabled, |v| {
             v.cursor_pointer().hover(move |s| s.bg(color.opacity(0.15)))
         })
-        .focus_visible(move |s| s.border_1().border_color(color))
+        .focus_visible(move |s| crate::controls::inset_focus_ring(s, cx))
         .on_mouse_down(MouseButton::Left, move |event, _, cx| {
             if enabled {
                 begin(

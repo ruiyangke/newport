@@ -275,9 +275,9 @@ impl Newport {
             .flex()
             .flex_wrap()
             .items_center()
-            .gap_2()
-            .px_3()
-            .py_2()
+            .gap(px(8.))
+            .px(px(12.))
+            .py(px(8.))
             .border_b_1()
             .border_color(cx.theme().border)
             .on_action(
@@ -286,8 +286,9 @@ impl Newport {
                 }),
             )
             .child(
-                crate::controls::input(&controls.input)
-                    .w(px(200.))
+                crate::controls::search_input(&controls.input, cx)
+                    .w(px(crate::controls::SEARCH_WIDTH))
+                    .max_w_full()
                     .aria_label("Find in diff"),
             )
             .children(

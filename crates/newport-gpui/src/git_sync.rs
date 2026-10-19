@@ -216,7 +216,7 @@ impl Newport {
                     .max_w(px(200.))
                     .label(format!("{} {remote}", kind.label()))
                     .icon(match kind {
-                        Kind::Fetch => IconName::RefreshCw,
+                        Kind::Fetch => IconName::Download,
                         Kind::Pull => IconName::ArrowDown,
                         Kind::Push => IconName::ArrowUp,
                     })

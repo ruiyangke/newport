@@ -16,7 +16,7 @@ pub fn render(bytes: PdfBytes, page_number: usize) -> Result<Page, String> {
     let width = page.data["width"].as_u64().ok_or("Missing PDF width.")? as u32;
     let height = page.data["height"].as_u64().ok_or("Missing PDF height.")? as u32;
     let frame = image::RgbaImage::from_raw(width, height, page.pixels)
-        .ok_or("Cannot allocate PDF preview.")?;
+        .ok_or("Couldn’t allocate the PDF preview.")?;
     Ok(Page {
         data: page.data,
         image: Arc::new(RenderImage::new(vec![image::Frame::new(frame)])),

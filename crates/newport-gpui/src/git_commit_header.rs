@@ -222,7 +222,7 @@ impl Newport {
                                         }
                                         .to_owned(),
                                     )
-                                    .text_size(px(14.))
+                                    .text_size(px(crate::ui::FONT_SIZE))
                                     .line_height(px(20.))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(

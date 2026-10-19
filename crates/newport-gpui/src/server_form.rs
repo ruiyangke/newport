@@ -248,13 +248,10 @@ impl ServerForm {
                         .pt(px(if compact { 14. } else { 20. }))
                         .pb(px(if compact { 0. } else { 4. }))
                         .child(
-                            div()
+                            crate::controls::dialog_title(title)
                                 .id("server-editor-title")
                                 .role(accesskit::Role::Heading)
-                                .aria_label(title)
-                                .text_size(px(17.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(title),
+                                .aria_label(title),
                         )
                         .child(
                             crate::controls::icon_button("close-server-editor")
@@ -262,6 +259,7 @@ impl ServerForm {
                                 .icon(IconName::Close)
                                 .text_color(cx.theme().muted_foreground)
                                 .accessibility_label("Close dialog")
+                                .tooltip("Close dialog")
                                 .disabled(pending)
                                 .on_click(move |_, window, cx| Self::close(&close, window, cx)),
                         ),
@@ -336,7 +334,7 @@ impl ServerForm {
             self.key_revision = revision;
             self.keys_loading = false;
             if let Some(error) = error {
-                self.warnings = vec![format!("Could not read agent keys: {error}")];
+                self.warnings = vec![format!("Couldn’t read agent keys: {error}")];
             } else {
                 self.keys = rows(&value["keys"]);
                 self.warnings = value["warnings"]
@@ -521,7 +519,7 @@ impl ServerForm {
             .aria_label(title.to_owned())
             .disabled(self.pending)
             .rounded(px(crate::ui::RADIUS))
-            .bg(control_background(cx))
+            .bg(crate::theme::field_background(cx.theme().is_dark()))
             .border_color(cx.theme().border);
         field(title).child(input).when_some(
             self.error
@@ -537,7 +535,7 @@ impl ServerForm {
             .w_full()
             .menu_item_min_height(px(28.))
             .rounded(px(crate::ui::RADIUS))
-            .bg(control_background(cx))
+            .bg(crate::theme::field_background(cx.theme().is_dark()))
             .border_color(cx.theme().border)
     }
     fn footer(form: &Entity<Self>, window: &Window, cx: &App) -> Div {
@@ -666,15 +664,14 @@ impl Render for ServerForm {
             } else if self.keys.is_empty() {
                 info = info.child(help(
                     "No keys found. Unlock your SSH agent and refresh, or use a key file.",
-                    12.,
                     cx,
                 ));
             }
             for warning in &self.warnings {
-                info = info.child(help(warning.clone(), 12., cx));
+                info = info.child(help(warning.clone(), cx));
             }
             if let Some(fingerprint) = self.value["agentKeyFingerprint"].as_str() {
-                info = info.child(help(format!("Selected key: {fingerprint}"), 12., cx));
+                info = info.child(help(format!("Selected key: {fingerprint}"), cx));
             }
             body = body
                 .child(self.scroll.row(
@@ -720,7 +717,6 @@ impl Render for ServerForm {
                     9,
                     self.input_field(IDENTITY, "Identity file", cx).child(help(
                         "Load encrypted keys into your system agent first.",
-                        11.,
                         cx,
                     )),
                 ));
@@ -734,7 +730,6 @@ impl Render for ServerForm {
                     } else {
                         "Saved in your encrypted vault."
                     },
-                    11.,
                     cx,
                 )),
             ));
@@ -817,14 +812,6 @@ fn key_choices(value: &Value, keys: &[Value], loading: bool) -> Vec<Choice> {
 fn compact(window: &Window) -> bool {
     window.viewport_size().height <= px(560.) || window.viewport_size().width <= px(540.)
 }
-fn control_background(cx: &App) -> Hsla {
-    rgb(if cx.theme().is_dark() {
-        0x232426
-    } else {
-        0xfbfafb
-    })
-    .into()
-}
 fn field(title: &str) -> Div {
     div().flex().flex_col().min_w_0().gap(px(7.)).child(
         div()
@@ -842,9 +829,9 @@ fn legend(title: &'static str, cx: &App) -> Div {
         .line_height(relative(1.))
         .child(title)
 }
-fn help(value: impl Into<String>, size: f32, cx: &App) -> Div {
+fn help(value: impl Into<String>, cx: &App) -> Div {
     div()
-        .text_size(px(size))
+        .text_size(px(crate::ui::FONT_SIZE))
         .font_weight(FontWeight::NORMAL)
         .text_color(cx.theme().muted_foreground)
         .line_height(relative(1.65))

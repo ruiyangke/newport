@@ -1,5 +1,6 @@
 //! Integrations: sharing controls and always-visible terminal and agent settings.
 use super::*;
+use gpui_kit::component::scroll::ScrollableElement as _;
 
 fn section_heading(id: &'static str, label: &'static str) -> impl IntoElement {
     div()
@@ -11,6 +12,17 @@ fn section_heading(id: &'static str, label: &'static str) -> impl IntoElement {
         .text_size(px(14.))
         .font_weight(FontWeight::SEMIBOLD)
         .child(label)
+}
+
+/// A page section spaced like Settings: 22px above and below, a rule after.
+fn section(first: bool, cx: &App) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .pt(px(if first { 4. } else { 22. }))
+        .pb(px(22.))
 }
 
 impl Newport {
@@ -58,19 +70,19 @@ impl Newport {
             muted
         } else if let Some(transport) = transport_wait {
             if transport.phase == crate::connectivity::Phase::Failed {
-                cx.theme().danger
+                theme::error(cx.theme().is_dark())
             } else {
                 muted
             }
         } else {
             match status {
                 "connected" => theme::success(cx.theme().is_dark()),
-                "error" => cx.theme().danger,
-                "connecting" | "reconnecting" => cx.theme().warning,
+                "error" => theme::error(cx.theme().is_dark()),
+                "connecting" | "reconnecting" => theme::warning(cx.theme().is_dark()),
                 _ => muted,
             }
         };
-        let mut body = div().w_full().max_w(px(720.)).min_w_0().flex().flex_col();
+        let mut body = div().w_full().min_w_0().flex().flex_col().gap(px(16.));
         for (feature, title, description, checked) in [
             (
                 "clipboard",
@@ -116,10 +128,6 @@ impl Newport {
             .to_owned();
             body = body.child(
                 div()
-                    .py(px(12.))
-                    .when(feature == "clipboard", |row| {
-                        row.border_b_1().border_color(cx.theme().border)
-                    })
                     .flex()
                     .items_center()
                     .justify_between()
@@ -142,8 +150,7 @@ impl Newport {
                                             .role(Role::Label)
                                             .test_support()
                                             .aria_label(title)
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_size(px(14.))
+                                            .text_size(px(crate::ui::FONT_SIZE))
                                             .line_height(relative(1.5))
                                             .when(!feature_disabled, |label| {
                                                 label.cursor_pointer().on_click(cx.listener(
@@ -252,10 +259,9 @@ impl Newport {
                         .role(Role::Alert)
                         .test_support()
                         .aria_label(error.to_owned())
-                        .mb(px(12.))
                         .text_size(px(crate::ui::FONT_SIZE))
                         .line_height(relative(1.6))
-                        .text_color(cx.theme().danger)
+                        .text_color(theme::error(cx.theme().is_dark()))
                         .child(error.to_owned()),
                 );
             }
@@ -344,8 +350,11 @@ impl Newport {
             let restore_operation = operation_id.clone();
             actions = actions.child(
                 crate::controls::button("needle-restore")
+                    .when(operation["phase"] == "rollingBack", |b| {
+                        b.accessibility_label("Try restoring again")
+                    })
                     .label(if operation["phase"] == "rollingBack" {
-                        "Retry restore"
+                        "Try again"
                     } else if helpers {
                         "Restore shell setup"
                     } else {
@@ -404,8 +413,9 @@ impl Newport {
             attention = attention.child(self.standalone_helper_history(cx));
         }
         let terminal_status = terminal_setup_status(operations, removal.is_some());
-        let mut shell = div().py(px(16.)).flex().flex_col().gap(px(8.)).child(
+        let mut shell = section(false, cx).gap(px(8.)).child(
             div()
+                .mb(px(8.))
                 .flex()
                 .flex_wrap()
                 .items_center()
@@ -453,17 +463,13 @@ impl Newport {
         } else {
             "Not checked"
         };
-        let mut maintenance = div()
+        let mut maintenance = section(false, cx)
             .id("needle-status")
             .debug_selector(|| "needle-status".into())
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .pt(px(16.))
-            .flex()
-            .flex_col()
             .gap(px(8.))
             .child(
                 div()
+                    .mb(px(8.))
                     .flex()
                     .flex_wrap()
                     .items_center()
@@ -508,40 +514,53 @@ impl Newport {
             }
             maintenance = maintenance.child(details);
         }
+        let attention_shown = unfinished.is_some() || management_attention || helper_attention;
+        let content = div()
+            .id("integrations-content")
+            .debug_selector(|| "integrations-content".into())
+            .w_full()
+            .max_w(px(720.))
+            .mx_auto()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(crate::controls::page_title("Integrations", None, cx).mb(px(16.)))
+            .when(attention_shown, |page| {
+                page.child(section(true, cx).child(attention))
+            })
+            .child(
+                section(!attention_shown, cx)
+                    .child(body)
+                    .when(show_connection, |section| {
+                        section.child(connection.mt(px(16.)))
+                    }),
+            )
+            .child(shell)
+            .child(maintenance);
         div()
-            .id("integrations-scroll")
+            .id("integrations-scroll-region")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .p(px(crate::controls::PAGE_PADDING))
+            .min_w_0()
             .flex()
-            .items_start()
+            .flex_col()
+            .overflow_hidden()
+            .relative()
             .child(
                 div()
-                    .id("integrations-content")
-                    .debug_selector(|| "integrations-content".into())
-                    .w_full()
-                    .max_w(px(720.))
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(24.))
-                    .when(
-                        unfinished.is_some() || management_attention || helper_attention,
-                        |page| page.child(attention),
-                    )
-                    .child(body)
-                    .when(show_connection, |page| page.child(connection))
+                    .id("integrations-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.integration_scroll)
                     .child(
                         div()
-                            .border_t_1()
-                            .border_color(cx.theme().border)
-                            .flex()
-                            .flex_col()
-                            .child(shell)
-                            .child(maintenance),
+                            .w_full()
+                            .p(px(crate::controls::PAGE_PADDING))
+                            .child(content),
                     ),
             )
+            .vertical_scrollbar(&self.integration_scroll)
             .into_any_element()
     }
 }

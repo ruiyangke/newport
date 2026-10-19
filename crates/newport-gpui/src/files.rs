@@ -466,12 +466,12 @@ impl Newport {
                 });
             let path = cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder("Go to folder…")
+                    .placeholder("Go to folder")
                     .default_value(path_text)
             });
             let filter = cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder("Find in this folder")
+                    .placeholder("Find a file in this folder")
                     .default_value(query)
             });
             let server = self.server.clone();
@@ -1046,6 +1046,7 @@ impl Newport {
                     .ghost()
                     .icon(IconName::Ellipsis)
                     .accessibility_label("More folder actions")
+                    .tooltip("More folder actions")
                     .loading(
                         project_pending && browser.project_path.as_deref() == Some(path.as_str()),
                     )
@@ -1056,7 +1057,7 @@ impl Newport {
                         let edit = view.clone();
                         let (server, connection) = (server.clone(), connection.clone());
                         menu.item(
-                            PopupMenuItem::new("Open this folder as project")
+                            PopupMenuItem::new("Open as project")
                                 .icon(IconName::FolderGit2)
                                 .disabled(project_target.is_none() || project_pending)
                                 .on_click(move |_, _, cx| {
@@ -1076,7 +1077,7 @@ impl Newport {
                                 }),
                         )
                         .item(
-                            PopupMenuItem::new("Go to folder…")
+                            PopupMenuItem::new("Go to folder")
                                 .icon(IconName::CornerDownRight)
                                 .on_click(move |_, window, cx| {
                                     let _ = edit.update(cx, |this, cx| {
@@ -1311,32 +1312,26 @@ impl Newport {
             .child(self.status("file-project", cx))
             .when_some(browser.reads.listing_error(), |view, error| {
                 let attempted = browser.reads.attempted_path().unwrap_or(".").to_owned();
-                let message = format!("Cannot open {attempted}: {error}");
+                let message = format!("Couldn’t open {attempted}: {error}");
                 let scope = browser.connection.clone();
                 let server = self.server.clone();
                 view.child(
                     div()
-                        .id("file-listing-error")
-                        .role(Role::Alert)
-                        .aria_label(message.clone())
                         .flex()
                         .items_center()
                         .gap_2()
-                        .px(px(crate::controls::PAGE_PADDING))
+                        .px(px(12.))
                         .py(px(8.))
                         .flex_shrink_0()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
                         .child(
-                            div()
+                            crate::controls::alert("file-listing-error", message, cx)
                                 .flex_1()
-                                .min_w_0()
-                                .text_color(cx.theme().danger)
-                                .child(message),
+                                .min_w_0(),
                         )
                         .child(
                             crate::controls::button("files-retry")
-                                .label("Retry")
+                                .label("Try again")
+                                .accessibility_label(format!("Try opening {attempted} again"))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     if this.file_browser_current(&server, &scope)
                                         && this.file_browsers[&server].reads.attempted_path()

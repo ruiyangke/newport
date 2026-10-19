@@ -86,7 +86,9 @@ impl Newport {
         let error = resource.and_then(|r| r.error.clone());
         if pending {
             return project_loading::workspace(
-                crate::controls::button("open-back-projects")
+                crate::controls::compact_button("open-back-projects")
+                    .ghost()
+                    .icon(IconName::ArrowLeft)
                     .label("All projects")
                     .on_click(cx.listener(|this, _, _, cx| this.git_all_projects(cx))),
                 cx,
@@ -104,37 +106,48 @@ impl Newport {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .items_start()
-            .gap_3()
-            .p_5()
             .child(
-                crate::controls::button("open-back-projects")
-                    .label("All projects")
-                    .on_click(cx.listener(|this, _, _, cx| this.git_all_projects(cx))),
+                crate::ui::header().px(px(12.)).child(
+                    crate::controls::compact_button("open-back-projects")
+                        .ghost()
+                        .icon(IconName::ArrowLeft)
+                        .label("All projects")
+                        .on_click(cx.listener(|this, _, _, cx| this.git_all_projects(cx))),
+                ),
             )
-            .when(!pending, |view| {
-                view.child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("Could not open this checkout"),
+            .child(
+                empty::pane(
+                    IconName::FolderGit2,
+                    "Newport couldn’t open this checkout",
+                    text(&self.git.opening_path, "display"),
+                    cx,
                 )
-            })
-            .child(crate::label(text(&self.git.opening_path, "display")))
-            .when_some(error, |view, error| {
-                view.child(div().text_color(cx.theme().danger).child(error))
-            })
-            .when(!pending, |view| {
-                view.child(crate::label(
-                    "Retry the connection, or open the saved project to locate a moved worktree.",
-                ))
+                .when_some(error, |view, error| {
+                    view.child(
+                        div()
+                            .max_w(px(360.))
+                            .text_center()
+                            .child(crate::controls::alert("open-repository-error", error, cx)),
+                    )
+                })
+                .child(
+                    crate::label(
+                        "Try again, or open the saved project to locate a moved worktree.",
+                    )
+                    .max_w(px(360.))
+                    .text_center()
+                    .text_size(px(crate::ui::FONT_SIZE)),
+                )
                 .child(
                     div()
                         .flex()
                         .flex_wrap()
-                        .gap_2()
+                        .justify_center()
+                        .gap(px(8.))
                         .child(
                             crate::controls::button("retry-open-repository")
-                                .label("Retry")
+                                .label("Try again")
+                                .accessibility_label("Try opening this checkout again")
                                 .disabled(!self.git.opening_path["bytesB64"].is_string())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.git_open_with_retry(this.git.opening_path.clone(), true);
@@ -151,8 +164,8 @@ impl Newport {
                                     })),
                             )
                         }),
-                )
-            })
+                ),
+            )
             .into_any_element()
     }
 }

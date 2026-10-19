@@ -127,8 +127,9 @@ impl Newport {
             .child(
                 project_dialog::actions()
                     .child(
-                        crate::controls::button("cancel-add-project")
+                        crate::controls::form_button("cancel-add-project")
                             .label("Cancel")
+                            .min_w(px(76.))
                             .disabled(pending)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if !this.project_add_pending() {
@@ -139,8 +140,9 @@ impl Newport {
                             })),
                     )
                     .child(
-                        crate::controls::button("add-project")
+                        crate::controls::form_button("add-project")
                             .primary()
+                            .min_w(px(76.))
                             .loading(pending)
                             .label("Add repository")
                             .disabled(pending)

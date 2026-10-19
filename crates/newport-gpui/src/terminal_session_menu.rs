@@ -26,11 +26,9 @@ pub(super) fn menu_for_tab(
         return menu;
     };
     let rename = view.clone();
-    let mut menu = menu.item(
-        PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
-            let _ = rename.update(cx, |workspace, cx| workspace.rename(id, window, cx));
-        }),
-    );
+    let mut menu = menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
+        let _ = rename.update(cx, |workspace, cx| workspace.rename(id, window, cx));
+    }));
     if custom {
         let reset = view.clone();
         menu = menu.item(PopupMenuItem::new("Reset name").on_click(move |_, _, cx| {

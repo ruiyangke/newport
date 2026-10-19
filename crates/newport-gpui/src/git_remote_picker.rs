@@ -94,7 +94,7 @@ impl ListDelegate for Delegate {
         cx: &mut Context<ListState<Self>>,
     ) -> impl IntoElement {
         div().when(!self.failed, |view| {
-            view.child(empty::compact("No matching remotes.", cx))
+            view.child(empty::compact("No remotes match.", cx))
         })
     }
     fn has_more(&self, _: &App) -> bool {
@@ -350,7 +350,7 @@ impl RemotePicker {
                 div().h(px(260.)).child(
                     List::new(&self.list)
                         .with_size(gpui_kit::component::Size::Medium)
-                        .search_placeholder("Search remotes…")
+                        .search_placeholder("Find a remote")
                         .h_full(),
                 ),
             )
@@ -379,17 +379,15 @@ impl RemotePicker {
                     .child(message)
             })
             .when_some(self.names_error.as_ref(), |view, error| {
-                view.child(
-                    crate::label(error.clone())
-                        .p_2()
-                        .text_size(px(crate::ui::FONT_SIZE))
-                        .text_color(cx.theme().danger),
-                )
-                .child(
-                    crate::controls::button("retry-remote-names")
-                        .label("Reload remotes")
-                        .on_click(cx.listener(|this, _, _, cx| this.read_names(false, false, cx))),
-                )
+                view.child(crate::controls::alert("remote-names-error", error.clone(), cx).p_2())
+                    .child(
+                        crate::controls::button("retry-remote-names")
+                            .label("Try again")
+                            .accessibility_label("Try loading remotes again")
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.read_names(false, false, cx)),
+                            ),
+                    )
             })
             .into_any_element()
     }
@@ -413,19 +411,24 @@ impl Render for RemotePicker {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_1()
                                     .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .w_full()
+                                    .gap(px(6.))
+                                    .min_w_0()
+                                    .child(
+                                        Icon::new(IconName::Globe)
+                                            .size(px(crate::controls::ICON_SIZE))
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
                                     .child(div().min_w_0().truncate().child(
                                         if self.name.is_empty() {
                                             "Choose remote".to_owned()
                                         } else {
                                             self.name.clone()
                                         },
-                                    ))
-                                    .child(Icon::new(IconName::ChevronDown).size(px(14.))),
+                                    )),
                             )
+                            .dropdown_caret(true)
                             .accessibility_label(format!(
                                 "Remote: {}",
                                 if self.name.is_empty() {
@@ -467,14 +470,15 @@ impl Render for RemotePicker {
                 self.detail_pending || (self.names_pending && self.name.is_empty()),
             ))
             .when_some(self.detail_error.as_ref(), |view, error| {
-                view.child(
-                    crate::label(error.clone())
-                        .text_size(px(crate::ui::FONT_SIZE))
-                        .text_color(cx.theme().danger),
-                )
+                view.child(crate::controls::alert(
+                    "remote-detail-error",
+                    error.clone(),
+                    cx,
+                ))
                 .child(
                     crate::controls::button("retry-remote-detail")
-                        .label("Retry remote")
+                        .label("Try again")
+                        .accessibility_label("Try reading the remote again")
                         .disabled(!self.enabled)
                         .on_click(cx.listener(|this, _, _, cx| this.read_detail(cx))),
                 )

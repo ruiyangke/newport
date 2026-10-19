@@ -251,7 +251,8 @@ impl Files {
                     .child(alert("compose-files-read-error", error.clone(), cx).test_support())
                     .child(
                         crate::controls::button("compose-files-retry")
-                            .label("Retry files")
+                            .label("Try again")
+                            .accessibility_label("Try reading files again")
                             .disabled(self.pending)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if this.compose_project_selected(&project) && this.tab == 2 {
@@ -310,7 +311,7 @@ impl Files {
             let paths: Vec<_> = self.tabs.iter().map(|(path, _)| path.clone()).collect();
             view = view.child(
                 crate::controls::tabs("compose-file-tabs")
-                    .gap_0()
+                    .underline()
                     .menu(true)
                     .accessibility_label("Compose files")
                     .track_scroll(&self.tab_scroll)
@@ -328,7 +329,7 @@ impl Files {
                         Tab::new()
                             .label(path.rsplit('/').next().unwrap_or(&path).to_owned())
                             .aria_label(path.clone())
-                            .focus_visible(|style| style.border_1().border_color(cx.theme().ring))
+                            .focus_visible(|style| crate::controls::inset_focus_ring(style, cx))
                             .track_focus(
                                 &focus
                                     .clone()
@@ -419,7 +420,8 @@ impl Files {
     fn retry_button(&self, project: &str, cx: &mut Context<ContainersPanel>) -> AnyElement {
         let project = project.to_owned();
         crate::controls::button("compose-files-retry")
-            .label("Retry files")
+            .label("Try again")
+            .accessibility_label("Try reading files again")
             .disabled(self.pending)
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.compose_project_selected(&project) && this.tab == 2 {

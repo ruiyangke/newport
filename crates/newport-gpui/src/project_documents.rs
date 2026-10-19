@@ -371,8 +371,7 @@ impl project_editor::CodeWorkspace {
             return;
         }
         if panel == 1 && self.navigator.filter.is_none() {
-            let input =
-                cx.new(|cx| InputState::new(window, cx).placeholder("Filter changed files"));
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find a changed file"));
             self.navigator.filter_subscription = Some(cx.observe(&input, |this, input, cx| {
                 let query = input.read(cx).value().trim().to_owned();
                 if this.navigator.query != query {
@@ -491,19 +490,16 @@ impl project_editor::CodeWorkspace {
                 view.when_some(self.navigator.filter.as_ref(), |view, input| {
                     view.child(
                         div().p_2().child(
-                            crate::controls::input(input).aria_label("Filter changed files"),
+                            crate::controls::search_input(input, cx).aria_label("Find a changed file"),
                         ),
                     )
                 })
             })
             .when_some(collection.error.clone(), |view, error| {
                 view.child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .text_size(px(crate::ui::FONT_SIZE))
-                        .text_color(cx.theme().danger)
-                        .child(error),
+                    crate::controls::alert(("project-nav-error", index), error, cx)
+                        .px_3()
+                        .py_2(),
                 )
             })
             .when(
@@ -557,34 +553,18 @@ impl project_editor::CodeWorkspace {
                                     let title = group.title();
                                     let collapsed = this.navigator.collapsed.contains(title);
                                     let toggle_group = title.to_owned();
-                                    let mut heading_content = div()
-                                        .w_full().justify_start().gap(px(5.))
-                                        .text_size(px(crate::ui::FONT_SIZE));
                                     return div()
                                         .id(SharedString::from(format!("project-nav-group-row-{title}")))
-                                        .hover(|style| style.bg(theme::row_hover(cx)))
-                                        .w_full().min_w_0().h(px(28.)).pl(px(12.)).pr(px(8.))
-                                        .flex().items_center().gap(px(8.))
-                                        .text_size(px(crate::ui::FONT_SIZE)).text_color(cx.theme().muted_foreground)
-                                        .child(crate::controls::compact_button(SharedString::from(format!("project-nav-group-{title}")))
-                                            .ghost()
-                                            .custom(gpui_kit::component::button::ButtonCustomVariant::new(cx)
-                                                .color(cx.theme().transparent)
-                                                .hover(cx.theme().transparent).active(cx.theme().transparent))
-                                            .flex_1().min_w_0().h(px(28.)).min_h(px(28.)).max_h(px(28.))
-                                            .px_0().rounded_none().border_0().justify_start().gap(px(5.))
-                                            .content_style(heading_content.style().clone(), gpui_kit::component::Size::Size(px(crate::controls::ICON_SIZE)))
-                                            .text_color(cx.theme().muted_foreground).font_weight(FontWeight::NORMAL)
-                                            .icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown })
-                                            .label(title).expanded(!collapsed)
-                                            .accessibility_label(format!("{} {title}", if collapsed { "Expand" } else { "Collapse" }))
+                                        .w_full().min_w_0().h(px(crate::ui::ROW_HEIGHT)).pr(px(8.))
+                                        .flex().items_center()
+                                        .child(crate::controls::group_heading(SharedString::from(format!("project-nav-group-{title}")), title, count, !collapsed, cx)
+                                            .flex_1().min_w_0()
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 if !this.navigator.collapsed.remove(&toggle_group) {
                                                     this.navigator.collapsed.insert(toggle_group.clone());
                                                 }
                                                 cx.notify();
                                             })))
-                                        .child(div().text_size(px(crate::ui::FONT_SIZE)).child(count.to_string()))
                                         .child(div().w(px(24.)).flex_shrink_0().flex().items_center().justify_center()
                                             .when(group != ChangeGroup::Conflicts, |slot| slot.child(
                                                 crate::controls::checkbox(SharedString::from(format!("project-stage-shown-{title}")))
@@ -623,7 +603,7 @@ impl project_editor::CodeWorkspace {
                                     .id(SharedString::from(format!("project-nav-row-{identity}")))
                                     .w_full()
                                     .overflow_hidden()
-                                    .h(px(if index == 0 { 28. } else { 44. }))
+                                    .h(px(if index == 0 { crate::ui::ROW_HEIGHT } else { crate::ui::TWO_LINE_ROW_HEIGHT }))
                                     .when(index == 0, |row| row.pr(px(8.)).when(!selected, |row| row.hover(|style| style.bg(theme::row_hover(cx)))))
                                     .flex()
                                     .items_center()
@@ -646,11 +626,11 @@ impl project_editor::CodeWorkspace {
                                                         .hover(cx.theme().transparent).active(cx.theme().transparent))
                                             })
                                             .when(index == 1, |button| {
-                                                let selection = cx.theme().background.blend(cx.theme().foreground.opacity(0.08));
+                                                let selection = theme::selected_fill(cx.theme().is_dark());
                                                 button
-                                                    .h(px(44.))
-                                                    .min_h(px(44.))
-                                                    .max_h(px(44.))
+                                                    .h(px(crate::ui::TWO_LINE_ROW_HEIGHT))
+                                                    .min_h(px(crate::ui::TWO_LINE_ROW_HEIGHT))
+                                                    .max_h(px(crate::ui::TWO_LINE_ROW_HEIGHT))
                                                     .px(px(12.))
                                                     .rounded_none()
                                                     .border_0()
@@ -710,7 +690,7 @@ impl project_editor::CodeWorkspace {
                                     let entry = entry.clone();
                                     let snapshot = snapshot.clone();
                                     let name = text(&entry["path"], "display");
-                                    let tint = cx.theme().background.blend(cx.theme().foreground.opacity(0.08));
+                                    let tint = theme::selected_fill(cx.theme().is_dark());
                                     row = row.when(selected, |row| row.bg(tint)).child(
                                         div().w(px(24.)).h_full().flex_shrink_0().flex().items_center().justify_center()
                                             .when(entry["conflicted"] != true, |slot| slot.child(

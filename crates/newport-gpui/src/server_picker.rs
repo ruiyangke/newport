@@ -72,7 +72,7 @@ impl SearchableListItem for ServerItem {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(crate::ui::FONT_SIZE - 1.))
+                    .text_size(px(crate::ui::FONT_SIZE))
                     .text_color(cx.theme().muted_foreground)
                     .truncate()
                     .child(self.endpoint.clone()),
@@ -316,7 +316,7 @@ impl Newport {
                             )
                             .child(
                                 Icon::new(IconName::ChevronDown)
-                                    .size(px(13.))
+                                    .size(px(crate::ui::SMALL_ICON))
                                     .text_color(cx.theme().muted_foreground),
                             )
                     })
@@ -343,7 +343,10 @@ impl Newport {
                                             .flex()
                                             .items_center()
                                             .gap(px(8.))
-                                            .child(Icon::new(IconName::Plus).size(px(15.)))
+                                            .child(
+                                                Icon::new(IconName::Plus)
+                                                    .size(px(crate::controls::ICON_SIZE)),
+                                            )
                                             .child("Add server…"),
                                     )
                                     .on_click(move |_, window, cx| {
@@ -368,7 +371,10 @@ impl Newport {
                                                 .flex()
                                                 .items_center()
                                                 .gap(px(8.))
-                                                .child(Icon::new(IconName::Settings2).size(px(15.)))
+                                                .child(
+                                                    Icon::new(IconName::Settings2)
+                                                        .size(px(crate::controls::ICON_SIZE)),
+                                                )
                                                 .child(
                                                     div()
                                                         .min_w_0()

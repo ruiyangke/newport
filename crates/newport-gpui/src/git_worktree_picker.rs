@@ -101,7 +101,7 @@ impl ListDelegate for Delegate {
         cx: &mut Context<ListState<Self>>,
     ) -> impl IntoElement {
         div().when(!self.failed, |view| {
-            view.child(empty::compact("No matching branches.", cx))
+            view.child(empty::compact("No branches match.", cx))
         })
     }
     fn has_more(&self, _: &App) -> bool {
@@ -386,9 +386,9 @@ impl WorktreeBranchPicker {
                     List::new(&self.list)
                         .with_size(gpui_kit::component::Size::Medium)
                         .search_placeholder(if self.purpose == WorktreeBranchUse::Existing {
-                            "Search local branches…"
+                            "Find a local branch"
                         } else {
-                            "Search local and remote branches…"
+                            "Find a branch"
                         })
                         .h_full(),
                 ),
@@ -417,14 +417,12 @@ impl WorktreeBranchPicker {
             })
             .when_some(self.names_error.as_ref(), |view, error| {
                 view.child(
-                    crate::label(error.clone())
-                        .p_2()
-                        .text_size(px(crate::ui::FONT_SIZE))
-                        .text_color(cx.theme().danger),
+                    crate::controls::alert("worktree-branch-names-error", error.clone(), cx).p_2(),
                 )
                 .child(
                     crate::controls::button("retry-worktree-branch-names")
-                        .label("Reload branches")
+                        .label("Try again")
+                        .accessibility_label("Try loading branches again")
                         .on_click(cx.listener(|this, _, _, cx| this.read_names(false, false, cx))),
                 )
             })
@@ -450,19 +448,24 @@ impl Render for WorktreeBranchPicker {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_1()
                                     .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .w_full()
+                                    .gap(px(6.))
+                                    .min_w_0()
+                                    .child(
+                                        Icon::new(IconName::GitBranch)
+                                            .size(px(crate::controls::ICON_SIZE))
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
                                     .child(div().min_w_0().truncate().child(
                                         if self.name.is_empty() {
                                             self.placeholder().to_owned()
                                         } else {
                                             self.name.clone()
                                         },
-                                    ))
-                                    .child(Icon::new(IconName::ChevronDown).size(px(14.))),
+                                    )),
                             )
+                            .dropdown_caret(true)
                             .accessibility_label(format!(
                                 "{}: {}",
                                 if self.purpose == WorktreeBranchUse::Existing {
@@ -501,14 +504,15 @@ impl Render for WorktreeBranchPicker {
                     }),
             )
             .when_some(self.detail_error.as_ref(), |view, error| {
-                view.child(
-                    crate::label(error.clone())
-                        .text_size(px(crate::ui::FONT_SIZE))
-                        .text_color(cx.theme().danger),
-                )
+                view.child(crate::controls::alert(
+                    "worktree-branch-detail-error",
+                    error.clone(),
+                    cx,
+                ))
                 .child(
                     crate::controls::button("retry-worktree-branch-detail")
-                        .label("Check branch again")
+                        .label("Try again")
+                        .accessibility_label("Check the branch again")
                         .disabled(!self.enabled)
                         .on_click(cx.listener(|this, _, _, cx| this.read_detail(cx))),
                 )

@@ -51,16 +51,9 @@ fn read_feedback_view(
             |view| view.child(project_loading::resource("git-repository-settings", 6)),
         )
         .children(feedback.errors.iter().enumerate().map(|(index, message)| {
-            div()
-                .id(("settings-read-error", index))
-                .role(accesskit::Role::Alert)
-                .aria_label(message.clone())
+            crate::controls::alert(("settings-read-error", index), message.clone(), cx)
                 .test_support()
                 .min_w_0()
-                .p_3()
-                .bg(cx.theme().danger.opacity(0.12))
-                .text_color(cx.theme().danger)
-                .child(message.clone())
         }))
         .when(!feedback.errors.is_empty(), |view| {
             view.child(
@@ -101,7 +94,8 @@ impl Newport {
     pub(super) fn repository_settings_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
         let feedback = read_feedback(&self.resources, self.git.error.as_deref());
         let retry = crate::controls::button("retry-modal-repository-settings")
-            .label("Retry settings")
+            .label("Try again")
+            .accessibility_label("Try loading repository settings again")
             .on_click(cx.listener(|this, _, _, cx| {
                 // Refresh every prerequisite, retaining any existing form draft.
                 // A retained draft still requires acceptance of the new review.
@@ -254,7 +248,7 @@ impl Newport {
     }
     pub(super) fn repository_settings_button(&self, cx: &mut Context<Self>) -> AnyElement {
         crate::controls::button("repository-settings")
-            .label("Repository settings")
+            .label("Repository settings…")
             .disabled(
                 self.git_mutation_blocks_write()
                     || self.git.repo["capabilities"]["readOnly"] != false
@@ -390,6 +384,7 @@ impl Newport {
                     )
                     .child(
                         crate::controls::button("save-repository-settings")
+                            .primary()
                             .loading(self.git_write_pending())
                             .label("Save settings")
                             .disabled(
@@ -459,7 +454,7 @@ mod tests {
                 .child(read_feedback_view(
                     &read_feedback(&self.resources, None),
                     self.has_form,
-                    crate::controls::button("retry-settings-test").label("Retry settings"),
+                    crate::controls::button("retry-settings-test").label("Try again"),
                     cx,
                 ))
                 .when(self.has_form, |view| {

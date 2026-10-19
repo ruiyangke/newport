@@ -344,9 +344,14 @@ impl Newport {
             transfer.progress(),
             crate::controls::button("cancel-file-transfer")
                 .label(if transfer.cancel_error().is_some() {
-                    "Retry cancel"
+                    "Try again"
                 } else {
                     "Cancel"
+                })
+                .accessibility_label(if transfer.cancel_error().is_some() {
+                    "Try cancelling the transfer again"
+                } else {
+                    "Cancel transfer"
                 })
                 .loading(transfer.cancel_pending())
                 .disabled(transfer.cancelling() || transfer.retired())

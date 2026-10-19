@@ -96,7 +96,7 @@ fn confirmation_is_scoped_cancelable_and_preserves_retry_identity(cx: &mut TestA
         cx.notify();
     });
     frame(visual);
-    click(visual, "Retry restore");
+    click(visual, "Try restoring again");
     assert_eq!(requests.try_recv().unwrap().args, first.args);
 }
 #[gpui::test]
@@ -164,7 +164,7 @@ fn durable_recovery_has_review_retry_and_completion_without_reinstall(cx: &mut T
             for node in gpui_kit::base::test_support::snapshots(window) {
                 if node.label().is_some_and(|s| {
                     [
-                        "Retry restore",
+                        "Try restoring again",
                         "Review files",
                         "Keep current file",
                         path.as_str(),
@@ -193,7 +193,7 @@ fn durable_recovery_has_review_retry_and_completion_without_reinstall(cx: &mut T
         cx.notify();
     });
     frame(visual);
-    click(visual, "Retry restore");
+    click(visual, "Try restoring again");
     let restore = requests.try_recv().unwrap();
     assert_eq!(restore.args["operationId"], id);
     view.update(visual, |v, cx| {
@@ -204,7 +204,7 @@ fn durable_recovery_has_review_retry_and_completion_without_reinstall(cx: &mut T
         cx.notify();
     });
     frame(visual);
-    assert!(!has(visual, "Retry restore"));
+    assert!(!has(visual, "Try restoring again"));
     assert!(!has(visual, "Review files"));
     assert!(!has(visual, &format!("Restore changes for {id}")));
     assert!(has(visual, "Reinstall Needle"));

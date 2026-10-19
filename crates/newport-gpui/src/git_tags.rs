@@ -234,7 +234,7 @@ impl Newport {
             .label(if self.git.tab == 1 {
                 "Tag this commit…"
             } else {
-                "New tag"
+                "New tag…"
             })
             .disabled(
                 !self.can_create_tag()
@@ -288,7 +288,7 @@ impl Newport {
                                 cx.notify();
                             }),
                         ))
-                    .child(crate::controls::button("create-tag").loading(self.git_write_pending())
+                    .child(crate::controls::button("create-tag").primary().loading(self.git_write_pending())
                                 .label("Create tag")
                                 .disabled(
                                     !self.can_create_tag()

@@ -264,7 +264,7 @@ fn connections_skeleton(table: bool) -> AnyElement {
         )
         .children((0..6).map(|_| {
             div()
-                .h(px(42.))
+                .h(px(crate::ui::TWO_LINE_ROW_HEIGHT))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
@@ -508,7 +508,6 @@ impl Newport {
     fn render_grouped_ports(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let viewport = f32::from(window.viewport_size().width);
         let content_width = inner_width(viewport, self.content_width);
-        let toolbar_gutter = (self.content_width - content_width).max(0.) / 2.;
         let Some(state) = self.connections_state.get(&self.server) else {
             return div().into_any_element();
         };
@@ -746,177 +745,140 @@ impl Newport {
                 }
             }
         };
+        let discovery_error = resource.and_then(|r| r.error.as_ref()).map(|error| {
+            format!(
+                "Couldn’t refresh ports: {error}{}",
+                if has_reading {
+                    " Showing the last available reading."
+                } else {
+                    ""
+                }
+            )
+        });
+        // The shared page toolbar; it may wrap to a second row when narrow.
+        let toolbar = crate::controls::page_toolbar(cx)
+            .id("connections-toolbar")
+            .debug_selector(|| "connections-toolbar".into())
+            .flex_wrap()
+            .h_auto()
+            .min_h(px(crate::controls::TOOLBAR_HEIGHT))
+            // The fixed toolbar's centring; its height includes the 1px rule.
+            .py(px((crate::controls::TOOLBAR_HEIGHT
+                - crate::controls::CONTROL_HEIGHT
+                - 1.)
+                / 2.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(160.))
+                    .max_w(px(crate::controls::SEARCH_WIDTH))
+                    .child(
+                        crate::controls::search_input(input, cx).aria_label("Find a connection"),
+                    ),
+            )
+            .child(Selector::new(
+                format!("port-filter:{}", self.server),
+                "Show",
+                filter,
+                ["All", "Saved", "Needs attention"]
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != 2 || attention > 0)
+                    .map(|(i, name)| Choice {
+                        danger: i == 2,
+                        count: match i {
+                            0 => Some(all),
+                            1 => Some(saved_count),
+                            _ => None,
+                        },
+                        tooltip: match i {
+                            0 => Some("Discovered ports and saved forwards"),
+                            1 => Some("Saved forwards, including those switched off"),
+                            _ => None,
+                        },
+                        ..Choice::text(i, name)
+                    })
+                    .collect(),
+                move |value, _, cx| {
+                    let _ = show_owner.update(cx, |this, cx| {
+                        if this.server != show_server {
+                            return;
+                        }
+                        this.connections_state
+                            .entry(show_server.clone())
+                            .or_default()
+                            .filter = value;
+                        cx.notify();
+                    });
+                },
+            ))
+            .child(Selector::new(
+                format!("ports-view:{}", self.server),
+                "View",
+                usize::from(state.table),
+                [
+                    (IconName::ListTree, "Projects view", "Group by project"),
+                    (IconName::Table2, "Ports view", "All ports in one table"),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(i, (icon, name, tooltip))| Choice {
+                    icon: Some(icon),
+                    tooltip: Some(tooltip),
+                    ..Choice::text(i, name)
+                })
+                .collect(),
+                move |value, _, cx| {
+                    let _ = view_owner.update(cx, |this, cx| {
+                        if this.server != view_server {
+                            return;
+                        }
+                        this.connections_state
+                            .entry(view_server.clone())
+                            .or_default()
+                            .table = value == 1;
+                        cx.notify();
+                    });
+                },
+            ))
+            .child(
+                div()
+                    .ml_auto()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        crate::controls::icon_button("discover")
+                            .ghost()
+                            .icon(IconName::RefreshCw)
+                            .accessibility_label("Refresh ports")
+                            .tooltip("Refresh")
+                            .loading(manual_pending)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.discover_connections(true);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        crate::controls::button("new-forward")
+                            .icon(IconName::Plus)
+                            .label("New forward")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.edit_tunnel(None, window, cx)
+                            })),
+                    ),
+            );
         let content = div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
-            .when_some(resource.and_then(|r| r.error.as_ref()), |view, error| {
-                let message = format!(
-                    "Could not refresh ports: {error}{}",
-                    if has_reading {
-                        " Showing the last available reading."
-                    } else {
-                        ""
-                    }
-                );
-                view.child(
-                    div()
-                        .id("connections-discovery-error")
-                        .role(accesskit::Role::Alert)
-                        .aria_label(message.clone())
-                        .text_size(px(crate::ui::FONT_SIZE))
-                        .text_color(theme::error(cx.theme().is_dark()))
-                        .mb(px(14.))
-                        .flex_shrink_0()
-                        .child(message),
-                )
-            })
-            .child(
-                // The shared page toolbar's height, inset and rule, inside the
-                // page's padding; it may wrap to a second row when narrow.
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .id("connections-toolbar")
-                    .debug_selector(|| "connections-toolbar".into())
-                    .relative()
-                    .gap(px(8.))
-                    .min_h(px(crate::controls::TOOLBAR_HEIGHT))
-                    .py(px((crate::controls::TOOLBAR_HEIGHT
-                        - crate::controls::CONTROL_HEIGHT)
-                        / 2.))
-                    .mx(px(
-                        crate::controls::TOOLBAR_INSET - crate::controls::PAGE_PADDING
-                    ))
-                    .mb(px(6.))
-                    .flex_shrink_0()
-                    .child(
-                        div()
-                            .absolute()
-                            .bottom_0()
-                            .left(px(crate::controls::PAGE_PADDING
-                                - crate::controls::TOOLBAR_INSET
-                                - toolbar_gutter))
-                            .right(px(crate::controls::PAGE_PADDING
-                                - crate::controls::TOOLBAR_INSET
-                                - toolbar_gutter))
-                            .h(px(1.))
-                            .bg(cx.theme().border),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(160.))
-                            .max_w(px(crate::controls::SEARCH_WIDTH))
-                            .child(
-                                crate::controls::search_input(input, cx)
-                                    .aria_label("Find a connection"),
-                            ),
-                    )
-                    .child(Selector::new(
-                        format!("port-filter:{}", self.server),
-                        "Show",
-                        filter,
-                        ["All", "Saved", "Needs attention"]
-                            .into_iter()
-                            .enumerate()
-                            .filter(|(i, _)| *i != 2 || attention > 0)
-                            .map(|(i, name)| Choice {
-                                danger: i == 2,
-                                count: match i {
-                                    0 => Some(all),
-                                    1 => Some(saved_count),
-                                    _ => None,
-                                },
-                                tooltip: match i {
-                                    0 => Some("Discovered ports and saved forwards"),
-                                    1 => Some("Saved forwards, including those switched off"),
-                                    _ => None,
-                                },
-                                ..Choice::text(i, name)
-                            })
-                            .collect(),
-                        move |value, _, cx| {
-                            let _ = show_owner.update(cx, |this, cx| {
-                                if this.server != show_server {
-                                    return;
-                                }
-                                this.connections_state
-                                    .entry(show_server.clone())
-                                    .or_default()
-                                    .filter = value;
-                                cx.notify();
-                            });
-                        },
-                    ))
-                    .child(Selector::new(
-                        format!("ports-view:{}", self.server),
-                        "View",
-                        usize::from(state.table),
-                        [
-                            (IconName::ListTree, "Projects view", "Group by project"),
-                            (IconName::Table2, "Ports view", "All ports in one table"),
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, (icon, name, tooltip))| Choice {
-                            icon: Some(icon),
-                            tooltip: Some(tooltip),
-                            ..Choice::text(i, name)
-                        })
-                        .collect(),
-                        move |value, _, cx| {
-                            let _ = view_owner.update(cx, |this, cx| {
-                                if this.server != view_server {
-                                    return;
-                                }
-                                this.connections_state
-                                    .entry(view_server.clone())
-                                    .or_default()
-                                    .table = value == 1;
-                                cx.notify();
-                            });
-                        },
-                    ))
-                    .child(
-                        div()
-                            .ml_auto()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                crate::controls::icon_button("discover")
-                                    .icon(IconName::RefreshCw)
-                                    .accessibility_label("Discover ports")
-                                    .tooltip("Discover listening ports now")
-                                    .loading(manual_pending)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.discover_connections(true);
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                crate::controls::button("new-forward")
-                                    .icon(IconName::Plus)
-                                    .label("New forward")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.edit_tunnel(None, window, cx)
-                                    })),
-                            ),
-                    ),
-            )
+            .pt(px(6.))
             .when(initial_loading, |view| {
                 view.child(connections_skeleton(state.table))
             })
             .when(empty && !no_entries, |v| {
-                v.child(empty::pane(
-                    IconName::Search,
-                    "No matching ports",
-                    "Try another search or adjust the filters.",
-                    cx,
-                ))
+                v.child(empty::compact("No connections match.", cx).flex_shrink_0())
             })
             .when(no_entries && has_reading, |view| {
                 view.child(empty::pane(
@@ -948,7 +910,7 @@ impl Newport {
             .when(attention > 0, |v| {
                 v.child(
                     div()
-                        .text_color(cx.theme().danger)
+                        .text_color(theme::error(cx.theme().is_dark()))
                         .child(format!("· {attention} need attention")),
                 )
             });
@@ -970,6 +932,15 @@ impl Newport {
             .flex_1()
             .min_h_0()
             .w_full()
+            .child(toolbar)
+            .when_some(discovery_error, |view, message| {
+                view.child(
+                    crate::controls::alert("connections-discovery-error", message, cx)
+                        .flex_shrink_0()
+                        .px(px(crate::controls::TOOLBAR_INSET))
+                        .py(px(8.)),
+                )
+            })
             .child(connections_viewport(viewport, content))
             .child(
                 div()
@@ -1013,12 +984,6 @@ impl Newport {
         } else {
             None
         };
-        let compose = project.source == newport_domain::port_grouping::Source::Compose;
-        let git = matches!(
-            project.source,
-            newport_domain::port_grouping::Source::Saved
-                | newport_domain::port_grouping::Source::Vcs
-        );
         // Both project and checkout actions use the full scope, independent of search.
         let show_branches =
             project.worktrees.len() > 1 || project.worktrees.iter().any(|w| !w.main);
@@ -1032,16 +997,6 @@ impl Newport {
         let mut list_section = String::new();
         let mut list_name = format!("{name} ports");
         let count = chunk.data.matched_count;
-        let tally = format!(
-            "{count} {}",
-            if key.is_empty() {
-                "services"
-            } else if count == 1 {
-                "port"
-            } else {
-                "ports"
-            }
-        );
         if !collapsed {
             for (offset, row) in rows[chunk.range.clone()].iter().cloned().enumerate() {
                 let worktree = &row.worktree;
@@ -1089,12 +1044,13 @@ impl Newport {
                             .id(SharedString::from(format!("reverse-heading:{key}")))
                             .role(accesskit::Role::Heading)
                             .aria_label("From this computer, shared with the server")
+                            // Aligned with the foldable group headings above it.
                             .flex()
                             .items_center()
                             .gap(px(6.))
-                            .min_h(px(28.))
-                            .px(px(12.))
-                            .pt(px(8.))
+                            .h(px(crate::controls::COMPACT_HEIGHT))
+                            .mt(px(4.))
+                            .px(px(11.))
                             .text_size(px(crate::ui::FONT_SIZE))
                             .text_color(cx.theme().muted_foreground)
                             .child(Icon::new(IconName::Laptop).size(px(12.)))
@@ -1113,9 +1069,12 @@ impl Newport {
                             .id(SharedString::from(format!("saved-heading:{key}")))
                             .role(accesskit::Role::Heading)
                             .aria_label("Other saved forwards")
-                            .px(px(16.))
-                            .pt(px(8.))
-                            .pb(px(4.))
+                            .flex()
+                            .items_center()
+                            .h(px(crate::controls::COMPACT_HEIGHT))
+                            .mt(px(4.))
+                            .pl(px(27.))
+                            .pr(px(11.))
                             .text_size(px(crate::ui::FONT_SIZE))
                             .text_color(cx.theme().muted_foreground)
                             .child("Other saved forwards")
@@ -1158,76 +1117,44 @@ impl Newport {
                                 .flex()
                                 .items_center()
                                 .gap(px(8.))
-                                .min_h(px(32.))
+                                .min_h(px(crate::ui::ROW_HEIGHT))
+                                .mt(px(4.))
                                 .pl(px(16.))
                                 .pr(px(12.))
-                                .pt(px(4.))
-                                .text_size(px(crate::ui::FONT_SIZE))
-                                .text_color(cx.theme().muted_foreground)
                                 .child(
-                                    gpui_kit::base::Button::new(SharedString::from(format!(
-                                        "fold-worktree:{key}:{path}"
-                                    )))
+                                    crate::controls::group_heading(
+                                        SharedString::from(format!("fold-worktree:{key}:{path}")),
+                                        &title,
+                                        section.len(),
+                                        !folded,
+                                        cx,
+                                    )
                                     .flex_1()
                                     .min_w_0()
-                                    .justify_start()
-                                    .gap(px(6.))
-                                    .py(px(4.))
-                                    .rounded(px(crate::ui::RADIUS))
-                                    .text_left()
-                                    .aria_expanded(!folded)
-                                    .accessibility_label(format!(
-                                        "{} worktree {title}",
-                                        if folded { "Expand" } else { "Collapse" }
-                                    ))
-                                    .focus_visible(|style| {
-                                        style.shadow(vec![BoxShadow {
-                                            color: cx.theme().ring,
-                                            offset: point(px(0.), px(0.)),
-                                            blur_radius: px(0.),
-                                            spread_radius: px(2.),
-                                            inset: false,
-                                        }])
-                                    })
                                     .hover_path("Worktree path", path.to_owned())
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if this.server != server {
-                                            return;
-                                        }
-                                        let state = this
-                                            .connections_state
-                                            .entry(server.clone())
-                                            .or_default();
-                                        if folded {
-                                            state.collapsed_worktrees.remove(&disclosure_key);
-                                        } else {
-                                            state
-                                                .collapsed_worktrees
-                                                .insert(disclosure_key.clone());
-                                        }
-                                        cx.notify();
-                                    }))
-                                    .child(
-                                        Icon::new(if folded {
-                                            IconName::ChevronRight
-                                        } else {
-                                            IconName::ChevronDown
-                                        })
-                                        .size(px(12.)),
-                                    )
-                                    .child(Icon::new(IconName::GitBranch).size(px(12.)))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(cx.theme().foreground)
-                                            .child(title.clone()),
-                                    ),
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            if this.server != server {
+                                                return;
+                                            }
+                                            let state = this
+                                                .connections_state
+                                                .entry(server.clone())
+                                                .or_default();
+                                            if folded {
+                                                state.collapsed_worktrees.remove(&disclosure_key);
+                                            } else {
+                                                state
+                                                    .collapsed_worktrees
+                                                    .insert(disclosure_key.clone());
+                                            }
+                                            cx.notify();
+                                        },
+                                    )),
                                 )
-                                .when(folded, |v| {
+                                .when(!kind_label.is_empty(), |v| {
                                     v.child(
-                                        label(tally)
+                                        label(kind_label)
                                             .text_size(px(crate::ui::FONT_SIZE))
                                             .flex_shrink_0(),
                                     )
@@ -1286,34 +1213,20 @@ impl Newport {
                         .items_center()
                         .gap(px(8.))
                         .min_h(px(34.))
-                        .pl(px(4.))
                         .pr(px(12.))
                         .child(
-                            gpui_kit::base::Button::new(SharedString::from(format!("fold-{key}")))
-                                .flex_1()
-                                .min_w_0()
-                                .justify_start()
-                                .gap(px(8.))
-                                .py(px(4.))
-                                .rounded(px(crate::ui::RADIUS))
-                                .text_left()
-                                .line_height(relative(1.5))
-                                .aria_expanded(!collapsed)
-                                .focus_visible(|style| {
-                                    style.shadow(vec![BoxShadow {
-                                        color: cx.theme().ring,
-                                        offset: point(px(0.), px(0.)),
-                                        blur_radius: px(0.),
-                                        spread_radius: px(2.),
-                                        inset: false,
-                                    }])
-                                })
-                                .hover_path(name.clone(), location.clone())
-                                .accessibility_label(format!(
-                                    "{} {name}",
-                                    if collapsed { "Expand" } else { "Collapse" }
-                                ))
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                            crate::controls::group_heading(
+                                SharedString::from(format!("fold-{key}")),
+                                &name,
+                                count,
+                                !collapsed,
+                                cx,
+                            )
+                            .flex_1()
+                            .min_w_0()
+                            .hover_path(name.clone(), location.clone())
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
                                     if this.server != click_server {
                                         return;
                                     }
@@ -1329,61 +1242,26 @@ impl Newport {
                                         state.expanded.remove(&click_key);
                                     }
                                     cx.notify();
-                                }))
-                                .child(
-                                    Icon::new(if collapsed {
-                                        IconName::ChevronRight
-                                    } else {
-                                        IconName::ChevronDown
-                                    })
-                                    .size(px(13.))
-                                    .text_color(cx.theme().muted_foreground.opacity(0.7)),
-                                )
-                                .child(
-                                    Icon::new(if key.is_empty() {
-                                        IconName::Cpu
-                                    } else if compose {
-                                        IconName::Container
-                                    } else if git {
-                                        IconName::FolderGit2
-                                    } else {
-                                        IconName::Folder
-                                    })
-                                    .size(px(15.))
-                                    .text_color(cx.theme().muted_foreground),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_size(px(crate::ui::FONT_SIZE))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(name.clone()),
-                                )
-                                .when_some(single_branch, |v, branch| {
-                                    v.child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(Icon::new(IconName::GitBranch).size(px(11.)))
-                                            .child(
-                                                label(branch)
-                                                    .font_family(
-                                                        cx.theme().mono_font_family.clone(),
-                                                    )
-                                                    .text_size(px(crate::ui::FONT_SIZE)),
-                                            ),
-                                    )
-                                })
-                                .child(div().flex_1().min_w_0()),
+                                },
+                            )),
                         )
-                        .when(collapsed, |v| {
+                        .when_some(single_branch, |v, branch| {
                             v.child(
-                                label(tally)
-                                    .text_size(px(crate::ui::FONT_SIZE))
-                                    .flex_shrink_0(),
+                                div()
+                                    .flex()
+                                    .flex_shrink_0()
+                                    .items_center()
+                                    .gap_1()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(
+                                        Icon::new(IconName::GitBranch)
+                                            .size(px(crate::ui::SMALL_ICON)),
+                                    )
+                                    .child(
+                                        label(branch)
+                                            .font_family(cx.theme().mono_font_family.clone())
+                                            .text_size(px(crate::ui::FONT_SIZE)),
+                                    ),
                             )
                         })
                         .children(

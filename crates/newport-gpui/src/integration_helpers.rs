@@ -337,9 +337,12 @@ impl Newport {
             actions = actions.child(
                 crate::controls::button("needle-helper-confirm")
                     .label(if review.submitted {
-                        "Retry restore"
+                        "Try again"
                     } else {
                         "Restore shell changes"
+                    })
+                    .when(review.submitted, |b| {
+                        b.accessibility_label("Try restoring again")
                     })
                     .disabled(blocked || running || stale)
                     .on_click(cx.listener(move |this, _, _, cx| {

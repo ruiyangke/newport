@@ -271,7 +271,7 @@ impl Newport {
                             }),
                         ))
     .child(
-                            crate::controls::button("pull-fast-forward").loading(self.git_write_pending())
+                            crate::controls::button("pull-fast-forward").primary().loading(self.git_write_pending())
                                 .label(if form.push.is_some() {"Push branch"} else {"Pull fast-forward"})
                                 .disabled(
                                     !self.can_prepare_pull()

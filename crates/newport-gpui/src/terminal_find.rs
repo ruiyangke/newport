@@ -107,7 +107,7 @@ impl TerminalView {
                 // Do not retain coordinates from a previous screen after a
                 // failed refresh: they may now identify unrelated output.
                 find.results = SearchResults::default();
-                find.error = Some(format!("Could not search terminal output. {error}"));
+                find.error = Some(format!("Couldn’t search terminal output. {error}"));
             }
         }
         find.active = if find.results.matches.is_empty() {
@@ -153,7 +153,7 @@ impl TerminalView {
                 .engine
                 .reveal_position(*range.start())
                 .err()
-                .map(|error| format!("Could not reveal terminal match. {error}"));
+                .map(|error| format!("Couldn’t reveal the terminal match. {error}"));
         }
     }
 
@@ -222,7 +222,7 @@ impl TerminalView {
                 }),
             )
             .child(
-                crate::controls::input(&find.input)
+                crate::controls::search_input(&find.input, cx)
                     .w(px(180.))
                     .aria_label("Find in terminal"),
             )
@@ -242,6 +242,7 @@ impl TerminalView {
                     .ghost()
                     .disabled(disabled)
                     .accessibility_label("Previous match")
+                    .tooltip("Previous match")
                     .on_click(cx.listener(|this, _, _, cx| this.next_match(true, cx))),
             )
             .child(
@@ -250,6 +251,7 @@ impl TerminalView {
                     .ghost()
                     .disabled(disabled)
                     .accessibility_label("Next match")
+                    .tooltip("Next match")
                     .on_click(cx.listener(|this, _, _, cx| this.next_match(false, cx))),
             )
             .child(
@@ -258,6 +260,7 @@ impl TerminalView {
                     .ghost()
                     .toggled(find.match_case)
                     .accessibility_label("Match case")
+                    .tooltip("Match case")
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(find) = &mut this.find {
                             find.match_case = !find.match_case;
@@ -269,7 +272,8 @@ impl TerminalView {
                 crate::controls::icon_button("terminal-find-close")
                     .icon(gpui_kit::assets::IconName::X)
                     .ghost()
-                    .accessibility_label("Close find")
+                    .accessibility_label("Close search")
+                    .tooltip("Close search")
                     .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
             )
             .into_any_element()

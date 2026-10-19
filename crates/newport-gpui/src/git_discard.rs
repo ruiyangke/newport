@@ -102,7 +102,7 @@ impl Confirmation {
                 if count == 1 { "line" } else { "lines" }
             ),
             None if self.review.partial() => "Discard this hunk?".into(),
-            None => "Discard file changes".into(),
+            None => "Discard file changes?".into(),
         }
     }
     fn current(&self, owner: &Newport) -> bool {
@@ -171,7 +171,7 @@ impl Render for Confirmation {
             } else {
                 "Discard this file’s staged and unstaged changes, restoring the last commit. Files absent from that commit will be deleted. There is no automatic undo."
             }))
-            .when(!current, |view| view.child(crate::label("The selection or repository state changed. Cancel and review the file again.").text_color(cx.theme().danger)))
+            .when(!current, |view| view.child(crate::controls::alert("discard-stale", "The selection or repository state changed. Cancel and review the file again.", cx)))
             .child(project_dialog::actions()
                 .child(crate::controls::form_button("cancel-discard-changes").label("Cancel")
                     .on_click(|_,window,cx| window.close_dialog(cx)))

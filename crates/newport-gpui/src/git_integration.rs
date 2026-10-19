@@ -398,14 +398,18 @@ impl Newport {
                                     Some("integration.skip") => "Skip commit",
                                     _ => "Confirm",
                                 })
-                                .when(
-                                    matches!(
+                                .map(|button| {
+                                    if matches!(
                                         review.action["kind"].as_str(),
                                         Some("integration.abort" | "integration.skip")
                                     ) || (review.action["kind"] == "reset"
-                                        && review.action["mode"] == "hard"),
-                                    |button| button.text_color(cx.theme().danger),
-                                )
+                                        && review.action["mode"] == "hard")
+                                    {
+                                        button.danger()
+                                    } else {
+                                        button.primary()
+                                    }
+                                })
                                 .disabled(
                                     !self.integration_ready_from(review.origin)
                                         || stale

@@ -49,12 +49,7 @@ fn chart<T: Copy>(
         .collect();
     let label = format!("{name} over the last {}", history_duration_label(samples));
     let selector = format!("container-{}-spark", name.to_lowercase());
-    let color: Hsla = rgb(if cx.theme().is_dark() {
-        0x3987e5
-    } else {
-        0x3478d4
-    })
-    .into();
+    let color: Hsla = theme::chart_primary(cx.theme().is_dark());
     Some(
         div()
             .id(SharedString::from(selector.clone()))

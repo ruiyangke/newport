@@ -442,7 +442,7 @@ impl Newport {
             self.git.branches.page["entries"]
                 .as_array()
                 .map_or(0, Vec::len),
-            48.,
+            git_layout::PICKER_ROW_HEIGHT,
         ) && self.page == Page::Projects
             && !self.project_dialog_open
             && !self.branch_picker_reviewing()
@@ -683,7 +683,7 @@ impl Newport {
                 .get("git-branches")
                 .is_some_and(|r| r.pending);
         let count = project_loading::picker_count(entries.len(), pending);
-        div()
+        git_layout::picker_surface(window)
             .id("branch-browser")
             .capture_key_down(cx.listener(Self::branch_picker_key))
             .capture_action(cx.listener(
@@ -693,17 +693,12 @@ impl Newport {
                     }
                 },
             ))
-            .w(px(365.).min(window.viewport_size().width - px(32.)))
-            .max_h((window.viewport_size().height * 0.7).min(px(520.)))
-            .flex()
-            .flex_col()
-            .min_h_0()
             .when(!reviewing, |view| {
                 view.child(self.git_branch_search_view(cx))
             })
             .when(reviewing, |view| {
                 view.child(
-                    div().flex().items_center().gap_2().px_3().py_2().child(
+                    git_layout::search_bar().child(
                         crate::controls::compact_button("branch-review-back")
                             .icon(IconName::ArrowLeft)
                             .label("Branches")
@@ -792,7 +787,7 @@ impl Newport {
                             range
                                 .map(|i| {
                                     let Some(entry) = entries.get(i) else {
-                                        return project_loading::picker_row("branches", i);
+                                        return git_layout::picker_loading_row("branches", i);
                                     };
                                     let name = text(&entry["name"], "display");
                                     let current = entry["current"] == true;
@@ -806,7 +801,6 @@ impl Newport {
                                     let details = branch_details(entry);
                                     git_layout::picker_row(
                                         ("branch-picker-row", i),
-                                        current,
                                         this.git.branches.highlighted == Some(i),
                                         cx,
                                     )
@@ -840,6 +834,7 @@ impl Newport {
                                                             .text_size(px(crate::ui::FONT_SIZE)),
                                                     ),
                                             )
+                                            .when(current, |b| b.icon(IconName::Check))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.activate_picker_branch(&selected, cx);
                                             })),
@@ -904,12 +899,12 @@ impl Newport {
                         }),
                     )
                     .track_scroll(&self.git.branches.scroll)
-                    .h(px((count as f32 * 48.).min(320.)))
+                    .h(px((count as f32 * git_layout::PICKER_ROW_HEIGHT).min(320.)))
                     .min_h_0(),
                 )
                 .when(
                     !pending && !failed && rows(&self.git.branches.page["entries"]).is_empty(),
-                    |view| view.child(empty::compact("No matching branches.", cx)),
+                    |view| view.child(empty::compact("No branches match.", cx)),
                 )
                 .child(self.git_branch_worktree_hint(cx))
                 .child(self.status("git-branches-more", cx))
@@ -928,7 +923,8 @@ impl Newport {
                 view.child(
                     div().p_2().child(
                         crate::controls::button("branch-picker-more")
-                            .label("Retry branches")
+                            .label("Try again")
+                            .accessibility_label("Try loading branches again")
                             .disabled(
                                 pending
                                     || self.git.branches.cursor.is_some()

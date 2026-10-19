@@ -2,7 +2,7 @@
 use super::*;
 use gpui_kit::component::input::InputEvent;
 const PAGE_SIZE: usize = 20;
-const ROW_HEIGHT: f32 = 46.;
+const ROW_HEIGHT: f32 = crate::ui::TWO_LINE_ROW_HEIGHT;
 const SORT_NAMES: [&str; 6] = ["CPU", "Memory", "Process", "PID", "User", "Time"];
 fn page_range(count: usize, requested: usize) -> std::ops::Range<usize> {
     let start = requested.min(count.saturating_sub(1) / PAGE_SIZE) * PAGE_SIZE;
@@ -88,12 +88,7 @@ fn elapsed(value: &Value) -> String {
     }
 }
 fn magnitude(value: String, share: f64, width: f32, bars: bool, cx: &App) -> AnyElement {
-    let color: Hsla = rgb(if cx.theme().is_dark() {
-        0x3987e5
-    } else {
-        0x3478d4
-    })
-    .into();
+    let color = crate::theme::chart_primary(cx.theme().is_dark());
     div()
         .w(px(width))
         .pr(px(8.))
@@ -386,9 +381,9 @@ impl Newport {
                             .child(format!("Processes · {}", text(data, "processCount"))),
                     )
                     .child(
-                        div()
-                            .w(px(220.))
-                            .child(crate::controls::input(input).aria_label("Filter processes")),
+                        div().w(px(crate::controls::SEARCH_WIDTH)).child(
+                            crate::controls::search_input(input, cx).aria_label("Find a process"),
+                        ),
                     )
                     .when(!wide, |view| {
                         let weak = cx.entity().downgrade();
@@ -532,14 +527,14 @@ mod tests {
         );
         assert_eq!(
             visual.debug_bounds("overview-process-1").unwrap().bottom(),
-            px(112.)
+            px(108.)
         );
         assert!(visual.debug_bounds("overview-process-2").is_none());
         assert!(visual.debug_bounds("overview-process-19").is_none());
         // A partially visible first row must remain mounted, then disappear at
         // the exact boundary. No nested scrolling or approximate-height spacer.
         view.update(visual, |view, cx| {
-            view.scroll.set_offset(point(px(0.), px(-65.)));
+            view.scroll.set_offset(point(px(0.), px(-63.)));
             cx.notify();
         });
         crate::page_perf_tests::frame(visual);
@@ -549,7 +544,7 @@ mod tests {
         );
         assert!(visual.debug_bounds("overview-process-3").is_some());
         view.update(visual, |view, cx| {
-            view.scroll.set_offset(point(px(0.), px(-66.)));
+            view.scroll.set_offset(point(px(0.), px(-64.)));
             cx.notify();
         });
         crate::page_perf_tests::frame(visual);
@@ -559,7 +554,7 @@ mod tests {
             px(0.)
         );
         view.update(visual, |view, cx| {
-            view.scroll.set_offset(point(px(0.), px(-860.)));
+            view.scroll.set_offset(point(px(0.), px(-820.)));
             cx.notify();
         });
         crate::page_perf_tests::frame(visual);

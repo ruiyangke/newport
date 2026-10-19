@@ -304,21 +304,26 @@ impl Newport {
                                             && path["bytesB64"]
                                                 == this.git.history.path["bytesB64"];
                                         div().h(px(28.)).w_full().min_w_0().px(px(6.)).child(
-                                            crate::controls::button(("git-history-file", i))
-                                                .accessibility_label(description.clone())
-                                                .hover_hint(description)
-                                                .custom(git_file_row::selection_style(selected, cx))
-                                                .selected(selected)
-                                                .w_full()
-                                                .min_w_0()
-                                                .disabled(!valid)
-                                                .toggled(selected)
-                                                .child(git_file_row::badge(mark, cx))
-                                                .child(git_file_row::path(title, cx))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                            git_file_row::row_focus(
+                                                crate::controls::button(("git-history-file", i)),
+                                                cx,
+                                            )
+                                            .accessibility_label(description.clone())
+                                            .hover_hint(description)
+                                            .custom(git_file_row::selection_style(selected, cx))
+                                            .selected(selected)
+                                            .w_full()
+                                            .min_w_0()
+                                            .disabled(!valid)
+                                            .toggled(selected)
+                                            .child(git_file_row::badge(mark, cx))
+                                            .child(git_file_row::path(title, cx))
+                                            .on_click(
+                                                cx.listener(move |this, _, _, cx| {
                                                     this.git_history_select_file(&owner, &entry);
                                                     cx.notify();
-                                                })),
+                                                }),
+                                            ),
                                         )
                                     })
                                     .collect()
@@ -335,10 +340,11 @@ impl Newport {
             .when(first_failed || more_failed, |view| {
                 view.child(
                     crate::controls::compact_button("git-more-commit-files")
-                        .label(if first_failed {
-                            "Reload commit files"
+                        .label("Try again")
+                        .accessibility_label(if first_failed {
+                            "Try loading commit files again"
                         } else {
-                            "Retry loading files"
+                            "Try loading more commit files again"
                         })
                         .disabled(loading || more_loading)
                         .on_click(cx.listener(move |this, _, _, cx| {

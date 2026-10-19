@@ -5,7 +5,7 @@ use gpui_kit::component::skeleton::Skeleton;
 
 use newport_client::git_remote_refs::{Listing, PAGE_SIZE};
 
-const ROW_HEIGHT: f32 = 36.;
+const ROW_HEIGHT: f32 = crate::ui::ROW_HEIGHT;
 
 /// Loaded and pending rows share columns so pagination never moves earlier rows.
 fn reference_columns(name: impl IntoElement, kind: impl IntoElement, oid: impl IntoElement) -> Div {
@@ -46,11 +46,13 @@ fn pending_reference(index: usize) -> AnyElement {
         ))
         .into_any_element()
 }
-fn reference_button(index: usize, entry: &Value) -> Button {
+fn reference_button(index: usize, entry: &Value, selected: bool, cx: &App) -> Button {
     let name = text(&entry["reference"], "display");
-    crate::controls::button(("remote-ref", index))
+    git_file_row::row_focus(crate::controls::button(("remote-ref", index)), cx)
         .accessibility_label(name.clone())
-        .ghost()
+        .custom(git_file_row::selection_style(selected, cx))
+        .selected(selected)
+        .toggled(selected)
         .w_full()
         .min_w_0()
         .h(px(ROW_HEIGHT))
@@ -104,7 +106,7 @@ impl Newport {
             return;
         }
         let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Filter remote branches and tags"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Find a remote branch or tag"));
         let subscription = cx.observe(&input, |this, input, cx| {
             if this.page != Page::Projects || this.git.tab != 6 {
                 return;
@@ -278,11 +280,11 @@ impl Newport {
         } else if browser.filter.len() > 1024 {
             "Filter is too long (maximum 1,024 bytes).".into()
         } else if browser.error.is_some() {
-            "Could not finish loading. Refresh to retry.".into()
+            "Couldn’t finish loading. Refresh to try again.".into()
         } else if browser.listing.page()["metadata"]["truncated"] == true {
             format!("{} references · Listing incomplete", entries.len())
         } else if entries.is_empty() {
-            "No matching remote references.".into()
+            "No remote references match.".into()
         } else {
             format!("{} references", entries.len())
         };
@@ -292,14 +294,14 @@ impl Newport {
             .flex_1()
             .min_h_0()
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_4()
-                    .py_2()
+                crate::ui::header()
+                    .px(px(12.))
+                    .gap(px(8.))
+                    .child(crate::ui::header_rule(cx))
                     .child(
-                        crate::controls::button("back-from-remote-refs")
+                        crate::controls::compact_button("back-from-remote-refs")
+                            .ghost()
+                            .icon(IconName::ArrowLeft)
                             .label("Remotes")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.reset_remote_refs();
@@ -308,19 +310,16 @@ impl Newport {
                                 cx.notify();
                             })),
                     )
+                    .child(div().flex_1().min_w_0().truncate().child(format!(
+                        "{} · Branches and tags",
+                        text(&browser.remote, "name")
+                    )))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!(
-                                "{} · Branches and tags",
-                                text(&browser.remote, "name")
-                            )),
-                    )
-                    .child(
-                        crate::controls::button("refresh-remote-refs")
-                            .label("Refresh remote references")
+                        crate::controls::icon_button("refresh-remote-refs")
+                            .ghost()
+                            .icon(IconName::RefreshCw)
+                            .tooltip("Refresh")
+                            .accessibility_label("Refresh remote references")
                             .disabled(loading)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.reset_remote_refs();
@@ -337,23 +336,22 @@ impl Newport {
                         .or(browser.remote["url"].as_str())
                         .unwrap_or("Unavailable")
                 ))
-                .px_4()
+                .px(px(12.))
+                .pt(px(8.))
                 .text_size(px(crate::ui::FONT_SIZE)),
             )
             .child(
-                div().px_4().py_2().child(
-                    crate::controls::input(&browser.input)
+                git_layout::search_bar().child(
+                    crate::controls::search_input(&browser.input, cx)
                         .aria_label("Filter remote branches and tags"),
                 ),
             )
             .when_some(browser.error.clone(), |view, error| {
-                view.child(
-                    div()
-                        .px_4()
-                        .py_2()
-                        .text_color(cx.theme().danger)
-                        .child(error),
-                )
+                view.child(div().px(px(12.)).py(px(8.)).child(crate::controls::alert(
+                    "remote-refs-error",
+                    error,
+                    cx,
+                )))
             })
             .child(self.remote_ref_actions_view(cx))
             .child(
@@ -372,8 +370,7 @@ impl Newport {
                                         browser.selected["reference"]["bytesB64"]
                                             == entry["reference"]["bytesB64"]
                                     });
-                                reference_button(index, &entry)
-                                    .selected(selected)
+                                reference_button(index, &entry, selected, cx)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.git.remote_ref_review = None;
                                         if let Some(browser) = this.git.remote_refs.as_mut() {
@@ -391,26 +388,24 @@ impl Newport {
                 .min_h_0(),
             )
             .when(browser.selected["oid"].is_object(), |view| {
-                view.child(div().px_4().py_2().child(crate::label(format!(
+                view.child(div().px(px(12.)).py(px(8.)).child(crate::label(format!(
                     "{} · {}",
                     text(&browser.selected["reference"], "display"),
                     text(&browser.selected["oid"], "hex")
                 ))))
             })
             .child(
-                div()
-                    .px_4()
-                    .h(px(36.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap_2()
+                crate::controls::pane_status_bar(cx)
+                    .px(px(12.))
                     .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        crate::label(summary)
-                            .text_size(px(crate::ui::FONT_SIZE))
-                            .flex_1(),
+                    .left(
+                        div()
+                            .id("remote-refs-summary")
+                            .role(accesskit::Role::Status)
+                            .aria_label(summary.clone())
+                            .min_w_0()
+                            .truncate()
+                            .child(summary),
                     ),
             )
             .into_any_element()
@@ -441,10 +436,10 @@ mod layout_tests {
             };
             div().size_full().flex().flex_col()
                 .child(div().h(px(40.)).flex_shrink_0().child("Filter"))
-                .child(uniform_list("references", self.loaded + placeholders, cx.processor(|this, range: std::ops::Range<usize>, _, _| {
+                .child(uniform_list("references", self.loaded + placeholders, cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
                     range.map(|i| div().debug_selector(move || format!("row-{i}")).child(
                         if i >= this.loaded { super::pending_reference(i) } else {
-                            super::reference_button(i, &json!({"reference":{"display":"refs/heads/main"},"kind":"branch","oid":{"hex":"a".repeat(40)}})).into_any_element()
+                            super::reference_button(i, &json!({"reference":{"display":"refs/heads/main"},"kind":"branch","oid":{"hex":"a".repeat(40)}}), false, cx).into_any_element()
                         }
                     )).collect()
                 })).track_scroll(&self.scroll).flex_1().min_h_0())

@@ -320,36 +320,16 @@ impl ContainersPanel {
                 )
             })
             .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(heading("Disk usage", 2))
-                            .child(
-                                quiet(subtitle.clone(), cx)
-                                    .id("disk-summary")
-                                    .role(accesskit::Role::Status)
-                                    .test_support()
-                                    .aria_label(subtitle)
-                                    .mt(px(2.)),
-                            ),
-                    )
-                    .child(
-                        crate::controls::icon_button("refresh-docker-disk")
-                            .ghost()
-                            .icon(IconName::RefreshCw)
-                            .accessibility_label("Refresh disk usage")
-                            .loading(pending)
-                            .disabled(pending)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.client.retry_disk();
-                                cx.notify();
-                            })),
+                div().flex().items_start().gap(px(8.)).child(
+                    div().flex_1().min_w_0().child(heading("Disk usage")).child(
+                        quiet(subtitle.clone(), cx)
+                            .id("disk-summary")
+                            .role(accesskit::Role::Status)
+                            .test_support()
+                            .aria_label(subtitle)
+                            .mt(px(2.)),
                     ),
+                ),
             )
             .when_some(error, |v, error| {
                 v.child(alert("docker-disk-error", error, cx))
@@ -375,8 +355,8 @@ impl ContainersPanel {
                         .child(
                             crate::controls::compact_button("retry-docker-disk-volumes")
                                 .ghost()
-                                .label("Retry")
-                                .accessibility_label("Retry measuring volumes")
+                                .label("Try again")
+                                .accessibility_label("Try measuring volumes again")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.client.retry_disk_volumes();
                                     cx.notify();
@@ -390,7 +370,8 @@ impl ContainersPanel {
                     v.child(
                         div().flex().items_start().child(
                             crate::controls::button("retry-docker-disk")
-                                .label("Retry disk usage")
+                                .label("Try again")
+                                .accessibility_label("Try reading disk usage again")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.client.retry_disk();
                                     cx.notify();

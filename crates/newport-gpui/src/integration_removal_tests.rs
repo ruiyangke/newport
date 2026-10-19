@@ -168,7 +168,7 @@ fn confirmation_requires_current_review_and_retries_the_same_operation(cx: &mut 
         json!({"expectedConnection":review.server,"operationId":review.id,"build":review.build})
     );
     assert!(uuid::Uuid::parse_str(&review.id).is_ok());
-    click(visual, "Retry removal");
+    click(visual, "Try removing Needle again");
     assert!(
         requests.try_recv().is_err(),
         "pending action must be disabled"
@@ -180,7 +180,7 @@ fn confirmation_requires_current_review_and_retries_the_same_operation(cx: &mut 
     });
     frame(visual);
     assert!(has(visual, "Reply lost"));
-    click(visual, "Retry removal");
+    click(visual, "Try removing Needle again");
     let retry = requests.try_recv().unwrap();
     assert_eq!(
         retry.args, first.args,
@@ -319,7 +319,7 @@ fn removal_recovery_uses_durable_state_and_preserves_preferences(cx: &mut TestAp
     frame(visual);
     assert!(has(visual, "Restore unfinished"));
     assert!(!has(visual, "Resume removal"));
-    click(visual, "Retry restore");
+    click(visual, "Try restoring again");
     let retry = requests.try_recv().unwrap();
     assert_eq!(retry.args, restore.args);
     view.update(visual, |v, cx| {
@@ -413,7 +413,12 @@ fn restoring_removal_reviews_conflicts_and_fences_obsolete_keep_choices(cx: &mut
         frame(visual);
         visual.update(|window, _| {
             let nodes = gpui_kit::base::test_support::snapshots(window);
-            for label in [&path, "Keep current file", "Retry restore", "Review files"] {
+            for label in [
+                &path,
+                "Keep current file",
+                "Try restoring again",
+                "Review files",
+            ] {
                 let node = nodes.iter().find(|n| n.label() == Some(label)).unwrap();
                 assert!(
                     node.bounds().right() <= px(width),

@@ -231,6 +231,7 @@ struct Newport {
     needle_removal_reviews: std::collections::HashMap<String, integration_removal::Review>,
     needle_helper_ui: std::collections::HashMap<String, integration_helpers::State>,
     integration_shell: Entity<integration::ShellCode>,
+    integration_scroll: ScrollHandle,
     server_form: Option<Entity<server_form::ServerForm>>,
     modal_open: bool,
     server_picker: Entity<server_picker::Picker>,
@@ -421,7 +422,7 @@ impl Newport {
             Ok(value) => (value, None),
             Err(error) => (
                 appearance::Appearance::System,
-                Some(format!("Could not load appearance: {error}")),
+                Some(format!("Couldn’t load appearance: {error}.")),
             ),
         };
         theme::install(appearance.is_dark(window.appearance()), cx);
@@ -464,6 +465,7 @@ impl Newport {
             needle_removal_reviews: Default::default(),
             needle_helper_ui: Default::default(),
             integration_shell: cx.new(|cx| integration::ShellCode::new(window, cx)),
+            integration_scroll: ScrollHandle::new(),
             server_form: None,
             modal_open: false,
             server_picker: Self::init_picker(window, cx),
@@ -549,7 +551,7 @@ impl Newport {
                     .into_iter()
                     .chain(
                         sidebar_error
-                            .map(|error| format!("Could not load sidebar preferences: {error}")),
+                            .map(|error| format!("Couldn’t load sidebar preferences: {error}.")),
                     )
                     .collect();
                 (!errors.is_empty()).then(|| Notification::error(errors.join("\n")))
@@ -1157,8 +1159,7 @@ impl Newport {
                                     .max_h(px(if compact { 40. } else { 36. }))
                                     .w_full()
                                     .rounded_none()
-                                    // Navigation tabs reserve a 1px focus border;
-                                    // match their content inset.
+                                    // Match the navigation tabs' content inset.
                                     .border_0()
                                     .px(px(if compact { 0. } else { 17. }))
                                     .when(!compact, |button| button.justify_start())
@@ -1177,15 +1178,7 @@ impl Newport {
             return div().into_any_element();
         };
         if let Some(error) = &r.error {
-            return div()
-                .id(SharedString::from(format!("{key}-error")))
-                .role(accesskit::Role::Alert)
-                .aria_label(error.clone())
-                .p_3()
-                .bg(cx.theme().danger.opacity(0.12))
-                .text_color(cx.theme().danger)
-                .child(error.clone())
-                .into_any_element();
+            return error_banner(format!("{key}-error"), error.clone(), cx).into_any_element();
         }
         if r.pending && (r.value.is_null() || key.ends_with("-more")) {
             if self.page == Page::Projects
@@ -1197,6 +1190,18 @@ impl Newport {
         }
         div().into_any_element()
     }
+}
+/// A page-wide error above the content: error text on a faint error tint,
+/// announced as an alert.
+fn error_banner(
+    id: impl Into<ElementId>,
+    message: impl Into<SharedString>,
+    cx: &App,
+) -> gpui_kit::Stateful<Div> {
+    crate::controls::alert(id, message, cx)
+        .flex_shrink_0()
+        .p_3()
+        .bg(theme::error(cx.theme().is_dark()).opacity(0.12))
 }
 impl Render for Newport {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1284,6 +1289,13 @@ impl Render for Newport {
             Some(connectivity::Phase::Failed) => theme::error(cx.theme().is_dark()),
             _ => cx.theme().muted_foreground,
         };
+        let sidebar_toggle_label = if !self.sidebar_visible {
+            "Show sidebar"
+        } else if self.sidebar_layout.compact() {
+            "Use full-name navigation"
+        } else {
+            "Use icons-only navigation"
+        };
         let header = div()
             .id("workspace-header")
             .debug_selector(|| "workspace-header".into())
@@ -1306,14 +1318,9 @@ impl Render for Newport {
             .when(!focused, |header| {
                 header.child(
                     crate::controls::icon_button("toggle-sidebar")
-                        .icon(Icon::new(IconName::PanelLeft).size(px(18.)))
-                        .accessibility_label(if !self.sidebar_visible {
-                            "Show sidebar"
-                        } else if self.sidebar_layout.compact() {
-                            "Use full-name navigation"
-                        } else {
-                            "Use icons-only navigation"
-                        })
+                        .icon(IconName::PanelLeft)
+                        .accessibility_label(sidebar_toggle_label)
+                        .tooltip(sidebar_toggle_label)
                         .ghost()
                         .on_click(cx.listener(|this, _, window, cx| {
                             if window.has_active_dialog(cx) {
@@ -1326,7 +1333,7 @@ impl Render for Newport {
                                 .set_compact(!this.sidebar_layout.compact())
                             {
                                 this.notification = Some(Notification::error(format!(
-                                    "Could not save navigation style: {error}"
+                                    "Couldn’t save navigation style: {error}."
                                 )));
                             }
                             cx.notify();
@@ -1358,7 +1365,7 @@ impl Render for Newport {
                             .gap(px(6.))
                             .text_size(px(crate::ui::FONT_SIZE))
                             .text_color(health_color)
-                            .child(div().size(px(5.)).rounded_full().bg(health_color))
+                            .child(crate::controls::status_dot(Some(health_color), cx))
                             .child(health_label),
                     )
                 },
@@ -1382,12 +1389,11 @@ impl Render for Newport {
                     .as_str()
                     .filter(|error| !error.is_empty()),
                 |content, error| {
-                    content.child(
-                        div()
-                            .p_3()
-                            .bg(cx.theme().danger.opacity(0.12))
-                            .child(format!("Could not load your configuration: {error}")),
-                    )
+                    content.child(error_banner(
+                        "configuration-error",
+                        format!("Couldn’t load your configuration: {error}"),
+                        cx,
+                    ))
                 },
             )
             .when(
@@ -1584,9 +1590,7 @@ impl Render for Newport {
                                     .sidebar_layout
                                     .capture_resize(f32::from(window.viewport_size().width), cx)
                                 {
-                                    this.notification = Some(Notification::error(format!(
-                                        "Could not save sidebar width: {error}"
-                                    )));
+                                    this.notification = Some(shell::sidebar_width_error(error));
                                 }
                                 cx.notify();
                             })),
@@ -1715,7 +1719,7 @@ pub fn run_with_options_and_ready(
 ) -> Result<(), String> {
     let _agent_relay = match newport_client::agent_relay::start(&backend::Backend::discover()) {
         Ok(relay) => relay,
-        Err(error) => return Err(format!("Could not start native SSH agent relay: {error}")),
+        Err(error) => return Err(format!("Couldn’t start native SSH agent relay: {error}")),
     };
     if let Err(error) = grammars::init() {
         eprintln!("Syntax highlighting unavailable: {error}");
@@ -1783,7 +1787,7 @@ pub fn run_with_options_and_ready(
             },
         );
         if let Err(error) = opened {
-            *failed_startup.borrow_mut() = Some(format!("Could not open Newport: {error}"));
+            *failed_startup.borrow_mut() = Some(format!("Couldn’t open Newport: {error}"));
             cx.quit();
             return;
         }

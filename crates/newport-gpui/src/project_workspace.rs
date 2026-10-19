@@ -2,11 +2,29 @@
 use super::*;
 use gpui_kit::component::tab::Tab;
 
-pub(super) fn document_tab_surface(
+type CloseTab = std::rc::Rc<dyn Fn(bool, &mut Window, &mut App)>;
+
+/// One open document in a pane's tab strip. Terminals, files and reviews share
+/// its padding, active fill, optional 16px icon, focus ring and close button.
+#[derive(IntoElement)]
+pub(crate) struct DocumentTab {
+    key: ElementId,
+    group: SharedString,
+    active: bool,
+    focus: Option<Option<FocusHandle>>,
+    close: Option<Button>,
+    tab: gpui_kit::base::Tab,
+}
+
+/// A document tab; add its title as a child, then `on_close`.
+pub(crate) fn document_tab(
     id: impl Into<ElementId>,
     active: bool,
+    icon: Option<AnyElement>,
     cx: &App,
-) -> gpui::Stateful<Div> {
+) -> DocumentTab {
+    let key = id.into();
+    let group = SharedString::from(format!("document-tab:{key}"));
     let background = if active {
         cx.theme().tab_active
     } else {
@@ -17,18 +35,139 @@ pub(super) fn document_tab_surface(
     } else {
         theme::row_hover(cx)
     };
-    div()
-        .id(id)
-        .h_full()
-        .flex()
-        .items_center()
+    let tab = gpui_kit::base::Tab::new(key.clone())
+        .selected(active)
+        .group(group.clone())
+        .h(px(crate::ui::HEADER_HEIGHT))
         .flex_shrink_0()
-        .px_1()
+        .max_w(px(260.))
+        .px(px(12.))
+        .gap(px(8.))
+        .text_size(px(crate::ui::FONT_SIZE))
+        .text_color(if active {
+            cx.theme().foreground
+        } else {
+            cx.theme().muted_foreground
+        })
         .bg(background)
         .border_r_1()
+        .when(!active, |tab| tab.border_b_1())
         .border_color(cx.theme().border)
-        .when(!active, |view| view.border_b_1())
-        .hover(move |view| view.bg(hover))
+        .hover(move |tab| tab.bg(hover))
+        .focus_visible(|style| crate::controls::inset_focus_ring(style, cx))
+        .when_some(icon, |tab, icon| tab.child(icon));
+    DocumentTab {
+        key,
+        group,
+        active,
+        focus: None,
+        close: None,
+        tab,
+    }
+}
+
+/// A document tab's truncating title.
+pub(crate) fn document_tab_title(title: impl Into<SharedString>) -> Div {
+    div().min_w_0().truncate().child(title.into())
+}
+
+impl DocumentTab {
+    /// Uses the owner's focus handle, for strips with roving keyboard focus.
+    pub(crate) fn focus_handle(mut self, focus: FocusHandle) -> Self {
+        self.focus = Some(Some(focus));
+        self
+    }
+    /// Leaves the tab out of keyboard focus, for example while it hosts an editor.
+    pub(crate) fn unfocusable(mut self) -> Self {
+        self.focus = Some(None);
+        self
+    }
+    pub(crate) fn set_position(mut self, position: usize, size: usize) -> Self {
+        self.tab = self.tab.set_position(position, size);
+        self
+    }
+    pub(crate) fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.tab = self.tab.accessibility_label(label);
+        self
+    }
+    /// A 12px close button, visible while active, hovered or focused, and a
+    /// middle-click shortcut. Its tooltip is "Close tab"; `label` names the tab
+    /// for assistive technology. `close` learns whether the keyboard asked.
+    pub(crate) fn on_close(
+        mut self,
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        enabled: bool,
+        close: impl Fn(bool, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        let close: CloseTab = std::rc::Rc::new(close);
+        let click = close.clone();
+        self.close = Some(
+            crate::controls::compact_icon_button(id)
+                .ghost()
+                .icon(Icon::new(IconName::X).size(px(12.)))
+                .flex_shrink_0()
+                .opacity(if self.active { 0.65 } else { 0. })
+                .group_hover(self.group.clone(), |style| style.opacity(1.))
+                .focus(|style| style.opacity(1.))
+                .accessibility_label(label)
+                .tooltip("Close tab")
+                .disabled(!enabled)
+                .on_click(move |event, window, cx| {
+                    cx.stop_propagation();
+                    click(matches!(event, ClickEvent::Keyboard(_)), window, cx);
+                }),
+        );
+        // The button's own inset already separates it from the tab's edge.
+        self.tab = self.tab.pr(px(6.));
+        if enabled {
+            self.tab = self
+                .tab
+                // Closing an inactive tab must not move focus away from the
+                // editor first; a middle press would otherwise focus the tab.
+                .on_mouse_down(MouseButton::Middle, |_, window, _| window.prevent_default())
+                .on_mouse_up(MouseButton::Middle, move |_, window, cx| {
+                    cx.stop_propagation();
+                    close(false, window, cx);
+                });
+        }
+        self
+    }
+}
+
+impl ParentElement for DocumentTab {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.tab.extend(elements);
+    }
+}
+impl Styled for DocumentTab {
+    fn style(&mut self) -> &mut gpui_kit::StyleRefinement {
+        self.tab.style()
+    }
+}
+impl InteractiveElement for DocumentTab {
+    fn interactivity(&mut self) -> &mut gpui_kit::Interactivity {
+        self.tab.interactivity()
+    }
+}
+impl StatefulInteractiveElement for DocumentTab {}
+impl RenderOnce for DocumentTab {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let focus = self.focus.unwrap_or_else(|| {
+            Some(
+                window
+                    // Document tabs are Tab-key stops, like the buttons they replaced.
+                    .use_keyed_state(self.key.clone(), cx, |_, cx| {
+                        cx.focus_handle().tab_stop(true)
+                    })
+                    .read(cx)
+                    .clone(),
+            )
+        });
+        self.tab
+            .when_some(focus, |tab, focus| tab.track_focus(&focus))
+            .when_some(self.close, |tab, close| tab.child(close))
+    }
 }
 
 fn status_view_button(
@@ -56,7 +195,7 @@ fn status_view_button(
             cx.theme().muted_foreground
         })
         .when(active, |button| {
-            button.bg(cx.theme().foreground.opacity(0.08))
+            button.bg(theme::selected_fill(cx.theme().is_dark()))
         })
 }
 
@@ -139,36 +278,23 @@ impl Newport {
             });
         }
         crate::ui::header()
+            .gap_1()
+            .pr_1()
+            .child(crate::ui::header_rule(cx))
             .when(files, |header| {
-                header.gap_1().px_1().child(crate::ui::header_rule(cx))
-            })
-            .when(files, |header| {
-                header.child(
-                    div()
-                        .flex_1()
-                        .px_2()
-                        .text_size(px(crate::ui::FONT_SIZE))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child("Explorer"),
-                )
+                header
+                    .pl_3()
+                    .child(div().flex_1().min_w_0().truncate().child("Explorer"))
             })
             .when(!files, |header| {
                 header.child(
                     crate::controls::tabs("project-navigation")
+                        .underline()
                         .accessibility_label("Project navigation")
-                        .with_size(px(crate::ui::HEADER_HEIGHT))
-                        .rounded_none()
-                        .bg(cx.theme().muted)
                         .flex_1()
                         .min_w_0()
                         .selected_index(editor.read(cx).navigator.panel.saturating_sub(1))
-                        .children(panels.into_iter().map(|name| {
-                            Tab::new()
-                                .label(name)
-                                .font_weight(FontWeight::MEDIUM)
-                                .rounded_none()
-                                .flex_1()
-                        }))
+                        .children(panels.into_iter().map(|name| Tab::new().label(name)))
                         .on_click(cx.listener(|this, index: &usize, window, cx| {
                             this.project_choose_panel(*index + 1, window, cx)
                         })),
@@ -177,7 +303,7 @@ impl Newport {
             .when(files, |header| {
                 let editor = editor.clone();
                 header.child(
-                    crate::controls::compact_icon_button("project-quick-open")
+                    crate::controls::icon_button("project-quick-open")
                         .ghost()
                         .icon(IconName::Search)
                         .accessibility_label("Open file")
@@ -193,20 +319,8 @@ impl Newport {
                 )
             })
             .child(
-                crate::controls::compact_icon_button("project-refresh")
+                crate::controls::icon_button("project-refresh")
                     .ghost()
-                    .when(!files, |button| {
-                        button
-                            .w(px(34.))
-                            .min_w(px(34.))
-                            .max_w(px(34.))
-                            .h(px(34.))
-                            .min_h(px(34.))
-                            .max_h(px(34.))
-                            .rounded_none()
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                    })
                     .icon(IconName::RefreshCw)
                     .loading(if files {
                         editor.read(cx).loading_files()
@@ -220,11 +334,7 @@ impl Newport {
                     } else {
                         "Refresh Git"
                     })
-                    .tooltip(if files {
-                        "Refresh files"
-                    } else {
-                        "Refresh Git"
-                    })
+                    .tooltip("Refresh")
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if files {
                             editor.update(cx, |e, cx| e.refresh_files(window, cx));
@@ -243,7 +353,7 @@ impl Newport {
             )
             .when(self.content_width < 600., |v| {
                 v.child(
-                    crate::controls::compact_icon_button("project-return-content")
+                    crate::controls::icon_button("project-return-content")
                         .ghost()
                         .icon(IconName::ArrowRight)
                         .accessibility_label("Return to open tab")
@@ -303,30 +413,22 @@ impl Newport {
                 6 => "Remotes",
                 _ => "Repository",
             };
+            let close = cx.entity().downgrade();
             tabs.push(
-                document_tab_surface("project-repository-tab-surface", reviewing, cx)
-                    .child(
-                        crate::controls::compact_button("project-repository-tab")
-                            .text()
-                            .label(title)
-                            .text_color(if reviewing {
-                                cx.theme().foreground
-                            } else {
-                                cx.theme().muted_foreground
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.project_show_review(cx))),
-                    )
-                    .child(
-                        crate::controls::compact_icon_button("project-close-repository")
-                            .ghost()
-                            .icon(IconName::X)
-                            .accessibility_label(format!("Close {title}"))
-                            .tooltip("Close tab")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if !window.has_active_dialog(cx) {
-                                    this.project_close_repository_tab(cx);
-                                }
-                            })),
+                document_tab("project-repository-tab", reviewing, None, cx)
+                    .accessibility_label(title)
+                    .child(document_tab_title(title))
+                    .on_click(cx.listener(|this, _, _, cx| this.project_show_review(cx)))
+                    .on_close(
+                        "project-close-repository",
+                        format!("Close {title}"),
+                        true,
+                        move |_, window, cx| {
+                            if !window.has_active_dialog(cx) {
+                                let _ = close
+                                    .update(cx, |this, cx| this.project_close_repository_tab(cx));
+                            }
+                        },
                     )
                     .into_any_element(),
             );
@@ -344,38 +446,28 @@ impl Newport {
             let keep_key = key.clone();
             let preview = document.preview;
             tabs.push(
-                document_tab_surface(("project-review-tab-surface", index), selected, cx)
-                    .child(
-                        crate::controls::compact_button(("project-review-tab", index))
-                            .text()
-                            .cursor_default()
-                            .text_color(if selected {
-                                cx.theme().foreground
-                            } else {
-                                cx.theme().muted_foreground
-                            })
-                            .rounded_none()
-                            .label(title.clone())
-                            .accessibility_label(format!("Review {title}"))
-                            .when(preview, |button| button.italic())
-                            .on_click(move |event, _, cx| {
-                                owner.update(cx, |e, cx| {
-                                    let mut item = document.clone();
-                                    if event.click_count() > 1 {
-                                        item.preview = false;
-                                    }
-                                    e.review_document(item, cx);
-                                })
-                            }),
-                    )
+                document_tab(("project-review-tab", index), selected, None, cx)
+                    .accessibility_label(format!("Review {title}"))
+                    .child(document_tab_title(title.clone()).when(preview, |label| label.italic()))
+                    .on_click(move |event, _, cx| {
+                        owner.update(cx, |e, cx| {
+                            let mut item = document.clone();
+                            if event.click_count() > 1 {
+                                item.preview = false;
+                            }
+                            e.review_document(item, cx);
+                        })
+                    })
                     .when(preview && selected, |view| {
                         view.child(
                             crate::controls::compact_icon_button(("project-keep-review", index))
                                 .ghost()
-                                .icon(IconName::Pin)
+                                .icon(Icon::new(IconName::Pin).size(px(12.)))
+                                .flex_shrink_0()
                                 .accessibility_label(format!("Keep {title} open"))
                                 .tooltip("Keep open")
                                 .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
                                     keep_owner.update(cx, |e, cx| {
                                         e.navigator.documents.keep(&keep_key);
                                         cx.notify();
@@ -383,15 +475,11 @@ impl Newport {
                                 }),
                         )
                     })
-                    .child(
-                        crate::controls::compact_icon_button(("project-close-review", index))
-                            .ghost()
-                            .icon(IconName::X)
-                            .accessibility_label(format!("Close {title}"))
-                            .tooltip("Close tab")
-                            .on_click(move |_, _, cx| {
-                                close_owner.update(cx, |e, cx| e.close_review(&key, cx))
-                            }),
+                    .on_close(
+                        ("project-close-review", index),
+                        format!("Close {title}"),
+                        true,
+                        move |_, _, cx| close_owner.update(cx, |e, cx| e.close_review(&key, cx)),
                     )
                     .into_any_element(),
             );
@@ -559,7 +647,13 @@ impl Newport {
             .child(self.status("repository", cx))
             .when_some(
                 self.git.error.clone().filter(|_| editor.read(cx).reviewing),
-                |v, e| v.child(div().px_3().text_color(cx.theme().danger).child(e)),
+                |v, e| {
+                    v.child(
+                        crate::controls::alert("project-git-error", e, cx)
+                            .px_3()
+                            .py_2(),
+                    )
+                },
             )
             .child(div().flex_1().min_h_0().min_w_0().child(content))
             .child(self.git_log_panel(window, cx))

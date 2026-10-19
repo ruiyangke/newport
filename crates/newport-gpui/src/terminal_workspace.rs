@@ -1,5 +1,4 @@
 use crate::{terminal_status::Phase, terminal_view::TerminalView, *};
-use gpui_kit::base::Tab;
 use newport_client::terminal_command::CommandDraft;
 use std::time::{Duration, Instant};
 
@@ -525,35 +524,18 @@ fn automatic_tab_title(title: &str, id: usize) -> String {
     }
 }
 
-fn session_tab(id: usize, active: bool, cx: &App) -> Tab {
-    let background = if active {
-        cx.theme().background
-    } else {
-        cx.theme().muted
-    };
-    let hover = if active {
-        background
-    } else {
-        theme::row_hover(cx)
-    };
-    Tab::new(("terminal-tab", id))
-        .selected(active)
-        .h(px(crate::ui::HEADER_HEIGHT))
-        .flex_shrink_0()
-        .max_w(px(260.))
-        .px(px(12.))
-        .gap(px(8.))
-        .text_size(px(crate::ui::FONT_SIZE))
-        .text_color(if active {
-            cx.theme().foreground
-        } else {
-            cx.theme().muted_foreground
-        })
-        .bg(background)
-        .border_r_1()
-        .when(!active, |tab| tab.border_b_1())
-        .border_color(cx.theme().border)
-        .hover(move |tab| tab.bg(hover))
+fn session_tab(id: usize, active: bool, cx: &App) -> crate::project_workspace::DocumentTab {
+    crate::project_workspace::document_tab(
+        ("terminal-tab", id),
+        active,
+        Some(
+            Icon::new(IconName::Terminal)
+                .size(px(16.))
+                .flex_shrink_0()
+                .into_any_element(),
+        ),
+        cx,
+    )
 }
 
 fn custom_name(value: &str) -> Option<String> {
@@ -668,6 +650,7 @@ impl Render for Workspace {
                                     self.rename.as_ref().filter(|rename| rename.id == id)
                                 {
                                     return session_tab(id, index == self.active, cx)
+                                        .unfocusable()
                                         .when(index == 0 && inset, |tab| tab.border_l_1())
                                         .set_position(index + 1, self.tabs.len())
                                         .accessibility_label(format!("Rename Terminal {}", id + 1))
@@ -704,7 +687,6 @@ impl Render for Workspace {
                                     (tab.custom.is_none() && title != remote_title && remote_title.contains('@') && remote_title.contains(':'))
                                         .then(|| remote_title.clone())
                                 });
-                                let group = SharedString::from(format!("terminal-tab-{id}"));
                                 session_tab(id, index == self.active, cx)
                                     // Inset beside the window controls, the first tab
                                     // needs its own leading edge.
@@ -715,7 +697,6 @@ impl Render for Workspace {
                                         None => title.clone(),
                                     })
                                     .when_some(hint, |tab, hint| tab.hover_hint(hint))
-                                    .group(group.clone())
                                     .debug_selector(move || format!("terminal-tab-{id}"))
                                     .on_mouse_down(
                                         MouseButton::Right,
@@ -724,17 +705,7 @@ impl Render for Workspace {
                                             cx.notify();
                                         }),
                                     )
-                                    .on_mouse_up(
-                                        MouseButton::Middle,
-                                        cx.listener(move |this, _, window, cx| {
-                                            this.close(id, false, window, cx);
-                                            cx.stop_propagation();
-                                        }),
-                                    )
-                                    .track_focus(&tab.focus.clone().tab_stop(index == self.active))
-                                    .focus_visible(|style| {
-                                        style.border_1().border_color(cx.theme().ring)
-                                    })
+                                    .focus_handle(tab.focus.clone().tab_stop(index == self.active))
                                     .on_key_down(cx.listener(
                                         move |this, event: &KeyDownEvent, window, cx| {
                                             this.tab_key(id, event, window, cx)
@@ -772,8 +743,7 @@ impl Render for Workspace {
                                             }
                                         },
                                     ))
-                                    .child(Icon::new(IconName::Terminal).size(px(16.)).flex_shrink_0())
-                                    .child(div().min_w_0().truncate().child(title))
+                                    .child(crate::project_workspace::document_tab_title(title.clone()))
                                     .when_some(startup_exit, |tab, exit| {
                                         tab.child(
                                             div()
@@ -783,31 +753,10 @@ impl Render for Workspace {
                                         )
                                     })
                                     .when(self.tabs.len() > 1, |tab| {
-                                        tab.child(
-                                            crate::controls::compact_icon_button((
-                                                "close-terminal",
-                                                id,
-                                            ))
-                                            .icon(Icon::new(IconName::X).size(px(12.)))
-                                            .w(px(20.)).min_w(px(20.)).max_w(px(20.))
-                                            .h(px(20.)).min_h(px(20.)).max_h(px(20.))
-                                            .ghost()
-                                            .opacity(if index == self.active { 0.65 } else { 0. })
-                                            .group_hover(group.clone(), |style| style.opacity(1.))
-                                            .focus(|style| style.opacity(1.))
-                                            .accessibility_label("Close terminal")
-                                            .on_click(cx.listener(
-                                                move |this, event: &ClickEvent, window, cx| {
-                                                    cx.stop_propagation();
-                                                    this.close(
-                                                        id,
-                                                        matches!(event, ClickEvent::Keyboard(_)),
-                                                        window,
-                                                        cx,
-                                                    );
-                                                },
-                                            )),
-                                        )
+                                        let owner = cx.entity().downgrade();
+                                        tab.on_close(("close-terminal", id), format!("Close {title}"), true, move |keyboard, window, cx| {
+                                            let _ = owner.update(cx, |this, cx| this.close(id, keyboard, window, cx));
+                                        })
                                     })
                             })),
                     )
@@ -820,6 +769,7 @@ impl Render for Workspace {
                             .rounded_none()
                             .border_b_1().border_color(cx.theme().border)
                             .accessibility_label("New terminal")
+                            .tooltip("New terminal")
                             .disabled(self.tabs.len() >= MAX_TERMINALS)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.finish_rename(true, false, window, cx);
@@ -866,9 +816,14 @@ impl Render for Workspace {
                                 gpui_kit::assets::IconName::Minimize2
                             } else {
                                 gpui_kit::assets::IconName::Maximize2
-                            }).size(px(13.)).text_color(cx.theme().muted_foreground))
+                            }).size(px(crate::controls::ICON_SIZE)).text_color(cx.theme().muted_foreground))
                             .ghost()
                             .accessibility_label(if self.immersive {
+                                "Exit immersive mode"
+                            } else {
+                                "Enter immersive mode"
+                            })
+                            .tooltip(if self.immersive {
                                 "Exit immersive mode"
                             } else {
                                 "Enter immersive mode"
@@ -895,18 +850,9 @@ impl Render for Workspace {
             )
             .when_some(error, |root, error| {
                 root.child(
-                    div()
-                        .id("terminal-error")
-                        .role(Role::Alert)
-                        .aria_label(error.clone())
+                    crate::controls::alert("terminal-error", error, cx)
                         .px(px(12.))
-                        .py(px(9.))
-                        .text_size(px(crate::ui::FONT_SIZE))
-                        .text_color(cx.theme().danger)
-                        .bg(cx.theme().danger.opacity(0.06))
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .child(error),
+                        .py(px(8.)),
                 )
             })
             .when_some(current.clone(), |root, current| {
@@ -939,51 +885,29 @@ impl Render for Workspace {
                                     "Open a remote shell".into()
                                 };
                                 frame.child(
-                                    div()
-                                        .absolute()
-                                        .inset_0()
-                                        .bg(cx.theme().background)
-                                        .flex()
-                                        .flex_col()
-                                        .items_center()
-                                        .justify_center()
-                                        .gap(px(6.))
-                                        .p(px(24.))
-                                        .child(
-                                            Icon::new(IconName::Terminal)
-                                                .size(px(28.))
-                                                .text_color(cx.theme().muted_foreground),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("terminal-welcome")
-                                                .role(Role::Status)
-                                                .aria_label(title.clone())
-                                                .text_size(px(15.))
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .child(title),
-                                        )
-                                        .child(
-                                            div()
-                                                .font_family(cx.theme().mono_font_family.clone())
-                                                .text_size(px(crate::ui::FONT_SIZE))
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(self.endpoint.clone()),
-                                        ),
+                                    // The endpoint reads as the description: it is
+                                    // the shell this tab is about to open.
+                                    empty::pane(
+                                        IconName::Terminal,
+                                        title,
+                                        self.endpoint.clone(),
+                                        cx,
+                                    )
+                                    .absolute()
+                                    .inset_0()
+                                    .bg(cx.theme().background),
                                 )
                             },
                         ),
                 )
             })
             .when(current.is_none(), |root| {
-                root.child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child("Open a terminal with +"),
-                )
+                root.child(empty::pane(
+                    IconName::Terminal,
+                    "No terminals open",
+                    "Open a terminal with +.",
+                    cx,
+                ))
             })
     }
 }

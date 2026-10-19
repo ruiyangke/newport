@@ -222,12 +222,11 @@ impl Newport {
                 .flex_shrink_0()
                 .ml(px(39.))
                 .mb(px(28.))
-                .child(
-                    div()
-                        .text_size(px(24.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(format!("Set up {name}")),
-                )
+                .child(crate::controls::page_title(
+                    format!("Set up {name}"),
+                    None,
+                    cx,
+                ))
                 .child(
                     div()
                         .id("setup-server-address")
@@ -342,7 +341,7 @@ impl Newport {
                         );
                     }
                 } else if flow.error.is_none() && phase == 1 {
-                    body=body.child(div().text_size(px(19.)).font_weight(FontWeight::SEMIBOLD).child("Install the helper?"))
+                    body=body.child(crate::controls::dialog_title("Install the helper?"))
                         .child(div().text_size(px(crate::ui::FONT_SIZE)).text_color(cx.theme().muted_foreground).child("Needle, a small tool for server metrics, Git, and optional browser and clipboard integration."))
                         .child(div().text_size(px(crate::ui::FONT_SIZE)).text_color(cx.theme().muted_foreground).child(format!("{:.1} MiB · copied over SSH",specs["total"].as_f64().unwrap_or(0.)/1048576.)))
                         .child(div().text_size(px(crate::ui::FONT_SIZE)).text_color(cx.theme().muted_foreground).child("Browser and clipboard access stay off until you choose them below."));
@@ -433,14 +432,14 @@ impl Newport {
                                     .id("setup-technical-error")
                                     .debug_selector(|| "setup-technical-error".into())
                                     .border_l_2()
-                                    .border_color(cx.theme().danger)
-                                    .bg(cx.theme().danger.opacity(0.06))
+                                    .border_color(crate::theme::error(cx.theme().is_dark()))
+                                    .bg(crate::theme::error(cx.theme().is_dark()).opacity(0.06))
                                     .px(px(12.))
                                     .py(px(8.))
                                     .font_family(cx.theme().mono_font_family.clone())
                                     .text_size(px(crate::ui::FONT_SIZE))
                                     .line_height(relative(1.5))
-                                    .text_color(cx.theme().danger)
+                                    .text_color(crate::theme::error(cx.theme().is_dark()))
                                     .whitespace_normal()
                                     .child(shown),
                             ),
@@ -462,7 +461,7 @@ impl Newport {
                                     .when(!fix_connection, |b| b.primary())
                                     .when(flow.error.is_some(), |b| b.icon(IconName::RefreshCw))
                                     .label(if flow.error.is_some() {
-                                        "Retry"
+                                        "Try again"
                                     } else if phase == 1 {
                                         "Allow"
                                     } else {
@@ -541,15 +540,13 @@ impl Newport {
                 .justify_center()
                 .text_size(px(crate::ui::FONT_SIZE))
                 .bg(if failed {
-                    cx.theme().danger
+                    crate::theme::error(cx.theme().is_dark())
                 } else if active {
                     cx.theme().foreground
                 } else {
                     cx.theme().muted
                 })
-                .text_color(if failed {
-                    cx.theme().danger_foreground
-                } else if active {
+                .text_color(if failed || active {
                     cx.theme().background
                 } else {
                     cx.theme().muted_foreground
@@ -632,25 +629,23 @@ impl Newport {
             }))
     }
     pub(super) fn setup_skipped(&self, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .p(px(16.))
-            .flex()
-            .flex_col()
-            .gap(px(16.))
-            .child("Monitoring is not enabled for this server.")
-            .child(
-                div().child(
-                    crate::controls::button("resume-setup")
-                        .label("Set up monitoring")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.setup_flow = None;
-                            this.resources.invalidate_prefix("setup-");
-                            this.poll_setup();
-                            cx.notify();
-                        })),
-                ),
-            )
-            .into_any_element()
+        crate::empty::pane(
+            IconName::Activity,
+            "Monitoring is off",
+            "Set up monitoring to see this server’s metrics and processes.",
+            cx,
+        )
+        .child(
+            crate::controls::button("resume-setup")
+                .label("Set up monitoring")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.setup_flow = None;
+                    this.resources.invalidate_prefix("setup-");
+                    this.poll_setup();
+                    cx.notify();
+                })),
+        )
+        .into_any_element()
     }
 }
 #[derive(Clone, Copy)]
@@ -847,7 +842,7 @@ mod tests {
                 assert!(visual.debug_bounds("setup-technical-error").is_some());
                 visual.update(|window, _| {
                     let nodes = gpui_kit::base::test_support::snapshots(window);
-                    for label in ["Edit connection", "Retry", "Copy details"] {
+                    for label in ["Edit connection", "Try again", "Copy details"] {
                         assert!(
                             nodes.iter().any(|n| n.label() == Some(label)),
                             "missing {label}"
@@ -868,7 +863,7 @@ mod tests {
                     .unwrap()
                     .bounds()
             };
-            (at("Edit connection"), at("Retry"))
+            (at("Edit connection"), at("Try again"))
         });
         assert!(edit.left() < retry.left());
         // Retrying keeps the failed step in place instead of swapping it out.

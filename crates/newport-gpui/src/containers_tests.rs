@@ -748,12 +748,14 @@ fn grouped_list_renders_each_container_once_and_search_opens_collapsed_matches(
     for (index, row) in rows.iter().enumerate().filter(|(_, r)| r.key.is_some()) {
         let bounds = cx
             .debug_bounds(Box::leak(
-                format!("containers-row-{index}").into_boxed_str(),
+                format!("containers-line-{index}").into_boxed_str(),
             ))
             .unwrap_or_else(|| panic!("row {} should render", row.name));
         let master = cx.debug_bounds("containers-master").unwrap();
-        assert!(
-            (bounds.right() - (master.right() - px(1.))).abs() <= px(2.),
+        // Edge to edge: no gap for a focus border on either side.
+        assert_eq!(
+            (bounds.left(), bounds.right()),
+            (master.left(), master.right()),
             "row {} must fill its pane, not shrink to its text",
             row.name
         );
@@ -763,7 +765,7 @@ fn grouped_list_renders_each_container_once_and_search_opens_collapsed_matches(
         cx.debug_bounds("container-job-badge-c:stack-run-1")
             .is_none()
     );
-    click(cx, "1 one-off job");
+    click(cx, "One-off jobs, 1");
     let job = element(cx, "stack-run-1: one-off job, Completed");
     let badge = cx
         .debug_bounds("container-job-badge-c:stack-run-1")
@@ -779,7 +781,7 @@ fn grouped_list_renders_each_container_once_and_search_opens_collapsed_matches(
         panel.read_with(cx, |p, _| p.selected.clone()),
         Some("c:stack-run-1".into())
     );
-    click(cx, "1 one-off job");
+    click(cx, "One-off jobs, 1");
     assert!(
         cx.debug_bounds("container-job-badge-c:stack-run-1")
             .is_none()
@@ -857,7 +859,7 @@ fn oneoff_only_projects_do_not_display_a_zero_service_fraction() {
     assert!(project.note.is_empty());
     assert!(
         rows.iter()
-            .any(|row| row.jobs && row.name == "1 one-off job")
+            .any(|row| row.jobs && row.name == "One-off jobs" && row.note == "1")
     );
 }
 
@@ -1069,7 +1071,7 @@ fn filtering_a_fallback_project_discards_its_compose_review_without_writing(
         assert_eq!(p.client.selected_project(), Some("stack"));
         assert!(p.client.selected_container().is_none());
     });
-    click(cx, "More Compose actions");
+    click(cx, "More actions for stack");
     click(cx, "Down…");
     assert!(panel.read_with(cx, |p, _| p.compose_state.proposed.is_some()));
     assert!(cx.debug_bounds("compose-review").is_some());
@@ -2011,7 +2013,7 @@ fn failed_disk_read_has_an_explicit_retry_without_starting_cleanup(cx: &mut Test
     select(&panel, cx, "disk");
     assert!(cx.debug_bounds("docker-disk-skeleton").is_none());
     assert!(!has_element(cx, "Clean up"));
-    assert!(has_element(cx, "Retry disk usage"));
+    assert!(has_element(cx, "Try reading disk usage again"));
     assert_eq!(
         panel.read_with(cx, |p, _| p
             .client
@@ -2032,7 +2034,7 @@ fn failed_disk_read_has_an_explicit_retry_without_starting_cleanup(cx: &mut Test
         "an unchanged failed pane must not retry on every poll"
     );
     backend.set_disk(disk_snapshot());
-    click(cx, "Retry disk usage");
+    click(cx, "Try reading disk usage again");
     settle(&panel, cx);
     assert!(has_element(cx, "Clean up"));
     assert_eq!(backend.count("docker_disk"), requests + 1);
@@ -2061,17 +2063,17 @@ fn failed_volume_measurement_stops_measuring_and_retries_only_volumes(cx: &mut T
     let tile = element(cx, "Volumes: Unknown, 2 volumes");
     assert!(tile.bounds().size.width > px(0.));
     assert!(!has_element(cx, "Volumes: Measuring…, 2 volumes"));
-    assert!(has_element(cx, "Retry measuring volumes"));
+    assert!(has_element(cx, "Try measuring volumes again"));
     let quick_reads = backend.count("docker_disk");
     backend.set_disk_volumes(Ok(serde_json::to_value(measured).unwrap()));
-    click(cx, "Retry measuring volumes");
+    click(cx, "Try measuring volumes again");
     settle(&panel, cx);
     assert_eq!(backend.count("docker_disk"), quick_reads + 1);
     assert_eq!(
         backend.requests("docker_disk").last().unwrap()["part"],
         "volumes"
     );
-    assert!(!has_element(cx, "Retry measuring volumes"));
+    assert!(!has_element(cx, "Try measuring volumes again"));
     // Sizes come from the measurement; totals are recomputed from them.
     assert!(has_element(cx, "Volumes: 976.6 KiB, 2 volumes"));
 }

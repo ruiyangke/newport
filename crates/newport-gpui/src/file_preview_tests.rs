@@ -49,7 +49,7 @@ impl PreviewHost {
             )
             .into_any_element();
         let body = if self.loading || self.error.is_some() {
-            message(self.error.as_deref(), cx)
+            message(self.error.as_deref(), None, cx)
         } else {
             self.viewport.text.as_ref().unwrap().view(
                 &"line of retained preview text\n".repeat(500),
@@ -141,7 +141,11 @@ fn side_pane_keeps_identity_and_controls_inside_narrow_widths(cx: &mut TestAppCo
                 .iter()
                 .any(|l| *l == "remote-report-with-a-very-long-file-name".repeat(4))
         );
-        assert_eq!(header.size.height, px(28.), "one compact row");
+        assert_eq!(
+            header.size.height,
+            px(crate::ui::HEADER_HEIGHT),
+            "one pane header row"
+        );
         let controls = cx.update(|window, _| {
             gpui::base::test_support::snapshots(window)
                 .iter()
@@ -180,15 +184,9 @@ fn loading_and_error_messages_keep_their_recovery(cx: &mut TestAppContext) {
         cx.notify();
     });
     draw(cx);
-    let labels = labels(cx);
-    assert!(
-        labels
-            .iter()
-            .any(|l| l == "Only text and supported images can be previewed")
-    );
-    assert!(
-        labels
-            .iter()
-            .any(|l| l == "Download to open on your computer.")
-    );
+    // The reason and "Download to open on your computer." are the shared
+    // empty state's description; the pane replaces the loading lines.
+    assert!(cx.debug_bounds("file-preview-skeleton").is_none());
+    let message = cx.debug_bounds("file-preview-message").unwrap();
+    assert!(message.size.width > px(0.) && message.size.height > px(0.));
 }

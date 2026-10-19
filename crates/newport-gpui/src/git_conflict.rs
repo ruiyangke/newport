@@ -237,7 +237,8 @@ impl Newport {
             .when(has_error, |view| {
                 view.child(
                     crate::controls::button("retry-conflict-preview")
-                        .label("Retry preview")
+                        .label("Try again")
+                        .accessibility_label("Try loading the preview again")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.select_conflict_side(side);
                             cx.notify();

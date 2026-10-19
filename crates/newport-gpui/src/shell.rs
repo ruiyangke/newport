@@ -33,12 +33,16 @@ pub(super) fn server_menu(menu: PopupMenu, view: WeakEntity<Newport>, cx: &App) 
             .disabled(unavailable),
     )
     .item(
-        PopupMenuItem::new("Delete server")
+        PopupMenuItem::new("Delete server…")
             .disabled(unavailable || missing || deleting)
             .on_click(move |_, window, cx| {
                 let _ = view.update(cx, |this, cx| this.confirm_delete_server(window, cx));
             }),
     )
+}
+/// The one toast for a sidebar width that couldn’t be remembered.
+pub(super) fn sidebar_width_error(error: impl std::fmt::Display) -> Notification {
+    Notification::error(format!("Couldn’t save sidebar width: {error}."))
 }
 impl Newport {
     pub(super) fn configuration_available(&self) -> bool {
@@ -150,9 +154,7 @@ impl Newport {
                 .set_width(self.sidebar_layout.width(viewport) + delta, viewport, cx)
         };
         if let Err(error) = result {
-            self.notification = Some(Notification::error(format!(
-                "Could not save sidebar width: {error}"
-            )));
+            self.notification = Some(sidebar_width_error(error));
         }
         cx.notify();
     }
@@ -224,21 +226,74 @@ impl Newport {
             return;
         }
         let name = text(server, "name");
+        let title = format!("Delete {name}?");
+        let description =
+            "Its forwards will disconnect and be removed, along with its saved password.";
         let view = cx.entity().downgrade();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
             let id = id.clone();
             let view = view.clone();
-            dialog.aria_label("Delete server?").title("Delete server?")
-                .description(format!("Delete {name}? Its tunnels will disconnect and be removed, along with its saved password."))
-                .show_cancel(true).cancel_text("Cancel").ok_text("Delete server")
-                .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
-                .on_ok(move |_, _, cx| {
-                    let _ = view.update(cx, |this, cx| {
-                        this.request(&format!("server-delete:{id}"), "delete_server", json!({"id":id}));
-                        cx.notify();
-                    });
-                    true
-                })
+            dialog
+                .aria_label(title.clone())
+                .title(crate::controls::dialog_title(title.clone()))
+                .w(px(480.))
+                .max_w((window.viewport_size().width - px(32.)).max(px(240.)))
+                .p(px(24.))
+                .rounded(px(crate::ui::RADIUS))
+                .border_0()
+                .centered(true)
+                .overlay_closable(false)
+                // Bare Enter must neither dismiss nor implicitly approve a
+                // destructive operation; the explicit button owns submission.
+                .on_ok(|_, _, _| false)
+                .child(
+                    div()
+                        .id("delete-server-confirmation")
+                        .role(accesskit::Role::AlertDialog)
+                        .aria_label(title.clone())
+                        .aria_description(description)
+                        .flex()
+                        .flex_col()
+                        .pt(px(12.))
+                        .gap(px(32.))
+                        .child(
+                            div()
+                                .text_size(px(crate::ui::FONT_SIZE))
+                                .line_height(relative(1.65))
+                                .child(description),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    crate::controls::form_button("cancel-delete-server")
+                                        .label("Cancel")
+                                        .min_w(px(76.))
+                                        .rounded(px(crate::ui::RADIUS))
+                                        .on_click(|_, window, cx| window.close_dialog(cx)),
+                                )
+                                .child(
+                                    crate::controls::form_button("confirm-delete-server")
+                                        .danger()
+                                        .min_w(px(76.))
+                                        .rounded(px(crate::ui::RADIUS))
+                                        .label("Delete server")
+                                        .on_click(move |_, window, cx| {
+                                            let _ = view.update(cx, |this, cx| {
+                                                this.request(
+                                                    &format!("server-delete:{id}"),
+                                                    "delete_server",
+                                                    json!({"id":id}),
+                                                );
+                                                cx.notify();
+                                            });
+                                            window.close_dialog(cx);
+                                        }),
+                                ),
+                        ),
+                )
         });
     }
     pub(super) fn shell_actions(&self, cx: &mut Context<Self>) -> AnyElement {

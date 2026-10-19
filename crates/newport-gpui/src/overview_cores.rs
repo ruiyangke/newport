@@ -137,12 +137,7 @@ pub(super) fn grid(
 }
 
 fn tile(core: &Core, height: f32, graphs: &graph_render::Cache, cx: &App) -> AnyElement {
-    let accent: Hsla = rgb(if cx.theme().is_dark() {
-        0x3987e5
-    } else {
-        0x3478d4
-    })
-    .into();
+    let accent = crate::theme::chart_primary(cx.theme().is_dark());
     let selector = format!("cpu-core-{}", core.id);
     div()
         .id(SharedString::from(selector.clone()))

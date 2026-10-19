@@ -100,11 +100,24 @@ pub fn row_hover(cx: &App) -> gpui_kit::Hsla {
 pub fn sidebar_foreground(dark: bool) -> gpui_kit::Hsla {
     rgb(if dark { 0xeeeeef } else { 0x191a1e }).into()
 }
-pub fn sidebar_muted(dark: bool) -> gpui_kit::Hsla {
-    rgb(if dark { 0xa9abb3 } else { 0x494c55 }).into()
-}
 pub fn sidebar_selection(dark: bool) -> gpui_kit::Hsla {
     rgb(if dark { 0x34363c } else { 0xe8e9ec }).into()
+}
+
+/// The first and second series in charts and sparklines.
+pub fn chart_primary(dark: bool) -> gpui_kit::Hsla {
+    rgb(if dark { 0x3987e5 } else { 0x3478d4 }).into()
+}
+pub fn chart_secondary(dark: bool) -> gpui_kit::Hsla {
+    rgb(if dark { 0xd95926 } else { 0xeb6834 }).into()
+}
+/// Background of form fields and form-like option groups in dialogs.
+pub fn field_background(dark: bool) -> gpui_kit::Hsla {
+    rgb(if dark { 0x232426 } else { 0xfbfafb }).into()
+}
+/// Column header strip of tables.
+pub fn table_header(dark: bool) -> gpui_kit::Hsla {
+    rgb(if dark { 0x2a292d } else { 0xf5f4f6 }).into()
 }
 
 pub fn success(dark: bool) -> gpui_kit::Hsla {

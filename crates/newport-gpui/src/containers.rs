@@ -680,10 +680,7 @@ impl ContainersPanel {
                         .role(accesskit::Role::ListBox)
                         .aria_label("Containers")
                         .track_focus(&self.list_focus)
-                        .rounded(px(crate::ui::RADIUS))
-                        .border_1()
-                        .border_color(cx.theme().ring.opacity(0.))
-                        .focus_visible(|s| s.border_color(cx.theme().ring))
+                        .focus_visible(|style| crate::controls::inset_focus_ring(style, cx))
                         .on_key_down(cx.listener(Self::navigate))
                         .flex()
                         .flex_col()
@@ -873,7 +870,7 @@ impl ContainersPanel {
         if row.stopped == Some(StoppedRow::Group) {
             return div()
                 .h(px(28.))
-                .pl(px(6.))
+                .pt(px(4.))
                 .child(
                     crate::controls::group_heading(
                         "containers-stopped-group",
@@ -918,23 +915,22 @@ impl ContainersPanel {
             let project = row.project.clone().unwrap_or_default();
             return div()
                 .h(px(28.))
-                .pl(px(30.))
+                .pt(px(4.))
+                .pl(px(19.))
                 .child(
-                    crate::controls::compact_button(SharedString::from(format!("jobs-{project}")))
-                        .ghost()
-                        .label(row.name.clone())
-                        .icon(if row.open {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .expanded(row.open)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.jobs_open.remove(&project) {
-                                this.jobs_open.insert(project.clone());
-                            }
-                            cx.notify();
-                        })),
+                    crate::controls::group_heading(
+                        SharedString::from(format!("jobs-{project}")),
+                        &row.name,
+                        row.note.parse().unwrap_or_default(),
+                        row.open,
+                        cx,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.jobs_open.remove(&project) {
+                            this.jobs_open.insert(project.clone());
+                        }
+                        cx.notify();
+                    })),
                 )
                 .into_any_element();
         }
@@ -942,12 +938,20 @@ impl ContainersPanel {
             return crate::empty::compact(row.name.clone(), cx)
                 .h(px(28.))
                 .py(px(5.))
-                .px(px(8.))
+                .px(px(14.))
                 .overflow_hidden()
                 .into_any_element();
         };
         let active = selected == Some(key.as_str());
-        let mut outer = div().h(px(28.)).w_full().flex().items_center();
+        // The whole line highlights, including a project's fold chevron.
+        let mut outer = div()
+            .debug_selector(move || format!("containers-line-{index}"))
+            .h(px(28.))
+            .w_full()
+            .flex()
+            .items_center()
+            .when(active, |v| v.bg(theme::selected_fill(cx.theme().is_dark())))
+            .when(!active, |v| v.hover(|v| v.bg(theme::row_hover(cx))));
         if let Some(project) = row.project.clone() {
             outer = outer.child(
                 crate::controls::compact_icon_button(SharedString::from(format!("fold-{project}")))
@@ -990,11 +994,9 @@ impl ContainersPanel {
                     .gap(px(8.))
                     .text_size(px(crate::ui::FONT_SIZE))
                     .cursor_pointer()
-                    .when(active, |v| v.bg(theme::selected_fill(cx.theme().is_dark())))
-                    .when(!active, |v| v.hover(|v| v.bg(theme::row_hover(cx))))
                     .child(if key == domain::DISK {
                         Icon::new(IconName::HardDrive)
-                            .size(px(13.))
+                            .size(px(crate::ui::SMALL_ICON))
                             .text_color(cx.theme().muted_foreground)
                             .into_any_element()
                     } else {
@@ -1102,7 +1104,9 @@ impl Render for ContainersPanel {
                             format!("{error} Showing the last reading."),
                             cx,
                         )
-                        .mb(px(12.)),
+                        .flex_shrink_0()
+                        .px(px(crate::controls::TOOLBAR_INSET))
+                        .py(px(8.)),
                     )
                 })
             })
@@ -1251,16 +1255,8 @@ fn master_rows(
                 let jobs_visible = !needle.is_empty() || jobs_open.contains(project.name);
                 rows.push(Row {
                     key: None,
-                    name: format!(
-                        "{} one-off {}",
-                        project.jobs.len(),
-                        if project.jobs.len() == 1 {
-                            "job"
-                        } else {
-                            "jobs"
-                        }
-                    ),
-                    note: String::new(),
+                    name: "One-off jobs".into(),
+                    note: project.jobs.len().to_string(),
                     clock: None,
                     tone: domain::Tone::Muted,
                     label: String::new(),
@@ -1376,16 +1372,13 @@ fn container_row(c: &Container, indent: f32, now: i64) -> Row {
         stopped: None,
     }
 }
-fn heading(value: impl Into<SharedString>, level: u8) -> Stateful<Div> {
+/// A detail pane's title: the shared 18px heading.
+fn heading(value: impl Into<SharedString>) -> Stateful<Div> {
     let value = value.into();
-    div()
-        .id(SharedString::from(format!("container-heading-{value}")))
-        .role(accesskit::Role::Heading)
-        .aria_level(level as usize)
-        .aria_label(value.clone())
-        .text_size(px(if level == 1 { 18. } else { 17. }))
-        .font_weight(FontWeight::SEMIBOLD)
-        .child(value)
+    crate::controls::detail_title(
+        SharedString::from(format!("container-heading-{value}")),
+        value,
+    )
 }
 fn quiet(value: impl Into<SharedString>, cx: &App) -> Div {
     div()
@@ -1403,17 +1396,10 @@ fn action_description(value: impl Into<SharedString>, cx: &App) -> impl IntoElem
         .aria_label(value)
         .test_support()
 }
+/// The shared inline error, also findable by its id in layout tests.
 fn alert(id: impl Into<SharedString>, value: impl Into<SharedString>, cx: &App) -> Stateful<Div> {
     let id = id.into();
-    let value = value.into();
-    div()
-        .id(id.clone())
-        .debug_selector(move || id.to_string())
-        .role(accesskit::Role::Alert)
-        .aria_label(value.clone())
-        .text_size(px(crate::ui::FONT_SIZE))
-        .text_color(cx.theme().danger)
-        .child(value)
+    crate::controls::alert(id.clone(), value, cx).debug_selector(move || id.to_string())
 }
 fn tone_color(tone: domain::Tone, cx: &App) -> Hsla {
     match tone {
@@ -1423,16 +1409,12 @@ fn tone_color(tone: domain::Tone, cx: &App) -> Hsla {
         domain::Tone::Muted => cx.theme().muted_foreground,
     }
 }
+/// The shared status dot; muted states draw the hollow ring.
 fn dot(tone: domain::Tone, cx: &App) -> Div {
-    div()
-        .size(px(7.))
-        .flex_shrink_0()
-        .rounded_full()
-        .when(tone != domain::Tone::Muted, |v| v.bg(tone_color(tone, cx)))
-        .when(tone == domain::Tone::Muted, |v| {
-            v.border(px(1.5))
-                .border_color(cx.theme().muted_foreground.opacity(0.4))
-        })
+    crate::controls::status_dot(
+        (tone != domain::Tone::Muted).then(|| tone_color(tone, cx)),
+        cx,
+    )
 }
 fn list_skeleton() -> impl IntoElement {
     div()

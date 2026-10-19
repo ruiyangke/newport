@@ -355,7 +355,7 @@ impl ContainersPanel {
         }
         if group.running > 0 {
             for (verb, label, icon) in [
-                (ProjectVerb::Restart, "Restart all", IconName::RefreshCw),
+                (ProjectVerb::Restart, "Restart all", IconName::RotateCw),
                 (ProjectVerb::Stop, "Stop all", IconName::Square),
             ] {
                 let action = action(verb);
@@ -383,8 +383,7 @@ impl ContainersPanel {
                 crate::controls::icon_button("compose-more")
                     .ghost()
                     .icon(IconName::Ellipsis)
-                    .tooltip("More Compose actions")
-                    .accessibility_label("More Compose actions")
+                    .accessibility_label(format!("More actions for {project}"))
                     .disabled(blocked)
                     .dropdown_menu(move |mut menu, _, cx| {
                         let enabled = weak.upgrade().is_some_and(|p| {

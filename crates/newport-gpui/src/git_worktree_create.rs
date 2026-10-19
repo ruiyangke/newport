@@ -33,7 +33,7 @@ fn review_hint(
                     .min_w_0()
                     .text_size(px(crate::ui::FONT_SIZE))
                     .opacity(1.)
-                    .text_color(cx.theme().danger),
+                    .text_color(theme::error(cx.theme().is_dark())),
             )
             .child(retry)
         })

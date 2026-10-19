@@ -300,7 +300,7 @@ fn listing_feedback(page: &Value, pending: bool, failed: bool) -> String {
         return "Loading repository…".into();
     }
     if failed {
-        return "Could not refresh this view".into();
+        return "Couldn’t refresh this view".into();
     }
     let Some(entries) = page["entries"].as_array() else {
         return String::new();
@@ -583,6 +583,7 @@ impl Newport {
                     )
                     .child(
                         crate::controls::button("create-branch-submit")
+                            .primary()
                             .loading(self.git_write_pending())
                             .label(if form.rename {
                                 "Rename branch"
@@ -827,7 +828,7 @@ impl Newport {
         self.resources.invalidate("repository");
         self.resources.invalidate("git-checkout-initial");
         self.notification = Some(Notification::error(format!(
-            "Could not open {}: {error}",
+            "Couldn’t open {}: {error}",
             text(&path, "display")
         )));
     }
@@ -1070,7 +1071,7 @@ impl Newport {
             Decision::Ignore => return,
             Decision::Exhausted => {
                 self.git.error = Some(
-                    "This repository keeps changing while its diff is read. Refresh to retry."
+                    "This repository keeps changing while its diff is read. Refresh to try again."
                         .into(),
                 );
                 return;
@@ -1399,7 +1400,7 @@ impl Newport {
                 .is_some_and(|r| r.pending || r.error.is_some())
             && self.git.error.is_none();
         let empty_message = match tab {
-            0 => "No local changes.",
+            0 => "No changes.",
             1 => "No commits yet.",
             2 if self
                 .git
@@ -1407,65 +1408,318 @@ impl Newport {
                 .as_ref()
                 .is_some_and(|search| !search.query.is_empty() || search.kind != 0) =>
             {
-                "No matching branches."
+                "No branches match."
             }
             2 => "No branches yet.",
             3 => "No stashes yet.",
             4 => "No tags yet.",
-            6 if !self.git.listing.remote_query().is_empty() => "No matching remotes.",
+            6 if !self.git.listing.remote_query().is_empty() => "No remotes match.",
             _ => "No remotes configured.",
         };
-        div().size_full().flex().flex_col().flex_1().min_w_0().min_h_0()
-                .when(tab==3, |column| column.child(self.status("git-stash-status",cx)).child(self.git_stash_toolbar(cx)))
-                .when(tab==4, |column| column.child(self.status("git-tag-status",cx)).child(self.git_tag_toolbar(cx)))
-                .when(tab==6, |column| column.child(self.git_remote_toolbar(cx)).when(compact, |column| column.child(div().px_2().pb_2().child(self.repository_settings_button(cx)))))
-                .when(matches!(tab,3|4|6), |column| column.child(self.git_listing_filter(cx)))
-                .child(self.status("git-list",cx)).child(self.status("git-more",cx))
-                .when(empty && tab!=0,|column|column.child(empty::compact(empty_message,cx)))
-                .when(tab==0 && self.git_is_clean(), |column| column.child(empty::compact("No changed files",cx).text_center().flex_1()))
-                .when(tab==0 && !self.git_is_clean(),|column| column.child(self.git_changes_list(cx)))
-                .when(tab!=0, |column| column.child(uniform_list("git-entries",entries.len(),cx.processor(move |this,range:std::ops::Range<usize>,_,cx|range.map(|i| {
-                let e=&entries[i];
-                let (title,subtitle)=match tab {
-                    0=>(text(&e["path"],"display"),if e["conflicted"]==true {"Conflicted".into()}else if e["staged"]==true && e["unstaged"]==true {"Staged and unstaged".into()}else if e["staged"]==true {"Staged".into()}else if e["untracked"]==true {"Untracked".into()}else{"Modified".into()}),
-                    1=>(git_commit_header::history_subject(e),git_commit_header::history_subtitle(e)),
-                    2=>(text(&e["name"],"display"),[if e["current"]==true { "Current branch".into() } else { String::new() }, e["upstream"]["display"].as_str().map(|name| format!("Tracks {}",name.strip_prefix("refs/remotes/").or_else(||name.strip_prefix("refs/heads/")).unwrap_or(name))).unwrap_or_default()].into_iter().filter(|s|!s.is_empty()).collect::<Vec<_>>().join(" · ")),
-                    3=>(format!("{}{}", if text(e,"message").is_empty() {"Unnamed stash".to_owned()} else {text(e,"message")}, if e["messageTruncated"] == true {"…"} else {""}),format!("stash@{{{}}} · {}",text(e,"index"),git_commit_header::relative_time(&e["time"],chrono::Utc::now().timestamp()))),
-                    4=>(text(&e["name"],"display"),format!("{} · {}", if e["annotated"] == true {"Annotated tag"} else {"Lightweight tag"},text(&e["oid"],"hex").chars().take(7).collect::<String>())),
-                    _=>(text(e,"name"),String::new()),
-                };
-                let entry=e.clone();
-                div().h(px(git_listing::row_height(tab))).w_full().min_w_0().px(px(6.)).flex().items_center()
-                    .child(Button::new(("git-entry",i)).accessibility_label(if subtitle.is_empty() {title.clone()} else {format!("{title} · {subtitle}")}).custom(git_file_row::selection_style(this.git.selected==*e,cx)).selected(this.git.selected==*e).w_full().h_full().min_w_0().toggled(this.git.selected==*e)
-                        .when(matches!(tab,3|4), |button|button.child(Icon::new(if tab==3 {gpui_kit::assets::IconName::Archive} else {gpui_kit::assets::IconName::Tag}).size(px(14.)).text_color(cx.theme().muted_foreground)))
-                        .child(div().flex_1().min_w_0().flex().when(tab!=0,|row|row.flex_col().items_start()).when(tab==0,|row|row.items_center()).gap(px(if tab==1 {2.} else if matches!(tab,3|4) {3.} else {6.}))
-                            .when(tab==0,|row|row.child(div().text_size(px(crate::ui::FONT_SIZE)).text_color(cx.theme().muted_foreground).w(px(16.)).flex_shrink_0().child(change_mark(e))))
-                            .child(div().w_full().min_w_0().truncate().when(matches!(tab,1|3|4), |text|text.text_size(px(crate::ui::FONT_SIZE))).when(tab==1, |text|text.line_height(px(17.))).font_weight(FontWeight::MEDIUM).child(title))
-                            .when(tab==1,|row|row.child(git_commit_header::history_row_identity(e,cx)))
-                            .when(tab!=0 && tab!=1 && tab!=6,|row|row.child(crate::label(subtitle).text_size(px(crate::ui::FONT_SIZE)).w_full().truncate())))
-                        .on_click(cx.listener(move |this,_,_,cx| {
-                        if this.git.tab != tab || !this.git_visible_entries().contains(&entry) { return; }
-                        this.project_show_review(cx);
-                        this.git.selected=entry.clone();
-                        this.git.detail_open=true;
-                        this.git.stash_apply=None;
-                        if tab==3 {this.git.stash_save=None;}
-                        if matches!(tab,1|4) {this.git.tag_form=None;}
-                        this.git.tag_delete=None;
-                        this.git.tag_push=None;
-                        this.git.worktree_lock=None;this.git.worktree_repair=None;this.git.worktree_remove=None;
-                        if tab==6 {this.git_select_remote();}
-                        if tab==2 {this.git_branch_worktree_owner();}
-                        if tab==0 {
-                            this.git_select_side(entry["staged"]==true);
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .when(tab == 3, |column| {
+                column
+                    .child(self.status("git-stash-status", cx))
+                    .child(self.git_stash_toolbar(cx))
+            })
+            .when(tab == 4, |column| {
+                column
+                    .child(self.status("git-tag-status", cx))
+                    .child(self.git_tag_toolbar(cx))
+            })
+            .when(tab == 6, |column| {
+                column
+                    .child(self.git_remote_toolbar(cx))
+                    .when(compact, |column| {
+                        column.child(
+                            div()
+                                .px_2()
+                                .pb_2()
+                                .child(self.repository_settings_button(cx)),
+                        )
+                    })
+            })
+            .when(matches!(tab, 3 | 4 | 6), |column| {
+                column.child(self.git_listing_filter(cx))
+            })
+            .child(self.status("git-list", cx))
+            .child(self.status("git-more", cx))
+            .when(empty && tab != 0, |column| {
+                column.child(empty::compact(empty_message, cx))
+            })
+            .when(tab == 0 && self.git_is_clean(), |column| {
+                column.child(empty::compact("No changes.", cx).text_center().flex_1())
+            })
+            .when(tab == 0 && !self.git_is_clean(), |column| {
+                column.child(self.git_changes_list(cx))
+            })
+            .when(tab != 0, |column| {
+                column.child(
+                    uniform_list(
+                        "git-entries",
+                        entries.len(),
+                        cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                            range
+                                .map(|i| {
+                                    let e = &entries[i];
+                                    let (title, subtitle) = match tab {
+                                        0 => (
+                                            text(&e["path"], "display"),
+                                            if e["conflicted"] == true {
+                                                "Conflicted".into()
+                                            } else if e["staged"] == true && e["unstaged"] == true {
+                                                "Staged and unstaged".into()
+                                            } else if e["staged"] == true {
+                                                "Staged".into()
+                                            } else if e["untracked"] == true {
+                                                "Untracked".into()
+                                            } else {
+                                                "Modified".into()
+                                            },
+                                        ),
+                                        1 => (
+                                            git_commit_header::history_subject(e),
+                                            git_commit_header::history_subtitle(e),
+                                        ),
+                                        2 => (
+                                            text(&e["name"], "display"),
+                                            [
+                                                if e["current"] == true {
+                                                    "Current branch".into()
+                                                } else {
+                                                    String::new()
+                                                },
+                                                e["upstream"]["display"]
+                                                    .as_str()
+                                                    .map(|name| {
+                                                        format!(
+                                                            "Tracks {}",
+                                                            name.strip_prefix("refs/remotes/")
+                                                                .or_else(|| name
+                                                                    .strip_prefix("refs/heads/"))
+                                                                .unwrap_or(name)
+                                                        )
+                                                    })
+                                                    .unwrap_or_default(),
+                                            ]
+                                            .into_iter()
+                                            .filter(|s| !s.is_empty())
+                                            .collect::<Vec<_>>()
+                                            .join(" · "),
+                                        ),
+                                        3 => (
+                                            format!(
+                                                "{}{}",
+                                                if text(e, "message").is_empty() {
+                                                    "Unnamed stash".to_owned()
+                                                } else {
+                                                    text(e, "message")
+                                                },
+                                                if e["messageTruncated"] == true {
+                                                    "…"
+                                                } else {
+                                                    ""
+                                                }
+                                            ),
+                                            format!(
+                                                "stash@{{{}}} · {}",
+                                                text(e, "index"),
+                                                git_commit_header::relative_time(
+                                                    &e["time"],
+                                                    chrono::Utc::now().timestamp()
+                                                )
+                                            ),
+                                        ),
+                                        4 => (
+                                            text(&e["name"], "display"),
+                                            format!(
+                                                "{} · {}",
+                                                if e["annotated"] == true {
+                                                    "Annotated tag"
+                                                } else {
+                                                    "Lightweight tag"
+                                                },
+                                                text(&e["oid"], "hex")
+                                                    .chars()
+                                                    .take(7)
+                                                    .collect::<String>()
+                                            ),
+                                        ),
+                                        _ => (text(e, "name"), String::new()),
+                                    };
+                                    let entry = e.clone();
+                                    div()
+                                        .h(px(git_listing::row_height(tab)))
+                                        .w_full()
+                                        .min_w_0()
+                                        .px(px(6.))
+                                        .flex()
+                                        .items_center()
+                                        .child(
+                                            git_file_row::row_focus(
+                                                Button::new(("git-entry", i)),
+                                                cx,
+                                            )
+                                            .accessibility_label(if subtitle.is_empty() {
+                                                title.clone()
+                                            } else {
+                                                format!("{title} · {subtitle}")
+                                            })
+                                            .custom(git_file_row::selection_style(
+                                                this.git.selected == *e,
+                                                cx,
+                                            ))
+                                            .selected(this.git.selected == *e)
+                                            .w_full()
+                                            .h_full()
+                                            .min_w_0()
+                                            .toggled(this.git.selected == *e)
+                                            .when(matches!(tab, 3 | 4), |button| {
+                                                button.child(
+                                                    Icon::new(if tab == 3 {
+                                                        gpui_kit::assets::IconName::Archive
+                                                    } else {
+                                                        gpui_kit::assets::IconName::Tag
+                                                    })
+                                                    .size(px(14.))
+                                                    .text_color(cx.theme().muted_foreground),
+                                                )
+                                            })
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .flex()
+                                                    .when(tab != 0, |row| {
+                                                        row.flex_col().items_start()
+                                                    })
+                                                    .when(tab == 0, |row| row.items_center())
+                                                    .gap(px(if tab == 1 {
+                                                        2.
+                                                    } else if matches!(tab, 3 | 4) {
+                                                        3.
+                                                    } else {
+                                                        6.
+                                                    }))
+                                                    .when(tab == 0, |row| {
+                                                        row.child(
+                                                            div()
+                                                                .text_size(px(crate::ui::FONT_SIZE))
+                                                                .text_color(
+                                                                    cx.theme().muted_foreground,
+                                                                )
+                                                                .w(px(16.))
+                                                                .flex_shrink_0()
+                                                                .child(change_mark(e)),
+                                                        )
+                                                    })
+                                                    .child(
+                                                        div()
+                                                            .w_full()
+                                                            .min_w_0()
+                                                            .truncate()
+                                                            .when(
+                                                                matches!(tab, 1 | 3 | 4),
+                                                                |text| {
+                                                                    text.text_size(px(
+                                                                        crate::ui::FONT_SIZE,
+                                                                    ))
+                                                                },
+                                                            )
+                                                            .when(tab == 1, |text| {
+                                                                text.line_height(px(17.))
+                                                            })
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .child(title),
+                                                    )
+                                                    .when(tab == 1, |row| {
+                                                        row.child(
+                                                            git_commit_header::history_row_identity(
+                                                                e, cx,
+                                                            ),
+                                                        )
+                                                    })
+                                                    .when(
+                                                        tab != 0 && tab != 1 && tab != 6,
+                                                        |row| {
+                                                            row.child(
+                                                                crate::label(subtitle)
+                                                                    .text_size(px(
+                                                                        crate::ui::FONT_SIZE,
+                                                                    ))
+                                                                    .w_full()
+                                                                    .truncate(),
+                                                            )
+                                                        },
+                                                    ),
+                                            )
+                                            .on_click(
+                                                cx.listener(move |this, _, _, cx| {
+                                                    if this.git.tab != tab
+                                                        || !this
+                                                            .git_visible_entries()
+                                                            .contains(&entry)
+                                                    {
+                                                        return;
+                                                    }
+                                                    this.project_show_review(cx);
+                                                    this.git.selected = entry.clone();
+                                                    this.git.detail_open = true;
+                                                    this.git.stash_apply = None;
+                                                    if tab == 3 {
+                                                        this.git.stash_save = None;
+                                                    }
+                                                    if matches!(tab, 1 | 4) {
+                                                        this.git.tag_form = None;
+                                                    }
+                                                    this.git.tag_delete = None;
+                                                    this.git.tag_push = None;
+                                                    this.git.worktree_lock = None;
+                                                    this.git.worktree_repair = None;
+                                                    this.git.worktree_remove = None;
+                                                    if tab == 6 {
+                                                        this.git_select_remote();
+                                                    }
+                                                    if tab == 2 {
+                                                        this.git_branch_worktree_owner();
+                                                    }
+                                                    if tab == 0 {
+                                                        this.git_select_side(
+                                                            entry["staged"] == true,
+                                                        );
+                                                    }
+                                                    if tab == 1 || tab == 3 || tab == 4 {
+                                                        this.git_history_select();
+                                                    }
+                                                    cx.notify();
+                                                }),
+                                            ),
+                                        )
+                                })
+                                .collect()
+                        }),
+                    )
+                    .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, _| {
+                        if event.delta.pixel_delta(px(20.)).y < px(0.) {
+                            this.git.listing.demand.arm(scroll_key.clone());
                         }
-                        if tab==1 || tab==3 || tab==4 {this.git_history_select();}
-                        cx.notify();
-                    })))
-            }).collect())).on_scroll_wheel(cx.listener(move |this,event:&ScrollWheelEvent,_,_| {
-                if event.delta.pixel_delta(px(20.)).y < px(0.) {this.git.listing.demand.arm(scroll_key.clone());}
-            })).track_scroll(&self.git.scroll).flex_1().min_w_0())).when(tab==0 && !self.git_is_clean(),|column|column.child(self.git_commit_composer(cx)))
-                .when(compact, |column| column.child(self.git_resume_detail(cx))).into_any_element()
+                    }))
+                    .track_scroll(&self.git.scroll)
+                    .flex_1()
+                    .min_w_0(),
+                )
+            })
+            .when(tab == 0 && !self.git_is_clean(), |column| {
+                column.child(self.git_commit_composer(cx))
+            })
+            .when(compact, |column| column.child(self.git_resume_detail(cx)))
+            .into_any_element()
     }
     pub(super) fn git_screen(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.git.remote_refs.is_some() {
@@ -1499,9 +1753,10 @@ impl Newport {
                 [
                     self.git_sync_control(cx),
                     crate::controls::icon_button("git-refresh-status")
+                        .ghost()
                         .icon(IconName::RefreshCw)
                         .accessibility_label("Refresh repository")
-                        .tooltip("Refresh repository")
+                        .tooltip("Refresh")
                         .disabled(
                             self.git.switching_path.is_some()
                                 || ["git-list", "git-refresh"]
@@ -1521,17 +1776,11 @@ impl Newport {
             ))
             .when(tab > 1, |view| {
                 view.child(
-                    div()
-                        .h(px(46.))
-                        .flex_shrink_0()
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
+                    crate::ui::header()
+                        .px(px(12.))
+                        .gap(px(8.))
                         .child(
-                            crate::controls::button("git-back-to-changes")
+                            crate::controls::compact_button("git-back-to-changes")
                                 .icon(IconName::ArrowLeft)
                                 .label(if self.git.repo["bare"] == true {
                                     "History"
@@ -1546,7 +1795,8 @@ impl Newport {
                                     )
                                 })),
                         )
-                        .child(div().font_weight(FontWeight::SEMIBOLD).child(title)),
+                        .child(div().min_w_0().truncate().child(title))
+                        .child(crate::ui::header_rule(cx)),
                 )
             })
             .child(self.status("repository", cx))
@@ -1554,26 +1804,39 @@ impl Newport {
                 view.child(self.git_integration_view(cx))
             })
             .when_some(self.git.error.clone(), |s, error| {
-                s.child(div().p_3().text_color(rgb(0x9f3026)).child(error))
+                s.child(
+                    div()
+                        .p_3()
+                        .child(crate::controls::alert("git-error", error, cx)),
+                )
             })
             .when(tab == 1, |view| {
                 view.child(self.status("git-tag-status", cx))
             })
             .when(clean_detail, |view| {
-                view.child(div().h(px(34.)).px_3().child("History").into_any_element())
+                view.child(
+                    crate::ui::header()
+                        .px(px(12.))
+                        .child("History")
+                        .child(crate::ui::header_rule(cx))
+                        .into_any_element(),
+                )
             })
             .when(compact && show_detail && !clean_detail, |view| {
                 view.child(
-                    div().flex().items_center().px_2().py_1().child(
-                        crate::controls::compact_button("git-back-to-list")
-                            .icon(IconName::ArrowLeft)
-                            .label(format!("All {}", title.to_lowercase()))
-                            .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.git.detail_open = false;
-                                cx.notify();
-                            })),
-                    ),
+                    crate::ui::header()
+                        .px(px(12.))
+                        .child(crate::ui::header_rule(cx))
+                        .child(
+                            crate::controls::compact_button("git-back-to-list")
+                                .icon(IconName::ArrowLeft)
+                                .label(format!("All {}", title.to_lowercase()))
+                                .ghost()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.git.detail_open = false;
+                                    cx.notify();
+                                })),
+                        ),
                 )
             })
             .child(
@@ -1632,19 +1895,12 @@ impl Newport {
             .child(self.status("git-detail", cx))
             .child(self.git_log_panel(window, cx))
             .child(
-                div()
-                    .px_3()
-                    .h(px(32.))
-                    .flex_shrink_0()
-                    .flex()
-                    .gap_2()
-                    .items_center()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(
+                crate::controls::status_bar(cx)
+                    .left(
                         crate::label(self.git_read_feedback())
                             .text_size(px(crate::ui::FONT_SIZE))
-                            .flex_1(),
+                            .min_w_0()
+                            .truncate(),
                     )
                     .when(
                         self.git.page["nextCursor"].is_string()
@@ -1652,10 +1908,11 @@ impl Newport {
                                 .resources
                                 .get("git-more")
                                 .is_some_and(|r| r.error.is_some()),
-                        |view| {
-                            view.child(
+                        |bar| {
+                            bar.right(
                                 crate::controls::compact_button("git-load-more")
-                                    .label("Retry loading more")
+                                    .label("Try again")
+                                    .accessibility_label("Try loading more again")
                                     .disabled(
                                         self.git.error.is_some()
                                             || self
@@ -1672,7 +1929,7 @@ impl Newport {
                             )
                         },
                     )
-                    .child(
+                    .right(
                         crate::controls::compact_button("git-log-toggle")
                             .ghost()
                             .icon(IconName::ScrollText)
@@ -2156,7 +2413,7 @@ mod tests {
         );
         assert_eq!(listing_feedback(&serde_json::Value::Null, false, false), "");
         assert!(listing_feedback(&view.page, true, false).starts_with("Loading"));
-        assert!(listing_feedback(&view.page, false, true).starts_with("Could not"));
+        assert!(listing_feedback(&view.page, false, true).starts_with("Couldn’t"));
         assert!(
             listing_feedback(
                 &json!({"entries":[],"metadata":{"truncated":true}}),

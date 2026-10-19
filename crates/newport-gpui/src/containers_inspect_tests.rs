@@ -279,12 +279,12 @@ fn inspection_error_retries_current_id_without_a_write(cx: &mut TestAppContext) 
         panel.read_with(cx, |panel, _| panel.error("container-inspect")),
         Some("inspection denied".into())
     );
-    assert!(has_label(cx, "Retry inspection"));
+    assert!(has_label(cx, "Try inspecting again"));
     let reads = backend.count("container_inspect");
     backend.set_inspect(Ok(inspection()));
-    click(cx, "Retry inspection");
+    click(cx, "Try inspecting again");
     settle(&panel, cx);
-    assert!(!has_label(cx, "Retry inspection"));
+    assert!(!has_label(cx, "Try inspecting again"));
     assert!(has_label(cx, "Every 30s"));
     assert_eq!(backend.count("container_inspect"), reads + 1);
     assert_eq!(

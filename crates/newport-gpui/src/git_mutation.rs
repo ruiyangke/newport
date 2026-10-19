@@ -567,9 +567,12 @@ impl Newport {
                 let owner = owner.clone();
                 crate::controls::button("recover-git-command")
                     .label(if reviewed {
-                        "I've inspected the repository"
+                        "I’ve inspected the repository"
                     } else {
-                        "Retry connection"
+                        "Try again"
+                    })
+                    .when(!reviewed, |button| {
+                        button.accessibility_label("Try the connection again")
                     })
                     .on_click(cx.listener(move |notice, _, window, cx| {
                         let _ = owner.update(cx, |this, cx| {

@@ -432,7 +432,6 @@ impl ServicesPanel {
             .snapshot()
             .and_then(|s| domain::action_blocked_reason(unit.scope, s.privilege));
         let status = self.client.action_status(&unit.name, unit.scope);
-        let pending = status.is_some_and(|status| status.pending);
         let review = self
             .review
             .as_ref()
@@ -467,38 +466,339 @@ impl ServicesPanel {
                 .when(primary, |b| b.primary())
                 .disabled(!this.client.can_action(&name, scope, verb))
                 .loading(busy)
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     if matches!(verb, ServiceVerb::Stop | ServiceVerb::Disable) {
-                        this.review = Some(Review {
-                            unit: name.clone(),
-                            scope,
-                            verb,
-                        });
-                        cx.notify();
+                        this.open_review(
+                            Review {
+                                unit: name.clone(),
+                                scope,
+                                verb,
+                            },
+                            window,
+                            cx,
+                        );
                     } else {
                         this.start_action(name.clone(), scope, verb, cx);
                     }
                 }))
         };
-        div().flex().flex_col().gap(px(8.))
-            .child(div().flex().flex_wrap().items_center().gap(px(6.))
-                .child(action(if running{ServiceVerb::Restart}else{ServiceVerb::Start},"service-primary",!running,self,cx))
-                .when(verbs.stop,|v|v.child(action(ServiceVerb::Stop,"service-stop",false,self,cx)))
-                .when(!running&&verbs.restart&&unit.active=="failed",|v|v.child(action(ServiceVerb::Restart,"service-restart",false,self,cx)))
-                .when(verbs.reload,|v|v.child(self.more_actions(unit,cx)))
-                .when(verbs.enable||verbs.disable,|v|{let name=unit.name.clone();let scope=unit.scope;let next=if unit.enabled.as_deref()==Some("enabled"){ServiceVerb::Disable}else{ServiceVerb::Enable};v.child(div().ml_auto().child(crate::controls::switch("service-at-boot").label("Start at boot").checked(unit.enabled.as_deref()==Some("enabled")).disabled(!self.client.can_action(&name,scope,next)).on_click(cx.listener(move|this,checked,_,cx|{let verb=if *checked{ServiceVerb::Enable}else{ServiceVerb::Disable};if verb==ServiceVerb::Disable{this.review=Some(Review{unit:name.clone(),scope,verb});cx.notify();}else{this.start_action(name.clone(),scope,verb,cx);}}))))}))
-            .when_some(blocked,|v,reason|v.child(quiet(reason,cx)))
-            .when(review.is_none(),|v|v.when_some(status.and_then(|s|s.error.clone()),|v,error|v.child(alert("service-action-error",error,cx))))
-            .when_some(handover,|v,command|v.child(div().id("service-handover").role(accesskit::Role::Alert).rounded(px(crate::ui::RADIUS)).border_1().border_color(tone_color(Tone::Warning,cx).opacity(0.3)).bg(tone_color(Tone::Warning,cx).opacity(0.05)).p(px(12.)).flex().flex_col().gap(px(8.)).child(div().text_size(px(crate::ui::FONT_SIZE)).child("This needs your sudo password. Run this command in the Terminal."))
-                .child(div().font_family(cx.theme().mono_font_family.clone()).text_size(px(crate::ui::FONT_SIZE)).child(command.clone()))
-                .child(crate::controls::button("service-open-terminal").label("Open in Terminal").on_click(cx.listener(move|_,_,_,cx|cx.emit(ServicesEvent::OpenTerminal{command:command.clone()}))))))
-            .when_some(review,|v,review|{let name=review.unit.clone();let scope=review.scope;let verb=review.verb;
-                let title=if verb==ServiceVerb::Stop{format!("Stop {}?",domain::short_name(&name))}else{format!("Don’t start at boot {}?",domain::short_name(&name))};
-                let description=if verb==ServiceVerb::Stop{format!("This stops {name}{}. Anything relying on it stops working until it is started again.",if scope==Scope::User{" (user service)"}else{""})}else{format!("{name} will no longer start when the server boots. It keeps running until it is stopped.")};
-                v.child(div().id("service-action-review").role(accesskit::Role::Region).aria_label(title.clone()).border_1().border_color(cx.theme().border).rounded(px(crate::ui::RADIUS)).p(px(12.)).flex().flex_col().gap(px(8.)).child(div().text_size(px(crate::ui::FONT_SIZE)).font_weight(FontWeight::SEMIBOLD).child(title)).child(quiet(description,cx))
-                    .when_some(status.and_then(|s|s.error.clone()),|v,error|v.child(alert("service-review-error",error,cx)))
-                    .child(div().flex().justify_end().gap(px(6.)).child(crate::controls::button("service-review-cancel").label("Cancel").disabled(pending).on_click(cx.listener(|this,_,_,cx|{this.review=None;cx.notify();})))
-                        .child(crate::controls::button("service-review-confirm").label(verb.label()).accessibility_label(format!("Confirm {}",verb.as_str())).danger().disabled(!self.client.can_action(&name,scope,verb)).loading(pending).on_click(cx.listener(move|this,_,_,cx|this.start_action(name.clone(),scope,verb,cx))))))}).into_any_element()
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(action(
+                        if running {
+                            ServiceVerb::Restart
+                        } else {
+                            ServiceVerb::Start
+                        },
+                        "service-primary",
+                        !running,
+                        self,
+                        cx,
+                    ))
+                    .when(verbs.stop, |v| {
+                        v.child(action(ServiceVerb::Stop, "service-stop", false, self, cx))
+                    })
+                    .when(!running && verbs.restart && unit.active == "failed", |v| {
+                        v.child(action(
+                            ServiceVerb::Restart,
+                            "service-restart",
+                            false,
+                            self,
+                            cx,
+                        ))
+                    })
+                    .when(verbs.reload, |v| v.child(self.more_actions(unit, cx)))
+                    .when(verbs.enable || verbs.disable, |v| {
+                        let name = unit.name.clone();
+                        let scope = unit.scope;
+                        let next = if unit.enabled.as_deref() == Some("enabled") {
+                            ServiceVerb::Disable
+                        } else {
+                            ServiceVerb::Enable
+                        };
+                        v.child(
+                            div().ml_auto().child(
+                                crate::controls::switch("service-at-boot")
+                                    .label("Start at boot")
+                                    .checked(unit.enabled.as_deref() == Some("enabled"))
+                                    .disabled(!self.client.can_action(&name, scope, next))
+                                    .on_click(cx.listener(move |this, checked, window, cx| {
+                                        let verb = if *checked {
+                                            ServiceVerb::Enable
+                                        } else {
+                                            ServiceVerb::Disable
+                                        };
+                                        if verb == ServiceVerb::Disable {
+                                            this.open_review(
+                                                Review {
+                                                    unit: name.clone(),
+                                                    scope,
+                                                    verb,
+                                                },
+                                                window,
+                                                cx,
+                                            );
+                                        } else {
+                                            this.start_action(name.clone(), scope, verb, cx);
+                                        }
+                                    })),
+                            ),
+                        )
+                    }),
+            )
+            .when_some(blocked, |v, reason| v.child(quiet(reason, cx)))
+            .when(review.is_none(), |v| {
+                v.when_some(status.and_then(|s| s.error.clone()), |v, error| {
+                    v.child(alert("service-action-error", error, cx))
+                })
+            })
+            .when_some(handover, |v, command| {
+                v.child(
+                    div()
+                        .id("service-handover")
+                        .role(accesskit::Role::Alert)
+                        .rounded(px(crate::ui::RADIUS))
+                        .border_1()
+                        .border_color(tone_color(Tone::Warning, cx).opacity(0.3))
+                        .bg(tone_color(Tone::Warning, cx).opacity(0.05))
+                        .p(px(12.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(div().text_size(px(crate::ui::FONT_SIZE)).child(
+                            "This needs your sudo password. Run this command in the Terminal.",
+                        ))
+                        .child(
+                            div()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_size(px(crate::ui::FONT_SIZE))
+                                .child(command.clone()),
+                        )
+                        .child(
+                            crate::controls::button("service-open-terminal")
+                                .label("Open in Terminal")
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(ServicesEvent::OpenTerminal {
+                                        command: command.clone(),
+                                    })
+                                })),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+    /// Stop and Disable are confirmed in a modal dialog, like Containers'
+    /// reviews. Enter never confirms: it only activates the focused button.
+    fn open_review(&mut self, review: Review, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) || self.retired {
+            return;
+        }
+        self.review = Some(review);
+        self.review_token += 1;
+        let token = self.review_token;
+        let owner = cx.weak_entity();
+        // Kit restores the focus captured when opening, including after Escape.
+        self.detail_focus.focus(window, cx);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let Some(panel) = owner.upgrade() else {
+                return dialog;
+            };
+            let (title, body, footer, pending) =
+                panel.update(cx, |panel, cx| panel.review_parts(token, cx));
+            let cancel = owner.clone();
+            let close = owner.clone();
+            let confirm = owner.clone();
+            dialog
+                .aria_label(title.clone())
+                .title(crate::controls::dialog_title(title))
+                .w(px(480.))
+                .max_w((window.viewport_size().width - px(32.)).max(px(240.)))
+                .p(px(24.))
+                .rounded(px(crate::ui::RADIUS))
+                .border_0()
+                .centered(true)
+                .overlay_closable(false)
+                .keyboard(!pending)
+                .close_button(!pending)
+                .on_ok(move |_, window, cx| {
+                    confirm
+                        .update(cx, |panel, cx| {
+                            if !panel.review_dialog_current(token)
+                                || panel.retired
+                                || panel.review_pending()
+                            {
+                                return false;
+                            }
+                            if panel.review_cancel_focus.is_focused(window) {
+                                return true;
+                            }
+                            if panel.review_confirm_focus.is_focused(window) {
+                                panel.confirm_review(token, cx);
+                            }
+                            false
+                        })
+                        .unwrap_or(false)
+                })
+                .on_cancel(move |_, _, cx| {
+                    cancel.upgrade().is_some_and(|panel| {
+                        let panel = panel.read(cx);
+                        panel.review_dialog_current(token) && !panel.review_pending()
+                    })
+                })
+                .on_close(move |_, _, cx| {
+                    let _ = close.update(cx, |panel, cx| {
+                        if panel
+                            .review_dialog
+                            .as_ref()
+                            .is_some_and(|dialog| dialog.token == token)
+                        {
+                            panel.review = None;
+                            panel.review_dialog = None;
+                            cx.notify();
+                        }
+                    });
+                })
+                .child(body)
+                .footer(footer)
+        });
+        self.review_dialog = window.active_dialog_handle(cx).map(|handle| ReviewDialog {
+            token,
+            window: window.window_handle(),
+            handle,
+        });
+        let owner = cx.weak_entity();
+        window.defer(cx, move |window, cx| {
+            let focus = owner.upgrade().and_then(|panel| {
+                let panel = panel.read(cx);
+                panel
+                    .review_dialog_current(token)
+                    .then(|| panel.review_cancel_focus.clone())
+            });
+            if let Some(focus) = focus {
+                focus.focus(window, cx);
+            }
+        });
+        cx.notify();
+    }
+    fn review_pending(&self) -> bool {
+        self.review.as_ref().is_some_and(|review| {
+            self.client
+                .action_status(&review.unit, review.scope)
+                .is_some_and(|status| status.pending)
+        })
+    }
+    fn confirm_review(&mut self, token: u64, cx: &mut Context<Self>) {
+        if let Some(review) = self.review.clone()
+            && self.review_dialog_current(token)
+        {
+            self.start_action(review.unit, review.scope, review.verb, cx);
+        }
+    }
+    fn dismiss_review(&mut self, token: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.review_dialog_current(token) || self.review_pending() {
+            return;
+        }
+        self.review = None;
+        if let Some(dialog) = self.review_dialog.take() {
+            window.close_dialog_if(dialog.handle.focus_handle(), cx);
+        }
+        cx.notify();
+    }
+    fn review_parts(
+        &self,
+        token: u64,
+        cx: &mut Context<Self>,
+    ) -> (String, AnyElement, AnyElement, bool) {
+        let Some(Review {
+            unit: name,
+            scope,
+            verb,
+        }) = self.review.clone()
+        else {
+            return (
+                String::new(),
+                div().into_any_element(),
+                div().into_any_element(),
+                false,
+            );
+        };
+        let title = if verb == ServiceVerb::Stop {
+            format!("Stop {}?", domain::short_name(&name))
+        } else {
+            format!("Don’t start at boot {}?", domain::short_name(&name))
+        };
+        let description = if verb == ServiceVerb::Stop {
+            format!(
+                "This stops {name}{}. Anything relying on it stops working until it is started again.",
+                if scope == Scope::User {
+                    " (user service)"
+                } else {
+                    ""
+                }
+            )
+        } else {
+            format!(
+                "{name} will no longer start when the server boots. It keeps running until it is stopped."
+            )
+        };
+        let status = self.client.action_status(&name, scope);
+        let pending = status.is_some_and(|status| status.pending);
+        let allowed = self.review_dialog_current(token)
+            && !self.retired
+            && self.client.can_action(&name, scope, verb);
+        let body = div()
+            .id("service-action-review")
+            .role(accesskit::Role::Region)
+            .aria_label(title.clone())
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                quiet(description.clone(), cx)
+                    .id("service-review-description")
+                    .role(accesskit::Role::Label)
+                    .aria_label(description),
+            )
+            .when_some(status.and_then(|s| s.error.clone()), |v, error| {
+                v.child(alert("service-review-error", error, cx))
+            })
+            .into_any_element();
+        let footer = div()
+            .flex()
+            .w_full()
+            .justify_end()
+            .gap(px(8.))
+            .child(
+                crate::controls::form_button("service-review-cancel")
+                    .min_w(px(76.))
+                    .track_focus(&self.review_cancel_focus)
+                    .label("Cancel")
+                    .disabled(pending)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.dismiss_review(token, window, cx)
+                    })),
+            )
+            .child(
+                crate::controls::form_button("service-review-confirm")
+                    .min_w(px(76.))
+                    .track_focus(&self.review_confirm_focus)
+                    .label(verb.label())
+                    .accessibility_label(format!("Confirm {}", verb.as_str()))
+                    .danger()
+                    .disabled(!allowed)
+                    .loading(pending)
+                    .on_click(cx.listener(move |this, _, _, cx| this.confirm_review(token, cx))),
+            )
+            .into_any_element();
+        (title, body, footer, pending)
     }
     /// Rare verbs live behind "…": today only Reload.
     fn more_actions(&self, unit: &ServiceUnit, cx: &mut Context<Self>) -> AnyElement {
@@ -560,18 +860,12 @@ impl ServicesPanel {
         let tabs = choices.iter().map(|&(index, label)| {
             Tab::new()
                 .label(label)
-                .border_1()
-                .border_color(cx.theme().ring.opacity(0.))
                 .track_focus(
                     &self.detail_tab_focus[index]
                         .clone()
                         .tab_stop(index == active),
                 )
-                .focus_visible(|style| {
-                    style
-                        .rounded(px(crate::ui::RADIUS))
-                        .border_color(cx.theme().ring)
-                })
+                .focus_visible(|style| crate::controls::inset_focus_ring(style, cx))
                 .on_key_down(cx.listener(move |this, event, window, cx| {
                     this.detail_tab_key(index, has_logs, event, window, cx)
                 }))
@@ -727,7 +1021,8 @@ impl ServicesPanel {
             .when_some(self.error("unit-file"), |v, error| {
                 v.child(alert("service-file-error", error, cx)).child(
                     crate::controls::button("service-file-retry")
-                        .label("Retry unit file")
+                        .label("Try again")
+                        .accessibility_label("Try reading the unit file again")
                         .disabled(self.pending("unit-file"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.client.retry_unit_file();
@@ -748,17 +1043,14 @@ impl ServicesPanel {
             .into_any_element()
     }
 }
+/// A detail pane's title: the shared 18px heading.
 fn title(value: impl Into<SharedString>) -> Stateful<Div> {
     let value = value.into();
-    div()
-        .id(SharedString::from(format!("services-heading-{value}")))
-        .debug_selector(|| "services-detail-heading".into())
-        .role(accesskit::Role::Heading)
-        .aria_level(2)
-        .aria_label(value.clone())
-        .text_size(px(17.))
-        .font_weight(FontWeight::SEMIBOLD)
-        .child(value)
+    crate::controls::detail_title(
+        SharedString::from(format!("services-heading-{value}")),
+        value,
+    )
+    .debug_selector(|| "services-detail-heading".into())
 }
 fn fact(label: &str, value: String, detail: Option<String>, cx: &App) -> Stateful<Div> {
     let accessible = format!(
@@ -773,13 +1065,11 @@ fn fact(label: &str, value: String, detail: Option<String>, cx: &App) -> Statefu
         .role(accesskit::Role::Group)
         .aria_label(accessible)
         .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
         .child(quiet(label.to_owned(), cx).text_size(px(crate::ui::FONT_SIZE)))
-        .child(
-            div()
-                .text_size(px(crate::ui::FONT_SIZE))
-                .mt(px(1.))
-                .child(value),
-        )
+        .child(div().text_size(px(crate::ui::FONT_SIZE)).child(value))
         .when_some(detail, |v, text| {
             v.child(quiet(text, cx).text_size(px(crate::ui::FONT_SIZE)))
         })

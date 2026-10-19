@@ -21,13 +21,12 @@ fn listing_name(tab: usize) -> &'static str {
 fn filterable(tab: usize) -> bool {
     matches!(tab, 3 | 4 | 6)
 }
+/// Changes and remotes are single-line rows; history, branches, stashes and
+/// tags carry a detail line beneath the title.
 pub(super) fn row_height(tab: usize) -> f32 {
     match tab {
-        0 => 28.,
-        1 => 46.,
-        3 | 4 => 48.,
-        6 => 36.,
-        _ => 54.,
+        0 | 6 => crate::ui::ROW_HEIGHT,
+        _ => crate::ui::TWO_LINE_ROW_HEIGHT,
     }
 }
 fn matches(tab: usize, entry: &Value, query: &str) -> bool {
@@ -85,12 +84,11 @@ impl Newport {
             return;
         }
         let tab = self.git.tab;
-        let name = listing_name(tab);
         let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(if tab == 6 {
-                "Find remotes".to_owned()
-            } else {
-                format!("Filter loaded {name}")
+            InputState::new(window, cx).placeholder(match tab {
+                3 => "Find a stash",
+                4 => "Find a tag",
+                _ => "Find a remote",
             })
         });
         let subscription = cx.observe(&input, move |this, input, cx| {
@@ -119,16 +117,16 @@ impl Newport {
         self.git.listing.subscription = Some(subscription);
     }
     pub(super) fn git_listing_filter(&self, cx: &App) -> AnyElement {
-        let mut view = div().flex().flex_col().gap_1().p_2();
+        let mut view = git_layout::search_bar().flex_col().items_stretch().gap_1();
         if let Some(input) = &self.git.listing.input {
             let name = listing_name(self.git.tab);
-            view = view.child(
-                crate::controls::input(input).aria_label(if self.git.tab == 6 {
+            view = view.child(crate::controls::search_input(input, cx).aria_label(
+                if self.git.tab == 6 {
                     "Find remotes".to_owned()
                 } else {
                     format!("Filter loaded {name}")
-                }),
-            );
+                },
+            ));
             if self.git.tab != 6 && !self.git.listing.query.is_empty() {
                 let count = self.git_visible_entries().len();
                 let message = if count == 0 {
@@ -228,7 +226,7 @@ fn editor_content(title: &'static str, body: impl IntoElement, fill: bool, cx: &
                         .id("git-editor-title")
                         .role(accesskit::Role::Heading)
                         .aria_label(title)
-                        .text_size(px(14.))
+                        .text_size(px(crate::ui::FONT_SIZE))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(cx.theme().foreground)
                         .child(title),

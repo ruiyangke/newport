@@ -18,6 +18,7 @@ pub(super) fn compact(message: impl Into<SharedString>, cx: &App) -> Div {
                 .id(SharedString::from(format!("empty-message:{message}")))
                 .role(accesskit::Role::Status)
                 .aria_label(message.clone())
+                .test_support()
                 .child(message),
         )
 }
@@ -54,6 +55,7 @@ pub(super) fn content(
                 } else {
                     format!("{title}. {description}")
                 })
+                .test_support()
                 .w_full()
                 .min_w_0()
                 .flex()

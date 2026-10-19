@@ -214,7 +214,7 @@ impl Newport {
                 .when(matches!(form.kind,Kind::Add|Kind::Url),|view|view.child(crate::label("Remote URL")).child(crate::controls::input(&form.url).aria_label("Repository URL or server path").disabled(busy)))
                 .child(project_dialog::actions()
                     .child(crate::controls::button("cancel-git-remote").label("Cancel").disabled(busy).on_click(cx.listener(|this,_,_,cx|{this.git.remote_edit=None;cx.notify();})))
-                    .child(crate::controls::button("save-git-remote").loading(self.git_write_pending()).when(form.kind == Kind::Remove, |button| button.danger()).label(title(form.kind)).disabled(form.needs_review || !self.can_edit_remote() || action(form.kind,&form.remote,&draft.1,&draft.2).is_none()).on_click(cx.listener(|this,_,_,cx|this.submit_remote_edit(cx)))));
+                    .child(crate::controls::button("save-git-remote").loading(self.git_write_pending()).when(form.kind == Kind::Remove, |button| button.danger()).when(form.kind != Kind::Remove, |button| button.primary()).label(title(form.kind)).disabled(form.needs_review || !self.can_edit_remote() || action(form.kind,&form.remote,&draft.1,&draft.2).is_none()).on_click(cx.listener(|this,_,_,cx|this.submit_remote_edit(cx)))));
         }
         view.into_any_element()
     }

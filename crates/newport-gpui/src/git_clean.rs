@@ -120,7 +120,8 @@ impl Newport {
                         )
                         .child(
                             crate::controls::compact_button("clean-commit-retry")
-                                .label("Retry")
+                                .label("Try again")
+                                .accessibility_label("Try loading the latest commit again")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.resources.invalidate(COMMIT);
                                     this.load_clean_commit();

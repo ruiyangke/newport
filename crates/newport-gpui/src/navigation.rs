@@ -94,15 +94,15 @@ pub(super) fn install_desktop_commands(cx: &mut App) {
         items.push(MenuItem::action(page.title(), action));
     }
     items.push(MenuItem::separator());
-    items.push(MenuItem::action("Show/Hide Sidebar", ToggleSidebar));
+    items.push(MenuItem::action("Show/hide sidebar", ToggleSidebar));
     items.push(MenuItem::separator());
-    items.push(MenuItem::action("Next Tab", crate::project_editor::NextTab));
+    items.push(MenuItem::action("Next tab", crate::project_editor::NextTab));
     items.push(MenuItem::action(
-        "Previous Tab",
+        "Previous tab",
         crate::project_editor::PreviousTab,
     ));
     items.push(MenuItem::action(
-        "Show/Hide Project Terminal",
+        "Show/hide project terminal",
         crate::project_editor::ToggleTerminal,
     ));
     let mut app_items = vec![
@@ -116,8 +116,8 @@ pub(super) fn install_desktop_commands(cx: &mut App) {
     #[cfg(target_os = "macos")]
     app_items.extend([
         MenuItem::action("Hide Newport", HideApp),
-        MenuItem::action("Hide Others", HideOthers),
-        MenuItem::action("Show All", ShowAll),
+        MenuItem::action("Hide others", HideOthers),
+        MenuItem::action("Show all", ShowAll),
         MenuItem::separator(),
     ]);
     app_items.push(MenuItem::action("Quit Newport", Quit));
@@ -131,21 +131,21 @@ pub(super) fn install_desktop_commands(cx: &mut App) {
             name: "File".into(),
             disabled: false,
             items: vec![
-                MenuItem::action("Open File…", crate::project_editor::QuickOpen),
-                MenuItem::action("Focus File Explorer", crate::project_editor::FocusExplorer),
-                MenuItem::action("Save File", crate::project_editor::SaveFile),
-                MenuItem::action("Close Tab", crate::project_editor::CloseTab),
+                MenuItem::action("Open file…", crate::project_editor::QuickOpen),
+                MenuItem::action("Focus file explorer", crate::project_editor::FocusExplorer),
+                MenuItem::action("Save file", crate::project_editor::SaveFile),
+                MenuItem::action("Close tab", crate::project_editor::CloseTab),
                 MenuItem::separator(),
-                MenuItem::action("Close Window", CloseWindow),
+                MenuItem::action("Close window", CloseWindow),
             ],
         },
         Menu {
             name: "Server".into(),
             disabled: false,
             items: vec![
-                MenuItem::action("Add Server…", NewServer),
-                MenuItem::action("Edit Server…", EditServer),
-                MenuItem::action("Test Connection", TestServer),
+                MenuItem::action("Add server…", NewServer),
+                MenuItem::action("Edit server…", EditServer),
+                MenuItem::action("Test connection", TestServer),
             ],
         },
         Menu {
@@ -158,7 +158,7 @@ pub(super) fn install_desktop_commands(cx: &mut App) {
                 MenuItem::os_action("Cut", Cut, OsAction::Cut),
                 MenuItem::os_action("Copy", Copy, OsAction::Copy),
                 MenuItem::os_action("Paste", Paste, OsAction::Paste),
-                MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
+                MenuItem::os_action("Select all", SelectAll, OsAction::SelectAll),
             ],
         },
         Menu {
@@ -174,7 +174,7 @@ pub(super) fn install_desktop_commands(cx: &mut App) {
             items: if cfg!(target_os = "macos") {
                 vec![]
             } else {
-                vec![MenuItem::action("Toggle Full Screen", ToggleFullScreen)]
+                vec![MenuItem::action("Toggle full screen", ToggleFullScreen)]
             },
         },
         Menu {
@@ -302,9 +302,7 @@ impl Newport {
                     .relative()
                     .h(px(if compact { 40. } else { 36. }))
                     .flex_shrink_0()
-                    .px(px(if compact { 0. } else { 16. }))
-                    .border_1()
-                    .border_color(gpui_kit::transparent_black())
+                    .px(px(if compact { 0. } else { 17. }))
                     .rounded(px(crate::ui::RADIUS))
                     .text_size(px(crate::ui::FONT_SIZE))
                     .font_weight(FontWeight::NORMAL)
@@ -324,7 +322,7 @@ impl Newport {
                         })
                     })
                     .when(disabled, |tab| tab.opacity(0.5))
-                    .focus_visible(|style| style.border_color(cx.theme().ring))
+                    .focus_visible(|style| crate::controls::inset_focus_ring(style, cx))
                     .child(
                         div()
                             .w_full()
@@ -339,16 +337,8 @@ impl Newport {
                             )
                             .when(!compact, |row| row.child(page.title()))
                             .when(!compact && page == Page::Ports && tunnel_count > 0, |row| {
-                                row.child(div().flex_1()).child(
-                                    div()
-                                        .text_size(px(crate::ui::FONT_SIZE))
-                                        .text_color(if page == self.page {
-                                            theme::sidebar_foreground(cx.theme().is_dark())
-                                        } else {
-                                            theme::sidebar_muted(cx.theme().is_dark())
-                                        })
-                                        .child(tunnel_count.to_string()),
-                                )
+                                row.child(div().flex_1())
+                                    .child(crate::controls::tag(tunnel_count.to_string(), cx))
                             }),
                     )
                     .when(compact, |tab| tab.hover_hint(page.title()))

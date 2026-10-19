@@ -94,14 +94,14 @@ impl Newport {
         let servers = |n: usize| format!("{n} {}", if n == 1 { "server" } else { "servers" });
         self.notification = Some(match (imported, failed.as_slice()) {
             (_, []) => Notification::success(format!("Imported {}.", servers(imported))),
-            (0, [only]) => Notification::error(format!("Couldn’t import {only}")),
+            (0, [only]) => Notification::error(format!("Couldn’t import {only}.")),
             (0, _) => Notification::error(format!(
-                "Couldn’t import {}. {}",
+                "Couldn’t import {}. {}.",
                 servers(failed.len()),
                 failed.join(" · ")
             )),
             (_, _) => Notification::warning(format!(
-                "Imported {}. Couldn’t import {}",
+                "Imported {}. Couldn’t import {}.",
                 servers(imported),
                 failed.join(" · ")
             )),
@@ -164,21 +164,11 @@ impl Newport {
         let importing = self.importing();
         let offer_import = reading || error.is_some() || !hosts.is_empty();
 
-        let title = div()
-            .child(
-                div()
-                    .text_size(px(24.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Welcome to Newport"),
-            )
-            .child(
-                div()
-                    .mt(px(6.))
-                    .text_size(px(crate::ui::FONT_SIZE))
-                    .line_height(relative(1.6))
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Your servers in one window: forwarded ports, terminals, files, services, and containers over SSH."),
-            );
+        let title = crate::controls::page_title(
+            "Welcome to Newport",
+            Some("Your servers in one window: forwarded ports, terminals, files, services, and containers over SSH.".into()),
+            cx,
+        );
 
         let list = div()
             .id("welcome-hosts")
@@ -301,7 +291,11 @@ impl Newport {
                         .flex()
                         .items_center()
                         .gap(px(8.))
-                        .child(div().flex_1().child(crate::empty::compact(error, cx)))
+                        .child(div().flex_1().child(crate::controls::alert(
+                            "welcome-hosts-error",
+                            error,
+                            cx,
+                        )))
                         .child(
                             crate::controls::button("welcome-hosts-retry")
                                 .label("Try again")
@@ -346,9 +340,9 @@ impl Newport {
                 crate::controls::button("welcome-add-server")
                     .icon(IconName::Plus)
                     .label(if offer_import {
-                        "Add a server manually"
+                        "Add server manually"
                     } else {
-                        "Add a server"
+                        "Add server"
                     })
                     .when(!offer_import, |b| b.primary())
                     .disabled(importing)

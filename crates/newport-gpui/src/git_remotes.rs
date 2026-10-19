@@ -41,8 +41,9 @@ impl Newport {
             &self.git.page,
             "remote",
             "remotes",
-            crate::controls::compact_button("add-git-remote")
-                .label("Add remote")
+            crate::controls::button("add-git-remote")
+                .icon(IconName::Plus)
+                .label("Add remote…")
                 .disabled(
                     !self.can_edit_remote()
                         || self.git.remote_edit.is_some()
@@ -79,7 +80,7 @@ impl Newport {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(px(14.))
+                                    .text_size(px(crate::ui::FONT_SIZE))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(
                                         self.git.selected["name"]
@@ -96,7 +97,7 @@ impl Newport {
                             && self.git.settings.is_none()
                             && !self.git.settings_open,
                         |view| {
-                            view.child(empty::pane(IconName::Network, "Choose a remote", "Select a remote to view its URLs and manage transfers.", cx))
+                            view.child(empty::pane(IconName::Globe, "Choose a remote", "Select a remote to view its URLs and manage transfers.", cx))
                         },
                     )
                     .child(self.status("git-remote-detail", cx))
@@ -108,7 +109,8 @@ impl Newport {
                         |view| {
                             view.child(
                                 crate::controls::button("retry-remote-status")
-                                    .label("Retry repository status")
+                                    .label("Try again")
+                                    .accessibility_label("Try reading repository status again")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.resources.invalidate("git-remote-status");
                                         this.request(
@@ -128,7 +130,8 @@ impl Newport {
                         |view| {
                             view.child(
                                 crate::controls::button("retry-remote-detail")
-                                    .label("Retry remote")
+                                    .label("Try again")
+                                    .accessibility_label("Try reading the remote again")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.git_select_remote();
                                         cx.notify();
@@ -152,7 +155,10 @@ impl Newport {
                                     |view| {
                                         view.child(
                                             crate::controls::button("retry-repository-settings")
-                                                .label("Retry settings")
+                                                .label("Try again")
+                                                .accessibility_label(
+                                                    "Try loading repository settings again",
+                                                )
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.resources
                                                         .invalidate("git-repository-settings");

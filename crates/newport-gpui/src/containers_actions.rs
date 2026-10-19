@@ -65,7 +65,7 @@ impl ContainersPanel {
                     .label(verb_label(verb))
                     .icon(match verb {
                         ContainerVerb::Start | ContainerVerb::Unpause => IconName::Play,
-                        ContainerVerb::Restart => IconName::RefreshCw,
+                        ContainerVerb::Restart => IconName::RotateCw,
                         ContainerVerb::Stop => IconName::Square,
                         ContainerVerb::Pause => IconName::Pause,
                     })
@@ -440,12 +440,7 @@ impl ContainersPanel {
             let confirm = owner.clone();
             dialog
                 .aria_label(title.clone())
-                .title(
-                    div()
-                        .text_size(px(17.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(title),
-                )
+                .title(crate::controls::dialog_title(title))
                 .w(px(480.))
                 .max_w((window.viewport_size().width - px(32.)).max(px(240.)))
                 .p(px(24.))
@@ -702,6 +697,7 @@ impl ContainersPanel {
             })
             .into_any_element();
         let cancel = crate::controls::form_button(cancel_id)
+            .min_w(px(76.))
             .debug_selector(move || cancel_id.into())
             .track_focus(&self.review_focus)
             .label("Cancel")
@@ -710,6 +706,7 @@ impl ContainersPanel {
                 this.dismiss_action_review(token, window, cx);
             }));
         let confirm = crate::controls::form_button(confirm_id)
+            .min_w(px(76.))
             .debug_selector(move || confirm_id.into())
             .track_focus(&self.review_confirm_focus)
             .label(label)

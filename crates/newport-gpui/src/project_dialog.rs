@@ -66,7 +66,7 @@ pub(super) fn validation_error(message: impl Into<String>, cx: &App) -> impl Int
         .min_w_0()
         .text_size(px(crate::ui::FONT_SIZE))
         .line_height(px(18.))
-        .text_color(cx.theme().danger)
+        .text_color(crate::theme::error(cx.theme().is_dark()))
         .child(message)
 }
 
@@ -539,17 +539,14 @@ impl Newport {
                         .gap(px(12.))
                         .px(px(if compact { 18. } else { 24. }))
                         .pt(px(if compact { 14. } else { 20. }))
-                        .pb(px(if compact { 8. } else { 12. }))
+                        .pb(px(if compact { 0. } else { 4. }))
                         .child(
-                            div()
+                            crate::controls::dialog_title(self.project_dialog_title())
                                 .id("project-form-heading")
                                 .role(accesskit::Role::Heading)
                                 .aria_label(self.project_dialog_title())
                                 .min_w_0()
-                                .flex_1()
-                                .text_size(px(17.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(self.project_dialog_title()),
+                                .flex_1(),
                         )
                         .child(
                             crate::controls::icon_button("project-form-close")
@@ -580,7 +577,7 @@ impl Newport {
                             .id("project-form-error")
                             .role(accesskit::Role::Alert)
                             .aria_label(message.clone())
-                            .text_color(cx.theme().danger)
+                            .text_color(crate::theme::error(cx.theme().is_dark()))
                             .when(kind.library_form(), |error| error.px(px(20.)))
                             .child(message),
                     )
@@ -614,8 +611,8 @@ mod tests {
                     .child(super::description("path-hint", "Choose an existing directory without a Git repository. Its files will be kept.")))
                 .child(super::validation_error("Enter an absolute repository path on this server.", cx))
                 .child(super::actions().debug_selector(|| "form-actions".into())
-                    .child(crate::controls::button("cancel").label("Cancel"))
-                    .child(crate::controls::button("submit").primary().label("Add repository")))
+                    .child(crate::controls::form_button("cancel").label("Cancel").min_w(gpui::px(76.)))
+                    .child(crate::controls::form_button("submit").primary().label("Add repository").min_w(gpui::px(76.))))
         }
     }
     #[gpui::test]

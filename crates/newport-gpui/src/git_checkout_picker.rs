@@ -43,7 +43,11 @@ pub(super) struct Picker {
 }
 impl Picker {
     fn near_scroll_end(&self) -> bool {
-        git_page_demand::near_uniform_end(&self.scroll, rows(&self.page["entries"]).len(), 48.)
+        git_page_demand::near_uniform_end(
+            &self.scroll,
+            rows(&self.page["entries"]).len(),
+            git_layout::PICKER_ROW_HEIGHT,
+        )
     }
     fn begin_search(&mut self, query: String) -> bool {
         if self.query == query {
@@ -307,8 +311,7 @@ impl Newport {
     fn open_checkout_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_checkout_picker();
         self.git_branch_picker_close();
-        let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name, branch or path"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find a worktree"));
         let subscription = cx.observe(&input, |this, input, cx| {
             if !this.git.checkouts.open || this.git.checkouts.input.as_ref() != Some(&input) {
                 return;
@@ -459,36 +462,21 @@ impl Newport {
             .p_0()
             .offset(px(6.))
             .trigger(
-                crate::controls::button("choose-worktree")
-                    .ghost()
+                git_layout::picker("choose-worktree", IconName::FolderTree, label.clone())
                     .w_full()
-                    .min_w_0()
-                    .px(px(8.))
                     .icon(Icon::new(IconName::FolderTree).text_color(cx.theme().muted_foreground))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .min_w_0()
-                            .text_size(px(crate::ui::FONT_SIZE))
-                            .font_weight(FontWeight::NORMAL)
-                            .child(div().min_w_0().truncate().child(label.clone()))
-                            .when_some(self.git.checkout_summary.count(), |view, count| {
-                                view.child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .text_size(px(crate::ui::FONT_SIZE))
-                                        .font_weight(FontWeight::NORMAL)
-                                        .child(count.to_string()),
-                                )
-                            }),
-                    )
+                    .when_some(self.git.checkout_summary.count(), |view, count| {
+                        view.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_color(cx.theme().muted_foreground)
+                                .text_size(px(crate::ui::FONT_SIZE))
+                                .font_weight(FontWeight::NORMAL)
+                                .child(count.to_string()),
+                        )
+                    })
                     .accessibility_label(format!("Worktrees: {label}"))
                     .hover_path("Repository", text(&self.git.repo["root"], "display"))
-                    .max_w(px(280.))
-                    .dropdown_caret(true)
                     .disabled(
                         self.git_write_pending()
                             || self.project_dialog_open
@@ -603,7 +591,7 @@ impl Newport {
                 .iter()
                 .any(|key| self.resources.get(key).is_some_and(|r| r.pending));
         let count = project_loading::picker_count(entries.len(), pending);
-        div()
+        git_layout::picker_surface(window)
             .capture_key_down(cx.listener(Self::checkout_picker_key))
             .capture_action(cx.listener(
                 |this, action: &gpui_kit::component::input::Enter, window, cx| {
@@ -612,28 +600,17 @@ impl Newport {
                     }
                 },
             ))
-            .w(px(440.).min(window.viewport_size().width - px(32.)))
-            .max_h((window.viewport_size().height * 0.7).min(px(560.)))
-            .flex()
-            .flex_col()
-            .min_h_0()
             .child(
-                div()
-                    .p_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
+                git_layout::search_bar()
                     .when_some(self.git.checkouts.input.as_ref(), |view, input| {
-                        view.child(
-                            div().flex_1().min_w_0().child(
-                                crate::controls::input(input).aria_label("Filter worktrees"),
-                            ),
-                        )
+                        view.child(div().flex_1().min_w_0().child(
+                            crate::controls::search_input(input, cx).aria_label("Filter worktrees"),
+                        ))
                     })
                     .child(
                         crate::controls::button("checkout-new-worktree")
                             .icon(IconName::Plus)
-                            .label("New worktree")
+                            .label("New worktree…")
                             .disabled(pending || !self.can_create_picker_worktree())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.new_picker_worktree(window, cx)
@@ -646,7 +623,8 @@ impl Newport {
                 |view| {
                     view.child(self.status(MORE, cx)).child(
                         crate::controls::button("retry-more-checkouts")
-                            .label("Retry loading worktrees")
+                            .label("Try again")
+                            .accessibility_label("Try loading more worktrees again")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.load_checkouts(true);
                                 cx.notify();
@@ -664,7 +642,8 @@ impl Newport {
                 |view| {
                     view.child(
                         crate::controls::button("retry-checkouts")
-                            .label("Reload worktrees")
+                            .label("Try again")
+                            .accessibility_label("Try loading worktrees again")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.git.checkouts.error = None;
                                 this.load_checkouts(false);
@@ -675,7 +654,7 @@ impl Newport {
             )
             .when(
                 entries.is_empty() && !pending && self.git.checkouts.page["entries"].is_array(),
-                |view| view.child(empty::compact("No worktrees match this search.", cx)),
+                |view| view.child(empty::compact("No worktrees match.", cx)),
             )
             .child(
                 uniform_list(
@@ -685,7 +664,7 @@ impl Newport {
                         range
                             .map(|index| {
                                 let Some(entry) = entries.get(index).cloned() else {
-                                    return project_loading::picker_row("worktrees", index);
+                                    return git_layout::picker_loading_row("worktrees", index);
                                 };
                                 let (title, subtitle) = git_worktree_view::row_labels(&entry);
                                 let current = entry["current"] == true;
@@ -697,7 +676,6 @@ impl Newport {
                                 let context_owner = cx.weak_entity();
                                 git_layout::picker_row(
                                     ("checkout-row", index),
-                                    current,
                                     this.git.checkouts.highlighted == Some(index),
                                     cx,
                                 )
@@ -731,7 +709,13 @@ impl Newport {
                                                 .flex_col()
                                                 .items_start()
                                                 .gap_1()
-                                                .child(div().w_full().truncate().child(title))
+                                                .child(
+                                                    div()
+                                                        .w_full()
+                                                        .truncate()
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .child(title),
+                                                )
                                                 .child(
                                                     crate::label(subtitle)
                                                         .text_size(px(crate::ui::FONT_SIZE))
@@ -807,9 +791,12 @@ impl Newport {
                     }),
                 )
                 .track_scroll(&self.git.checkouts.scroll)
-                .h(px((count as f32 * 48.).min(300.).min(
-                    (f32::from(window.viewport_size().height) * 0.7 - 140.).max(48.),
-                )))
+                .h(px((count as f32 * git_layout::PICKER_ROW_HEIGHT)
+                    .min(320.)
+                    .min(
+                        (f32::from(window.viewport_size().height) * 0.7 - 140.)
+                            .max(git_layout::PICKER_ROW_HEIGHT),
+                    )))
                 .min_h_0(),
             )
             .when(
@@ -852,7 +839,9 @@ mod tests {
                 "checkouts",
                 super::rows(&self.0.page["entries"]).len(),
                 cx.processor(|_, range: std::ops::Range<usize>, _, _| {
-                    range.map(|_| div().h(px(48.))).collect()
+                    range
+                        .map(|_| div().h(px(crate::git_layout::PICKER_ROW_HEIGHT)))
+                        .collect()
                 }),
             )
             .track_scroll(&self.0.scroll)

@@ -4,7 +4,7 @@
 use super::*;
 use gpui_kit::component::skeleton::Skeleton;
 
-pub(super) const ROW_HEIGHT: f32 = 30.;
+pub(super) const ROW_HEIGHT: f32 = crate::ui::ROW_HEIGHT;
 const MODIFIED_WIDTH: f32 = 132.;
 const SIZE_WIDTH: f32 = 84.;
 const ACTIONS_WIDTH: f32 = 60.;
@@ -421,7 +421,8 @@ fn file_row(props: &FileRowProps, view: &WeakEntity<Newport>, cx: &App) -> AnyEl
                     button: crate::controls::compact_icon_button("file-actions")
                         .icon(IconName::Ellipsis)
                         .ghost()
-                        .accessibility_label(format!("Actions for {name}")),
+                        .accessibility_label(format!("Actions for {name}"))
+                        .tooltip("More actions"),
                     builder: Box::new(move |menu, _, cx| match &menu_target {
                         Some(target) => file_menu(menu, menu_view.clone(), target.clone(), cx),
                         None => menu,
@@ -670,6 +671,7 @@ impl Newport {
             .aria_row_count(count + 1)
             .track_focus(&browser.list_focus)
             .tab_stop(true)
+            .focus_visible(|style| crate::controls::inset_focus_ring(style, cx))
             .on_key_down(cx.listener(Self::files_key_down))
             .flex()
             .flex_col()

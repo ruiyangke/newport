@@ -217,7 +217,7 @@ pub(super) fn library(width: f32, cx: &App) -> AnyElement {
         )
         .children((0..4).map(|i| {
             div()
-                .h(px(56.))
+                .h(px(crate::ui::TWO_LINE_ROW_HEIGHT))
                 .px_3()
                 .flex()
                 .items_center()

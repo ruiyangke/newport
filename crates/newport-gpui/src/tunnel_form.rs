@@ -73,13 +73,7 @@ impl DirectionSelector {
 
 impl Render for DirectionSelector {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The reference outlined ToggleGroup uses --muted for its pressed state.
-        let selected_background: Hsla = rgb(if cx.theme().is_dark() {
-            0x252b34
-        } else {
-            0xf5f5f5
-        })
-        .into();
+        let selected_background = crate::theme::selected_fill(cx.theme().is_dark());
         ToggleGroup::new("forward-direction")
             .aria_label("Direction")
             .flex()
@@ -303,7 +297,7 @@ impl Form {
                                 } else {
                                     "New forward"
                                 })
-                                .text_size(px(17.))
+                                .text_size(px(crate::ui::DIALOG_TITLE))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(if existing {
                                     "Edit forward"
@@ -317,6 +311,7 @@ impl Form {
                                 .icon(IconName::Close)
                                 .text_color(cx.theme().muted_foreground)
                                 .accessibility_label("Close dialog")
+                                .tooltip("Close dialog")
                                 .disabled(pending)
                                 .on_click(move |_, window, cx| {
                                     if !close_form.read(cx).pending {
@@ -517,16 +512,6 @@ fn hint(value: &'static str, cx: &App) -> Div {
     )
 }
 
-fn control_background(cx: &App) -> Hsla {
-    // EditorControls.tsx mixes 45% native-toolbar with the page background.
-    rgb(if cx.theme().is_dark() {
-        0x232426
-    } else {
-        0xfbfafb
-    })
-    .into()
-}
-
 fn error_message(message: String, cx: &App) -> impl IntoElement {
     div()
         .id("forward-editor-error")
@@ -545,7 +530,7 @@ impl Form {
             .aria_label(title.to_owned())
             .disabled(self.pending)
             .rounded(px(crate::ui::RADIUS))
-            .bg(control_background(cx))
+            .bg(crate::theme::field_background(cx.theme().is_dark()))
             .border_color(cx.theme().border)
     }
 
@@ -683,7 +668,7 @@ impl Render for Form {
                         crate::controls::form_button("forward-project")
                             .w_full()
                             .rounded(px(crate::ui::RADIUS))
-                            .bg(control_background(cx))
+                            .bg(crate::theme::field_background(cx.theme().is_dark()))
                             .disabled(self.pending)
                             .accessibility_label(format!("Project: {project_name}"))
                             .child(
