@@ -417,3 +417,65 @@ fn discovery_resumes_accepted_partial_cleanup_without_a_valid_backup() {
     assert!(!root.exists());
     assert_eq!(bundle_version(&destination).unwrap().to_string(), "2.0.0");
 }
+
+#[test]
+fn abandoning_a_begun_install_removes_only_the_staged_candidate() {
+    let (_parent, transaction) = fixture();
+    let destination = transaction.destination().to_owned();
+    let root = transaction.recovery_directory().to_owned();
+    transaction.abandon().unwrap();
+    assert!(!root.exists());
+    assert_eq!(bundle_version(&destination).unwrap().to_string(), "1.0.0");
+    let guard = StartupGuard::acquire(&destination).unwrap();
+    assert!(guard.into_transaction().is_none());
+}
+
+#[test]
+fn an_exchanged_install_cannot_be_abandoned() {
+    let (_parent, mut transaction) = fixture();
+    transaction.reconcile_with(verify_fixture).unwrap();
+    let destination = transaction.destination().to_owned();
+    let root = transaction.recovery_directory().to_owned();
+    assert!(transaction.abandon().is_err());
+    assert_eq!(bundle_version(&destination).unwrap().to_string(), "2.0.0");
+    assert_eq!(
+        bundle_version(&root.join("Newport.app"))
+            .unwrap()
+            .to_string(),
+        "1.0.0"
+    );
+}
+
+#[test]
+fn startup_removes_only_old_private_staging_without_a_journal() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_parent, transaction) = fixture();
+    let destination = transaction.destination().to_owned();
+    let journaled = transaction.recovery_directory().to_owned();
+    drop(transaction);
+    let parent = destination.parent().unwrap();
+    let staging = |name: &str, mode: u32, age: u64| {
+        let root = parent.join(name);
+        write_bundle(&root, IDENTIFIER, "2.0.0", "newport", 0x0100000c);
+        fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
+        let modified = std::time::SystemTime::now() - std::time::Duration::from_secs(age);
+        File::open(&root).unwrap().set_modified(modified).unwrap();
+        root
+    };
+    let abandoned = staging(".newport-update-abandoned", 0o700, 3600);
+    let preparing = staging(".newport-update-preparing", 0o700, 0);
+    let shared = staging(".newport-update-shared", 0o755, 3600);
+    let unrelated = staging(".other-abandoned", 0o700, 3600);
+    // Journaled recovery is old too, but must survive for recovery.
+    File::open(&journaled)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .unwrap();
+    discard_unstarted(&destination, std::time::Duration::from_secs(600));
+    assert!(!abandoned.exists());
+    assert!(preparing.exists());
+    assert!(shared.exists());
+    assert!(unrelated.exists());
+    assert!(journaled.join(JOURNAL).exists());
+    assert!(destination.exists());
+}

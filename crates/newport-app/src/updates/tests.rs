@@ -383,6 +383,32 @@ async fn successful_handoff_transfers_preparation_once_and_blocks_duplicates() {
 }
 
 #[tokio::test]
+async fn a_failed_install_stays_visible_until_the_next_attempt() {
+    let f = fixture();
+    f.service
+        .report_failure("Couldn’t install version 2.0.0. Startup check failed.".into());
+    assert_eq!(
+        f.service.status()["error"],
+        "Couldn’t install version 2.0.0. Startup check failed."
+    );
+    // The background check offers the same version again; the reason stays.
+    let check = start(&f.service, &f.started).await;
+    f.release.send(Outcome::Update).unwrap();
+    check.await.unwrap().unwrap();
+    let status = f.service.status();
+    assert_eq!(status["phase"], "ready");
+    assert_eq!(
+        status["error"],
+        "Couldn’t install version 2.0.0. Startup check failed."
+    );
+    f.service
+        .prepare_install("2.0.0", |_| Ok(()), |_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(f.service.status()["error"], serde_json::Value::Null);
+}
+
+#[tokio::test]
 async fn shutdown_during_staging_drops_preparation_without_requesting_restart() {
     let f = ready().await;
     let (started, receive_started) = mpsc::channel();

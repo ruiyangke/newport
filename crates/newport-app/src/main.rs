@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod desktop;
 mod health;
+mod shutdown;
 mod startup;
 #[cfg(any(target_os = "macos", windows))]
 mod tray;
@@ -73,6 +74,8 @@ fn run() -> Result<(), String> {
     };
     let store = newport_backend::profile::open()?;
     let endpoint = newport_platform::ipc::profile_endpoint(&store.directory);
+    #[cfg(target_os = "macos")]
+    let profile_directory = store.directory.clone();
     let Some(reserved) = newport_backend::application::Application::reserve(store, isolated)?
     else {
         #[cfg(target_os = "macos")]
@@ -88,7 +91,7 @@ fn run() -> Result<(), String> {
     };
     #[cfg(target_os = "macos")]
     let recovery = match startup_guard.and_then(|guard| guard.into_transaction()) {
-        Some(transaction) => match updates::recovery::resolve(transaction)? {
+        Some(transaction) => match updates::recovery::resolve(transaction, &profile_directory)? {
             updates::recovery::Startup::Continue(transaction) => Some(transaction),
             updates::recovery::Startup::Restart(installation) => {
                 // Do not load credentials or migrate a profile using an old
@@ -99,6 +102,14 @@ fn run() -> Result<(), String> {
         },
         None => None,
     };
+    // Recovery restored this version after a failed install. The health probe
+    // never consumes the reason; only an app that shows Settings does.
+    #[cfg(target_os = "macos")]
+    if launch.check.is_none()
+        && let Some(failure) = updates::recovery::take_failure(&profile_directory)
+    {
+        updates.report_failure(failure);
+    }
     reserved.prepare_upgrade(env!("CARGO_PKG_VERSION"))?;
     let mut backend = runtime.block_on(
         reserved.start(
@@ -156,15 +167,48 @@ fn run() -> Result<(), String> {
     ));
     #[cfg(any(target_os = "macos", windows))]
     let tray_desktop = desktop.clone();
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(windows)]
     let install_request = std::sync::Arc::new(std::sync::Mutex::new(None));
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(windows)]
     let requested_install = install_request.clone();
+    let teardown = std::rc::Rc::new(std::cell::Cell::new(Some(shutdown::Teardown {
+        #[cfg(target_os = "macos")]
+        acceptance,
+        #[cfg(any(target_os = "macos", windows))]
+        tray_monitor,
+        signal,
+        updates: updates.clone(),
+        update_background,
+        desktop: desktop.clone(),
+        backend: shutdown::Backend { stop, services },
+    })));
+    #[cfg(target_os = "macos")]
+    let quit_teardown = teardown.clone();
+    #[cfg(target_os = "macos")]
+    let quit_runtime = runtime.handle().clone();
     let ui_result = newport_gpui::run_with_options_and_ready(
         newport_gpui::LaunchOptions {
             start_hidden: launch.autostart,
         },
         move |cx| {
+            // AppKit calls exit() right after quit observers, so the loop never
+            // returns. Drain here, before the window's own observer: backend
+            // shutdown closes every terminal, and GPUI caps that observer's now
+            // redundant close requests at its quit timeout.
+            #[cfg(target_os = "macos")]
+            cx.on_app_quit(move |cx| {
+                if let Some(teardown) = quit_teardown.take() {
+                    // The main thread blocks until the drain ends; don't leave
+                    // a frozen window on screen.
+                    cx.hide();
+                    match teardown.finish_within(&quit_runtime, shutdown::LIMIT) {
+                        Ok(()) => eprintln!("Newport shut down."),
+                        Err(error) => eprintln!("Newport shutdown: {error}"),
+                    }
+                }
+                async {}
+            })
+            .detach();
             newport_gpui::connectivity::publish(initial_connections, cx);
             cx.spawn(async move |cx| {
                 while connections.changed().await.is_ok() {
@@ -198,19 +242,61 @@ fn run() -> Result<(), String> {
                         match action {
                             #[cfg(any(target_os = "macos", windows))]
                             desktop::Action::Install(request, reply) => {
-                                if let Err(error) = cx.update(newport_gpui::ensure_editors_saved) {
-                                    let _ = reply.send(Err(error));
-                                    continue;
+                                // AppKit exits inside terminate:, so nothing after the UI
+                                // loop runs on macOS. Persist intent first, then check
+                                // buffers and quit with no await in between; the
+                                // relaunched app replaces the bundle during recovery.
+                                #[cfg(target_os = "macos")]
+                                {
+                                    use updates::install::{Begun, Handoff, handoff};
+                                    let begun = cx
+                                        .background_executor()
+                                        .spawn(async move { (*request).begin() })
+                                        .await;
+                                    match handoff(
+                                        begun,
+                                        || cx.update(newport_gpui::ensure_editors_saved),
+                                        Begun::relaunch,
+                                        |result| reply.send(result).is_ok(),
+                                    ) {
+                                        Handoff::Quit(relaunch) => {
+                                            relaunch.release();
+                                            cx.update(|cx| cx.quit());
+                                            break;
+                                        }
+                                        Handoff::Abandon(begun) => {
+                                            let abandoned = cx
+                                                .background_executor()
+                                                .spawn(async move { begun.abandon() })
+                                                .await;
+                                            if let Err(error) = abandoned {
+                                                eprintln!(
+                                                    "Couldn’t discard the staged update: {error}"
+                                                );
+                                            }
+                                        }
+                                        Handoff::Refused => {}
+                                    }
                                 }
-                                // A timed-out/cancelled requester must never arm an install.
-                                if reply.send(Ok(())).is_err() {
-                                    continue;
+                                #[cfg(windows)]
+                                {
+                                    if let Err(error) =
+                                        cx.update(newport_gpui::ensure_editors_saved)
+                                    {
+                                        let _ = reply.send(Err(error));
+                                        continue;
+                                    }
+                                    // A timed-out/cancelled requester must never arm an install.
+                                    if reply.send(Ok(())).is_err() {
+                                        continue;
+                                    }
+                                    *requested_install
+                                        .lock()
+                                        .unwrap_or_else(|error| error.into_inner()) =
+                                        Some(*request);
+                                    cx.update(|cx| cx.quit());
+                                    break;
                                 }
-                                *requested_install
-                                    .lock()
-                                    .unwrap_or_else(|error| error.into_inner()) = Some(*request);
-                                cx.update(|cx| cx.quit());
-                                break;
                             }
                             desktop::Action::Run(action) => action(),
                             desktop::Action::Activate(acknowledge) => {
@@ -253,23 +339,15 @@ fn run() -> Result<(), String> {
             let _ = ready.send(());
         },
     );
-    #[cfg(target_os = "macos")]
-    if let Some(acceptance) = acceptance
-        && let Err(error) = runtime.block_on(acceptance.finish())
-    {
-        eprintln!("Update backup retained: {error}");
-    }
-    #[cfg(any(target_os = "macos", windows))]
-    tray_monitor.abort();
-    signal.abort();
-    updates.shutdown();
-    update_background.abort();
-    desktop.close();
-    runtime.block_on(updates.finish_preparation());
-    #[cfg(any(target_os = "macos", windows))]
+    // On macOS this is reached only when the UI never ran its event loop.
+    let Some(teardown) = teardown.take() else {
+        return ui_result;
+    };
+    let backend = runtime.block_on(teardown.release_host());
+    #[cfg(windows)]
     let installation = if ui_result.is_ok() {
         // The UI loop has ended, but backend ownership is still held. Transfer
-        // preparation (and persist macOS recovery) before requesting drain.
+        // preparation before requesting drain.
         install_request
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -278,13 +356,9 @@ fn run() -> Result<(), String> {
     } else {
         None
     };
-    let _ = stop.send(());
-    let backend_result = runtime
-        .block_on(services)
-        .map_err(|error| format!("Backend shutdown failed: {error}"))
-        .and_then(|result| result);
+    let backend_result = runtime.block_on(backend.stop());
     let result = ui_result.and(backend_result);
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(windows)]
     let result = match installation {
         Some(Ok(installation)) => runtime.block_on(installation.run(result)),
         Some(Err(error)) => result.and(Err(error)),

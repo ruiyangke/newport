@@ -35,9 +35,8 @@ impl Integration {
         self.0
             .try_send(Action::Install(Box::new(request), reply))
             .map_err(|_| "The application cannot restart right now. Try again.".to_owned())?;
-        accepted
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .map_err(|_| "The application did not accept the restart. Try again.".to_owned())?
+        // The UI persists intent (signature checks, fsync) before replying.
+        await_reply(&accepted, || self.0.is_closed(), INSTALL_REPLY_LIMIT)
     }
     pub async fn quit(&self) {
         let _ = self.0.send(Action::Quit).await;
@@ -51,6 +50,29 @@ impl Integration {
     #[cfg(any(target_os = "macos", windows))]
     pub async fn tray_status(&self, status: Option<(usize, bool)>) -> bool {
         self.0.send(Action::TrayStatus(status)).await.is_ok()
+    }
+}
+#[cfg(any(target_os = "macos", windows, test))]
+const INSTALL_REPLY_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Stop waiting as soon as the app starts quitting: its main thread will never
+/// reply, and staging cleanup at shutdown waits for this worker.
+#[cfg(any(target_os = "macos", windows, test))]
+fn await_reply(
+    accepted: &std::sync::mpsc::Receiver<Result<(), String>>,
+    closed: impl Fn() -> bool,
+    limit: std::time::Duration,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match accepted.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(result) => return result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                if !closed() && std::time::Instant::now() < deadline => {}
+            Err(_) => {
+                return Err("The application did not accept the restart. Try again.".into());
+            }
+        }
     }
 }
 impl DesktopIntegration for Integration {
@@ -331,5 +353,24 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn install_reply_wait_ends_when_the_app_quits_or_the_limit_passes() {
+        use std::time::{Duration, Instant};
+        let (reply, accepted) = std::sync::mpsc::sync_channel(1);
+        reply.send(Ok(())).unwrap();
+        assert_eq!(
+            await_reply(&accepted, || false, Duration::from_secs(5)),
+            Ok(())
+        );
+        let started = Instant::now();
+        assert!(await_reply(&accepted, || true, Duration::from_secs(30)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let started = Instant::now();
+        assert!(await_reply(&accepted, || false, Duration::from_millis(100)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(reply);
+        assert!(await_reply(&accepted, || false, Duration::from_secs(30)).is_err());
     }
 }

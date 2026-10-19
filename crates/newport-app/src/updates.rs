@@ -71,6 +71,7 @@ struct State<P> {
     downloaded: u64,
     total: Option<u64>,
     error: Option<String>,
+    failure: Option<String>,
     busy: bool,
     preparing: bool,
     pending: Option<Arc<P>>,
@@ -162,6 +163,7 @@ impl<P: Package> Service<P> {
             state.preparing = true;
             state.phase = "installing";
             state.error = None;
+            state.failure = None;
             package
         };
         let job = InstallJob {
@@ -200,6 +202,7 @@ impl<P: Package> Service<P> {
                     downloaded: 0,
                     total: None,
                     error: None,
+                    failure: None,
                     busy: false,
                     preparing: false,
                     pending: None,
@@ -222,7 +225,8 @@ impl<P: Package> Service<P> {
 
     pub fn status(&self) -> Value {
         let state = self.state();
-        json!({"enabled":self.source.is_some() && !self.closed(),"currentVersion":env!("CARGO_PKG_VERSION"),"phase":state.phase,"version":state.version,"downloaded":state.downloaded,"total":state.total,"error":state.error})
+        let error = state.error.as_ref().or(state.failure.as_ref());
+        json!({"enabled":self.source.is_some() && !self.closed(),"currentVersion":env!("CARGO_PKG_VERSION"),"phase":state.phase,"version":state.version,"downloaded":state.downloaded,"total":state.total,"error":error})
     }
 
     pub async fn check(&self) -> Result<(), String> {
@@ -280,6 +284,13 @@ impl<P: Package> Service<P> {
         }
     }
 
+    /// A previous launch failed to install and was restored. Keep the reason
+    /// visible, even once the version is offered again, until the next attempt.
+    #[cfg(any(target_os = "macos", test))]
+    pub fn report_failure(&self, message: String) {
+        self.state().failure = Some(message);
+    }
+
     pub fn shutdown(&self) {
         self.shared.closed.store(true, Ordering::Release);
         let mut state = self.state();
@@ -289,6 +300,12 @@ impl<P: Package> Service<P> {
         state.downloaded = 0;
         state.total = None;
         state.error = None;
+    }
+
+    /// Model a preparation that never finishes, for shutdown tests.
+    #[cfg(test)]
+    pub(crate) fn hold_preparation(&self) {
+        self.state().preparing = true;
     }
 
     /// Unlike network-only checks, staging owns temporary files. Let cancelled

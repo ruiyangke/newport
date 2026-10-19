@@ -4,7 +4,7 @@ use super::install::{Installation, bundle_for_executable};
 use newport_platform::updates::macos::{RecoveryStatus, StartupGuard, Transaction};
 use std::{
     future::Future,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU8, Ordering},
@@ -22,7 +22,7 @@ pub enum Startup {
     Restart(Installation),
 }
 
-pub fn resolve(mut transaction: Transaction) -> Result<Startup, String> {
+pub fn resolve(mut transaction: Transaction, profile: &Path) -> Result<Startup, String> {
     let status = transaction.inspect()?;
     let running =
         semver::Version::parse(env!("CARGO_PKG_VERSION")).map_err(|error| error.to_string())?;
@@ -33,8 +33,42 @@ pub fn resolve(mut transaction: Transaction) -> Result<Startup, String> {
             transaction,
             status.intended,
             status.accepted,
+            profile.to_owned(),
         )))
     }
+}
+
+const FAILURE: &str = "update-failure.json";
+
+/// Keep why an installation failed for the app that recovery relaunches.
+pub fn record_failure(
+    profile: &Path,
+    version: &semver::Version,
+    reason: &str,
+) -> Result<(), String> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    let record = serde_json::json!({"version": version.to_string(), "reason": reason});
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(profile.join(FAILURE))
+        .and_then(|mut file| file.write_all(record.to_string().as_bytes()))
+        .map_err(|error| error.to_string())
+}
+
+/// Read and clear the last failure, as text for Settings.
+pub fn take_failure(profile: &Path) -> Option<String> {
+    let path = profile.join(FAILURE);
+    let bytes = std::fs::read(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    let record: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Some(format!(
+        "Couldn’t install version {}. {}",
+        record["version"].as_str()?,
+        record["reason"].as_str()?
+    ))
 }
 
 fn can_continue(status: &RecoveryStatus, running: &semver::Version) -> bool {
@@ -123,6 +157,23 @@ impl Acceptance {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn a_recorded_failure_is_shown_once() {
+        let profile = tempfile::tempdir().unwrap();
+        assert_eq!(take_failure(profile.path()), None);
+        record_failure(
+            profile.path(),
+            &"2.0.0".parse().unwrap(),
+            "The updated app's startup check timed out.",
+        )
+        .unwrap();
+        assert_eq!(
+            take_failure(profile.path()).as_deref(),
+            Some("Couldn’t install version 2.0.0. The updated app's startup check timed out.")
+        );
+        assert_eq!(take_failure(profile.path()), None);
+    }
 
     #[test]
     fn only_the_intended_installed_and_running_version_can_open_the_profile() {

@@ -63,6 +63,7 @@ impl StartupGuard {
     pub fn acquire(installed: &Path) -> Result<Self, String> {
         let destination = installation_path(installed)?;
         let lock = installation_lock(&destination)?;
+        discard_unstarted(&destination, ABANDONED_AFTER);
         match pending_record(&destination)? {
             Some((root, record)) => Ok(Self {
                 transaction: Some(Transaction {
@@ -227,6 +228,23 @@ impl Transaction {
         self.state_with(validate_candidate)?;
         self.set_intent(Intent::Restore)?;
         self.reconcile()
+    }
+
+    /// Discard an installation that was begun but never reconciled, after the
+    /// host refused the restart. The live app was never exchanged, so only the
+    /// staged candidate is removed; versions are compared without re-signing.
+    pub fn abandon(mut self) -> Result<(), String> {
+        self.reload_intent()?;
+        if self.record.intent != Intent::Install
+            || bundle_version(self.destination())? != super::super::version(&self.record.previous)?
+            || bundle_version(&self.other())? != super::super::version(&self.record.updated)?
+        {
+            return Err("This update has already started installing.".into());
+        }
+        // Accept first: an interrupted cleanup must never look like a pending
+        // installation of a partially deleted candidate.
+        self.set_intent(Intent::AcceptPrevious)?;
+        self.cleanup()
     }
 
     /// Call only after the host has verified the relaunched app/backend is
@@ -469,6 +487,53 @@ fn pending_record(destination: &Path) -> Result<Option<(PathBuf, Record)>, Strin
         pending = Some((root, record));
     }
     Ok(pending)
+}
+
+/// Recent staging directories may still belong to a preparation for another
+/// installation in the same folder. Preparation takes seconds, so anything
+/// this old without a journal was left behind by an exit.
+const ABANDONED_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+// Called only while holding the installation lock. A staging directory without
+// a journal never began installing, and nothing else will ever remove it.
+// Best effort: leftovers only cost disk space, so failures never block startup.
+fn discard_unstarted(destination: &Path, older_than: std::time::Duration) {
+    let Some(parent) = destination.parent() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .as_bytes()
+            .starts_with(b".newport-update-")
+        {
+            continue;
+        }
+        let root = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&root) else {
+            continue;
+        };
+        // SAFETY: geteuid has no arguments or preconditions.
+        if !metadata.is_dir()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
+            || !matches!(
+                fs::symlink_metadata(root.join(JOURNAL)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            )
+            || !metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age >= older_than)
+        {
+            continue;
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 fn ensure_no_pending(destination: &Path) -> Result<(), String> {
