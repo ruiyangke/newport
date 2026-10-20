@@ -62,7 +62,7 @@ fn cancel_on_disconnect(method: &str) -> bool {
     )
 }
 
-async fn with_progress<W: AsyncRead + AsyncWrite + Unpin>(
+pub(super) async fn with_progress<W: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut W,
     server: Option<Uuid>,
     cancel_on_disconnect: bool,

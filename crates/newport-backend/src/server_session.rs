@@ -576,6 +576,14 @@ impl Lease {
         self.validate()?;
         result
     }
+    /// A started command's channel on this connection.
+    pub(crate) async fn exec_channel(
+        &self,
+        command: &str,
+    ) -> Result<russh::Channel<russh::client::Msg>, String> {
+        self.validate()?;
+        self.connection.exec_channel(command).await
+    }
     pub async fn launch(
         &self,
         service: agent::Service,
@@ -696,13 +704,19 @@ impl Lease {
         force: bool,
         integrations: bool,
         operation_id: Uuid,
-        automatic: bool,
+        trigger: crate::agent_lifecycle::Trigger,
     ) -> Result<String, String> {
+        use crate::agent_lifecycle::Trigger;
         self.validate()?;
         let owner = self.owner.upgrade().ok_or(STALE)?;
         let operation = owner.lifecycle.operation.lock().await;
         self.validate()?;
-        if automatic {
+        if trigger != Trigger::Manual {
+            // A feature waiting on a required update hears why it did not run.
+            let skip = |message: &str| match trigger {
+                Trigger::Required => Err(message.to_owned()),
+                _ => Ok(message.to_owned()),
+            };
             // Recheck under lifecycle exclusion. A manual install, removal, or
             // another desktop may have changed the target since discovery.
             if !self.connection.server().agent_install_approved
@@ -710,13 +724,15 @@ impl Lease {
                     .lifecycle
                     .automatic_update_journal_clear(self.connection.server())?
             {
-                return Ok("Automatic Needle update deferred.".into());
+                return skip(
+                    "Another Needle operation on this server is unfinished. Finish it in Integrations.",
+                );
             }
             let status = crate::agent_lifecycle::check(&self.connection).await;
             self.validate()?;
             owner.lifecycle.record(self.generation, &status);
-            if !status?.automatic_update_available() {
-                return Ok("Needle does not need an automatic update.".into());
+            if !trigger.allows(&status?) {
+                return skip("The installed Needle can’t be replaced automatically.");
             }
         }
         let progress = owner.lifecycle.progress.attempt_for(Some(operation_id));
@@ -728,7 +744,7 @@ impl Lease {
                 integrations,
                 &owner.lifecycle.receipts,
                 operation_id,
-                automatic,
+                trigger,
             )
             .await?;
             self.validate()?;
@@ -1120,7 +1136,10 @@ impl Lease {
         action: crate::lifecycle_task::Action,
         force: bool,
     ) -> Result<String, String> {
-        use crate::lifecycle_task::{Action, Request};
+        use crate::{
+            agent_lifecycle::Trigger,
+            lifecycle_task::{Action, Request},
+        };
         self.validate()?;
         let owner = self.owner.upgrade().ok_or(STALE)?;
         // Give the owned task its own demand and a lease of this exact transport
@@ -1148,11 +1167,18 @@ impl Lease {
                 async move {
                     match action {
                         Action::AutoUpdate => {
-                            lease.install_operation_inner(true, false, id, true).await
+                            lease
+                                .install_operation_inner(true, false, id, Trigger::Automatic)
+                                .await
+                        }
+                        Action::RequiredUpdate => {
+                            lease
+                                .install_operation_inner(true, false, id, Trigger::Required)
+                                .await
                         }
                         Action::Install { integrations } => {
                             lease
-                                .install_operation_inner(force, integrations, id, false)
+                                .install_operation_inner(force, integrations, id, Trigger::Manual)
                                 .await
                         }
                         Action::Helpers => lease.configure_integrations_operation_inner(id).await,
@@ -1267,6 +1293,38 @@ impl Lease {
         )
         .await
         .map(|_| ())
+    }
+    /// Replaces a Needle that is too old for a feature this desktop needs,
+    /// unless an update is already running or recently failed. Approval and
+    /// the replacement rules of a manual install still apply.
+    pub(crate) async fn update_needle_for_feature(
+        &self,
+    ) -> Result<(), crate::agent_lifecycle::RequiredUpdate> {
+        use crate::agent_lifecycle::RequiredUpdate;
+        let failed = |error: String| RequiredUpdate::Failed {
+            error,
+            at: std::time::Instant::now(),
+        };
+        self.validate().map_err(failed)?;
+        let owner = self.owner.upgrade().ok_or_else(|| failed(STALE.into()))?;
+        if !self.connection.server().agent_install_approved {
+            return Err(failed(
+                "Needle installation requires approval. Open Overview to set up this server."
+                    .into(),
+            ));
+        }
+        owner
+            .lifecycle
+            .claim_required_update(std::time::Instant::now())?;
+        let result = self
+            .run_lifecycle(
+                Uuid::new_v4(),
+                crate::lifecycle_task::Action::RequiredUpdate,
+                true,
+            )
+            .await;
+        owner.lifecycle.finish_required_update(&result);
+        result.map(|_| ()).map_err(failed)
     }
     pub(crate) async fn check_installation_if_due(
         &self,

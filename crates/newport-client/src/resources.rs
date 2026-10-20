@@ -217,11 +217,12 @@ impl Resources {
             .collect();
         self.take_cached(&keys.iter().map(String::as_str).collect::<Vec<_>>())
     }
-    /// Shell-owned operations must survive ordinary page navigation.
-    pub fn clear_preserving(&mut self, prefix: &str) {
+    /// Shell-owned operations, and pages that manage their own returns, must
+    /// survive ordinary page navigation.
+    pub fn clear_preserving(&mut self, prefixes: &[&str]) {
         let kept: HashMap<_, _> = self
             .rows
-            .extract_if(|key, _| key.starts_with(prefix))
+            .extract_if(|key, _| prefixes.iter().any(|prefix| key.starts_with(prefix)))
             .collect();
         self.clear();
         self.rows.extend(kept);

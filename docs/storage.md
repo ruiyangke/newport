@@ -8,11 +8,14 @@ Newport saves its data in `~/Library/Application Support/Newport` on macOS and `
 | --- | --- |
 | Servers, tunnels, SSH passwords and integration preferences | `profiles.stronghold`, encrypted together |
 | Vault unlock key | macOS Data Protection Keychain or Windows Credential Manager |
+| Newport account sign-in (device credential and license) | `account.stronghold`, encrypted with the same vault key |
 | Appearance and sidebar preferences | `preferences.json` |
 | Metric history | `metrics.sqlite3`, not encrypted; endpoint identifiers use keyed fingerprints |
 | SSH private keys | Your existing files or SSH agent; agent private keys are not imported |
 
-The vault key is scoped to the profile directory. On macOS, access also requires the signed app’s Keychain access group. On Windows, the key belongs to the current user on that machine. Keys do not roam or sync through iCloud. Saved passwords and the vault key are not sent to the UI.
+The vault key is scoped to the profile directory. On macOS, access also requires the signed app’s Keychain access group. On Windows, the key belongs to the current user on that machine. Keys do not roam or sync through iCloud. Saved passwords, the vault key and the account's device credential are not sent to the UI.
+
+The account sign-in has its own snapshot so it never contends with profile edits, and older Newport builds never rewrite it. Signing out removes the file. To sign in, Newport opens the account site in your browser, listens on `127.0.0.1` for its one-time code, and exchanges the code with a PKCE verifier; the license refreshes at launch and once a day. Development builds with `NEWPORT_DATA_DIR` set can point at another account site with `NEWPORT_ACCOUNT_URL` (HTTPS, or HTTP on loopback).
 
 Metrics keep 10-second readings for the latest 24 hours and one-minute summaries for the rest of the seven-day retention period. Background cleanup runs on startup and every 15 minutes.
 

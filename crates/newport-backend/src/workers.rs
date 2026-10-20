@@ -1,5 +1,6 @@
 //! Lifetime ownership for background services shared by desktop hosts.
 use crate::{
+    account::Account,
     connectivity,
     desktop_integration::Desktop,
     manager::{self, Shared},
@@ -13,8 +14,9 @@ pub struct Workers(Mutex<JoinSet<()>>);
 
 impl Workers {
     /// Call inside the application's Tokio runtime, once per owned profile.
-    pub fn start(manager: Shared, metrics: MetricsDb, desktop: Desktop) -> Self {
+    pub fn start(manager: Shared, metrics: MetricsDb, desktop: Desktop, account: Account) -> Self {
         let mut tasks = JoinSet::new();
+        tasks.spawn(account.maintain());
         tasks.spawn(manager.sessions.connections.clone().observe_approvals());
         tasks.spawn(manager::connection_events(
             manager.clone(),

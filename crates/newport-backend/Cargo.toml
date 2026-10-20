@@ -11,8 +11,9 @@ test-support = []
 [dependencies]
 newport-domain = { path = "../newport-domain" }
 newport-release = { path = "../newport-release", default-features = false }
-newport-platform = { path = "../newport-platform" }
+newport-platform = { path = "../newport-platform", features = ["account"] }
 anyhow = "1"
+getrandom = "0.4"
 dirs = "7"
 fs2 = "0.4"
 sha1 = "0.11"

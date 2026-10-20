@@ -93,6 +93,23 @@ impl Store {
             id,
         )
     }
+    /// The saved Newport account sign-in, if this computer has one.
+    pub fn account(&self) -> Result<Option<super::account::Record>, String> {
+        super::account::read(
+            &self.directory.join(super::account::FILE),
+            self.vault_key()?,
+        )
+    }
+    pub fn save_account(&self, record: &super::account::Record) -> Result<(), String> {
+        super::account::write(
+            &self.directory.join(super::account::FILE),
+            self.vault_key()?,
+            record,
+        )
+    }
+    pub fn remove_account(&self) -> Result<(), String> {
+        super::account::remove(&self.directory.join(super::account::FILE))
+    }
     pub(crate) fn prepare(
         &self,
         config: &Config,

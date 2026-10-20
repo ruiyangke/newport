@@ -1,5 +1,6 @@
 //! Newport backend services, independent of the desktop UI framework.
 //! The native application owns service lifetime and supplies platform adapters.
+pub mod account;
 pub mod agent_approval;
 pub mod agent_relay;
 pub mod application;
@@ -54,4 +55,5 @@ pub mod session_transport;
 #[cfg(test)]
 mod remote_tests;
 
+mod remote_apps;
 mod server_queries;

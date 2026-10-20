@@ -1,4 +1,6 @@
 //! Operating-system adapters shared by the native client and backend.
+#[cfg(feature = "account")]
+pub mod account;
 pub mod clipboard;
 pub mod events;
 pub mod filesystem;

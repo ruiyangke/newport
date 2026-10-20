@@ -800,9 +800,6 @@ mod integration_tests {
             ssh::execute(&server, "printf ok", None).await.unwrap(),
             "ok"
         );
-        let ports =
-            crate::ports::parse_ports(&ssh::execute(&server, "discover", None).await.unwrap());
-        assert_eq!(ports[0].port, 5432);
         m.connect(tunnel.id).unwrap();
         wait_status(&m, tunnel.id, Status::Connected).await;
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))

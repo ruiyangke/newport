@@ -1,6 +1,7 @@
 //! Tauri-free service composition. The application supplies platform adapters;
 //! this owner keeps its profile locked until RPC and background work have drained.
 use crate::{
+    account::Account,
     desktop_integration::Desktop,
     files, git, manager,
     metrics_db::MetricsDb,
@@ -92,6 +93,11 @@ impl Application {
         let preferences = Preferences::open(&directory)?;
         let manager = manager::Manager::new(store);
         let credentials = crate::credentials::register(manager.store.clone())?;
+        let account = Account::new(
+            manager.store.clone(),
+            desktop.clone(),
+            desktop.app_version(),
+        );
         let key = match &manager.load_error {
             Some(error) => Err(error.clone()),
             None => manager.store.vault_key().map(|key| key.to_vec()),
@@ -107,6 +113,7 @@ impl Application {
             git: git::Sessions::default(),
             pending: git::pending::PendingOperations::new(directory.join("git-operations.json")),
             preferences,
+            account,
             desktop,
         });
         let endpoint = newport_platform::ipc::profile_endpoint(&directory);
@@ -123,6 +130,7 @@ impl Application {
             state.manager.clone(),
             state.metrics.clone(),
             state.desktop.clone(),
+            state.account.clone(),
         );
         let (shutdown, wait) = oneshot::channel();
         let task = tokio::spawn(async move {
@@ -140,6 +148,7 @@ impl Application {
                 })
                 .await;
             workers.stop().await;
+            state.account.shutdown();
             state.terminals.close_server(None).await;
             state.files.shutdown().await;
             state.git.shutdown().await;
@@ -198,6 +207,7 @@ struct State {
     git: git::Sessions,
     pending: git::pending::PendingOperations,
     preferences: Preferences,
+    account: Account,
     desktop: Desktop,
 }
 
@@ -226,6 +236,7 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
                 events: Arc::new(move |event| events.record(event)),
             },
             preferences: &state.preferences,
+            account: &state.account,
             desktop: state.desktop.clone(),
         };
         match services.dispatch(method, &args).await {
@@ -248,6 +259,20 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
             state: self.state.clone(),
             session: request.session,
         }))
+    }
+    async fn open_remote_stream(
+        &self,
+        server: uuid::Uuid,
+        command: String,
+    ) -> Result<rpc::RemoteChannel, String> {
+        let owner = self.state.manager.owner(server)?;
+        let config = owner.server().clone();
+        let lease = owner.acquire(&config).await?;
+        let channel = lease.exec_channel(&command).await?;
+        Ok(rpc::RemoteChannel {
+            channel,
+            guard: Box::new(lease),
+        })
     }
 }
 

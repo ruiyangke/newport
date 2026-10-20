@@ -846,6 +846,21 @@ impl Backend {
         Ok(value)
     }
 
+    /// Start a command on a server over Newport's connection. The returned
+    /// socket carries the command's stdin and stdout; closing it ends the command.
+    pub fn open_remote_stream(&self, server: &str, command: &str) -> Result<Stream, String> {
+        let (_, stream) = self
+            .exchange_with_timeout(
+                protocol::REMOTE_STREAM_OPEN,
+                serde_json::json!({"serverId": server, "command": command}),
+                Duration::from_secs(45),
+            )
+            .map_err(|error| error.message)?;
+        stream.set_read_timeout(None).map_err(|e| e.to_string())?;
+        stream.set_write_timeout(None).map_err(|e| e.to_string())?;
+        Ok(stream)
+    }
+
     pub(crate) fn open_terminal_lease(&self, args: Value) -> Result<Stream, String> {
         self.exchange_with_timeout(protocol::TERMINAL_OPEN_LEASE, args, Duration::from_secs(10))
             .map(|(_, stream)| stream)

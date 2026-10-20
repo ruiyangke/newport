@@ -1,5 +1,5 @@
 //! One shared native command router for standalone and transitional hosts.
-use super::{control, features, git, preferences};
+use super::{account, control, features, git, preferences};
 use serde_json::Value;
 
 pub struct Services<'a> {
@@ -7,6 +7,7 @@ pub struct Services<'a> {
     pub features: features::Services<'a>,
     pub git: git::Services<'a>,
     pub preferences: &'a crate::preferences::Preferences,
+    pub account: &'a crate::account::Account,
     pub desktop: crate::desktop_integration::Desktop,
 }
 
@@ -21,6 +22,9 @@ impl Services<'_> {
         }
         if let Some(command) = preferences::Command::parse(method) {
             return Some(command.dispatch(self.preferences, args).await);
+        }
+        if let Some(command) = account::Command::parse(method) {
+            return Some(command.dispatch(self.account).await);
         }
         if let Some(command) = control::Command::parse(method) {
             return Some(

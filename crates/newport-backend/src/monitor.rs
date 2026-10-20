@@ -134,7 +134,7 @@ pub async fn ask(
     if let Some(cached) = &slot.unavailable {
         let runtime = server.agent_runtime.snapshot().hello.map(|h| h.instance_id);
         if Instant::now() < cached.until && cached.runtime == runtime {
-            return Err(unavailable(&cached.reason));
+            return Err(unavailable(request, &cached.reason));
         }
         slot.unavailable = None;
     }
@@ -155,7 +155,7 @@ pub async fn ask(
                         reason: reason.clone(),
                         runtime: server.agent_runtime.snapshot().hello.map(|h| h.instance_id),
                     });
-                    return Err(unavailable(&reason));
+                    return Err(unavailable(request, &reason));
                 }
             }
         }
@@ -197,6 +197,7 @@ fn retryable_read(request: &Value) -> bool {
         request["op"].as_str(),
         Some(
             "snapshot"
+                | "ports"
                 | "services"
                 | "logs"
                 | "unit"
@@ -226,9 +227,13 @@ where
     Ok(reply)
 }
 
-/// Monitoring needs the agent; say why it cannot run rather than show nothing.
-fn unavailable(reason: &str) -> String {
-    format!("Monitoring needs the Newport agent, which can’t run on this server: {reason}")
+/// These features need the agent; say why it cannot run rather than show nothing.
+fn unavailable(request: &Value, reason: &str) -> String {
+    let feature = match request["op"].as_str() {
+        Some("ports") => "Port discovery",
+        _ => "Monitoring",
+    };
+    format!("{feature} needs the Newport agent, which can’t run on this server: {reason}")
 }
 
 /// Transport and runtime recovery remain eligible on the next request. Only
@@ -565,7 +570,10 @@ mod tests {
             "Remote command failed (status 1): noexec"
         ));
         assert_eq!(
-            unavailable("The Newport agent requires Linux."),
+            unavailable(
+                &serde_json::json!({"op": "snapshot"}),
+                "The Newport agent requires Linux."
+            ),
             "Monitoring needs the Newport agent, which can’t run on this server: The Newport agent requires Linux."
         );
     }

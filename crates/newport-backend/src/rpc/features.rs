@@ -37,6 +37,8 @@ pub enum Command {
     GetMetricsCache,
     ClearMetricsCache,
     ServicesSnapshot,
+    RemoteAppsStatus,
+    RemoteAppsCatalogue,
     ServiceLogs,
     ServiceUnitFile,
     ServiceAction,
@@ -209,6 +211,20 @@ impl Command {
                     .await
                     .map_err(error)?,
             ),
+            Self::RemoteAppsStatus | Self::RemoteAppsCatalogue => {
+                let key = if matches!(self, Self::RemoteAppsStatus) {
+                    crate::server_queries::Read::RemoteAppsStatus
+                } else {
+                    crate::server_queries::Read::RemoteAppsCatalogue
+                };
+                let force = args.get("refresh").and_then(Value::as_bool) == Some(true);
+                let owner = crate::server_session::resolve(services.manager, argument(args, "id")?)
+                    .await
+                    .map_err(error)?;
+                crate::server_queries::read(&owner, key, force)
+                    .await
+                    .map_err(error)
+            }
             Self::ServicesSnapshot => encode(
                 crate::commands::services_snapshot(services.manager, argument(args, "id")?)
                     .await

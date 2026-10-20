@@ -73,6 +73,10 @@ pub(super) fn changed(previous: &Value, next: &Value, server: &str, surface: Sur
     if previous["agentTransport"][server]["status"] != next["agentTransport"][server]["status"] {
         return true;
     }
+    // Needle found missing (or back) decides whether setup takes the window.
+    if previous["agentStatus"][server]["installed"] != next["agentStatus"][server]["installed"] {
+        return true;
+    }
     if SERVER_FIELDS.iter().any(|key| {
         if !surface.watches(key) {
             return false;
@@ -112,6 +116,19 @@ mod tests {
         assert!(!changed(&before, &next, "selected", Surface::General));
         next["runtime"]["agentTransport"]["selected"]["status"] = json!("connected");
         assert!(changed(&before, &next, "selected", Surface::General));
+    }
+
+    #[test]
+    fn needle_presence_repaints_every_page_but_other_status_does_not() {
+        let before =
+            json!({"runtime": {"agentStatus": {"selected": {"installed":true,"checkedAt":1}}}});
+        let mut checked = before.clone();
+        checked["runtime"]["agentStatus"]["selected"]["checkedAt"] = json!(2);
+        assert!(!changed(&before, &checked, "selected", Surface::General));
+        let mut missing = before.clone();
+        missing["runtime"]["agentStatus"]["selected"]["installed"] = json!(false);
+        assert!(changed(&before, &missing, "selected", Surface::General));
+        assert!(!changed(&before, &missing, "other", Surface::General));
     }
 
     #[test]

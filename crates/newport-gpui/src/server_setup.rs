@@ -31,10 +31,23 @@ fn identity(server: &Value) -> Value {
 impl Newport {
     pub(super) fn setup_visible(&self) -> bool {
         self.setup_flow.as_ref().is_some_and(|f| !f.dismissed)
-            || self
-                .selected_server()
-                .is_some_and(|s| s["setupComplete"] != true)
+            || self.selected_server().is_some_and(|s| self.needs_setup(s))
                 && self.setup_flow.as_ref().is_none_or(|f| !f.dismissed)
+    }
+    /// Setup is due until it is finished on this connection, and again once
+    /// Needle is found missing. Both come from the last snapshot: the backend
+    /// checks Needle in the background, never while the window draws. An
+    /// unchecked server (`installed` null) is not treated as missing.
+    fn needs_setup(&self, server: &Value) -> bool {
+        server["setupComplete"] != true
+            || self.snapshot["runtime"]["agentStatus"][text(server, "id")]["installed"] == false
+    }
+    /// A server whose setup is unfinished shows only its setup, whichever
+    /// page was open when it was added or selected, Settings included.
+    pub(super) fn sync_setup_page(&mut self, cx: &mut Context<Self>) {
+        if self.page != Page::Overview && self.setup_visible() {
+            self.navigate(Page::Overview, cx);
+        }
     }
     pub(super) fn poll_setup(&mut self) -> bool {
         if self.page != Page::Overview {
@@ -51,7 +64,7 @@ impl Newport {
         {
             self.setup_flow = None;
         }
-        if self.setup_flow.is_none() && server["setupComplete"] != true {
+        if self.setup_flow.is_none() && self.needs_setup(&server) {
             self.setup_flow = Some(Flow {
                 connection,
                 phase: 0,
@@ -875,6 +888,56 @@ mod tests {
             visual.debug_bounds("setup-current-step").unwrap().top(),
             before.top()
         );
+    }
+
+    #[gpui::test]
+    fn an_unfinished_server_opens_its_setup_from_any_page(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::component::init(cx);
+            theme::install(false, cx);
+        });
+        let mut owner = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                let mut v = page_perf_tests::owner(window, cx);
+                // A server just added while another server's Ports page was open.
+                v.page = Page::Ports;
+                v.snapshot["config"]["servers"][0]["setupComplete"] = json!(false);
+                v
+            });
+            owner = Some(view.clone());
+            Host(view)
+        });
+        let view = owner.unwrap();
+        let (work, requests) = std::sync::mpsc::sync_channel(16);
+        view.update(visual, |v, cx| {
+            v.work = work.into();
+            v.sync_setup_page(cx);
+            assert!(v.page == Page::Overview);
+            assert!(v.setup_visible());
+        });
+        assert!(requests.try_iter().any(|r| r.method == "setup_inspect"));
+        view.update(visual, |v, cx| {
+            // Not even Settings opens before setup is finished.
+            v.page = Page::Settings;
+            v.sync_setup_page(cx);
+            assert!(v.page == Page::Overview);
+            // A finished server keeps whatever page was open.
+            v.page = Page::Ports;
+            v.setup_flow = None;
+            v.snapshot["config"]["servers"][0]["setupComplete"] = json!(true);
+            v.sync_setup_page(cx);
+            assert!(v.page == Page::Ports);
+            // Not yet checked: no reason to interrupt.
+            v.snapshot["runtime"]["agentStatus"]["fixture"] = json!({"installed": null});
+            v.sync_setup_page(cx);
+            assert!(v.page == Page::Ports);
+            // Needle found missing on a finished server: setup again.
+            v.snapshot["runtime"]["agentStatus"]["fixture"] = json!({"installed": false});
+            v.sync_setup_page(cx);
+            assert!(v.page == Page::Overview);
+            assert!(v.setup_visible());
+        });
     }
 
     #[gpui::test]

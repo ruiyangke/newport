@@ -1,4 +1,8 @@
 mod grammars;
+mod remote_apps;
+mod remote_apps_api;
+mod remote_apps_install;
+mod remote_apps_sessions;
 extern crate self as newport_gpui;
 
 pub use newport_client::backend;
@@ -145,6 +149,7 @@ mod services;
 mod services_host;
 mod settings;
 mod shell;
+mod sidebar_account;
 mod sidebar_layout;
 mod snapshot_presentation;
 mod state;
@@ -190,9 +195,10 @@ enum Page {
     Files,
     Integration,
     Settings,
+    RemoteApps,
 }
 impl Page {
-    const ALL: [(Self, &'static str); 9] = [
+    const ALL: [(Self, &'static str); 10] = [
         (Self::Overview, "Overview"),
         (Self::Ports, "Connections"),
         (Self::Projects, "Projects"),
@@ -202,6 +208,7 @@ impl Page {
         (Self::Files, "Files"),
         (Self::Integration, "Integrations"),
         (Self::Settings, "Settings"),
+        (Self::RemoteApps, "Remote apps"),
     ];
     fn title(self) -> &'static str {
         Self::ALL.iter().find(|(p, _)| *p == self).unwrap().1
@@ -239,12 +246,28 @@ struct Newport {
     picker_selection: String,
     page: Page,
     workspace_page: Page,
+    remote_apps: Option<Entity<remote_apps::Launchpad>>,
+    remote_apps_refresh: bool,
+    /// Counts returns to Remote apps; each return resets the page's view state.
+    remote_apps_visit: u64,
+    remote_apps_away: bool,
+    /// The page was just returned to; its readings are requested again.
+    remote_apps_returned: bool,
+    /// Preference changes not yet sent, and keys with one in flight.
+    remote_apps_mutations: std::collections::VecDeque<remote_apps::Mutation>,
+    remote_apps_mutating: std::collections::HashSet<String>,
+    /// A status-only read asked for, and whether it replaces one in flight.
+    remote_apps_recheck: Option<bool>,
+    /// The server and status reading the installed-servers record was last
+    /// saved for, so a failed save isn't retried every tick.
+    remote_apps_record_tried: Option<(String, u64)>,
     restore_git: Option<workspace_state::GitDestination>,
     git_destinations: std::collections::BTreeMap<String, workspace_state::GitDestination>,
     appearance: appearance::Appearance,
     appearance_store: appearance::AppearanceStore,
     settings_state: newport_client::settings::Settings,
     settings_ui: settings::SettingsUi,
+    account: newport_client::account::Account,
     services_panels: std::collections::HashMap<String, services_host::HostedServices>,
     services_preferences: std::collections::HashMap<String, services::Preferences>,
     retired_services: Vec<Entity<services::ServicesPanel>>,
@@ -387,6 +410,8 @@ impl Newport {
         })
         .detach();
         cx.on_app_quit(|this, cx| {
+            // Remote app windows close with their sessions, before Newport exits.
+            remote_apps::shutdown(cx);
             this.save_workspace_selection();
             if let Err(error) = this.window_state.save() {
                 eprintln!("Could not save native window state: {error}");
@@ -437,6 +462,13 @@ impl Newport {
             this.window_visibility_changed(visibility.is_visible(), cx);
         })
         .detach();
+        // Returning from the browser (after buying Pro, say) shows the current plan.
+        cx.observe_window_activation(window, |this, window, _| {
+            if window.is_window_active() {
+                this.account.refresh();
+            }
+        })
+        .detach();
         let (work, replies) = request_dispatch::start();
         cx.spawn(async move |view, cx| {
             loop {
@@ -479,6 +511,7 @@ impl Newport {
             appearance_store,
             settings_state: newport_client::settings::Settings::new(backend::Backend::discover()),
             settings_ui: settings::SettingsUi::new(appearance, window, cx),
+            account: newport_client::account::Account::new(backend::Backend::discover()),
             services_panels: Default::default(),
             services_preferences: Default::default(),
             retired_services: Vec::new(),
@@ -512,7 +545,7 @@ impl Newport {
             window_visible: window.is_visible(),
             focus: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
-            navigation_focus: navigation::VIEWS
+            navigation_focus: navigation::views(cx)
                 .iter()
                 .map(|_| cx.focus_handle())
                 .collect(),
@@ -520,6 +553,15 @@ impl Newport {
             files_refresh_requested: true,
             file_preview_path: None,
             file_preview_image: None,
+            remote_apps: None,
+            remote_apps_refresh: false,
+            remote_apps_visit: 0,
+            remote_apps_away: false,
+            remote_apps_returned: false,
+            remote_apps_mutations: Default::default(),
+            remote_apps_mutating: Default::default(),
+            remote_apps_recheck: None,
+            remote_apps_record_tried: None,
             file_preview_viewport: file_preview::Viewport::default(),
             file_preview_pdf: None,
             file_preview_pdf_text: None,
@@ -637,6 +679,9 @@ impl Newport {
         let remote_search_changed = self.poll_git_remote_search();
         self.window_state.settle();
         let mut changed = branch_search_changed;
+        self.sync_navigation_focus(cx);
+        changed |= remote_apps::take_changed(cx);
+        self.poll_remote_apps(cx);
         changed |= self.poll_checkout_search();
         changed |= self.poll_checkout_scroll();
         changed |= changes_search_changed;
@@ -649,6 +694,8 @@ impl Newport {
         changed |= self.poll_tunnel_actions();
         let settings = self.settings_state.poll(self.page == Page::Settings);
         changed |= self.apply_settings_effects(settings);
+        let account = self.account.poll();
+        changed |= self.apply_account_effects(account, cx);
         let mut completed_file_project = None;
         while let Ok(reply) = self.replies.try_recv() {
             let snapshot_status = |resource: Option<&state::Resource>| {
@@ -704,10 +751,16 @@ impl Newport {
             if reply.key == "page" && self.page == Page::Projects {
                 self.restore_git_destination();
             }
+            if reply.key.starts_with("remote-apps-") {
+                // A change queued behind this reply goes out before the page
+                // draws, so its value never flicks back in between.
+                self.send_remote_mutations();
+            }
             let background_read = reply.key == "snapshot"
                 || reply.key == "connection-projects" && self.page == Page::Ports
                 || reply.key == "page" && matches!(self.page, Page::Ports | Page::Projects)
-                || reply.key.starts_with("project-status:");
+                || reply.key.starts_with("project-status:")
+                || reply.key.starts_with("remote-apps-");
             let configuration_acknowledgement = reply.key == "snapshot"
                 && (self.saved_server_selection.is_some()
                     || !self.integration_refresh_pending.is_empty());
@@ -772,6 +825,7 @@ impl Newport {
                         .map(|server| terminal_scope::connection(server, &self.snapshot));
                     self.sync_connections_snapshot(&data);
                     self.snapshot = data;
+                    remote_apps::sync_permissions(&self.snapshot, cx);
                     // A failed profile load is not evidence that a server was
                     // deleted. Preserve the destination until a valid snapshot.
                     if !self.configuration_available() {
@@ -1022,7 +1076,9 @@ impl Newport {
         }
         self.git_release();
         if navigation {
-            self.resources.clear_preserving("setup-");
+            // Remote apps keeps its readings so a return draws them at once;
+            // its own polling reads them again.
+            self.resources.clear_preserving(&["setup-", "remote-apps-"]);
         } else {
             self.resources.clear();
         }
@@ -1090,6 +1146,9 @@ impl Newport {
             Page::Files => self.files_refresh_requested = true,
             Page::Terminal => {}
             Page::Integration => self.request("snapshot", "snapshot", json!({})),
+            // Read again, letting the backend answer from its cache while
+            // fresh; only the page's Refresh bypasses it.
+            Page::RemoteApps => self.remote_apps_returned = true,
             Page::Settings => self.settings_state.refresh(),
         }
     }
@@ -1168,7 +1227,8 @@ impl Newport {
                                     })),
                             )
                             .when(selected, |row| row.child(navigation::selection_marker(cx)))
-                    }),
+                    })
+                    .child(self.account_row(compact, cx)),
             )
             .context_menu(move |menu, _, cx| shell::server_menu(menu, menu_view.clone(), cx))
             .into_any_element()
@@ -1205,6 +1265,7 @@ fn error_banner(
 }
 impl Render for Newport {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_setup_page(cx);
         self.sync_services(window, cx);
         self.sync_containers(window, cx);
         self.sync_settings_ui(window, cx);
@@ -1509,7 +1570,11 @@ impl Render for Newport {
                 }),
             )
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
-                if !window.has_active_dialog(cx) && this.server_form.is_none() {
+                // An unfinished setup is the only screen until it is done.
+                if !window.has_active_dialog(cx)
+                    && this.server_form.is_none()
+                    && !this.setup_visible()
+                {
                     this.navigate(Page::Settings, cx);
                     this.focus.focus(window, cx);
                 }
@@ -1628,8 +1693,12 @@ pub fn activate(cx: &mut App) -> Result<(), String> {
     for handle in windows {
         handle
             .update(cx, |_, window, _| {
-                window_activation::restore(window)?;
-                window.activate_window();
+                // Remote app windows have no Root and keep their minimized
+                // or hidden state when Newport is activated.
+                if window.root::<gpui_kit::base::Root>().flatten().is_some() {
+                    window_activation::restore(window)?;
+                    window.activate_window();
+                }
                 Ok::<_, String>(())
             })
             .map_err(|error| error.to_string())??;
@@ -1751,6 +1820,9 @@ pub fn run_with_options_and_ready(
             }
         })
         .detach();
+        // Before the window's first frame, so a restored Remote apps page
+        // and its sidebar entry are there from the start.
+        remote_apps::start(cx);
         let window_state = window_state::WindowState::load(cx);
         let bounds = window_state.bounds();
         let opened = cx.open_window(

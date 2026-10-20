@@ -711,6 +711,41 @@ pub fn prune_json(reply: &Value) -> Value {
     json!({"removed": removed, "reclaimed": size(&reply["SpaceReclaimed"]).unwrap_or(0)})
 }
 
+/// A running container's published TCP ports for Port discovery, or None
+/// when it publishes none. Compose labels name its project and directory.
+pub fn published(row: &Value) -> Option<Value> {
+    let name = row["Names"][0].as_str()?.trim_start_matches('/');
+    let mut bindings: Vec<Value> = row["Ports"]
+        .as_array()?
+        .iter()
+        .filter(|p| p["Type"] == "tcp")
+        .filter_map(|p| {
+            let port = p["PublicPort"]
+                .as_u64()
+                .filter(|p| (1..=65535).contains(p))?;
+            let address = p["IP"]
+                .as_str()
+                .filter(|ip| !ip.is_empty())
+                .unwrap_or("0.0.0.0");
+            Some(json!({"address": address, "port": port}))
+        })
+        .collect();
+    bindings.dedup();
+    if bindings.is_empty() {
+        return None;
+    }
+    // Docker reports a missing label as absent, or as an empty string.
+    let label = |key: &str| row["Labels"][key].as_str().filter(|v| !v.is_empty());
+    Some(json!({
+        "name": name,
+        "image": row["Image"].as_str().filter(|v| !v.is_empty()),
+        "project": label("com.docker.compose.project"),
+        "service": label("com.docker.compose.service"),
+        "workdir": label("com.docker.compose.project.working_dir"),
+        "bindings": bindings,
+    }))
+}
+
 pub struct Containers {
     sockets: Box<dyn Fn() -> Vec<PathBuf> + Send + Sync>,
     engine: Mutex<Option<(Engine, Instant)>>,
@@ -810,6 +845,23 @@ impl Containers {
             .collect();
         rows.sort_by_key(|row| std::cmp::Reverse(row["Created"].as_i64().unwrap_or(0)));
         Ok(rows)
+    }
+
+    /// Published ports of running containers. No Docker, or no access to
+    /// it, is not an error for Port discovery: listeners still show.
+    pub fn published_ports(&self) -> Vec<Value> {
+        let deadline = Instant::now() + LIST_TIMEOUT;
+        self.with_engine(|engine| {
+            let timeout = within(deadline, LIST_TIMEOUT).ok_or(OUT_OF_TIME)?;
+            engine.get("/containers/json", timeout)
+        })
+        .ok()
+        .and_then(|rows| rows.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .take(MAX_CONTAINERS)
+        .filter_map(published)
+        .collect()
     }
 
     pub fn snapshot(&self) -> Result<Value, String> {
@@ -1894,6 +1946,28 @@ mod tests {
         assert!(size <= LOG_BUDGET && entries.len() < 3000);
         // The newest survive.
         assert_eq!(entries.last().unwrap()["at"], 2999);
+    }
+
+    #[test]
+    fn published_ports_keep_tcp_host_bindings_and_compose_labels() {
+        let row = json!({
+            "Names": ["/app-web-1"], "Image": "nginx:1",
+            "Labels": {"com.docker.compose.project": "app", "com.docker.compose.service": "web",
+                "com.docker.compose.project.working_dir": "/srv/app"},
+            "Ports": [
+                {"IP": "0.0.0.0", "PrivatePort": 80, "PublicPort": 8080, "Type": "tcp"},
+                {"IP": "::", "PrivatePort": 80, "PublicPort": 8080, "Type": "tcp"},
+                {"IP": "0.0.0.0", "PrivatePort": 53, "PublicPort": 5353, "Type": "udp"},
+                {"PrivatePort": 9000, "Type": "tcp"}
+            ]
+        });
+        assert_eq!(
+            published(&row).unwrap(),
+            json!({"name": "app-web-1", "image": "nginx:1", "project": "app", "service": "web",
+                "workdir": "/srv/app", "bindings": [{"address": "0.0.0.0", "port": 8080}, {"address": "::", "port": 8080}]})
+        );
+        let unpublished = json!({"Names": ["/db"], "Labels": {}, "Ports": [{"PrivatePort": 5432, "Type": "tcp"}]});
+        assert_eq!(published(&unpublished), None);
     }
 
     #[test]

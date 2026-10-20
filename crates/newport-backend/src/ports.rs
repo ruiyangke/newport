@@ -1,21 +1,24 @@
-//! Listener discovery and process/container attribution, independent of SSH transport.
-use crate::{model::Server, ssh};
-use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+//! Listener discovery through the server's agent, which reads the sockets
+//! from /proc (no ss or netstat), and attribution of each listener to a
+//! process, container and project.
+use crate::{monitor, server_session::ServerSession};
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
+
+// Walking every process's descriptors and project roots on a busy host.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The key is (server session incarnation, listening ports). The session owns
 /// the cache across windows/navigation; replacing credentials creates a new key.
-pub(crate) fn query(
-    owner: &std::sync::Arc<crate::server_session::ServerSession>,
-) -> &crate::query::Query<Vec<DiscoveredPort>> {
+pub(crate) fn query(owner: &Arc<ServerSession>) -> &crate::query::Query<Vec<DiscoveredPort>> {
     let query = owner.ports.get_or_init(|| {
-        let weak = std::sync::Arc::downgrade(owner);
+        let weak = Arc::downgrade(owner);
         crate::query::Query::new(
             crate::query::Policy {
-                stale_after: std::time::Duration::from_secs(30),
-                retry_after: std::time::Duration::from_secs(10),
-                timeout: std::time::Duration::from_secs(35),
-                observation_lease: std::time::Duration::from_secs(5),
+                stale_after: Duration::from_secs(30),
+                retry_after: Duration::from_secs(10),
+                timeout: Duration::from_secs(35),
+                observation_lease: Duration::from_secs(5),
             },
             move || {
                 let weak = weak.clone();
@@ -28,11 +31,7 @@ pub(crate) fn query(
                     tokio::select! {
                         biased;
                         _ = cancelled.changed() => Err("Server session closed.".into()),
-                        result = async {
-                            let lease = owner.acquire(owner.server()).await?;
-                            let output = lease.execute(DISCOVER_PORTS_COMMAND, None).await?;
-                            Ok(parse_ports(&output))
-                        } => result,
+                        result = discover(&owner) => result,
                     }
                 }
             },
@@ -44,9 +43,52 @@ pub(crate) fn query(
     query
 }
 
-pub async fn discover(server: &Server) -> Result<Vec<DiscoveredPort>, String> {
-    let output = ssh::execute(server, DISCOVER_PORTS_COMMAND, None).await?;
-    Ok(parse_ports(&output))
+/// One reading from the agent, uncached.
+pub async fn discover(owner: &Arc<ServerSession>) -> Result<Vec<DiscoveredPort>, String> {
+    let request = serde_json::json!({"op": "ports"});
+    let reply = match monitor::ask(owner, &request, REPLY_TIMEOUT).await {
+        Err(error) if error.starts_with("Unknown monitor request") => {
+            return Err(update_needle(owner).await);
+        }
+        reply => reply?,
+    };
+    let reply: Reply =
+        serde_json::from_value(reply).map_err(|e| format!("Invalid ports reply: {e}"))?;
+    Ok(assemble(reply))
+}
+
+/// Shown while Needle is replaced; the page reads it as progress, not failure.
+pub const UPDATING: &str =
+    "Updating Needle on this server. Ports appear here as soon as it finishes.";
+
+/// The installed Needle predates port discovery. Replace it in the
+/// background, as a newer release would be; the next refresh asks the new
+/// one. Returns what to show until then.
+async fn update_needle(owner: &Arc<ServerSession>) -> String {
+    use crate::agent_lifecycle::RequiredUpdate;
+    let failed = |error: &str| {
+        format!(
+            "Port discovery needs a newer Needle on this server, and updating it didn’t work: \
+             {error} Choose Update Needle in Integrations to try again."
+        )
+    };
+    match owner.lifecycle.required_update() {
+        Some(RequiredUpdate::Running) => return UPDATING.into(),
+        Some(RequiredUpdate::Failed { error, at }) if at.elapsed() < Duration::from_secs(600) => {
+            return failed(&error);
+        }
+        _ => {}
+    }
+    let lease = match owner.acquire(owner.server()).await {
+        Ok(lease) => lease,
+        Err(error) => return failed(&error),
+    };
+    tokio::spawn(async move {
+        if let Err(RequiredUpdate::Failed { error, .. }) = lease.update_needle_for_feature().await {
+            log::warn!("Needle update for port discovery did not complete: {error}");
+        }
+    });
+    UPDATING.into()
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
@@ -84,215 +126,166 @@ pub struct DiscoveredPort {
     pub worktree_branch: Option<String>,
     pub worktree_main: Option<bool>,
 }
+
+/// The agent's `ports` reply: what the server shows, not yet attributed.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Reply {
+    listeners: Vec<Listener>,
+    #[serde(default)]
+    processes: Vec<Process>,
+    #[serde(default)]
+    containers: Vec<Container>,
+}
+#[derive(Debug, Default, Deserialize)]
+struct Listener {
+    address: String,
+    port: u16,
+    /// The socket's owner, known even when its process is not visible.
+    user: Option<String>,
+    pid: Option<u32>,
+    process: Option<String>,
+}
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Process {
+    pid: u32,
+    executable: Option<String>,
+    working_directory: Option<String>,
+    #[serde(default)]
+    arguments: Vec<String>,
+    user: Option<String>,
+    project: Option<Project>,
+}
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Container {
+    name: String,
+    image: Option<String>,
+    project: Option<String>,
+    service: Option<String>,
+    workdir: Option<String>,
+    #[serde(default)]
+    bindings: Vec<Binding>,
+    /// The project around the Compose working directory.
+    workdir_project: Option<Project>,
+}
+#[derive(Debug, Default, Deserialize)]
+struct Binding {
+    address: String,
+    port: u16,
+}
 /// A directory's project as the server resolved it.
-#[derive(Default)]
-struct ProjectInfo {
-    root: Option<String>,
-    marker: Option<String>,
+#[derive(Debug, Default, Deserialize)]
+struct Project {
+    root: String,
+    marker: String,
     worktree: Option<String>,
     branch: Option<String>,
     main: Option<bool>,
 }
-impl ProjectInfo {
-    /// Decoded root, marker, then optionally worktree, branch and main flag.
-    fn parse(fields: &[String]) -> Self {
-        let field = |i: usize| fields.get(i).and_then(|s| nonempty(s));
-        let root = field(0);
-        // Nothing describes a root that was not found.
-        if root.is_none() {
-            return Self::default();
-        }
-        Self {
-            marker: field(1),
-            worktree: field(2),
-            branch: field(3),
-            main: match fields.get(4).map(String::as_str) {
-                Some("1") => Some(true),
-                Some("0") => Some(false),
-                _ => None,
-            },
-            root,
-        }
-    }
+impl Project {
     /// Version-control roots (and an explicit `.projectile`) name a project
     /// more precisely than the Compose directory inside them.
     fn is_repository(&self) -> bool {
         matches!(
-            self.marker.as_deref(),
-            Some(
-                ".projectile"
-                    | ".git"
-                    | ".hg"
-                    | ".jj"
-                    | ".sl"
-                    | ".fslckout"
-                    | "_FOSSIL_"
-                    | ".bzr"
-                    | "_darcs"
-                    | ".svn"
-            )
+            self.marker.as_str(),
+            ".projectile"
+                | ".git"
+                | ".hg"
+                | ".jj"
+                | ".sl"
+                | ".fslckout"
+                | "_FOSSIL_"
+                | ".bzr"
+                | "_darcs"
+                | ".svn"
         )
     }
     fn apply(&self, port: &mut DiscoveredPort) {
-        port.project_root = self.root.clone();
-        port.project_marker = self.marker.clone();
-        port.worktree_path = self.worktree.clone();
-        port.worktree_branch = self.branch.clone();
+        port.project_root = nonempty(&self.root);
+        port.project_marker = nonempty(&self.marker);
+        port.worktree_path = self.worktree.as_deref().and_then(nonempty);
+        port.worktree_branch = self.branch.as_deref().and_then(nonempty);
         port.worktree_main = self.main;
     }
 }
-const DISCOVER_PORTS_COMMAND: &str = include_str!("discover-ports.sh");
 
-pub fn parse_ports(output: &str) -> Vec<DiscoveredPort> {
-    let (output, details) = output
-        .split_once("__NEWPORT_PROCESS_DETAILS__\n")
-        .unwrap_or((output, ""));
-    let (listeners, docker) = output
-        .split_once("__NEWPORT_DOCKER_PORTS__\n")
-        .unwrap_or((output, ""));
-    let (docker, compose_roots) = docker
-        .split_once("__NEWPORT_COMPOSE_ROOTS__\n")
-        .unwrap_or((docker, ""));
-    // Compose working directory -> the project around it.
-    let compose_roots: HashMap<String, ProjectInfo> = compose_roots
-        .lines()
-        .filter_map(|line| {
-            let decoded: Option<Vec<_>> = line.split('|').map(decode_hex).collect();
-            let decoded = decoded.filter(|d| d.len() == 6)?;
-            Some((decoded[0].clone(), ProjectInfo::parse(&decoded[1..])))
-        })
-        .collect();
+fn assemble(reply: Reply) -> Vec<DiscoveredPort> {
     let mut ports: BTreeMap<(u16, String), DiscoveredPort> = BTreeMap::new();
-    for line in listeners.lines().filter(|line| line.contains("LISTEN")) {
-        let fields: Vec<_> = line.split_whitespace().collect();
-        // Both ss -tlnp and netstat -tlnp put the local address in column four.
-        let Some((address, port)) = fields.get(3).and_then(|field| field.rsplit_once(':')) else {
-            continue;
-        };
-        let Some(port) = port.parse::<u16>().ok().filter(|p| *p > 0) else {
-            continue;
-        };
-        let process_name = line
-            .split("users:((\"")
-            .nth(1)
-            .and_then(|s| s.split('"').next())
-            .map(str::to_owned)
-            .or_else(|| {
-                fields
-                    .last()
-                    .and_then(|s| s.split_once('/'))
-                    .map(|(_, name)| name.to_owned())
-            });
-        let pid = line
-            .split("pid=")
-            .nth(1)
-            .map(|s| {
-                s.chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect::<String>()
-            })
-            .and_then(|s| s.parse().ok())
-            .or_else(|| {
-                fields
-                    .last()
-                    .and_then(|s| s.split_once('/'))
-                    .and_then(|(pid, _)| pid.parse().ok())
-            });
-        let address = address.trim_matches(['[', ']']).to_owned();
+    for listener in reply.listeners.into_iter().filter(|l| l.port > 0) {
+        let address = listener.address.trim_matches(['[', ']']).to_owned();
         let entry = ports
-            .entry((port, address.clone()))
+            .entry((listener.port, address.clone()))
             .or_insert(DiscoveredPort {
-                port,
+                port: listener.port,
                 address,
                 ..Default::default()
             });
-        if entry.process_name.is_none() && process_name.is_some() {
-            entry.process_name = process_name;
-            entry.pid = pid;
+        if entry.process_name.is_none() && listener.process.is_some() {
+            entry.process_name = listener.process;
+            entry.pid = listener.pid;
+        }
+        if entry.user.is_none() {
+            entry.user = listener.user.as_deref().and_then(nonempty);
         }
     }
-    for line in docker.lines() {
-        let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let (Some(name), Some(bindings)) = (row["name"].as_str(), row["ports"].as_str()) else {
-            continue;
-        };
-        // Docker reports a missing label as an empty string.
-        let label = |key: &str| row[key].as_str().and_then(nonempty);
-        for mapping in bindings.split(',').map(str::trim) {
-            let Some((host, target)) = mapping.split_once("->") else {
-                continue;
-            };
-            if !target.ends_with("/tcp") {
-                continue;
-            }
-            let Some((address, published)) = host.rsplit_once(':') else {
-                continue;
-            };
-            let (start, end) = published.split_once('-').unwrap_or((published, published));
-            let (Ok(start), Ok(end)) = (start.parse::<u16>(), end.parse::<u16>()) else {
-                continue;
-            };
-            if start == 0 || end < start {
-                continue;
-            }
-            let address = address.trim_matches(['[', ']']).to_owned();
-            for port in start..=end {
-                let entry = ports
-                    .entry((port, address.clone()))
-                    .or_insert(DiscoveredPort {
-                        port,
-                        address: address.clone(),
-                        ..Default::default()
-                    });
-                entry.container_name = Some(name.to_owned());
-                entry.image = label("image");
-                entry.compose_project = label("project");
-                entry.compose_service = label("service");
-                entry.compose_working_dir = label("workdir");
-                if let Some(workdir) = &entry.compose_working_dir {
-                    match compose_roots
-                        .get(workdir)
-                        .filter(|info| info.is_repository())
-                    {
-                        Some(info) => info.apply(entry),
-                        None => {
-                            entry.project_root = Some(workdir.clone());
-                            entry.project_marker = Some("compose".into());
-                        }
+    for container in reply.containers {
+        let compose_working_dir = container.workdir.as_deref().and_then(nonempty);
+        for binding in container.bindings.iter().filter(|b| b.port > 0) {
+            let address = binding.address.trim_matches(['[', ']']).to_owned();
+            let entry = ports
+                .entry((binding.port, address.clone()))
+                .or_insert(DiscoveredPort {
+                    port: binding.port,
+                    address,
+                    ..Default::default()
+                });
+            entry.container_name = Some(container.name.clone());
+            entry.image = container.image.as_deref().and_then(nonempty);
+            entry.compose_project = container.project.as_deref().and_then(nonempty);
+            entry.compose_service = container.service.as_deref().and_then(nonempty);
+            entry.compose_working_dir = compose_working_dir.clone();
+            if let Some(workdir) = &compose_working_dir {
+                match container
+                    .workdir_project
+                    .as_ref()
+                    .filter(|project| project.is_repository())
+                {
+                    Some(project) => project.apply(entry),
+                    None => {
+                        entry.project_root = Some(workdir.clone());
+                        entry.project_marker = Some("compose".into());
                     }
                 }
             }
         }
     }
-    for line in details.lines() {
-        let fields: Vec<_> = line.split('|').collect();
-        // pid, exe, cwd, argv, user, then the project root, its marker, and
-        // the worktree, branch and main flag. Older agents send fewer fields.
-        if ![5, 7, 10].contains(&fields.len()) {
-            continue;
-        }
-        let Ok(pid) = fields[0].parse::<u32>() else {
-            continue;
-        };
-        let decoded: Option<Vec<_>> = fields[1..].iter().map(|s| decode_hex(s)).collect();
-        let Some(decoded) = decoded else {
-            continue;
-        };
-        for port in ports.values_mut().filter(|p| p.pid == Some(pid)) {
-            let (executable, executable_deleted) = deleted(decoded[0].trim_end_matches('\n'));
-            let (directory, directory_deleted) = deleted(decoded[1].trim_end_matches('\n'));
+    for process in reply.processes {
+        for port in ports.values_mut().filter(|p| p.pid == Some(process.pid)) {
+            let (executable, executable_deleted) =
+                deleted(process.executable.as_deref().unwrap_or_default());
+            let (directory, directory_deleted) =
+                deleted(process.working_directory.as_deref().unwrap_or_default());
             port.executable = nonempty(executable);
             port.executable_deleted = executable_deleted;
             port.working_directory = nonempty(directory);
             port.working_directory_deleted = directory_deleted;
-            port.user = nonempty(decoded[3].trim());
-            // A container's Compose directory outranks its proxy process's directory.
-            if port.project_root.is_none() {
-                ProjectInfo::parse(&decoded[4..]).apply(port);
+            if let Some(user) = process.user.as_deref().and_then(nonempty) {
+                port.user = Some(user);
             }
-            let argv: Vec<_> = decoded[2].split('\0').filter(|s| !s.is_empty()).collect();
+            // A container's Compose directory outranks its proxy process's directory.
+            if port.project_root.is_none()
+                && let Some(project) = &process.project
+            {
+                project.apply(port);
+            }
+            let argv: Vec<&str> = process
+                .arguments
+                .iter()
+                .map(String::as_str)
+                .filter(|s| !s.is_empty())
+                .collect();
             port.command = nonempty(&argv.join(" "));
             port.arguments = argv.iter().map(|arg| (*arg).to_owned()).collect();
             let executable = port
@@ -333,22 +326,27 @@ fn deleted(path: &str) -> (&str, bool) {
 fn nonempty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
-fn decode_hex(value: &str) -> Option<String> {
-    if value.len() > 16384 || !value.len().is_multiple_of(2) || !value.is_ascii() {
-        return None;
-    }
-    let bytes: Option<Vec<u8>> = (0..value.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&value[i..i + 2], 16).ok())
-        .collect();
-    Some(String::from_utf8_lossy(&bytes?).into_owned())
-}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn ports(reply: Value) -> Vec<DiscoveredPort> {
+        assemble(serde_json::from_value(reply).unwrap())
+    }
+    fn listener(address: &str, port: u16, pid: u32, process: &str) -> Value {
+        json!({"address": address, "port": port, "pid": pid, "process": process})
+    }
+    fn node(pid: u32, cwd: &str, entry: &str) -> Value {
+        json!({"pid": pid, "executable": "/usr/bin/node", "workingDirectory": cwd,
+            "arguments": ["node", entry], "user": "dev"})
+    }
+
     #[tokio::test]
     #[ignore = "Run with npm run test:ssh -- ports::tests::session_query"]
-    async fn session_query_discovers_over_shared_ssh_without_installing_needle() {
-        let server = serde_json::from_value(serde_json::json!({
+    async fn session_query_without_the_agent_says_it_is_needed() {
+        let server = serde_json::from_value(json!({
             "id":uuid::Uuid::new_v4(), "name":"Query SSH fixture", "sshUser":"fixture",
             "sshHost":"127.0.0.1", "sshPort":std::env::var("NEWPORT_TEST_SSH_PORT").unwrap().parse::<u16>().unwrap(),
             "identityFile":std::env::var("NEWPORT_TEST_IDENTITY").unwrap(),
@@ -356,45 +354,28 @@ mod tests {
         })).unwrap();
         let registry = crate::server_session::Registry::default();
         let owner = registry.session(&server, 1);
-        let query = super::query(&owner);
-        let ports = query.refresh().await.unwrap();
-        assert!(ports.iter().any(|port| port.port == 5432));
-        let cached = query.observe(false);
-        assert_eq!(cached.data.as_ref(), Some(&ports));
-        assert!(!cached.fetching);
-        assert!(owner.agent_runtime.snapshot().instances.is_empty());
+        let error = query(&owner).refresh().await.unwrap_err();
+        assert!(
+            error.contains("Port discovery needs the Newport agent"),
+            "{error}"
+        );
+        // Discovery never installs the agent on its own.
         assert!(owner.lifecycle.progress.snapshot().is_none());
         registry.invalidate(server.id);
-        assert!(query.snapshot().data.is_none());
+        assert!(query(&owner).snapshot().data.is_none());
         registry.shutdown().await;
-    }
-    use super::*;
-    fn detail<const N: usize>(pid: u32, values: [&str; N]) -> String {
-        format!(
-            "{}|{}",
-            pid,
-            values
-                .map(|v| v
-                    .as_bytes()
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>())
-                .join("|")
-        )
     }
     #[test]
     fn deleted_paths_lose_the_suffix_and_say_so() {
         // A preview server outlives its build folder, and its binary is upgraded.
         let record = |cwd: &str| {
-            format!(
-                "LISTEN 0 128 127.0.0.1:7070 *:* users:((\"node\",pid=310,fd=19))\n__NEWPORT_PROCESS_DETAILS__\n{}\n",
-                detail(
-                    310,
-                    ["/usr/bin/node (deleted)\n", cwd, "node\0serve.js\0", "ci\n"]
-                )
-            )
+            ports(json!({
+                "listeners": [listener("127.0.0.1", 7070, 310, "node")],
+                "processes": [{"pid": 310, "executable": "/usr/bin/node (deleted)",
+                    "workingDirectory": cwd, "arguments": ["node", "serve.js"], "user": "ci"}]
+            }))
         };
-        let port = &parse_ports(&record("/tmp/build/preview (deleted)\n"))[0];
+        let port = &record("/tmp/build/preview (deleted)")[0];
         assert_eq!(
             port.working_directory.as_deref(),
             Some("/tmp/build/preview")
@@ -409,27 +390,21 @@ mod tests {
             true
         );
         // An ordinary folder carries no flag at all.
-        let json = serde_json::to_value(&parse_ports(&record("/tmp/build/preview\n"))[0]).unwrap();
+        let json = serde_json::to_value(&record("/tmp/build/preview")[0]).unwrap();
         assert!(json.get("workingDirectoryDeleted").is_none());
     }
     #[test]
     fn names_vite_from_its_entry_point_not_the_thread_name() {
         // Node reports its main thread's name; the entry point says what runs.
         let record = |entry: &str| {
-            format!(
-                "LISTEN 0 511 0.0.0.0:4173 *:* users:((\"MainThread\",pid=520,fd=21))\n__NEWPORT_PROCESS_DETAILS__\n{}\n",
-                detail(
-                    520,
-                    [
-                        "/opt/node/bin/node\n",
-                        "/srv/site\n",
-                        &format!("node\0{entry}\0--port\x004173\0"),
-                        "www\n"
-                    ]
-                )
-            )
+            ports(json!({
+                "listeners": [listener("0.0.0.0", 4173, 520, "MainThread")],
+                "processes": [{"pid": 520, "executable": "/opt/node/bin/node",
+                    "workingDirectory": "/srv/site", "arguments": ["node", entry, "--port", "4173"],
+                    "user": "www"}]
+            }))
         };
-        let vite = &parse_ports(&record("/srv/site/node_modules/.bin/vite"))[0];
+        let vite = &record("/srv/site/node_modules/.bin/vite")[0];
         assert_eq!(vite.application_name.as_deref(), Some("Vite · site"));
         assert_eq!(vite.process_name.as_deref(), Some("MainThread"));
         assert_eq!(vite.user.as_deref(), Some("www"));
@@ -439,217 +414,140 @@ mod tests {
             ["node", "/srv/site/node_modules/.bin/vite", "--port", "4173"]
         );
         // Mentioning vite anywhere else does not make a process Vite.
-        let script = &parse_ports(&record("/srv/site/scripts/serve-vite-assets.js"))[0];
+        let script = &record("/srv/site/scripts/serve-vite-assets.js")[0];
         assert_eq!(script.application_name.as_deref(), Some("node · site"));
     }
     #[test]
-    fn incomplete_or_invalid_metadata_preserves_listener() {
-        let base = "LISTEN 0 511 0.0.0.0:5174 *:* users:((\"MainThread\",pid=9,fd=25))\n__NEWPORT_PROCESS_DETAILS__\n";
-        for details in ["9||||", "9|zz|||", "9|é|||", "10|6e6f6465|||"] {
-            let ports = parse_ports(&format!("{base}{details}\n"));
-            assert_eq!(ports.len(), 1);
-            assert_eq!(ports[0].application_name, None);
-            assert_eq!(ports[0].pid, Some(9));
+    fn missing_process_details_preserve_the_listener() {
+        for processes in [
+            json!([]),
+            json!([{"pid": 9}]),
+            json!([{"pid": 10, "executable": "/usr/bin/node"}]),
+        ] {
+            let found = ports(json!({
+                "listeners": [listener("0.0.0.0", 5174, 9, "MainThread")],
+                "processes": processes
+            }));
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].application_name, None);
+            assert_eq!(found[0].pid, Some(9));
         }
     }
     #[test]
     fn preserves_spaces_and_does_not_misidentify_command_arguments() {
-        let data = format!(
-            "LISTEN 0 511 0.0.0.0:5174 *:* users:((\"MainThread\",pid=9,fd=25))\n__NEWPORT_PROCESS_DETAILS__\n{}",
-            detail(
-                9,
-                [
-                    "/usr/bin/node\n",
-                    "/srv/my project\n",
-                    "node\0server.js\0--description=vite\0",
-                    "alice\n"
-                ]
-            )
-        );
-        let port = &parse_ports(&data)[0];
+        let mut process = node(9, "/srv/my project", "server.js");
+        process["arguments"] = json!(["node", "server.js", "--description=vite"]);
+        let port = &ports(json!({
+            "listeners": [listener("0.0.0.0", 5174, 9, "MainThread")],
+            "processes": [process]
+        }))[0];
         assert_eq!(port.application_name.as_deref(), Some("node · my project"));
         assert_eq!(port.working_directory.as_deref(), Some("/srv/my project"));
     }
     #[test]
-    fn discovers_ss_ipv6_and_deduplicates() {
-        let p = parse_ports(
-            "LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=45,fd=3))\nLISTEN 0 128 [::]:22 [::]:*\nLISTEN 0 128 [::1]:8080 [::]:*",
-        );
-        assert_eq!(p.len(), 3);
-        assert_eq!(p[0].process_name.as_deref(), Some("sshd"));
-        assert_eq!(p[0].pid, Some(45));
-        assert_eq!(p[2].address, "::1");
-    }
-    #[test]
-    fn discovers_netstat() {
-        let p = parse_ports("tcp 0 0 127.0.0.1:5432 0.0.0.0:* LISTEN 12/postgres");
-        assert_eq!(p[0].port, 5432);
-        assert_eq!(p[0].process_name.as_deref(), Some("postgres"));
-    }
-    #[test]
     fn keeps_richer_details_and_distinct_bindings() {
-        let ports = parse_ports(
-            "LISTEN 0 128 127.0.0.1:8080 *:*\nLISTEN 0 128 127.0.0.1:8080 *:* users:((\"node\",pid=20,fd=3))\nLISTEN 0 128 10.0.0.2:8080 *:* users:((\"other\",pid=21,fd=3))",
-        );
-        assert_eq!(ports.len(), 2);
-        let local = ports.iter().find(|p| p.address == "127.0.0.1").unwrap();
+        let found = ports(json!({"listeners": [
+            {"address": "127.0.0.1", "port": 8080},
+            listener("127.0.0.1", 8080, 20, "node"),
+            listener("10.0.0.2", 8080, 21, "other"),
+            {"address": "::", "port": 22, "user": "root"},
+        ]}));
+        assert_eq!(found.len(), 3);
+        let local = found.iter().find(|p| p.address == "127.0.0.1").unwrap();
         assert_eq!(local.process_name.as_deref(), Some("node"));
         assert_eq!(local.pid, Some(20));
+        // Another account's service still says whose it is.
+        let ssh = found.iter().find(|p| p.port == 22).unwrap();
+        assert_eq!(ssh.user.as_deref(), Some("root"));
+        assert_eq!(ssh.pid, None);
     }
     #[test]
     fn identifies_docker_bindings_without_guessing_processes() {
-        let ports = parse_ports(
-            r#"LISTEN 0 128 0.0.0.0:8080 *:*
-__NEWPORT_DOCKER_PORTS__
-{"name":"web","ports":"0.0.0.0:8080->80/tcp, [::]:8080->80/tcp, 80/tcp, 0.0.0.0:5353->53/udp"}
-{"name":"workers","ports":"127.0.0.1:9000-9001->9000-9001/tcp"}
-not json
-"#,
-        );
-        assert_eq!(ports.len(), 4);
-        assert_eq!(ports[0].container_name.as_deref(), Some("web"));
-        assert_eq!(ports[0].process_name, None);
-        assert_eq!(ports[1].address, "::");
-        assert_eq!(ports[3].port, 9001);
+        let found = ports(json!({
+            "listeners": [{"address": "0.0.0.0", "port": 8080}],
+            "containers": [
+                {"name": "web", "bindings": [{"address": "0.0.0.0", "port": 8080}, {"address": "::", "port": 8080}]},
+                {"name": "workers", "bindings": [{"address": "127.0.0.1", "port": 9000}, {"address": "127.0.0.1", "port": 9001}]}
+            ]
+        }));
+        assert_eq!(found.len(), 4);
+        assert_eq!(found[0].container_name.as_deref(), Some("web"));
+        assert_eq!(found[0].process_name, None);
+        assert_eq!(found[1].address, "::");
+        assert_eq!(found[3].port, 9001);
     }
     #[test]
-    fn reports_project_roots_from_process_details() {
-        let data = format!(
-            "LISTEN 0 511 127.0.0.1:3000 *:* users:((\"node\",pid=7,fd=25))\nLISTEN 0 511 127.0.0.1:3001 *:* users:((\"node\",pid=8,fd=25))\n__NEWPORT_PROCESS_DETAILS__\n{}\n{}\n",
-            detail(
-                7,
-                [
-                    "/usr/bin/node\n",
-                    "/srv/mono/apps/web",
-                    "node\0server.js\0",
-                    "alice\n",
-                    "/srv/mono",
-                    ".git"
-                ]
-            ),
-            detail(
-                8,
-                [
-                    "/usr/bin/node\n",
-                    "/srv/loose",
-                    "node\0server.js\0",
-                    "alice\n",
-                    "",
-                    ""
-                ]
-            )
-        );
-        let ports = parse_ports(&data);
-        assert_eq!(ports[0].project_root.as_deref(), Some("/srv/mono"));
-        assert_eq!(ports[0].project_marker.as_deref(), Some(".git"));
-        assert_eq!(ports[1].project_root, None);
-        assert_eq!(ports[1].project_marker, None);
+    fn reports_project_roots_from_processes() {
+        let mut mono = node(7, "/srv/mono/apps/web", "server.js");
+        mono["project"] = json!({"root": "/srv/mono", "marker": ".git"});
+        let found = ports(json!({
+            "listeners": [listener("127.0.0.1", 3000, 7, "node"), listener("127.0.0.1", 3001, 8, "node")],
+            "processes": [mono, node(8, "/srv/loose", "server.js")]
+        }));
+        assert_eq!(found[0].project_root.as_deref(), Some("/srv/mono"));
+        assert_eq!(found[0].project_marker.as_deref(), Some(".git"));
+        assert_eq!(found[1].project_root, None);
+        assert_eq!(found[1].project_marker, None);
     }
     #[test]
     fn identifies_compose_projects() {
-        let ports = parse_ports(
-            r#"LISTEN 0 128 0.0.0.0:5432 *:*
-__NEWPORT_DOCKER_PORTS__
-{"name":"shop-db-1","ports":"0.0.0.0:5432->5432/tcp","image":"postgres:16","project":"shop","service":"db","workdir":"/srv/shop"}
-{"name":"solo","ports":"127.0.0.1:6379->6379/tcp","image":"redis","project":"","service":"","workdir":""}
-"#,
-        );
-        let db = ports.iter().find(|p| p.port == 5432).unwrap();
+        let found = ports(json!({
+            "listeners": [{"address": "0.0.0.0", "port": 5432}],
+            "containers": [
+                {"name": "shop-db-1", "image": "postgres:16", "project": "shop", "service": "db",
+                    "workdir": "/srv/shop", "bindings": [{"address": "0.0.0.0", "port": 5432}]},
+                {"name": "solo", "image": "redis", "bindings": [{"address": "127.0.0.1", "port": 6379}]}
+            ]
+        }));
+        let db = found.iter().find(|p| p.port == 5432).unwrap();
         assert_eq!(db.image.as_deref(), Some("postgres:16"));
         assert_eq!(db.compose_project.as_deref(), Some("shop"));
         assert_eq!(db.compose_service.as_deref(), Some("db"));
         assert_eq!(db.compose_working_dir.as_deref(), Some("/srv/shop"));
         assert_eq!(db.project_root.as_deref(), Some("/srv/shop"));
         assert_eq!(db.project_marker.as_deref(), Some("compose"));
-        let solo = ports.iter().find(|p| p.port == 6379).unwrap();
+        let solo = found.iter().find(|p| p.port == 6379).unwrap();
         assert_eq!(solo.compose_project, None);
         assert_eq!(solo.project_root, None);
     }
-    fn hex(value: &str) -> String {
-        value.bytes().map(|b| format!("{b:02x}")).collect()
-    }
     #[test]
     fn worktrees_of_one_repository_share_its_root() {
-        let listeners = "LISTEN 0 511 127.0.0.1:3000 *:* users:((\"node\",pid=1,fd=3))\nLISTEN 0 511 127.0.0.1:3001 *:* users:((\"node\",pid=2,fd=3))\nLISTEN 0 511 127.0.0.1:3002 *:* users:((\"node\",pid=3,fd=3))\n";
-        let main = detail(
-            1,
-            [
-                "/usr/bin/node",
-                "/srv/shop/web",
-                "node\0a.js\0",
-                "dev",
-                "/srv/shop",
-                ".git",
-                "/srv/shop",
-                "main",
-                "1",
-            ],
-        );
-        let linked = detail(
-            2,
-            [
-                "/usr/bin/node",
-                "/srv/shop-login/web",
-                "node\0a.js\0",
-                "dev",
-                "/srv/shop",
-                ".git",
-                "/srv/shop-login",
-                "feat/login",
-                "0",
-            ],
-        );
-        let detached = detail(
-            3,
-            [
-                "/usr/bin/node",
-                "/srv/shop-old",
-                "node\0a.js\0",
-                "dev",
-                "/srv/shop",
-                ".git",
-                "/srv/shop-old",
-                "0123456",
-                "0",
-            ],
-        );
-        let ports = parse_ports(&format!(
-            "{listeners}__NEWPORT_PROCESS_DETAILS__\n{main}\n{linked}\n{detached}\n"
-        ));
+        let checkout = |pid: u32, cwd: &str, worktree: &str, branch: &str, main: bool| {
+            let mut process = node(pid, cwd, "a.js");
+            process["project"] = json!({"root": "/srv/shop", "marker": ".git",
+                "worktree": worktree, "branch": branch, "main": main});
+            process
+        };
+        let found = ports(json!({
+            "listeners": [listener("127.0.0.1", 3000, 1, "node"), listener("127.0.0.1", 3001, 2, "node"), listener("127.0.0.1", 3002, 3, "node")],
+            "processes": [
+                checkout(1, "/srv/shop/web", "/srv/shop", "main", true),
+                checkout(2, "/srv/shop-login/web", "/srv/shop-login", "feat/login", false),
+                checkout(3, "/srv/shop-old", "/srv/shop-old", "0123456", false),
+            ]
+        }));
         assert!(
-            ports
+            found
                 .iter()
                 .all(|p| p.project_root.as_deref() == Some("/srv/shop"))
         );
-        assert_eq!(ports[0].worktree_path.as_deref(), Some("/srv/shop"));
-        assert_eq!(ports[0].worktree_branch.as_deref(), Some("main"));
-        assert_eq!(ports[0].worktree_main, Some(true));
-        assert_eq!(ports[1].worktree_path.as_deref(), Some("/srv/shop-login"));
-        assert_eq!(ports[1].worktree_branch.as_deref(), Some("feat/login"));
-        assert_eq!(ports[1].worktree_main, Some(false));
-        assert_eq!(ports[2].worktree_branch.as_deref(), Some("0123456"));
-        assert_eq!(ports[2].worktree_main, Some(false));
+        assert_eq!(found[0].worktree_path.as_deref(), Some("/srv/shop"));
+        assert_eq!(found[0].worktree_branch.as_deref(), Some("main"));
+        assert_eq!(found[0].worktree_main, Some(true));
+        assert_eq!(found[1].worktree_path.as_deref(), Some("/srv/shop-login"));
+        assert_eq!(found[1].worktree_branch.as_deref(), Some("feat/login"));
+        assert_eq!(found[1].worktree_main, Some(false));
+        assert_eq!(found[2].worktree_branch.as_deref(), Some("0123456"));
+        assert_eq!(found[2].worktree_main, Some(false));
     }
     #[test]
     fn roots_without_git_carry_no_worktree() {
-        let data = format!(
-            "LISTEN 0 511 127.0.0.1:3000 *:* users:((\"node\",pid=1,fd=3))\n__NEWPORT_PROCESS_DETAILS__\n{}\n",
-            detail(
-                1,
-                [
-                    "/usr/bin/node",
-                    "/srv/app",
-                    "node\0a.js\0",
-                    "dev",
-                    "/srv/app",
-                    "package.json",
-                    "",
-                    "",
-                    ""
-                ]
-            )
-        );
-        let port = &parse_ports(&data)[0];
+        let mut process = node(1, "/srv/app", "a.js");
+        process["project"] = json!({"root": "/srv/app", "marker": "package.json"});
+        let port = &ports(json!({
+            "listeners": [listener("127.0.0.1", 3000, 1, "node")],
+            "processes": [process]
+        }))[0];
         assert_eq!(port.project_marker.as_deref(), Some("package.json"));
         assert_eq!(port.worktree_path, None);
         assert_eq!(port.worktree_branch, None);
@@ -657,27 +555,21 @@ __NEWPORT_DOCKER_PORTS__
     }
     #[test]
     fn compose_projects_inside_a_worktree_join_its_repository() {
-        let row = |name: &str, port: u16, workdir: &str| {
-            format!(
-                r#"{{"name":"{name}","ports":"127.0.0.1:{port}->{port}/tcp","image":"postgres","project":"{name}","service":"db","workdir":"{workdir}"}}"#
-            )
-        };
-        let data = format!(
-            "__NEWPORT_DOCKER_PORTS__\n{}\n{}\n__NEWPORT_COMPOSE_ROOTS__\n{}|{}|{}|{}|{}|{}\n{}|{}|{}|||\n__NEWPORT_PROCESS_DETAILS__\n",
-            row("login", 5432, "/srv/shop-login/deploy"),
-            row("plain", 5433, "/srv/plain"),
-            hex("/srv/shop-login/deploy"),
-            hex("/srv/shop"),
-            hex(".git"),
-            hex("/srv/shop-login"),
-            hex("feat/login"),
-            hex("0"),
-            hex("/srv/plain"),
-            hex("/srv/plain"),
-            hex("compose.yaml"),
-        );
-        let ports = parse_ports(&data);
-        let login = ports.iter().find(|p| p.port == 5432).unwrap();
+        let found = ports(json!({
+            "listeners": [],
+            "containers": [
+                {"name": "login", "image": "postgres", "project": "login", "service": "db",
+                    "workdir": "/srv/shop-login/deploy",
+                    "bindings": [{"address": "127.0.0.1", "port": 5432}],
+                    "workdirProject": {"root": "/srv/shop", "marker": ".git",
+                        "worktree": "/srv/shop-login", "branch": "feat/login", "main": false}},
+                {"name": "plain", "image": "postgres", "project": "plain", "service": "db",
+                    "workdir": "/srv/plain",
+                    "bindings": [{"address": "127.0.0.1", "port": 5433}],
+                    "workdirProject": {"root": "/srv/plain", "marker": "compose.yaml"}}
+            ]
+        }));
+        let login = found.iter().find(|p| p.port == 5432).unwrap();
         assert_eq!(login.project_root.as_deref(), Some("/srv/shop"));
         assert_eq!(login.project_marker.as_deref(), Some(".git"));
         assert_eq!(login.worktree_path.as_deref(), Some("/srv/shop-login"));
@@ -688,16 +580,16 @@ __NEWPORT_DOCKER_PORTS__
             Some("/srv/shop-login/deploy")
         );
         // A project file is no better than the Compose directory itself.
-        let plain = ports.iter().find(|p| p.port == 5433).unwrap();
+        let plain = found.iter().find(|p| p.port == 5433).unwrap();
         assert_eq!(plain.project_root.as_deref(), Some("/srv/plain"));
         assert_eq!(plain.project_marker.as_deref(), Some("compose"));
         assert_eq!(plain.worktree_path, None);
     }
     #[test]
-    fn missing_docker_access_keeps_listeners() {
-        let ports = parse_ports("LISTEN 0 128 0.0.0.0:22 *:*\n__NEWPORT_DOCKER_PORTS__\n");
-        assert_eq!(ports.len(), 1);
-        assert_eq!(ports[0].process_name, None);
-        assert_eq!(ports[0].container_name, None);
+    fn missing_docker_keeps_listeners() {
+        let found = ports(json!({"listeners": [{"address": "0.0.0.0", "port": 22}]}));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].process_name, None);
+        assert_eq!(found[0].container_name, None);
     }
 }

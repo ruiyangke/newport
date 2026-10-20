@@ -1884,15 +1884,63 @@ impl Newport {
             cx.notify();
             return;
         }
-        if !self
+        let dirty = self
             .code_workspaces
             .iter()
-            .any(|e| e.editor.read(cx).dirty(cx))
-        {
+            .any(|e| e.editor.read(cx).dirty(cx));
+        // Quitting ends remote apps without their own close prompts.
+        let remote_apps = crate::remote_apps::active_sessions(cx);
+        if !dirty && remote_apps == 0 {
             cx.quit();
             return;
         }
-        window.open_alert_dialog(cx,|dialog,_,_|dialog.title("Quit with unsaved files?").description("Return to Code to save your edits. Quitting now discards unsaved editor changes.").button_props(DialogButtonProps::default().show_cancel(true).ok_text("Quit without saving").cancel_text("Keep editing")).on_ok(|_,_,cx|{cx.quit();true}));
+        if dirty {
+            // Remote apps close too, so say so here as well.
+            let description = match remote_apps {
+                0 => "Return to Code to save your edits. Quitting now discards unsaved editor changes.".to_owned(),
+                1 => "Return to Code to save your edits. Quitting now discards unsaved editor changes and closes the open remote app.".to_owned(),
+                n => format!("Return to Code to save your edits. Quitting now discards unsaved editor changes and closes {n} open remote apps."),
+            };
+            window.open_alert_dialog(cx, move |dialog, _, _| {
+                dialog
+                    .title("Quit with unsaved files?")
+                    .description(description.clone())
+                    .button_props(
+                        DialogButtonProps::default()
+                            .show_cancel(true)
+                            .ok_text("Quit without saving")
+                            .cancel_text("Keep editing"),
+                    )
+                    .on_ok(|_, _, cx| {
+                        cx.quit();
+                        true
+                    })
+            });
+            return;
+        }
+        let description = if remote_apps == 1 {
+            "A remote app is open. Quitting closes it, and anything unsaved in it is lost."
+                .to_owned()
+        } else {
+            format!(
+                "{remote_apps} remote apps are open. Quitting closes them, and anything unsaved in them is lost."
+            )
+        };
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            dialog
+                .title("Quit with remote apps open?")
+                .description(description.clone())
+                .button_props(
+                    DialogButtonProps::default()
+                        .show_cancel(true)
+                        .ok_text("Quit")
+                        .cancel_text("Keep open"),
+                )
+                .on_ok(|_, _, cx| {
+                    cx.quit();
+                    true
+                })
+        });
     }
 }
 #[cfg(test)]

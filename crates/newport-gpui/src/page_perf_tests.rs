@@ -47,6 +47,7 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
         appearance_store,
         settings_state: newport_client::settings::Settings::new(backend.clone()),
         settings_ui: settings::SettingsUi::new(appearance, window, cx),
+        account: newport_client::account::Account::new(backend.clone()),
         services_panels: Default::default(),
         services_preferences: Default::default(),
         retired_services: Vec::new(),
@@ -78,7 +79,7 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
         window_visible: window.is_visible(),
         focus: cx.focus_handle(),
         sidebar_focus: cx.focus_handle(),
-        navigation_focus: navigation::VIEWS
+        navigation_focus: navigation::views(cx)
             .iter()
             .map(|_| cx.focus_handle())
             .collect(),
@@ -86,6 +87,15 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
         files_refresh_requested: true,
         file_preview_path: None,
         file_preview_image: None,
+        remote_apps: None,
+        remote_apps_visit: 0,
+        remote_apps_away: false,
+        remote_apps_returned: false,
+        remote_apps_mutations: Default::default(),
+        remote_apps_mutating: Default::default(),
+        remote_apps_recheck: None,
+        remote_apps_record_tried: None,
+        remote_apps_refresh: false,
         file_preview_viewport: file_preview::Viewport::default(),
         file_preview_pdf: None,
         file_preview_pdf_text: None,

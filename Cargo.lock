@@ -5522,6 +5522,7 @@ dependencies = [
  "dirs 7.0.0",
  "flate2",
  "fs2",
+ "getrandom 0.4.3",
  "hmac 0.13.0",
  "image",
  "iota_stronghold",
@@ -5578,6 +5579,7 @@ dependencies = [
 name = "newport-gpui"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "base64 0.23.1",
  "chrono",
  "cocoa 0.26.0",
@@ -5595,6 +5597,7 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
+ "shlex",
  "tree-sitter",
  "tree-sitter-language",
  "unicode-width",
@@ -5684,6 +5687,7 @@ dependencies = [
  "ureq",
  "url",
  "uuid",
+ "whoami",
  "windows-sys 0.61.2",
  "winreg",
  "zeroize",

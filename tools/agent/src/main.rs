@@ -72,6 +72,7 @@ fn run(args: &[String]) -> std::io::Result<()> {
             Some("clipboard") => newport_agent::clipboard::read(&args[2..]),
             Some("open") => newport_agent::browser::open(&args[2..], false),
             Some("sessions") => newport_agent::routing::list(),
+            Some("listeners") if args.len() == 2 => newport_agent::ports::print_listeners(),
             Some("env") => newport_agent::environment::print(&args[2..]),
             Some("install") => newport_agent::install::install(),
             Some("deployment") => newport_agent::deployment::run(&args[2..]),
@@ -84,7 +85,7 @@ fn run(args: &[String]) -> std::io::Result<()> {
                 Ok(())
             }
             Some("--help") | None => {
-                println!("Newport agent\n\nCommands: runtime --stdio, serve, git-rpc --stdio, monitor --stdio, install, clipboard, open URL, env, sessions, display --backend x11|wayland");
+                println!("Newport agent\n\nCommands: runtime --stdio, serve, git-rpc --stdio, monitor --stdio, install, listeners, clipboard, open URL, env, sessions, display --backend x11|wayland");
                 Ok(())
             }
             _ => Err(std::io::Error::other("Unknown command; use --help")),

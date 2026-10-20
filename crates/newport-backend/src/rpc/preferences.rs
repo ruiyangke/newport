@@ -1,6 +1,6 @@
 //! Native preference routes share the same transactions as the legacy desktop.
 use super::arguments::{argument, encode, error};
-use crate::preferences::{self, Preferences, projects};
+use crate::preferences::{self, Preferences, projects, remote_apps};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -12,6 +12,13 @@ pub enum Command {
     GitProjectsList,
     GitProjectsSave,
     GitProjectsRemove,
+    RemoteAppsSettings,
+    RemoteAppsSettingsSave,
+    RemoteAppsCommands,
+    RemoteAppsCommandSave,
+    RemoteAppsCommandRemove,
+    RemoteAppsInstalled,
+    RemoteAppsInstalledSave,
 }
 impl Command {
     pub fn parse(method: &str) -> Option<Self> {
@@ -49,6 +56,49 @@ impl Command {
                     state,
                     argument(args, "serverId")?,
                     argument(args, "projectId")?,
+                )
+                .await
+                .map_err(error)?,
+            ),
+            Self::RemoteAppsSettings => encode(
+                remote_apps::remote_apps_settings(state)
+                    .await
+                    .map_err(error)?,
+            ),
+            Self::RemoteAppsSettingsSave => encode(
+                remote_apps::remote_apps_settings_save(state, argument(args, "settings")?)
+                    .await
+                    .map_err(error)?,
+            ),
+            Self::RemoteAppsCommands => encode(
+                remote_apps::remote_apps_commands(state, argument(args, "serverId")?)
+                    .await
+                    .map_err(error)?,
+            ),
+            Self::RemoteAppsCommandSave => encode(
+                remote_apps::remote_apps_command_save(state, argument(args, "command")?)
+                    .await
+                    .map_err(error)?,
+            ),
+            Self::RemoteAppsCommandRemove => encode(
+                remote_apps::remote_apps_command_remove(
+                    state,
+                    argument(args, "serverId")?,
+                    argument(args, "id")?,
+                )
+                .await
+                .map_err(error)?,
+            ),
+            Self::RemoteAppsInstalled => encode(
+                remote_apps::remote_apps_installed(state)
+                    .await
+                    .map_err(error)?,
+            ),
+            Self::RemoteAppsInstalledSave => encode(
+                remote_apps::remote_apps_installed_save(
+                    state,
+                    argument(args, "serverId")?,
+                    argument(args, "installed")?,
                 )
                 .await
                 .map_err(error)?,

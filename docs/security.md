@@ -3,7 +3,7 @@
 - **Saved credentials:** profiles and SSH passwords are encrypted, with the unlock key stored in macOS Keychain or Windows Credential Manager. Metric history is not encrypted. See [storage and recovery](storage.md).
 - **Server trust:** SSH host keys are trusted on first use. Changed or revoked keys are rejected.
 - **Clipboard sharing:** enable it only for trusted servers. Server applications can request sensitive content you copy. The agent keeps requested clipboard data in memory until the clipboard changes or sharing disconnects.
-- **Remote access:** actions use your SSH account's permissions. Port discovery may use existing non-interactive sudo access. Forwarded ports are accessible only through local loopback.
+- **Remote access:** actions use your SSH account's permissions. Port discovery runs in Needle and may use existing non-interactive sudo access (`sudo -n`, never a prompt) to name other accounts' services. Forwarded ports are accessible only through local loopback.
 
 ## Known limitation
 

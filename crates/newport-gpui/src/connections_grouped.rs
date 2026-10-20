@@ -745,16 +745,27 @@ impl Newport {
                 }
             }
         };
-        let discovery_error = resource.and_then(|r| r.error.as_ref()).map(|error| {
-            format!(
-                "Couldn’t refresh ports: {error}{}",
+        let problem = resource.and_then(|r| r.error.clone());
+        // Discovery has never worked here: say why, and that forwarding by
+        // port number does not depend on it.
+        let undiscovered = !has_reading && problem.is_some();
+        // The backend is replacing an outdated Needle: progress, not failure.
+        let updating = problem
+            .as_deref()
+            .is_some_and(|p| p.starts_with("Updating Needle"));
+        let update_notice = problem
+            .clone()
+            .filter(|_| updating && !(undiscovered && no_entries));
+        let discovery_error = problem
+            .as_ref()
+            .filter(|_| !updating && !(undiscovered && no_entries))
+            .map(|error| {
                 if has_reading {
-                    " Showing the last available reading."
+                    format!("Couldn’t refresh ports: {error} Showing the last available reading.")
                 } else {
-                    ""
+                    format!("Couldn’t discover ports: {error} Saved forwards still work.")
                 }
-            )
-        });
+            });
         // The shared page toolbar; it may wrap to a second row when narrow.
         let toolbar = crate::controls::page_toolbar(cx)
             .id("connections-toolbar")
@@ -880,6 +891,52 @@ impl Newport {
             .when(empty && !no_entries, |v| {
                 v.child(empty::compact("No connections match.", cx).flex_shrink_0())
             })
+            .when(no_entries && undiscovered && updating, |view| {
+                view.child(empty::pane(
+                    IconName::RefreshCw,
+                    "Updating Needle",
+                    problem.clone().unwrap_or_default(),
+                    cx,
+                ))
+            })
+            .when(no_entries && undiscovered && !updating, |view| {
+                let error = problem.clone().unwrap_or_default();
+                // The agent's own words name the fix; offer to go there.
+                let setup = error.contains("Open Overview");
+                view.child(
+                    empty::pane(
+                        IconName::ServerOff,
+                        "Port discovery isn’t available",
+                        format!("{error} You can still forward a port by number with New forward."),
+                        cx,
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .when(setup, |v| {
+                                v.child(
+                                    crate::controls::button("connections-setup")
+                                        .primary()
+                                        .label("Open Overview")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.navigate(Page::Overview, cx)
+                                        })),
+                                )
+                            })
+                            .child(
+                                crate::controls::button("connections-retry")
+                                    .label("Try again")
+                                    .loading(manual_pending)
+                                    .disabled(manual_pending)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.discover_connections(true);
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+                )
+            })
             .when(no_entries && has_reading, |view| {
                 view.child(empty::pane(
                     IconName::Network,
@@ -904,6 +961,10 @@ impl Newport {
             .truncate()
             .child(if has_reading {
                 displayed_summary
+            } else if updating {
+                "Updating Needle…".into()
+            } else if undiscovered {
+                "Port discovery unavailable".into()
             } else {
                 "Discovering ports…".into()
             })
@@ -933,6 +994,19 @@ impl Newport {
             .min_h_0()
             .w_full()
             .child(toolbar)
+            .when_some(update_notice, |view, message| {
+                view.child(
+                    div()
+                        .id("connections-updating")
+                        .role(accesskit::Role::Status)
+                        .aria_label(message.clone())
+                        .flex_shrink_0()
+                        .px(px(crate::controls::TOOLBAR_INSET))
+                        .py(px(8.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(message),
+                )
+            })
             .when_some(discovery_error, |view, message| {
                 view.child(
                     crate::controls::alert("connections-discovery-error", message, cx)

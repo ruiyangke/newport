@@ -20,9 +20,7 @@ pub struct Index {
     paths: Vec<String>,
     skipped: usize,
 }
-fn quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
+use crate::ssh::shell_quote as quote;
 fn command(root: &str) -> Result<String> {
     path_valid(root)?;
     ensure!(

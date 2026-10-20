@@ -16,6 +16,7 @@ impl Newport {
                     | Page::Services
                     | Page::Containers
                     | Page::Files
+                    | Page::RemoteApps
             ) && self.initial_loading("page"))
         {
             return loading::page(self.page, self.content_width);
@@ -85,6 +86,7 @@ impl Newport {
                 }),
             Page::Files => self.files(window, cx),
             Page::Integration => self.integration(cx),
+            Page::RemoteApps => self.remote_apps(window, cx),
             Page::Settings => self.settings(cx),
         }
     }

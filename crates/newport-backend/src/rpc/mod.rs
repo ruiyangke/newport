@@ -1,11 +1,13 @@
 //! Bounded local RPC transport shared by both application hosts. This module
 //! owns framing, consent progress and connection-held resources, never UI state.
+pub mod account;
 mod arguments;
 pub mod control;
 pub mod features;
 pub mod git;
 pub mod preferences;
 mod progress;
+mod remote_stream;
 pub mod services;
 mod terminal_lease;
 use newport_platform::ipc::asynchronous::{Listener, Stream};
@@ -47,6 +49,20 @@ pub trait Host: Send + Sync + 'static {
         &self,
         request: TerminalOpen,
     ) -> impl Future<Output = Result<Box<dyn Send>, String>> + Send;
+    /// Start a command on a server over its existing connection.
+    fn open_remote_stream(
+        &self,
+        _server: Uuid,
+        _command: String,
+    ) -> impl Future<Output = Result<RemoteChannel, String>> + Send {
+        async { Err("Remote streams aren’t available.".to_owned()) }
+    }
+}
+
+/// A started remote command, and whatever keeps its connection open.
+pub struct RemoteChannel {
+    pub channel: russh::Channel<russh::client::Msg>,
+    pub guard: Box<dyn Send>,
 }
 
 #[derive(Default)]
@@ -185,6 +201,9 @@ async fn serve<H: Host>(
     }
     if request.method == protocol::TERMINAL_OPEN_LEASE {
         return terminal_lease::serve(stream, host.as_ref(), request.args).await;
+    }
+    if request.method == protocol::REMOTE_STREAM_OPEN {
+        return remote_stream::serve(stream, host.as_ref(), request.args).await;
     }
     // Feature calls and consent waits cannot consume revocation admission.
     // This reserves capacity only; the host still validates scope and permissions.

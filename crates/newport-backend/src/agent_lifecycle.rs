@@ -38,7 +38,7 @@ pub async fn manage(
     integrations: bool,
     receipts: &crate::lifecycle_receipts::Store,
     operation_id: uuid::Uuid,
-    automatic: bool,
+    trigger: Trigger,
 ) -> Result<Deployment, String> {
     deploy(
         session,
@@ -47,7 +47,7 @@ pub async fn manage(
         integrations,
         receipts,
         operation_id,
-        automatic,
+        trigger,
     )
     .await
 }
@@ -297,6 +297,45 @@ impl Status {
             && self.build_relation == BuildRelation::Older
             && self.error.is_none()
     }
+    /// The installed Needle lacks something this desktop needs. It may be
+    /// replaced wherever a manual install could: an older release, or a build
+    /// without release metadata. Never a newer or unordered signed release.
+    pub(crate) fn required_update_available(&self) -> bool {
+        self.installed == Some(true)
+            && self.error.is_none()
+            && match self.build_relation {
+                BuildRelation::Older => true,
+                BuildRelation::Different => self.installed_version.is_none(),
+                _ => false,
+            }
+    }
+}
+
+/// Who started a Needle deployment, which decides what it may replace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trigger {
+    /// The person chose to install, reinstall or update.
+    Manual,
+    /// A newer signed release is bundled.
+    Automatic,
+    /// A feature found the installed Needle too old to answer it.
+    Required,
+}
+impl Trigger {
+    pub fn allows(self, status: &Status) -> bool {
+        match self {
+            Self::Manual => true,
+            Self::Automatic => status.automatic_update_available(),
+            Self::Required => status.required_update_available(),
+        }
+    }
+}
+
+/// A required update's progress, so the feature waiting on it can say so.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum RequiredUpdate {
+    Running,
+    Failed { error: String, at: Instant },
 }
 #[derive(Default)]
 struct Observation {
@@ -314,6 +353,7 @@ pub struct State {
     pub(crate) helper_history: helpers::State,
     observation: Mutex<Observation>,
     automatic_attempt: Mutex<Option<Instant>>,
+    required: Mutex<Option<RequiredUpdate>>,
 }
 impl State {
     pub fn new(receipts: Arc<crate::lifecycle_receipts::Store>) -> Self {
@@ -354,6 +394,32 @@ impl State {
         }
         *previous = Some(now);
         true
+    }
+    /// Claims a required update unless one is running, or failed less than
+    /// ten minutes ago (then that failure is returned to report).
+    pub(crate) fn claim_required_update(&self, now: Instant) -> Result<(), RequiredUpdate> {
+        let mut required = self.required.lock().unwrap();
+        match &*required {
+            Some(RequiredUpdate::Running) => return Err(RequiredUpdate::Running),
+            Some(failed @ RequiredUpdate::Failed { at, .. })
+                if now.saturating_duration_since(*at) < Duration::from_secs(600) =>
+            {
+                return Err(failed.clone());
+            }
+            _ => {}
+        }
+        *required = Some(RequiredUpdate::Running);
+        Ok(())
+    }
+    pub(crate) fn required_update(&self) -> Option<RequiredUpdate> {
+        self.required.lock().unwrap().clone()
+    }
+    pub(crate) fn finish_required_update(&self, result: &Result<String, String>) {
+        *self.required.lock().unwrap() =
+            result.as_ref().err().map(|error| RequiredUpdate::Failed {
+                error: error.clone(),
+                at: Instant::now(),
+            });
     }
     pub(crate) fn automatic_update_unblocked(
         &self,
@@ -549,7 +615,7 @@ pub(crate) async fn manage_test(
         integrations,
         &state.receipts,
         uuid::Uuid::new_v4(),
-        false,
+        Trigger::Manual,
     )
     .await
     .map(|d| d.output);
@@ -587,7 +653,7 @@ async fn deploy(
     integrate: bool,
     receipts: &crate::lifecycle_receipts::Store,
     operation_id: uuid::Uuid,
-    automatic: bool,
+    trigger: Trigger,
 ) -> Result<Deployment, String> {
     if !session.server().agent_install_approved {
         return Err(
@@ -601,7 +667,7 @@ async fn deploy(
         progress,
         receipts,
         operation_id,
-        automatic,
+        trigger,
     )
     .await
 }
@@ -612,7 +678,7 @@ async fn deploy_inner(
     progress: &crate::agent_install::Attempt,
     receipts: &crate::lifecycle_receipts::Store,
     operation_id: uuid::Uuid,
-    automatic: bool,
+    trigger: Trigger,
 ) -> Result<Deployment, String> {
     use crate::lifecycle_receipts::{
         Phase, Record,
@@ -657,7 +723,7 @@ async fn deploy_inner(
         record
     } else {
         let status = check(session).await?;
-        if automatic && !status.automatic_update_available() {
+        if !trigger.allows(&status) {
             return Err(
                 "Needle changed since the automatic update check; leaving it unchanged.".into(),
             );
@@ -953,6 +1019,51 @@ pub(crate) async fn recover(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn required_updates_replace_only_what_a_manual_install_may() {
+        let status = |relation, version: Option<&str>| Status {
+            installed: Some(true),
+            build_relation: relation,
+            installed_version: version.map(str::to_owned),
+            ..Status::default()
+        };
+        // An older release, or a build without release metadata (development).
+        assert!(Trigger::Required.allows(&status(BuildRelation::Older, Some("1.0.0"))));
+        assert!(Trigger::Required.allows(&status(BuildRelation::Different, None)));
+        // Never a newer or unordered signed release, nor the bundled build.
+        assert!(!Trigger::Required.allows(&status(BuildRelation::Newer, Some("9.0.0"))));
+        assert!(!Trigger::Required.allows(&status(BuildRelation::Different, Some("1.0.0"))));
+        assert!(!Trigger::Required.allows(&status(BuildRelation::Bundled, None)));
+        assert!(!Trigger::Required.allows(&Status {
+            installed: Some(false),
+            ..status(BuildRelation::Missing, None)
+        }));
+        // Automatic updates still need a signed, ordered release.
+        assert!(!Trigger::Automatic.allows(&status(BuildRelation::Different, None)));
+    }
+
+    #[test]
+    fn required_updates_run_once_and_back_off_after_failing() {
+        let state = State::default();
+        let now = Instant::now();
+        assert_eq!(state.claim_required_update(now), Ok(()));
+        assert_eq!(
+            state.claim_required_update(now),
+            Err(RequiredUpdate::Running)
+        );
+        state.finish_required_update(&Err("upload failed".into()));
+        assert!(matches!(
+            state.claim_required_update(now),
+            Err(RequiredUpdate::Failed { error, .. }) if error == "upload failed"
+        ));
+        assert_eq!(
+            state.claim_required_update(now + Duration::from_secs(601)),
+            Ok(())
+        );
+        state.finish_required_update(&Ok("Needle installed and verified.".into()));
+        assert_eq!(state.required_update(), None);
+    }
     #[tokio::test]
     #[ignore = "Requires disposable Linux OpenSSH fixture"]
     async fn conflict_review_keeps_only_the_confirmed_file_and_scope() {
@@ -1110,6 +1221,7 @@ mod tests {
                         Action::Helpers => lease.configure_integrations_operation(id).await,
                         Action::Recover => lease.recover_installation(id).await,
                         Action::AutoUpdate
+                        | Action::RequiredUpdate
                         | Action::Keep { .. }
                         | Action::Remove { .. }
                         | Action::RestoreRemoval

@@ -325,6 +325,23 @@ pub fn tag(value: impl Into<SharedString>, cx: &App) -> Div {
         .child(value.into())
 }
 
+/// A small tinted label beside a name, such as a plan.
+pub fn status_tag(
+    value: impl Into<SharedString>,
+    fill: gpui_kit::Hsla,
+    ink: gpui_kit::Hsla,
+) -> Div {
+    div()
+        .flex_shrink_0()
+        .px(px(5.))
+        .rounded(px(crate::ui::RADIUS))
+        .bg(fill)
+        .text_color(ink)
+        .text_size(px(12.))
+        .line_height(px(17.))
+        .child(value.into())
+}
+
 /// A foldable list group: chevron, name, and its count as a tag. Callers add
 /// `on_click`; the button announces whether the group is expanded.
 pub fn group_heading(

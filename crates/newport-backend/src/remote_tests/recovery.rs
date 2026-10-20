@@ -719,7 +719,9 @@ async fn discovery_and_unavailable_capabilities_report_real_server_state() {
         "fixture",
     )
     .await;
-    let ports = crate::ports::discover(&server).await.unwrap();
+    let ports = crate::ports::discover(&crate::remote_tests::owner(&server))
+        .await
+        .unwrap();
     assert!(ports.iter().any(|p| p.port == 22));
     assert!(
         ports

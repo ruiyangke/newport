@@ -10,6 +10,7 @@ use std::{
 };
 
 pub mod projects;
+pub mod remote_apps;
 #[cfg(test)]
 mod tests;
 

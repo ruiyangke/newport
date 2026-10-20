@@ -363,6 +363,32 @@ impl ExecSession {
         .map_err(session_error)
     }
 
+    /// A started command's channel, for callers that need its error output
+    /// and exit status as well as its stdout.
+    pub(crate) async fn exec_channel(
+        &self,
+        command: &str,
+    ) -> Result<russh::Channel<russh::client::Msg>, String> {
+        const TIMED_OUT: &str = "SSH command timed out starting";
+        let started = tokio::time::Instant::now();
+        let channel = tokio::time::timeout(COMMAND_TIMEOUT, self.0.open_session())
+            .await
+            .map_err(|_| TIMED_OUT.to_owned())?
+            .map_err(session_error)?;
+        let remaining = COMMAND_TIMEOUT.saturating_sub(started.elapsed());
+        match tokio::time::timeout(remaining, channel.exec(true, command)).await {
+            Ok(Ok(())) => Ok(channel),
+            failed => {
+                // An open channel would keep a server session in use.
+                let _ = channel.close().await;
+                Err(match failed {
+                    Ok(Err(error)) => session_error(error.into()),
+                    _ => TIMED_OUT.to_owned(),
+                })
+            }
+        }
+    }
+
     pub fn is_closed(&self) -> bool {
         self.0.handle.is_closed()
     }

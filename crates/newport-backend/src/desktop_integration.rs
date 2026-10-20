@@ -14,4 +14,8 @@ pub trait DesktopIntegration: Send + Sync + 'static {
     fn read_clipboard_format(&self, revision: isize, format: &str) -> Option<Vec<u8>>;
     /// Called on a blocking worker after URL validation and consent checks.
     fn open_url(&self, url: &str) -> Result<(), String>;
+    /// The shipping application's version, reported to the Newport account.
+    fn app_version(&self) -> String {
+        env!("CARGO_PKG_VERSION").into()
+    }
 }

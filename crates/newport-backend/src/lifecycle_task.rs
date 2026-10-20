@@ -10,6 +10,8 @@ type Outcome = Result<String, String>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     AutoUpdate,
+    /// A feature needs a newer Needle than the one installed.
+    RequiredUpdate,
     Install {
         integrations: bool,
     },

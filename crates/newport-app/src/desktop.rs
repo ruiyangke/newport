@@ -93,6 +93,9 @@ impl DesktopIntegration for Integration {
     fn open_url(&self, url: &str) -> Result<(), String> {
         open::that(url).map_err(|error| error.to_string())
     }
+    fn app_version(&self) -> String {
+        env!("CARGO_PKG_VERSION").into()
+    }
 }
 
 pub struct Commands {

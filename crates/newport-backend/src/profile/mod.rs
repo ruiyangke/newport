@@ -1,4 +1,5 @@
 //! Encrypted profiles and migration policy, independent of the desktop host.
+pub mod account;
 pub mod credentials;
 mod instance;
 pub mod legacy;

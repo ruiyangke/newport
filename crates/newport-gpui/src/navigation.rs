@@ -230,7 +230,7 @@ pub(super) fn install_workspace_shortcuts(cx: &mut App) {
         )]);
     }
 }
-pub(super) const VIEWS: [(Page, IconName); 8] = [
+const VIEWS: [(Page, IconName); 8] = [
     (Page::Overview, IconName::Activity),
     (Page::Ports, IconName::Link),
     (Page::Services, IconName::Layers),
@@ -238,8 +238,28 @@ pub(super) const VIEWS: [(Page, IconName); 8] = [
     (Page::Terminal, IconName::Terminal),
     (Page::Files, IconName::Folder),
     (Page::Projects, IconName::FolderCode),
-    (Page::Integration, IconName::LayoutGrid),
+    (Page::Integration, IconName::Plug),
 ];
+/// Sidebar views for this build. Remote apps appears only in builds that
+/// include it, after the interactive views and before Integrations.
+pub(super) fn views(cx: &App) -> Vec<(Page, IconName)> {
+    let mut views = VIEWS.to_vec();
+    if crate::remote_apps::available(cx) {
+        let integration = views.len() - 1;
+        views.insert(integration, (Page::RemoteApps, IconName::LayoutGrid));
+    }
+    views
+}
+impl Newport {
+    /// One focus handle per sidebar view, including views that become
+    /// available after the window opens, such as Remote apps.
+    pub(super) fn sync_navigation_focus(&mut self, cx: &mut Context<Self>) {
+        let count = views(cx).len();
+        while self.navigation_focus.len() < count {
+            self.navigation_focus.push(cx.focus_handle());
+        }
+    }
+}
 fn destination(index: usize, key: &str, count: usize) -> Option<usize> {
     if count == 0 {
         return None;
@@ -260,7 +280,9 @@ impl Newport {
             .filter(|tunnel| text(tunnel, "serverId") == self.server)
             .count();
         let disabled = self.server.is_empty() || self.server_form.is_some() || self.modal_open;
-        let current = VIEWS
+        let views = views(cx);
+        let tabs = views.clone();
+        let current = views
             .iter()
             .position(|(page, _)| *page == self.page)
             .unwrap_or(0);
@@ -271,7 +293,7 @@ impl Newport {
             .flex_col()
             .flex_shrink_0()
             .w_full()
-            .children(VIEWS.into_iter().enumerate().flat_map(|(i, (page, icon))| {
+            .children(tabs.into_iter().enumerate().flat_map(|(i, (page, icon))| {
                 let separator = matches!(page, Page::Terminal | Page::Integration).then(|| {
                     div()
                         .id(("navigation-separator", i))
@@ -283,10 +305,11 @@ impl Newport {
                         .bg(cx.theme().border)
                         .into_any_element()
                 });
+                let views = views.clone();
                 let tab = Tab::new(("nav", i))
                     .accessibility_label(page.title())
                     .selected(page == self.page)
-                    .set_position(i + 1, VIEWS.len())
+                    .set_position(i + 1, views.len())
                     .disabled(disabled)
                     // Kit blocks activation but does not expose the disabled
                     // flag. Amend the same node, preserving its label, selected
@@ -296,7 +319,10 @@ impl Newport {
                             builder.parent_node().set_disabled();
                         }
                     })
-                    .track_focus(&self.navigation_focus[i])
+                    // A view that appeared after startup gets its handle on the next tick.
+                    .when_some(self.navigation_focus.get(i), |tab, focus| {
+                        tab.track_focus(focus)
+                    })
                     .tab_stop(!disabled && i == current)
                     .w_full()
                     .relative()
@@ -347,7 +373,9 @@ impl Newport {
                             return;
                         }
                         this.navigate(page, cx);
-                        this.navigation_focus[i].focus(window, cx);
+                        if let Some(focus) = this.navigation_focus.get(i) {
+                            focus.focus(window, cx);
+                        }
                     }))
                     .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                         if this.server.is_empty()
@@ -362,13 +390,15 @@ impl Newport {
                         {
                             return;
                         }
-                        let Some(next) = destination(i, &event.keystroke.key, VIEWS.len()) else {
+                        let Some(next) = destination(i, &event.keystroke.key, views.len()) else {
                             return;
                         };
                         cx.stop_propagation();
                         window.prevent_default();
-                        this.navigate(VIEWS[next].0, cx);
-                        this.navigation_focus[next].focus(window, cx);
+                        this.navigate(views[next].0, cx);
+                        if let Some(focus) = this.navigation_focus.get(next) {
+                            focus.focus(window, cx);
+                        }
                     }))
                     .into_any_element();
                 separator.into_iter().chain(std::iter::once(tab))

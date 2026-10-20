@@ -1,5 +1,10 @@
 //! SSH transport, forwarding and interactive shell lifecycle.
 mod auth;
+
+/// Single-quote a word for a POSIX shell on the server.
+pub(crate) fn shell_quote(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
 pub mod callback;
 mod exec;
 mod health;

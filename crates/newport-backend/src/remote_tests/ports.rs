@@ -52,6 +52,14 @@ printf '%s' "$base"
 const CLEANUP: &str =
     r#"pkill -f '^newport-test-fixture http 181' || true; rm -rf "$HOME"/ports.*"#;
 
+/// Discovery runs in the agent, deployed explicitly as every feature test does.
+async fn discovered() -> (crate::model::Server, Vec<DiscoveredPort>) {
+    let server =
+        super::installed_server("NEWPORT_TEST_SSH_PORT", "Disposable ports", "fixture").await;
+    let ports = discover(&super::owner(&server)).await.unwrap();
+    (server, ports)
+}
+
 fn on(ports: &[DiscoveredPort], port: u16) -> &DiscoveredPort {
     ports
         .iter()
@@ -64,7 +72,7 @@ fn on(ports: &[DiscoveredPort], port: u16) -> &DiscoveredPort {
 async fn discovery_attributes_listeners_to_projects_and_worktrees() {
     let base = run(LAYOUT).await;
     let shop = format!("{base}/shop");
-    let ports = discover(&server()).await.unwrap();
+    let (_, ports) = discovered().await;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // The main checkout: its repository is the project.
         let main = on(&ports, 18101);
@@ -190,8 +198,7 @@ async fn local_forward_reaches_a_discovered_port() {
 for i in $(seq 50); do ss -ltn | grep -q ':18300 ' && exit 0; sleep 0.1; done; exit 1"#,
     )
     .await;
-    let server = server();
-    let ports = discover(&server).await.unwrap();
+    let (server, ports) = discovered().await;
     let found = on(&ports, 18300).clone();
     let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local = reservation.local_addr().unwrap().port();

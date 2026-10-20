@@ -42,10 +42,16 @@ pub(crate) enum Read {
     Inspect(String),
     Disk(DiskPart),
     Compose(String),
+    RemoteAppsStatus,
+    RemoteAppsCatalogue,
 }
 impl Read {
     fn services(&self) -> bool {
         matches!(self, Self::Services | Self::UnitFile { .. })
+    }
+    /// The Remote apps agent and distribution, and the agent's applications.
+    fn remote_apps(&self) -> bool {
+        matches!(self, Self::RemoteAppsStatus | Self::RemoteAppsCatalogue)
     }
     fn policy(&self) -> Policy {
         let seconds = match self {
@@ -53,6 +59,9 @@ impl Read {
             Self::UnitFile { .. } => 10,
             // Measuring volumes walks them on disk; reuse a recent reading.
             Self::Disk(DiskPart::Volumes) => 60,
+            Self::RemoteAppsStatus => 30,
+            // Installed applications change rarely; Refresh reads them again.
+            Self::RemoteAppsCatalogue => 300,
             _ => 5,
         };
         Policy {
@@ -77,6 +86,8 @@ impl Read {
             Self::Inspect(id) => crate::containers::inspect(owner, id).await,
             Self::Disk(part) => crate::containers::disk(owner, *part).await,
             Self::Compose(project) => crate::compose::project(owner, project).await,
+            Self::RemoteAppsStatus => crate::remote_apps::status(owner).await,
+            Self::RemoteAppsCatalogue => crate::remote_apps::catalogue(owner).await,
         }
     }
 }
@@ -84,12 +95,14 @@ impl Read {
 pub(crate) struct Queries {
     services: Registry<Read, Value>,
     containers: Registry<Read, Value>,
+    remote_apps: Registry<Read, Value>,
 }
 impl Default for Queries {
     fn default() -> Self {
         Self {
             services: Registry::new(40),
             containers: Registry::new(40),
+            remote_apps: Registry::new(2),
         }
     }
 }
@@ -97,6 +110,7 @@ impl Queries {
     pub fn close(&self) {
         self.services.close();
         self.containers.close();
+        self.remote_apps.close();
     }
     pub fn invalidate_services(&self) {
         self.services.invalidate(|_| true);
@@ -111,11 +125,16 @@ pub(crate) async fn read(
     key: Read,
     force: bool,
 ) -> Result<Value, String> {
-    owner.require_agent_available()?;
-    let registry = if key.services() {
-        &owner.queries.services
+    // Remote apps use their own agent, not Needle.
+    let registry = if key.remote_apps() {
+        &owner.queries.remote_apps
     } else {
-        &owner.queries.containers
+        owner.require_agent_available()?;
+        if key.services() {
+            &owner.queries.services
+        } else {
+            &owner.queries.containers
+        }
     };
     let weak = Arc::downgrade(owner);
     let policy = key.policy();

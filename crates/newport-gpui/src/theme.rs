@@ -104,6 +104,48 @@ pub fn sidebar_selection(dark: bool) -> gpui_kit::Hsla {
     rgb(if dark { 0x34363c } else { 0xe8e9ec }).into()
 }
 
+/// Initials avatars: a quiet neutral, never a per-person hue.
+pub fn avatar_fill(dark: bool) -> gpui_kit::Hsla {
+    rgb(if dark { 0x45464d } else { 0xd9dadf }).into()
+}
+/// Newport Pro's plan tag.
+pub fn pro_fill(dark: bool) -> gpui_kit::Hsla {
+    rgb(if dark { 0x253d58 } else { 0xe5effb }).into()
+}
+pub fn pro_ink(dark: bool) -> gpui_kit::Hsla {
+    rgb(if dark { 0x9cc4fa } else { 0x1768d7 }).into()
+}
+/// The trial's plan tag; its ink is `warning`.
+pub fn trial_fill(dark: bool) -> gpui_kit::Hsla {
+    rgb(if dark { 0x3b3324 } else { 0xfbf1dc }).into()
+}
+
+/// The Remote apps welcome wall: eight soft hues, each a fill and its ink.
+pub fn launch_tile(hue: usize, dark: bool) -> (gpui_kit::Hsla, gpui_kit::Hsla) {
+    const LIGHT: [(u32, u32); 8] = [
+        (0xe6f1fb, 0x185fa5),
+        (0xe1f5ee, 0x0f6e56),
+        (0xfaece7, 0x993c1d),
+        (0xeeedfe, 0x534ab7),
+        (0xfaeeda, 0x854f0b),
+        (0xfbeaf0, 0x993556),
+        (0xeaf3de, 0x3b6d11),
+        (0xf1efe8, 0x5f5e5a),
+    ];
+    const DARK: [(u32, u32); 8] = [
+        (0x0c447c, 0xb5d4f4),
+        (0x085041, 0x9fe1cb),
+        (0x712b13, 0xf5c4b3),
+        (0x3c3489, 0xcecbf6),
+        (0x633806, 0xfac775),
+        (0x72243e, 0xf4c0d1),
+        (0x27500a, 0xc0dd97),
+        (0x444441, 0xd3d1c7),
+    ];
+    let (fill, ink) = if dark { DARK } else { LIGHT }[hue % 8];
+    (rgb(fill).into(), rgb(ink).into())
+}
+
 /// The first and second series in charts and sparklines.
 pub fn chart_primary(dark: bool) -> gpui_kit::Hsla {
     rgb(if dark { 0x3987e5 } else { 0x3478d4 }).into()

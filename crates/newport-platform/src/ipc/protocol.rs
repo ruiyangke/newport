@@ -18,6 +18,13 @@ pub const MAX_RESPONSE: usize = 32 * 1024 * 1024;
 /// Successful open keeps this socket alive as the PTY's ownership lease.
 /// EOF releases the PTY; terminal data still uses the ordinary read/write RPCs.
 pub const TERMINAL_OPEN_LEASE: &str = "$terminal_open_lease";
+/// After the reply, the client writes the remote command's stdin as raw bytes
+/// and reads frames: `[kind: u8][length: u32 BE][payload]`. Kind 0 carries
+/// stdout; kind 1, sent last, is JSON `{status, signal, stderr}` describing
+/// how the command ended. Closing either side ends the command.
+pub const REMOTE_STREAM_OPEN: &str = "$remote_stream_open";
+pub const REMOTE_STREAM_DATA: u8 = 0;
+pub const REMOTE_STREAM_EXIT: u8 = 1;
 /// Raise the existing application window without creating another profile owner.
 pub const ACTIVATE_WINDOW: &str = "native.activate";
 /// Admission priority only; callers still require normal connection validation.

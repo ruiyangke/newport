@@ -24,7 +24,8 @@ export function developmentLaunch(bundle, args, env = process.env) {
   // profile and agent selection explicitly, without putting signing secrets
   // or the launching terminal's identity in the application's environment.
   for (const name of [
-    "NEWPORT_DATA_DIR", "PORTHOP_DATA_DIR", "SSH_AUTH_SOCK", "RUST_LOG", "RUST_BACKTRACE",
+    "NEWPORT_DATA_DIR", "PORTHOP_DATA_DIR", "NEWPORT_ACCOUNT_URL", "SSH_AUTH_SOCK", "RUST_LOG",
+    "RUST_BACKTRACE",
   ]) {
     if (env[name] !== undefined) {
       const value = name.endsWith("DATA_DIR") && env[name] ? resolve(env[name]) : env[name];

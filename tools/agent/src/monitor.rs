@@ -601,6 +601,7 @@ fn handle_bound(
 ) -> io::Result<()> {
     let mut input = input;
     let mut file_watches: Option<crate::file_watch::Watches> = None;
+    let mut ports: Option<crate::ports::Ports> = None;
     loop {
         cancellation.check()?;
         let mut line = String::new();
@@ -618,6 +619,10 @@ fn handle_bound(
             Some("files_watch") => file_watches
                 .get_or_insert_with(crate::file_watch::Watches::new)
                 .handle(&request),
+            Some("ports") => ports
+                .get_or_insert_with(crate::ports::Ports::system)
+                .handle(&request, containers)
+                .expect("a ports request"),
             // The desktop gives each feature its own channel. Non-metrics
             // channels never start the CPU/process sampling thread.
             Some(op) => services

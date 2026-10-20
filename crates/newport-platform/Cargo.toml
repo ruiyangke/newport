@@ -17,6 +17,7 @@ name = "update_startup_check"
 required-features = ["updates"]
 
 [features]
+account = ["dep:ureq", "dep:base64", "dep:whoami"]
 pdf = ["dep:base64", "dep:cocoa", "dep:objc", "dep:libloading"]
 tray = ["dep:tray-icon", "dep:png"]
 updates = ["dep:ureq", "dep:minisign-verify", "dep:base64", "dep:semver", "dep:tar", "dep:flate2", "dep:tempfile", "dep:fs2", "tokio/process", "tokio/io-util"]
@@ -43,6 +44,7 @@ flate2 = { version = "1", optional = true }
 tempfile = { version = "3", optional = true }
 serde = { version = "1", features = ["derive"] }
 fs2 = { version = "0.4", optional = true }
+whoami = { version = "1.6.1", default-features = false, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
