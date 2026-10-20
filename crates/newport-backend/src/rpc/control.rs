@@ -23,7 +23,6 @@ pub enum Command {
     DeleteServer,
     ForwardDiscoveredPort,
     ForwardTunnelBatch,
-    ForwardPort,
     SaveTunnel,
     UpdateTunnel,
     DeleteTunnel,
@@ -31,9 +30,7 @@ pub enum Command {
     SetClipboardEnabled,
     SetIntegrationEnabled,
     TestConnection,
-    DiscoverPorts,
     ConnectionsQuery,
-    InstallClipboardHelper,
     ReinstallAgent,
     RecoverAgent,
     RemoveAgent,
@@ -44,7 +41,6 @@ pub enum Command {
     ReviewAgent,
     KeepAgentFile,
     OpenTunnel,
-    OpenUrl,
     OpenTerminalLink,
 }
 impl Command {
@@ -128,11 +124,6 @@ impl Command {
                 .await
                 .map_err(error)?,
             ),
-            Self::ForwardPort => encode(
-                crate::commands::forward_port(services.manager, argument(args, "tunnel")?)
-                    .await
-                    .map_err(error)?,
-            ),
             Self::SaveTunnel => encode(
                 crate::commands::save_tunnel(services.manager, argument(args, "tunnel")?)
                     .await
@@ -191,11 +182,6 @@ impl Command {
                     .await
                     .map_err(error)?,
             ),
-            Self::DiscoverPorts => encode(
-                crate::commands::discover_ports(services.manager, argument(args, "id")?)
-                    .await
-                    .map_err(error)?,
-            ),
             Self::ConnectionsQuery => encode(
                 crate::commands::connections_query(
                     services.manager,
@@ -204,11 +190,6 @@ impl Command {
                 )
                 .await
                 .map_err(error)?,
-            ),
-            Self::InstallClipboardHelper => encode(
-                crate::commands::install_clipboard_helper(services.manager, argument(args, "id")?)
-                    .await
-                    .map_err(error)?,
             ),
             Self::ResumeAgent => encode(
                 crate::commands::resume_agent(
@@ -296,11 +277,6 @@ impl Command {
                 )
                 .await
                 .map_err(error)?,
-            ),
-            Self::OpenUrl => encode(
-                crate::commands::open_url(services.desktop.clone(), argument(args, "url")?)
-                    .await
-                    .map_err(error)?,
             ),
             Self::OpenTerminalLink => encode(
                 crate::commands::open_terminal_link(

@@ -51,15 +51,22 @@ impl Startup {
     }
 
     fn read_settings(&self) -> Result<Settings, String> {
-        let Some(_) = &self.executable else {
+        let Some(executable) = &self.executable else {
             return Ok(Settings {
                 enabled: false,
                 available: false,
             });
         };
+        // macOS registrations name the executable; a moved app reads as off.
+        #[cfg(target_os = "macos")]
+        let enabled = os::Registration::current()?.enabled_for(executable);
+        #[cfg(not(target_os = "macos"))]
+        let _ = executable;
+        #[cfg(windows)]
+        let enabled = os::Registration::current()?.enabled();
         #[cfg(any(target_os = "macos", windows))]
         return Ok(Settings {
-            enabled: os::Registration::current()?.enabled()?,
+            enabled: enabled?,
             available: true,
         });
         #[cfg(not(any(target_os = "macos", windows)))]

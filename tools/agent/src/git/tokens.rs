@@ -1,10 +1,9 @@
 //! Stateless request tokens.
 //!
-//! `repoId`, `snapshot`, `entryId` and `cursor` used to be keys into tables an
-//! RPC process kept for the one client connected to it. They are now
-//! self-describing: each carries what the agent needs to act on it, so any
-//! agent process of the same user can serve a request, whichever channel issued
-//! its tokens -- a reconnect, or a second channel, no longer invalidates them.
+//! `repoId`, `snapshot`, `entryId` and `cursor` are self-describing: each
+//! carries what the agent needs to act on it, so any agent process of the same
+//! user can serve a request, whichever channel issued its tokens -- a reconnect,
+//! or a second channel, does not invalidate them.
 //!
 //! Nothing here is a secret or an authorisation boundary; SSH is that. A token
 //! is a claim the agent re-verifies against the repository on every use: the

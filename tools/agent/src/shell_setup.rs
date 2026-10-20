@@ -26,9 +26,9 @@ fn block_range(original: &str) -> io::Result<Option<std::ops::Range<usize>>> {
     for line in original.split_inclusive('\n') {
         let length = line.len();
         let line = line.trim_end_matches(['\r', '\n']);
-        if crate::migration::shell_start(line) {
+        if line == START {
             starts.push(offset);
-        } else if crate::migration::shell_end(line) {
+        } else if line == END {
             ends.push(offset + length);
         }
         offset += length;
@@ -119,7 +119,7 @@ pub(crate) fn plan(
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".config"))
                 .join("fish/conf.d");
-            vec![crate::migration::fish_config(&dir)]
+            vec![dir.join("newport.fish")]
         }
         _ => {
             return Ok(vec![format!(
@@ -191,19 +191,19 @@ fn plan_path(
 mod tests {
     use super::*;
     #[test]
-    fn block_recovery_preserves_surroundings_and_restores_legacy_content() {
+    fn block_recovery_preserves_surroundings_and_restores_previous_content() {
         for before in [
             "# original\n",
             "# original without newline",
             "",
-            "# prefix\n# >>> Porthop >>>\nold command\n# <<< Porthop <<<\n# suffix\n",
+            "# prefix\n# >>> Newport >>>\nold command\n# <<< Newport <<<\n# suffix\n",
         ] {
             let after = merge(before, &block(false)).unwrap();
             let current = format!("# new prefix\n{after}# new suffix\n");
             let restored = restore_block(before, &after, &current).unwrap();
             assert!(restored.starts_with("# new prefix\n"));
             assert!(restored.ends_with("# new suffix\n"));
-            assert!(!restored.contains(START));
+            assert_eq!(restored.contains(START), before.contains(START));
             assert_eq!(
                 restored.contains("old command"),
                 before.contains("old command")
@@ -236,18 +236,6 @@ mod tests {
         )?;
         plan_path(&mut transaction, path, fish)?;
         transaction.apply()
-    }
-    #[test]
-    fn replaces_legacy_brand_block_without_duplicating_shell_setup() {
-        let old =
-            "export CUSTOM=yes\n# >>> Porthop >>>\nold command\n# <<< Porthop <<<\n# user footer\n";
-        let new = merge(old, &block(false)).unwrap();
-        assert!(new.starts_with("export CUSTOM=yes\n"));
-        assert!(new.ends_with("# user footer\n"));
-        assert!(!new.contains("Porthop"));
-        assert_eq!(new.matches(START).count(), 1);
-        assert_eq!(merge(&new, &block(false)).unwrap(), new);
-        assert!(merge("# >>> Porthop >>>\nincomplete", &block(false)).is_err());
     }
     #[test]
     fn preserves_content_and_installs_once() {

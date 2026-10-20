@@ -40,10 +40,6 @@ pub(super) fn server_menu(menu: PopupMenu, view: WeakEntity<Newport>, cx: &App) 
             }),
     )
 }
-/// The one toast for a sidebar width that couldn’t be remembered.
-pub(super) fn sidebar_width_error(error: impl std::fmt::Display) -> Notification {
-    Notification::error(format!("Couldn’t save sidebar width: {error}."))
-}
 impl Newport {
     pub(super) fn configuration_available(&self) -> bool {
         !self.snapshot.is_null()
@@ -147,15 +143,13 @@ impl Newport {
             return;
         }
         let viewport = f32::from(window.viewport_size().width);
-        let result = if reset {
+        if reset {
             self.sidebar_layout.reset(viewport, cx)
         } else {
             self.sidebar_layout
                 .set_width(self.sidebar_layout.width(viewport) + delta, viewport, cx)
-        };
-        if let Err(error) = result {
-            self.notification = Some(sidebar_width_error(error));
         }
+        self.save_sidebar();
         cx.notify();
     }
     pub(super) fn selected_server(&self) -> Option<&Value> {

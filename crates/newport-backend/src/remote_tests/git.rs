@@ -6,8 +6,8 @@ use crate::git::{
 use crate::ssh::ExecSession;
 use uuid::Uuid;
 
-/// Optional test-only wire capture for exercising the TypeScript boundary against
-/// real agent responses. This wrapper is never part of production RPC traffic.
+/// Optional test-only wire capture that feeds real agent responses to the
+/// protocol oracle in `tools/git-contract`. This wrapper is never part of production RPC traffic.
 #[path = "git_metrics.rs"]
 mod metrics;
 struct Client<S> {
@@ -336,7 +336,7 @@ async fn git_rpc_roundtrip() {
             break;
         }
     }
-    let legacy_lines: Vec<_> = diff["diff"]["files"]
+    let full_lines: Vec<_> = diff["diff"]["files"]
         .as_array()
         .unwrap()
         .iter()
@@ -352,7 +352,7 @@ async fn git_rpc_roundtrip() {
             })
         })
         .collect();
-    assert_eq!(paged_lines, legacy_lines);
+    assert_eq!(paged_lines, full_lines);
     let history = client
         .request(Request::History {
             message_bytes: None,

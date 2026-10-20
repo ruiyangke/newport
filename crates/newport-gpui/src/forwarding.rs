@@ -47,7 +47,7 @@ mod tests {
     use serde_json::json;
     #[test]
     fn connected_transport_does_not_claim_destination_is_up() {
-        let runtime = json!({"tunnels":{"t":{"status":"connected"}},"tunnelHealth":{"t":[{"status":"unavailable","message":"Connection refused"}]}});
+        let runtime = json!({"tunnels":{"t":{"status":"connected"}},"tunnelHealth":{"t":[{"remotePort":8080,"status":"unavailable","message":"Connection refused"}]}});
         assert!(status(&runtime, "t").contains("destination unavailable"));
         assert!(
             status(&json!({"tunnels":{"t":{"status":"connected"}}}), "t").contains("not confirmed")
@@ -61,8 +61,7 @@ mod tests {
             "tunnelHealth":{"t":[
                 {"remotePort":8079,"status":"unavailable","message":"Connection refused"},
                 {"remotePort":8080,"status":"reachable"},
-                {"remotePort":8081,"status":"checking"},
-                {"status":"blocked","message":"Unscoped legacy result"}
+                {"remotePort":8081,"status":"checking"}
             ]}
         });
         assert_eq!(

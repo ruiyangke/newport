@@ -1772,14 +1772,16 @@ mod tests {
         );
         // A shell-helper collision causes activation to roll back while the same
         // remote lock is held; it cannot undo another desktop's later activation.
-        lease.execute("printf 'unrelated' > \"$HOME/.local/bin/newport-browser\"; printf '#!/bin/sh\\necho newport-agent/4\\n' > \"$HOME/.local/bin/.legacy\"; chmod 700 \"$HOME/.local/bin/.legacy\"; mv -f \"$HOME/.local/bin/.legacy\" \"$HOME/.local/bin/newport-agent\"", None).await.unwrap();
-        let legacy = check(&connection).await.unwrap().installed_hash.unwrap();
-        assert_ne!(legacy, hash);
+        // Point the entry point at another build so it differs from the build
+        // the live runtime runs.
+        lease.execute("printf 'unrelated' > \"$HOME/.local/bin/newport-browser\"; builds=\"$HOME/.local/share/newport/needle/builds\"; stub=$(mktemp); printf '#!/bin/sh\\necho newport-agent\\n' > \"$stub\"; other=\"$builds/$(sha256sum \"$stub\" | cut -d' ' -f1)\"; mkdir -m 700 \"$other\"; mv \"$stub\" \"$other/newport-agent\"; chmod 700 \"$other/newport-agent\"; ln -sfn \"$other/newport-agent\" \"$HOME/.local/bin/newport-agent\"", None).await.unwrap();
+        let other = check(&connection).await.unwrap().installed_hash.unwrap();
+        assert_ne!(other, hash);
         let error = lease.install(true, true).await.unwrap_err();
         assert!(error.contains("no helper changes remain"), "{error}");
         assert_eq!(
             check(&connection).await.unwrap().installed_hash.as_deref(),
-            Some(legacy.as_str())
+            Some(other.as_str())
         );
         assert_eq!(
             lease
@@ -1789,7 +1791,7 @@ mod tests {
             "unrelated"
         );
         assert!(!worker.is_closed());
-        // The entry point is now the restored legacy stub. New work on the
+        // The entry point is the restored other build. New work on the
         // surviving runtime must launch its retained build, not that entry point.
         let monitor = owner.acquire(&server).await.unwrap();
         let (mut channel, _) = monitor

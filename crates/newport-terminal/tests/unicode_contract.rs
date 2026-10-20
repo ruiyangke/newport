@@ -1,4 +1,4 @@
-//! Independent contracts for intentional differences from the archived xterm
+//! Independent contracts for intentional differences from the xterm
 //! grapheme fixtures. Expectations come from pinned Ghostty's UUCODE tables and
 //! `src/unicode/grapheme.zig`, not from snapshots of the engine under test.
 //!

@@ -228,11 +228,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_journal_reads_without_adopting_history_and_invalid_identity_is_rejected() {
+    async fn invalid_helper_recovery_identity_is_rejected() {
         let home = tempfile::tempdir().unwrap();
-        let path = home.path().join("journal.json");
-        std::fs::write(&path, br#"{"version":1,"operations":[],"removals":[]}"#).unwrap();
-        let store = Store::new(path);
+        let store = Store::new(home.path().join("journal.json"));
         let server = super::super::tests::server();
         assert!(
             store

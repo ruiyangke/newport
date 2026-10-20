@@ -37,10 +37,8 @@ test("health probes retain direct execution, output and process exit status", ()
 test("login launch remains background and empty profile overrides remain invalid", () => {
   const launch = developmentLaunch("target/Newport.app", ["--autostart"], {
     NEWPORT_DATA_DIR: "",
-    PORTHOP_DATA_DIR: "legacy profile",
   });
   assert.ok(launch.args.includes("-g"));
   assert.ok(launch.args.includes("NEWPORT_DATA_DIR="));
-  assert.ok(launch.args.includes(`PORTHOP_DATA_DIR=${resolve("legacy profile")}`));
   assert.deepEqual(launch.args.slice(-2), ["--args", "--autostart"]);
 });

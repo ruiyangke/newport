@@ -23,8 +23,8 @@ fn terminal_setup_status(operations: &Value, removed: bool) -> &'static str {
             _ => "Needs attention",
         };
     }
-    // Standalone history proves changes were applied, but older receipts do
-    // not say whether every shell file was configured. Keep that distinction.
+    // Standalone history proves changes were applied, but does not say whether
+    // every shell file was configured. Keep that distinction.
     let history = &operations["helperHistory"];
     if history["error"].is_null()
         && history["supported"] == true

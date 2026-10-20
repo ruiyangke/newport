@@ -37,7 +37,6 @@ fn cancel_on_disconnect(method: &str) -> bool {
         newport_platform::ipc::protocol::ACTIVATE_WINDOW
             | "test_connection"
             | "setup_inspect"
-            | "discover_ports"
             | "cockpit_collect"
             | "services_snapshot"
             | "service_logs"
@@ -55,8 +54,6 @@ fn cancel_on_disconnect(method: &str) -> bool {
             | "files_read_text"
             | "files_project_index"
             | "files_write_text"
-            | "files_upload"
-            | "files_download"
             | "native.files_upload"
             | "native.files_download"
     )
@@ -231,8 +228,6 @@ mod tests {
             newport_platform::ipc::protocol::ACTIVATE_WINDOW,
             "files_list",
             "files_preview",
-            "files_upload",
-            "files_download",
             "native.files_upload",
             "native.files_download",
         ] {

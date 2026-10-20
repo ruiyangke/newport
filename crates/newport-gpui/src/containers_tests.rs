@@ -949,7 +949,7 @@ fn keyboard_navigation_and_tabs_only_read_with_one_selected_tab_stop(cx: &mut Te
         panel.read_with(cx, |p, _| p.selected.clone()),
         Some("c:cache".into())
     );
-    // Disk usage lives in the toolbar now; the list starts with projects.
+    // Disk usage lives in the toolbar; the list starts with projects.
     key(cx, "home");
     assert_eq!(
         panel.read_with(cx, |p, _| p.selected.clone()),

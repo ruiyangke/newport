@@ -232,109 +232,6 @@ fn fingerprint(destination: &Path) -> Result<BTreeMap<&'static str, [u8; 32]>> {
         .collect()
 }
 
-fn legacy_installer() -> Result<Option<PathBuf>> {
-    let Some(path) = std::env::var_os("NEWPORT_TEST_LEGACY_INSTALLER") else {
-        return Ok(None);
-    };
-    let path = PathBuf::from(path);
-    ensure!(
-        path.is_absolute() && path.is_file(),
-        "Invalid legacy installer path"
-    );
-    let arch = std::env::consts::ARCH;
-    let manifest: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../resources/test-fixtures/legacy-desktop-release.json"
-    ))?;
-    let name = format!("Newport-0.3.0-windows-{arch}-setup.exe");
-    let asset = manifest["assets"]
-        .as_array()
-        .context("Missing released baseline assets")?
-        .iter()
-        .find(|asset| asset["name"] == name)
-        .context("No released baseline for this architecture")?;
-    let digest: String = Sha256::digest(fs::read(&path)?)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    ensure!(
-        asset["sha256"].as_str() == Some(digest.as_str()),
-        "Legacy installer does not match the pinned release digest"
-    );
-    Ok(Some(path))
-}
-
-fn upgrade_released_baseline(legacy: &Path, installer: &Path, destination: &Path) -> Result<()> {
-    ensure!(
-        install(legacy, destination, false)?.success(),
-        "Legacy install failed"
-    );
-    let version = || -> Result<String> {
-        Ok(registration(UNINSTALL)?
-            .context("Missing release registration")?
-            .get_value("DisplayVersion")?)
-    };
-    ensure!(version()? == "0.3.0", "Wrong installed baseline version");
-    let binary = destination.join("newport.exe");
-    let old_hash = Sha256::digest(fs::read(&binary)?);
-    let profile = destination.join("profile-canary");
-    let snapshot =
-        include_bytes!("../../../resources/test-fixtures/released-profile/v0.3.0.stronghold");
-    fs::write(profile.join("profiles.stronghold"), snapshot)?;
-
-    // An in-use released executable must survive a refused replacement intact.
-    let lock = OpenOptions::new().read(true).share_mode(1).open(&binary)?;
-    let status = install(installer, destination, false)?;
-    drop(lock);
-    ensure!(!status.success(), "Replaced a locked released executable");
-    ensure!(
-        Sha256::digest(fs::read(&binary)?) == old_hash,
-        "Changed released executable on failure"
-    );
-    ensure!(
-        version()? == "0.3.0",
-        "Changed release registration on failure"
-    );
-    intact(destination)?;
-
-    ensure!(
-        install(installer, destination, true)?.success(),
-        "Released-to-native upgrade failed"
-    );
-    let metadata: serde_json::Value =
-        serde_json::from_slice(&fs::read(destination.join("newport-package.json"))?)?;
-    ensure!(
-        metadata["version"].as_str() == Some(version()?.as_str()),
-        "Native version registration differs from package"
-    );
-    ensure!(
-        version()? != "0.3.0",
-        "Upgrade retained the released version"
-    );
-    let key = destination
-        .parent()
-        .context("Missing fixture parent")?
-        .join("test-key");
-    fs::write(&key, [7u8; 32])?;
-    ensure!(
-        wait(
-            Command::new(&binary)
-                .arg("--check-update-health")
-                .env("NEWPORT_DATA_DIR", &profile)
-                .env("NEWPORT_TEST_VAULT_KEY_FILE", &key)
-        )?
-        .success(),
-        "Upgraded native app cannot open the released profile"
-    );
-    ensure!(
-        fs::read(profile.join("profiles.stronghold"))? == snapshot,
-        "Upgrade rewrote released vault on read"
-    );
-    eprintln!(
-        "PASS: pinned 0.3.0 install, locked-file rollback, native upgrade and released-profile health"
-    );
-    Ok(())
-}
-
 fn intact(destination: &Path) -> Result<()> {
     ensure!(
         fs::read(destination.join("profile-canary/keep.txt"))? == CANARY,
@@ -357,17 +254,13 @@ fn intact(destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn exercise(installer: &Path, destination: &Path, legacy: Option<&Path>) -> Result<()> {
+fn exercise(installer: &Path, destination: &Path) -> Result<()> {
     fs::create_dir_all(destination.join("profile-canary"))?;
     fs::write(destination.join("profile-canary/keep.txt"), CANARY)?;
-    if let Some(legacy) = legacy {
-        upgrade_released_baseline(legacy, installer, destination)?;
-    } else {
-        ensure!(
-            install(installer, destination, false)?.success(),
-            "Fresh install failed"
-        );
-    }
+    ensure!(
+        install(installer, destination, false)?.success(),
+        "Fresh install failed"
+    );
     intact(destination)?;
     ensure!(
         wait(Command::new(destination.join("newport.exe")).arg("--check-grammars"))?.success(),
@@ -425,15 +318,6 @@ fn exercise(installer: &Path, destination: &Path, legacy: Option<&Path>) -> Resu
         fs::read(destination.join("profile-canary/keep.txt"))? == CANARY,
         "Uninstall changed profile"
     );
-    if legacy.is_some() {
-        ensure!(
-            fs::read(destination.join("profile-canary/profiles.stronghold"))?
-                == include_bytes!(
-                    "../../../resources/test-fixtures/released-profile/v0.3.0.stronghold"
-                ),
-            "Uninstall changed the released vault"
-        );
-    }
     no_existing_shortcuts()?;
     for name in [
         "Fonts",
@@ -464,7 +348,6 @@ fn native_installer_preserves_profiles_and_recovers_failed_replacements() -> Res
         "Refusing to touch an existing Newport installation"
     );
     no_existing_shortcuts()?;
-    let legacy = legacy_installer()?;
     // Keep the directory on any failure for recovery and diagnosis. Successful
     // cleanup removes only this test's freshly created, unique directory.
     let root = tempfile::Builder::new()
@@ -473,7 +356,7 @@ fn native_installer_preserves_profiles_and_recovers_failed_replacements() -> Res
         .keep();
     let destination = root.join("Newport test install");
     eprintln!("Installer acceptance workspace: {}", root.display());
-    exercise(&installer, &destination, legacy.as_deref()).with_context(|| {
+    exercise(&installer, &destination).with_context(|| {
         format!(
             "Installer test failed; files retained at {}",
             root.display()

@@ -168,9 +168,6 @@ impl Installation {
         Ok(path)
     }
     fn current(&self) -> io::Result<String> {
-        self.inspect_current(true)
-    }
-    fn inspect_current(&self, retain: bool) -> io::Result<String> {
         let metadata = match fs::symlink_metadata(&self.active) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok("missing".into()),
@@ -192,32 +189,7 @@ impl Installation {
             self.verify(hash)?;
             return Ok(hash.into());
         }
-        // Adopt only recognized legacy executables, preserving their exact bytes
-        // before replacing the entry point. Never execute a file to identify it.
-        if !metadata.is_file()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.len() > 128 * 1024 * 1024
-        {
-            return Err(io::Error::other("Cannot replace unrelated newport-agent"));
-        }
-        let mut bytes = Vec::new();
-        fs::File::open(&self.active)?
-            .take(128 * 1024 * 1024 + 1)
-            .read_to_end(&mut bytes)?;
-        if !bytes
-            .windows(15)
-            .any(|s| s.starts_with(b"newport-agent/") && (b'1'..=b'6').contains(&s[14]))
-        {
-            return Err(io::Error::other("Cannot replace unrelated newport-agent"));
-        }
-        let hash = Sha256::digest(&bytes)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
-        if retain {
-            self.retain(&self.active, &hash)?;
-        }
-        Ok(hash)
+        Err(io::Error::other("Cannot replace unrelated newport-agent"))
     }
     fn replace(&self, hash: &str) -> io::Result<()> {
         if hash == "missing" {
@@ -576,9 +548,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
             if crate::runtime::build_identity()? != *hash {
                 return Err(io::Error::other("Needle candidate checksum mismatch"));
             }
-            installation.retain(&env::current_exe()?, hash)?;
-            removal::record_compatibility(&installation, hash)?;
-            Ok(())
+            installation.retain(&env::current_exe()?, hash).map(|_| ())
         }
         [operation, hash, expected] if operation == "activate" => {
             installation.activate(hash, expected)
@@ -627,18 +597,19 @@ mod tests {
     }
 
     #[test]
-    fn adoption_retains_previous_bytes_and_rollback_keeps_both_builds() {
+    fn activation_retains_previous_build_and_rollback_keeps_both_builds() {
         let home = tempfile::tempdir().unwrap();
         let install = Installation::open(home.path()).unwrap();
-        let old = b"legacy fixture newport-agent/4";
-        fs::write(&install.active, old).unwrap();
-        let before = checksum(&install.active).unwrap();
+        fs::write(&install.active, b"unrelated").unwrap();
+        assert!(install.current().is_err());
+        fs::remove_file(&install.active).unwrap();
+        let before = candidate(&install, b"previous build");
+        install.activate(&before, "missing").unwrap();
         let next = candidate(&install, b"new build");
         install.activate(&next, &before).unwrap();
         assert_eq!(install.current().unwrap(), next);
-        assert_eq!(fs::read(install.binary(&before)).unwrap(), old);
         install.replace(&before).unwrap();
-        assert_eq!(fs::read(&install.active).unwrap(), old);
+        assert_eq!(install.current().unwrap(), before);
         assert!(
             install.verify(&next).is_ok(),
             "rollback retains the candidate too"

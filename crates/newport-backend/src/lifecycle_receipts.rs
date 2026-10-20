@@ -48,14 +48,12 @@ pub struct OperationsSnapshot {
 }
 
 /// Each server journal covers deployments, removals and helper recovery.
-/// Global version-one and array-only stores migrate on the first write.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Journal {
     version: u32,
     operations: Vec<Record>,
     removals: Vec<Removal>,
-    #[serde(default)]
     helper_recoveries: Vec<HelperRecovery>,
 }
 impl Default for Journal {
@@ -67,12 +65,6 @@ impl Default for Journal {
             helper_recoveries: Vec::new(),
         }
     }
-}
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Loaded {
-    Versioned(Journal),
-    Legacy(Vec<Record>),
 }
 
 #[path = "lifecycle_storage.rs"]
@@ -195,29 +187,6 @@ impl Journal {
                     .iter()
                     .map(|r| (r.operation_id, r.server_id)),
             )
-    }
-    fn for_owner(&self, server: Uuid) -> Self {
-        Self {
-            version: self.version,
-            operations: self
-                .operations
-                .iter()
-                .filter(|r| r.server_id == server)
-                .cloned()
-                .collect(),
-            removals: self
-                .removals
-                .iter()
-                .filter(|r| r.server_id == server)
-                .cloned()
-                .collect(),
-            helper_recoveries: self
-                .helper_recoveries
-                .iter()
-                .filter(|r| r.server_id == server)
-                .cloned()
-                .collect(),
-        }
     }
     fn validate(&self) -> Result<(), String> {
         let mut ids = std::collections::HashSet::new();
@@ -421,17 +390,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_journal_migrates_atomically_and_removal_barrier_survives_restart() {
+    async fn fresh_store_writes_descriptor_and_removal_barrier_survives_restart() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("needle.json");
         let server = server();
-        let mut installed = record(&server);
-        installed.phase = Phase::Ready;
-        let legacy = serde_json::to_vec(&vec![installed.clone()]).unwrap();
-        fs::write(&path, &legacy).unwrap();
+        let installed = record(&server);
         let store = Store::new(path.clone());
-        assert_eq!(store.for_server(&server).unwrap().len(), 1);
-        assert_eq!(fs::read(&path).unwrap(), legacy, "reading must not migrate");
+        assert!(store.for_server(&server).unwrap().is_empty());
+        assert!(!path.exists(), "reading must not write");
+        store.begin(installed.clone()).await.unwrap();
+        store
+            .update(installed.intent.operation_id, Some(Phase::Ready), None)
+            .await
+            .unwrap();
         let id = Uuid::new_v4();
         let build = "2".repeat(64);
         store.begin_removal(&server, id, &build).await.unwrap();

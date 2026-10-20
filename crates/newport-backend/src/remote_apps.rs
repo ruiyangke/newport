@@ -5,17 +5,14 @@ use crate::ssh::shell_quote as quote;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// Sets `agent` to the installed agent, or empty. Each release's selected
-/// generation (`current`) or its validated legacy layout counts; incomplete
-/// installs are skipped. Among installed releases, the most recently
-/// installed one is used.
+/// Sets `agent` to the installed agent, or empty. Each release's selected,
+/// validated generation (`current`) counts; incomplete installs are skipped.
+/// Among installed releases, the most recently installed one is used.
 const FIND_AGENT: &str = r#"cache="${NEWPORT_REMOTE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/newport-remote}"
 set --
 for release in "$cache"/releases/system/* "$cache"/releases/nix/*; do
     if [ -x "$release/current/run-agent" ] && [ -f "$release/current/.validated-v6" ]; then
         set -- "$@" "$release/current/run-agent"
-    elif [ -x "$release/run-agent" ] && [ -f "$release/.installed-v5" ]; then
-        set -- "$@" "$release/run-agent"
     fi
 done
 agent=

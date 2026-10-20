@@ -2,14 +2,10 @@
 //! This coordination file is never unlinked: replacing a live lock would split
 //! admission between two inodes. It contains no installation or shell state.
 use fs2::FileExt;
-use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    os::unix::{
-        ffi::OsStrExt,
-        fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
-    },
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 
@@ -32,10 +28,9 @@ impl Drop for Lease {
 
 pub struct ServiceLease {
     _lease: Lease,
-    _legacy: Option<Lease>,
 }
 
-pub struct MaintenanceLease(Lease, Option<Lease>);
+pub struct MaintenanceLease(Lease);
 
 fn identity(metadata: &fs::Metadata) -> (u64, u64) {
     (metadata.dev(), metadata.ino())
@@ -47,66 +42,30 @@ fn directory(home: &Path) -> io::Result<PathBuf> {
     crate::paths::private_home_directory(home, ".local/state/newport/usage")
 }
 
-fn legacy_directory(home: &Path) -> io::Result<PathBuf> {
-    let home = home.canonicalize()?;
-    if !home.is_dir() {
-        return Err(io::Error::other("Needle HOME is not a directory"));
-    }
-    let hash: String = Sha256::digest(home.as_os_str().as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    Ok(Path::new("/tmp").join(format!("newport-use-{}-{hash}", unsafe { libc::geteuid() })))
-}
-
 impl ServiceLease {
     /// Every service holds its own descriptor, independent of its controller.
     pub fn acquire() -> io::Result<Self> {
         let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is required"))?;
         let lease = Lease::acquire(Path::new(&home), false)?;
         crate::deployment::require_service_ready(Path::new(&home))?;
-        let legacy = Lease::legacy(Path::new(&home), false)?;
-        Ok(Self {
-            _lease: lease,
-            _legacy: legacy,
-        })
+        Ok(Self { _lease: lease })
     }
 }
 
 impl MaintenanceLease {
-    /// The caller must retain this lease throughout destructive maintenance and
-    /// separately establish compatibility of older installed/running builds.
-    /// A successful lease alone cannot account for pre-lease agent versions.
+    /// The caller must retain this lease throughout destructive maintenance.
     pub fn acquire(home: &Path) -> io::Result<Self> {
-        Ok(Self(
-            Lease::acquire(home, true)?,
-            Lease::legacy(home, true)?,
-        ))
+        Lease::acquire(home, true).map(Self)
     }
 
     pub fn validate(&self) -> io::Result<()> {
-        self.0.validate()?;
-        if let Some(legacy) = &self.1 {
-            legacy.validate()?;
-        }
-        Ok(())
+        self.0.validate()
     }
 }
 
 impl Lease {
     fn acquire(home: &Path, exclusive: bool) -> io::Result<Self> {
         Self::at(directory(home)?, exclusive)
-    }
-
-    // Existing older processes must keep sharing their original inode. Never
-    // create a new global temporary path, delete one, or ignore an access error.
-    fn legacy(home: &Path, exclusive: bool) -> io::Result<Option<Self>> {
-        let root = legacy_directory(home)?;
-        match fs::symlink_metadata(&root) {
-            Ok(_) => Self::at(root, exclusive).map(Some),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
-        }
     }
 
     fn at(root: PathBuf, exclusive: bool) -> io::Result<Self> {
@@ -205,36 +164,14 @@ mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     #[test]
-    fn fresh_installation_uses_home_without_creating_a_legacy_lock() {
+    fn fresh_installation_creates_the_home_lease() {
         let home = tempfile::tempdir().unwrap();
-        let legacy = legacy_directory(home.path()).unwrap();
         let lease = MaintenanceLease::acquire(home.path()).unwrap();
         assert!(home
             .path()
             .join(".local/state/newport/usage/lease")
             .is_file());
-        assert!(!legacy.exists());
         lease.validate().unwrap();
-    }
-
-    #[test]
-    fn maintenance_honors_an_existing_legacy_service_lock() {
-        let home = tempfile::tempdir().unwrap();
-        let legacy = legacy_directory(home.path()).unwrap();
-        let old_service = Lease::at(legacy.clone(), false).unwrap();
-        assert_eq!(
-            MaintenanceLease::acquire(home.path()).err().unwrap().kind(),
-            io::ErrorKind::WouldBlock
-        );
-        drop(old_service);
-        let maintenance = MaintenanceLease::acquire(home.path()).unwrap();
-        assert_eq!(
-            Lease::at(legacy.clone(), false).err().unwrap().kind(),
-            io::ErrorKind::WouldBlock
-        );
-        maintenance.validate().unwrap();
-        drop(maintenance);
-        fs::remove_dir_all(legacy).unwrap();
     }
 
     #[test]

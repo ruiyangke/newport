@@ -264,7 +264,6 @@ struct Newport {
     restore_git: Option<workspace_state::GitDestination>,
     git_destinations: std::collections::BTreeMap<String, workspace_state::GitDestination>,
     appearance: appearance::Appearance,
-    appearance_store: appearance::AppearanceStore,
     settings_state: newport_client::settings::Settings,
     settings_ui: settings::SettingsUi,
     account: newport_client::account::Account,
@@ -441,23 +440,24 @@ impl Newport {
             }
         })
         .detach();
-        let (sidebar_layout, sidebar_error) = sidebar_layout::SidebarLayout::new(cx);
-        let appearance_store = appearance::AppearanceStore::from_env();
-        let (appearance, appearance_error) = match appearance_store.load() {
-            Ok(value) => (value, None),
-            Err(error) => (
-                appearance::Appearance::System,
-                Some(format!("Couldn’t load appearance: {error}.")),
-            ),
-        };
+        // Read once, before the first frame; saved through the backend.
+        let (preferences, preferences_error) = newport_client::window_preferences::load(
+            newport_client::profile::directory().as_deref(),
+        );
+        let sidebar_layout = sidebar_layout::SidebarLayout::new(
+            preferences.sidebar_width,
+            preferences.sidebar_compact,
+            cx,
+        );
+        let appearance = preferences.appearance;
         theme::install(appearance.is_dark(window.appearance()), cx);
         cx.observe_window_appearance(window, |this, window, cx| {
             theme::install(this.appearance.is_dark(window.appearance()), cx);
             cx.notify();
         })
         .detach();
-        // Tauri's query focus manager follows document visibility, not keyboard
-        // focus. A visible but inactive native window should keep polling too.
+        // Polling follows visibility, not keyboard focus. A visible but
+        // inactive window keeps polling.
         cx.observe_window_visibility(window, |this, visibility, _, cx| {
             this.window_visibility_changed(visibility.is_visible(), cx);
         })
@@ -508,7 +508,6 @@ impl Newport {
             restore_git: restored.git,
             git_destinations: restored.git_destinations,
             appearance,
-            appearance_store,
             settings_state: newport_client::settings::Settings::new(backend::Backend::discover()),
             settings_ui: settings::SettingsUi::new(appearance, window, cx),
             account: newport_client::account::Account::new(backend::Backend::discover()),
@@ -588,16 +587,7 @@ impl Newport {
             git_log: Default::default(),
             git_drafts: Default::default(),
             notice: None,
-            notification: {
-                let errors: Vec<_> = appearance_error
-                    .into_iter()
-                    .chain(
-                        sidebar_error
-                            .map(|error| format!("Couldn’t load sidebar preferences: {error}.")),
-                    )
-                    .collect();
-                (!errors.is_empty()).then(|| Notification::error(errors.join("\n")))
-            },
+            notification: preferences_error.map(Notification::error),
         };
         this.focus.focus(window, cx);
         this.request("snapshot", "snapshot", json!({}));
@@ -920,6 +910,8 @@ impl Newport {
                         }
                     }
                 }
+            } else if reply.key == settings::WINDOW_PREFERENCES {
+                self.window_preferences_saved();
             } else if reply.key == "server-save" {
                 if self
                     .resources
@@ -1389,13 +1381,10 @@ impl Render for Newport {
                             }
                             if !this.sidebar_visible {
                                 this.sidebar_visible = true;
-                            } else if let Err(error) = this
-                                .sidebar_layout
-                                .set_compact(!this.sidebar_layout.compact())
-                            {
-                                this.notification = Some(Notification::error(format!(
-                                    "Couldn’t save navigation style: {error}."
-                                )));
+                            } else {
+                                this.sidebar_layout
+                                    .set_compact(!this.sidebar_layout.compact());
+                                this.save_sidebar();
                             }
                             cx.notify();
                         })),
@@ -1651,11 +1640,11 @@ impl Render for Newport {
                             )
                             .child(self.sidebar_layout.content_panel().child(content))
                             .on_resize(cx.listener(|this, _, window, cx| {
-                                if let Err(error) = this
+                                if this
                                     .sidebar_layout
                                     .capture_resize(f32::from(window.viewport_size().width), cx)
                                 {
-                                    this.notification = Some(shell::sidebar_width_error(error));
+                                    this.save_sidebar();
                                 }
                                 cx.notify();
                             })),
@@ -1845,8 +1834,8 @@ pub fn run_with_options_and_ready(
                 ..Default::default()
             },
             move |window, cx| {
-                // Closing this client preserves its workspace and drafts,
-                // like the Tauri shell. Explicit Quit still exits normally.
+                // Closing the window hides it and preserves its workspace and
+                // drafts. Explicit Quit still exits normally.
                 window.on_window_should_close(cx, |window, cx| {
                     window_activation::hide(window, cx);
                     false

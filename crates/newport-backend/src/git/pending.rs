@@ -338,23 +338,13 @@ pub async fn git_review_operation(
     events: super::LogSink,
     preferences: &dyn super::ClientIdentity,
     state: &super::Shared,
-    sessions: &super::Sessions,
     pending: &PendingOperations,
     server_id: Uuid,
     operation_id: Uuid,
 ) -> Result<(), super::protocol::Error> {
     let ledger = pending.clone();
     review_with_remote_confirmation(ledger, server_id, operation_id, |request| {
-        super::git_request(
-            events,
-            preferences,
-            state,
-            sessions,
-            pending,
-            server_id,
-            request,
-            None,
-        )
+        super::git_request(events, preferences, state, pending, server_id, request)
     })
     .await
 }

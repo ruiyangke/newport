@@ -380,8 +380,8 @@ impl Engine {
             .map(|bytes| {
                 let mut text = String::from_utf8(bytes.to_vec())
                     .map_err(|_| libghostty_vt::Error::InvalidValue)?;
-                // Whole-line clipboard gestures include their final line break,
-                // as in the original terminal. Ghostty's plain formatter trims
+                // Whole-line clipboard gestures include their final line break.
+                // Ghostty's plain formatter trims
                 // trailing newlines even when a complete line was selected.
                 if self.selection.append_newline && !text.ends_with('\n') {
                     text.push('\n');

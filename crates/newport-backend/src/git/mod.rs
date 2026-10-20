@@ -15,7 +15,6 @@ pub mod pending;
 #[path = "../../../../tools/agent/src/git/protocol.rs"]
 pub mod protocol;
 mod queries;
-mod reads;
 use crate::{manager::Shared, server_session};
 use client::Client;
 use protocol::{Error, Request};
@@ -73,17 +72,6 @@ impl Session {
         }
     }
 }
-/// Connection-independent read cancellation. Live services belong to server owners.
-#[derive(Default)]
-pub struct Sessions {
-    reads: reads::Reads,
-}
-impl Sessions {
-    pub async fn shutdown(&self) {
-        self.reads.shutdown();
-    }
-}
-
 /// The owning ServerSession is the only live Git service store.
 #[derive(Default)]
 pub(crate) struct Slot {
@@ -412,13 +400,6 @@ pub async fn git_connect(
     Ok(json!({"serverId":server_id,"info":session.info}))
 }
 
-pub fn git_register_read(sessions: &Sessions, server_id: Uuid) -> Result<Uuid, Error> {
-    sessions.reads.register(server_id)
-}
-pub fn git_cancel_read(sessions: &Sessions, server_id: Uuid, read_id: Uuid) {
-    sessions.reads.cancel(server_id, read_id);
-}
-
 /// A refresh barrier for one checkout's observations. It neither opens an SSH
 /// channel nor acquires configuration control. Subsequent reads share fresh
 /// query work; other repositories and servers retain their cached pages.
@@ -441,38 +422,25 @@ pub async fn git_refresh_repository(
     Ok(json!({"repoId":repo_id}))
 }
 
-#[allow(clippy::too_many_arguments)] // Explicit services are separate from wire arguments.
 pub async fn git_request(
     events: LogSink,
     preferences: &dyn ClientIdentity,
     state: &Shared,
-    sessions: &Sessions,
     pending: &pending::PendingOperations,
     server_id: Uuid,
     request: Request,
-    read_id: Option<Uuid>,
 ) -> Result<Value, Error> {
-    if read_id.is_some() && is_mutation(&request) {
-        return Err(Error::invalid("Writes cannot use read cancellation."));
-    }
-    let mut read = read_id
-        .map(|id| sessions.reads.claim(server_id, id))
-        .transpose()?;
     // Connect, or reconnect, BEFORE sending -- never after.
-    let session = tokio::select! {
-        biased;
-        _ = reads::cancelled(&mut read) => return Err(reads::cancelled_error()),
-        result = connection(preferences, state, server_id) => result?,
-    };
+    let session = connection(preferences, state, server_id).await?;
     if queries::cacheable(&request) {
-        return queries::read(&session, events, state, pending, request, &mut read).await;
+        return queries::read(&session, events, state, pending, request).await;
     }
     let mutation = is_mutation(&request) || matches!(request, Request::Close { .. });
     if mutation {
         session.queries.invalidate(&request);
     }
     let invalidation = request.clone();
-    let result = execute(&session, events, state, pending, request, read).await;
+    let result = execute(&session, events, state, pending, request).await;
     if mutation {
         session.queries.invalidate(&invalidation);
         if let Ok(owner) = server_session::resolve(state, server_id).await {
@@ -489,7 +457,6 @@ async fn execute(
     state: &Shared,
     pending: &pending::PendingOperations,
     request: Request,
-    mut read: Option<reads::Read<'_>>,
 ) -> Result<Value, Error> {
     let server_id = session.server_id;
     let mut cancel = session.cancelled.subscribe();
@@ -500,13 +467,11 @@ async fn execute(
     // different channels; mutations retain the original exclusive ordering.
     let _access = tokio::select! {
         biased;
-        _ = reads::cancelled(&mut read) => return Err(reads::cancelled_error()),
         access = request_access(&session.access, &request) => access,
         _ = cancel.changed() => return Err(Error::transport("Git connection closed. Retry.")),
     };
     let mut guard = tokio::select! {
         biased;
-        _ = reads::cancelled(&mut read) => return Err(reads::cancelled_error()),
         guard = session.clients[request_lane(&request)].lock() => guard,
         _ = cancel.changed() => return Err(Error::transport("Git connection closed. Retry.")),
     };
@@ -533,7 +498,6 @@ async fn execute(
         };
         let initialized = tokio::select! {
             biased;
-            _ = reads::cancelled(&mut read) => return Err(reads::cancelled_error()),
             result = tokio::time::timeout(DEADLINE, setup) => result
                 .map_err(|_| Error::transport("Git channel initialization timed out."))
                 .and_then(|result| result),
@@ -631,7 +595,7 @@ async fn execute(
     } else {
         DEADLINE
     };
-    let mut result = reads::response(&mut guard, request, deadline, &mut cancel, &mut read).await;
+    let mut result = client::response(&mut guard, request, deadline, &mut cancel).await;
     if guard.as_ref().is_some_and(|c| c.stream().is_draining()) {
         *guard = None;
         session.connection.release_draining_runtime();
@@ -642,9 +606,6 @@ async fn execute(
         result = Err(Error::transport(
             "Needle runtime changed during this Git read. Request it again.",
         ));
-    }
-    if result.as_ref().is_err_and(|e| e.code == "READ_CANCELLED") {
-        return result;
     }
     if result
         .as_ref()

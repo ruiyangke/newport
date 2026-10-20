@@ -513,18 +513,6 @@ async fn native_forward_edits_and_browser_opening_reject_stale_requests() {
             .contains("connection changed")
     );
     assert!(fixture.call("forward_tunnel_batch", json!({"serverId":server.id,"create":[],"connect":[tunnel],"expectedConnection":connection})).await.unwrap_err().contains("connection changed"));
-    assert!(
-        fixture
-            .call("open_url", json!({"url":"file:///private/file"}))
-            .await
-            .is_err()
-    );
-    assert_eq!(fixture.desktop.urls.lock().unwrap().len(), 1);
-    fixture
-        .call("open_url", json!({"url":"https://example.test/path"}))
-        .await
-        .unwrap();
-    assert_eq!(fixture.desktop.urls.lock().unwrap().len(), 2);
     fixture
         .call("delete_tunnel", json!({"id":tunnel.id}))
         .await
@@ -569,7 +557,14 @@ mod remote_tests {
                 .unwrap();
         tunnel.local_port = local;
         fixture
-            .call("forward_port", json!({"tunnel":tunnel}))
+            .call("save_tunnel", json!({"tunnel":tunnel}))
+            .await
+            .unwrap();
+        fixture
+            .call(
+                "set_tunnel_connected",
+                json!({"id":tunnel.id,"connected":true}),
+            )
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -666,7 +661,7 @@ async fn integration_routes_reject_obsolete_connection_identity_before_any_side_
     let permissions = serde_json::to_value(owner.permissions.snapshot()).unwrap();
     let before = serde_json::to_value(fixture.manager.lock().await.config.clone()).unwrap();
     // Every identity field, credential-only changes, and backend restarts must fence
-    // both legacy Clipboard and current integration routes, in both directions.
+    // both the Clipboard and integration routes, in both directions.
     for field in 0..10 {
         let mut stale = expected.clone();
         stale[field] = if field == 8 {

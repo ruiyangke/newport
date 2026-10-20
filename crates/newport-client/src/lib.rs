@@ -23,12 +23,14 @@ pub mod git_read_recovery;
 pub mod git_remote_refs;
 pub mod git_remotes;
 pub mod git_selection;
+pub mod profile;
 pub mod resources;
 pub mod services;
 pub mod settings;
 pub mod terminal_command;
 pub mod terminal_transport;
 pub mod tunnel_operations;
+pub mod window_preferences;
 pub use newport_domain::git_operation;
 
 pub mod git_checkout_recovery;

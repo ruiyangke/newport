@@ -11,8 +11,7 @@ pub struct Overview {
     uptime: f64,
     load: [f64; 3],
     cpu: f64,
-    /// Each online core's usage over the sampling interval; older agents omit it.
-    #[serde(default)]
+    /// Each online core's usage over the sampling interval.
     cpus: Vec<Core>,
     memory_total: u64,
     memory_used: u64,
@@ -53,7 +52,7 @@ struct Process {
     memory: u64,
     state: String,
     name: String,
-    /// Seconds since the process started; older agents omit it.
+    /// Seconds since the process started; absent when unknowable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     elapsed: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,12 +76,11 @@ mod tests {
         assert!(parse_overview(&invalid.to_string()).is_err());
     }
     #[test]
-    fn per_core_usage_is_optional_and_validated() {
+    fn per_core_usage_is_required_and_validated() {
         let input = include_str!("../tests/fixtures/overview.json");
-        let mut legacy: serde_json::Value = serde_json::from_str(input).unwrap();
-        legacy.as_object_mut().unwrap().remove("cpus");
-        let parsed = serde_json::to_value(parse_overview(&legacy.to_string()).unwrap()).unwrap();
-        assert_eq!(parsed["cpus"], serde_json::json!([]));
+        let mut missing: serde_json::Value = serde_json::from_str(input).unwrap();
+        missing.as_object_mut().unwrap().remove("cpus");
+        assert!(parse_overview(&missing.to_string()).is_err());
         let mut invalid: serde_json::Value = serde_json::from_str(input).unwrap();
         invalid["cpus"][0]["id"] = (-1).into();
         assert!(parse_overview(&invalid.to_string()).is_err());

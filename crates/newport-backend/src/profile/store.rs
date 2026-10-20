@@ -1,8 +1,4 @@
-#[cfg(test)]
-use super::profile_directory;
 use newport_domain::model::Config;
-#[cfg(test)]
-use newport_domain::model::Server;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -61,11 +57,13 @@ impl Store {
     pub fn load(&self) -> Result<Config, String> {
         let vault = self.directory.join("profiles.stronghold");
         if vault.exists() {
-            let config = super::vault::read(&vault, self.vault_key()?)?;
-            super::remove_plaintext(&self.directory)?;
-            return Ok(config);
+            return super::vault::read(&vault, self.vault_key()?);
         }
-        super::import_profiles(self)
+        // A new profile starts empty. Saving it creates and verifies the vault
+        // key now, so credential storage failures surface at first launch.
+        let config = Config::default();
+        self.save(&config)?;
+        Ok(config)
     }
     pub fn save(&self, config: &Config) -> Result<(), String> {
         super::vault::write(
@@ -136,40 +134,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn opens_actual_v030_release_snapshot_without_rewriting_it() {
-        // Created through the signed release UI, not this crate's vault writer.
-        // See the fixture README for provenance and the public test key.
-        let snapshot = include_bytes!(
-            "../../../../resources/test-fixtures/released-profile/v0.3.0.stronghold"
-        );
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("profiles.stronghold");
-        fs::write(&path, snapshot).unwrap();
-        let store = Store::for_test(directory.path().into());
-        let mut config = store.load().unwrap();
-        assert_eq!(config.servers.len(), 1);
-        assert!(config.tunnels.is_empty());
-        let server = &config.servers[0];
-        assert_eq!(server.name, "Release baseline fixture");
-        assert_eq!(server.ssh_host, "127.0.0.1");
-        assert_eq!(server.ssh_port, 1);
-        assert_eq!(server.ssh_user, "fixture");
-        assert_eq!(
-            server.auth_method,
-            newport_domain::model::AuthMethod::PublicKey
-        );
-        assert!(server.identity_file.is_none());
-        assert!(server.agent_source.is_none());
-        assert!(server.agent_key_fingerprint.is_none());
-        assert_eq!(fs::read(&path).unwrap(), snapshot);
-
-        config.servers[0].name = "Native roundtrip fixture".into();
-        store.save(&config).unwrap();
-        let reopened = Store::for_test(directory.path().into());
-        assert_eq!(reopened.load().unwrap(), config);
-    }
-
-    #[test]
     fn explicit_key_source_is_cached_and_failures_cannot_replace_a_vault() {
         use std::sync::{
             Arc,
@@ -204,109 +168,15 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), original);
     }
     #[test]
-    fn new_install_uses_newport_and_existing_profiles_keep_their_path() {
-        let root = tempfile::tempdir().unwrap();
-        assert_eq!(
-            profile_directory(root.path()).unwrap(),
-            root.path().join("Newport")
-        );
-        let legacy = root.path().join("Porthop");
-        fs::create_dir(&legacy).unwrap();
-        // An empty/new Newport directory must not hide a user's existing profile.
-        fs::create_dir(root.path().join("Newport")).unwrap();
-        assert_eq!(profile_directory(root.path()).unwrap(), legacy);
-    }
-
-    #[test]
-    fn rebrand_preserves_encrypted_profiles_passwords_and_supporting_data() {
-        let root = tempfile::tempdir().unwrap();
-        let legacy = root.path().join("Porthop");
-        fs::create_dir(&legacy).unwrap();
-        let old = Store::for_test(legacy.clone());
-        let server: Server = serde_json::from_value(serde_json::json!({
-            "id": Uuid::new_v4(), "name": "My server", "sshHost": "host", "sshUser": "dev", "sshPort": 22
-        }))
-        .unwrap();
-        let id = server.id;
-        let config = Config {
-            servers: vec![server],
-            ..Default::default()
-        };
-        old.save_with_password(&config, Some((id, "test-password")))
-            .unwrap();
-        for name in [
-            "metrics.sqlite3",
-            "vault-key.storage",
-            "clipboard-client-test",
-        ] {
-            fs::write(legacy.join(name), name.as_bytes()).unwrap();
-        }
-        let original_vault = fs::read(legacy.join("profiles.stronghold")).unwrap();
-        for _ in 0..2 {
-            let new = Store::for_test(profile_directory(root.path()).unwrap());
-            assert_eq!(new.load().unwrap().servers[0].id, id);
-            assert_eq!(new.password(id).unwrap().as_str(), "test-password");
-            assert_eq!(
-                fs::read(new.directory.join("profiles.stronghold")).unwrap(),
-                original_vault
-            );
-            for name in [
-                "metrics.sqlite3",
-                "vault-key.storage",
-                "clipboard-client-test",
-            ] {
-                assert_eq!(fs::read(new.directory.join(name)).unwrap(), name.as_bytes());
-            }
-        }
-        assert!(!root.path().join("Newport").exists());
-    }
-
-    #[test]
-    fn invalid_legacy_profile_does_not_silently_create_a_new_profile() {
-        let root = tempfile::tempdir().unwrap();
-        fs::write(root.path().join("Porthop"), "invalid").unwrap();
-        assert!(profile_directory(root.path()).is_err());
-        assert!(!root.path().join("Newport").exists());
-    }
-
-    #[test]
-    fn corrupt_config_is_not_overwritten() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = Store::for_test(dir.path().into());
-        fs::write(dir.path().join("config.json"), "bad").unwrap();
-        assert!(s.load().is_err());
-        assert_eq!(
-            fs::read_to_string(dir.path().join("config.json")).unwrap(),
-            "bad"
-        );
-    }
-    #[test]
-    fn migrates_json_and_never_falls_back_from_a_damaged_vault() {
+    fn new_profile_starts_empty_and_never_replaces_a_damaged_vault() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::for_test(dir.path().into());
-        let source = dir.path().join("config.json");
-        fs::write(&source, r#"{"servers":[],"tunnels":[]}"#).unwrap();
-        store.load().unwrap();
-        assert!(!source.exists());
-        store.load().unwrap();
+        assert_eq!(store.load().unwrap(), Config::default());
         let vault = dir.path().join("profiles.stronghold");
+        assert!(vault.exists());
+        assert_eq!(store.load().unwrap(), Config::default());
         fs::write(&vault, "damaged").unwrap();
-        fs::write(&source, r#"{"servers":[],"tunnels":[]}"#).unwrap();
         assert!(store.load().is_err());
-        assert!(source.exists());
         assert_eq!(fs::read(&vault).unwrap(), b"damaged");
-    }
-    #[test]
-    fn imports_legacy_into_encrypted_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = Store::for_test(dir.path().into());
-        let data=serde_json::json!([{"id":Uuid::new_v4(),"name":"Web","sshUser":"dev","sshHost":"host","sshPort":22,"localPort":8000,"remoteHost":"127.0.0.1","remotePort":80}]).to_string();
-        fs::write(dir.path().join("tunnels.json"), &data).unwrap();
-        let c = s.load().unwrap();
-        assert_eq!(c.servers.len(), 1);
-        assert_eq!(c.tunnels[0].server_id, c.servers[0].id);
-        assert!(!dir.path().join("tunnels.json").exists());
-        assert!(dir.path().join("profiles.stronghold").exists());
-        assert_eq!(s.load().unwrap().tunnels.len(), 1);
     }
 }

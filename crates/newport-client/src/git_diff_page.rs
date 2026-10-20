@@ -1,5 +1,5 @@
 //! Validate Git diff wire pages before publishing them to client state.
-//! Mirrors the desktop response contract; accumulated page boundaries are separate.
+//! Accumulated page boundaries are tracked separately.
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::Value;
 

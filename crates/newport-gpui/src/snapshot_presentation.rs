@@ -28,8 +28,8 @@ pub(super) enum Surface {
 
 impl Surface {
     fn watches(self, field: &str) -> bool {
-        // Connection epochs invalidate the current page's owner. Legacy health
-        // fields conservatively request redraws, but never set connectivity:
+        // Connection epochs invalidate the current page's owner. Health fields
+        // conservatively request redraws, but never set connectivity:
         // the header subscribes to the global store. The wizard shows progress.
         // Remaining agent state belongs to the Integration page. Accepting it
         // still updates permission checks and retained state on every page.

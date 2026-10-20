@@ -82,7 +82,6 @@ mod tests {
             let (desktop, _requests) = desktop::Integration::new();
             let application = Application::start(
                 store,
-                true,
                 Arc::new(desktop.clone()),
                 desktop::Commands::new(desktop, newport_platform::startup::Startup::disabled()),
             )
@@ -93,7 +92,7 @@ mod tests {
                 read(application.endpoint().to_owned()).await.is_ok(),
                 !corrupt
             );
-            assert!(Instance::acquire(directory.path(), true).unwrap().is_none());
+            assert!(Instance::acquire(directory.path()).unwrap().is_none());
             assert_eq!(std::fs::read(&path).unwrap(), before);
             let result = check(application).await;
             if corrupt {
@@ -108,7 +107,7 @@ mod tests {
                 assert_eq!((report.servers, report.tunnels), (0, 0));
                 assert_eq!(report.update_receipt()["status"], "ready");
             }
-            assert!(Instance::acquire(directory.path(), true).unwrap().is_some());
+            assert!(Instance::acquire(directory.path()).unwrap().is_some());
             assert_eq!(std::fs::read(path).unwrap(), before);
         }
     }

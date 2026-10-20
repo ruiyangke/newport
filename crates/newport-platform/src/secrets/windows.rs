@@ -36,28 +36,20 @@ fn read(target: &[u16]) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
 
 pub struct SystemStorage {
     target: Vec<u16>,
-    legacy_target: Vec<u16>,
 }
 impl SystemStorage {
-    pub fn new(modern: &str, legacy: &str, account: &str, _legacy_protected: bool) -> Self {
-        let wide = |namespace: &str| {
-            format!("{namespace}/{account}")
+    pub fn new(namespace: &str, account: &str) -> Self {
+        Self {
+            target: format!("{namespace}/{account}")
                 .encode_utf16()
                 .chain(Some(0))
-                .collect()
-        };
-        Self {
-            target: wide(modern),
-            legacy_target: wide(legacy),
+                .collect(),
         }
     }
 }
 impl KeyStorage for SystemStorage {
-    fn modern(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
+    fn read(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
         read(&self.target)
-    }
-    fn legacy(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-        read(&self.legacy_target)
     }
     fn generate(&self) -> Result<Zeroizing<Vec<u8>>, String> {
         let mut key = Zeroizing::new(vec![0; 32]);
@@ -121,60 +113,40 @@ mod tests {
 
     #[test]
     #[ignore = "Writes and removes uniquely named fixture entries in Windows Credential Manager"]
-    fn credential_manager_preserves_legacy_key_and_isolates_profiles() {
+    fn credential_manager_stores_and_isolates_profile_keys() {
         let account = uuid::Uuid::new_v4().to_string();
         let other_account = uuid::Uuid::new_v4().to_string();
-        let modern = "app.newport.tests/vault-modern";
-        let legacy = "app.newport.tests/vault-legacy";
-        let storage = SystemStorage::new(modern, legacy, &account, false);
-        let other = SystemStorage::new(modern, legacy, &other_account, false);
-        let legacy_writer = SystemStorage::new(legacy, legacy, &account, false);
-        let mut owned = OwnedTargets(vec![
-            storage.target.clone(),
-            storage.legacy_target.clone(),
-            other.target.clone(),
-        ]);
-        assert!(storage.modern().unwrap().is_none());
-        assert!(storage.legacy().unwrap().is_none());
-        assert!(other.modern().unwrap().is_none());
+        let namespace = "app.newport.tests/vault";
+        let storage = SystemStorage::new(namespace, &account);
+        let other = SystemStorage::new(namespace, &other_account);
+        let mut owned = OwnedTargets(vec![storage.target.clone(), other.target.clone()]);
+        assert!(storage.read().unwrap().is_none());
+        assert!(other.read().unwrap().is_none());
         let original = storage.generate().unwrap();
         assert_eq!(original.len(), 32);
-        legacy_writer.create(&original).unwrap();
-        assert_eq!(
-            storage.legacy().unwrap().unwrap().as_slice(),
-            original.as_slice()
-        );
-        assert!(storage.modern().unwrap().is_none());
-
-        // Migration copies the key into the new namespace and retains the old
-        // item for rollback. A new adapter must read the persisted bytes.
         storage.create(&original).unwrap();
-        let reopened = SystemStorage::new(modern, legacy, &account, false);
+        // A new adapter must read the persisted bytes.
+        let reopened = SystemStorage::new(namespace, &account);
         assert_eq!(
-            reopened.modern().unwrap().unwrap().as_slice(),
+            reopened.read().unwrap().unwrap().as_slice(),
             original.as_slice()
         );
-        assert_eq!(
-            reopened.legacy().unwrap().unwrap().as_slice(),
-            original.as_slice()
-        );
+        assert!(other.read().unwrap().is_none());
         let unrelated = other.generate().unwrap();
         other.create(&unrelated).unwrap();
         assert_eq!(
-            other.modern().unwrap().unwrap().as_slice(),
+            other.read().unwrap().unwrap().as_slice(),
             unrelated.as_slice()
         );
         assert_eq!(
-            reopened.modern().unwrap().unwrap().as_slice(),
+            reopened.read().unwrap().unwrap().as_slice(),
             original.as_slice()
         );
-        assert!(other.legacy().unwrap().is_none());
 
         owned
             .remove()
             .expect("Remove only the fixture credential targets");
-        assert!(reopened.modern().unwrap().is_none());
-        assert!(reopened.legacy().unwrap().is_none());
-        assert!(other.modern().unwrap().is_none());
+        assert!(reopened.read().unwrap().is_none());
+        assert!(other.read().unwrap().is_none());
     }
 }

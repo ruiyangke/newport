@@ -1,5 +1,5 @@
-//! Container contracts and domain rules shared by desktop clients.
-//! Mirrors `src/domain/containers.ts`; no UI, transport, or runtime dependencies.
+//! Container contracts and domain rules, with no UI, transport, or runtime
+//! dependencies.
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
@@ -381,7 +381,7 @@ pub struct DockerDisk {
     pub volumes: Vec<DockerVolume>,
     pub totals: DockerTotals,
     /// False for the quick reading, whose volumes are listed but not yet
-    /// sized. Full readings (and agents that predate the split) measure them.
+    /// sized. Full readings omit the field and measure them.
     #[serde(default = "measured")]
     pub volumes_measured: bool,
 }
@@ -1258,14 +1258,6 @@ mod tests {
                 true
             ])
         );
-        // The positional form from before the flag still decodes, measured.
-        let legacy = rmp_serde::to_vec(&json!([
-            [["sha256:1", ["web:latest"], 20, 3, 11, 2, false]],
-            [["app_data", "local", null, null, false, "app"]],
-            [[1, 20, 10], [1, 20, 10], [1, 20, 10], [1, 20, 10]]
-        ]))
-        .unwrap();
-        assert_eq!(rmp_serde::from_slice::<DockerDisk>(&legacy).unwrap(), disk);
         for pointer in [
             "/images/0/size",
             "/images/0/containers",
@@ -1680,7 +1672,7 @@ mod tests {
     }
 
     #[test]
-    fn query_covers_all_tauri_search_fields_without_mutating_the_snapshot() {
+    fn query_covers_all_search_fields_without_mutating_the_snapshot() {
         let mut web = service("Atlas", "web", 1);
         web.health = Some(ContainerHealth::Unhealthy);
         for query in [

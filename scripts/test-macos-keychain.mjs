@@ -92,7 +92,7 @@ run(
   bin,
   [
     "--exact",
-    "secrets::macos::tests::protected_keychain_preserves_legacy_key_and_isolates_profiles",
+    "secrets::macos::tests::protected_keychain_stores_and_isolates_profile_keys",
     "--ignored",
     "--nocapture",
   ],

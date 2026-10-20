@@ -3,11 +3,11 @@
 The default library verifies Needle release identity. The optional `signing`
 feature enables the offline release CLI described below.
 
-This offline tool signs update artifacts without either desktop runtime. It
-imports the base64-wrapped signing keys used by the former Tauri CLI and emits
-the same wrapped Minisign signature format. A signed comment binds each artifact
-to its release version. Signatures are checked against the configured public key
-before replacing the `.sig` sidecar.
+This offline tool signs update artifacts. It imports base64-wrapped,
+password-encrypted Minisign secret keys and emits base64-wrapped Minisign
+signatures. A signed comment binds each artifact to its release version.
+Signatures are checked against the configured public key before replacing the
+`.sig` sidecar.
 
 ```sh
 cargo test --locked -p newport-release --features signing
@@ -21,8 +21,7 @@ Keys and passwords are never command-line arguments; this tool never prompts.
 
 The packaging scripts use `scripts/sign-update.mjs`, which selects
 `resources/updater.json` as the trust root and strips updater credentials before
-building the tool. Existing `TAURI_SIGNING_PRIVATE_KEY` and password secret names
-remain accepted by that wrapper. No Tauri executable is used for signing.
+building the tool.
 
 This authenticates updater packages, not OS code signatures. macOS Developer ID
 signing/notarization, Windows distribution acceptance, profile upgrades and
@@ -60,8 +59,7 @@ requirements and [test source](tests/native_package_runtime.rs) for preflight.
 ## Dependency boundary
 
 `newport_release::needle` owns the manifest types, signature verification and
-hash-bound version comparison previously in `newport-needle-release`. The default
-build has no signing feature. The backend uses this same verification-only API
-at build time and runtime; it does not depend on the private-key signing library.
-The CLI and its tests require `--features signing`, enabled explicitly by the
-release wrapper and CI. No signature format, trust root or upgrade policy changed.
+hash-bound version comparison. The default build has no signing feature. The
+backend uses this same verification-only API at build time and runtime; it does
+not depend on the private-key signing library. The CLI and its tests require
+`--features signing`, enabled explicitly by the release wrapper and CI.

@@ -3804,7 +3804,7 @@ mod interaction_tests {
     }
 
     #[gpui::test]
-    fn reopening_review_retires_failed_or_pending_legacy_status(cx: &mut TestAppContext) {
+    fn reopening_review_retires_failed_or_pending_list_status(cx: &mut TestAppContext) {
         let (_, cx, _) = fixture(cx);
         let owner = cx.update(|window, cx| cx.new(|cx| crate::page_perf_tests::owner(window, cx)));
         let entry = json!({"entryId":"e","path":{"display":"docs/file.md"},"untracked":true});

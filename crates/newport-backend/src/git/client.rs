@@ -241,13 +241,45 @@ async fn send(stream: &mut (impl AsyncWrite + Unpin), message: &Message) -> Resu
         .map_err(|_| Error::transport("Could not flush Git request."))
 }
 
+/// A failed read must retire its partially consumed protocol stream.
+/// This deliberately does not receive the shared connection, so it cannot
+/// disconnect another lane while releasing a failed read.
+pub(super) async fn response<S: AsyncRead + AsyncWrite + Unpin>(
+    slot: &mut Option<Client<S>>,
+    request: Request,
+    deadline: std::time::Duration,
+    session_cancel: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<Value, Error> {
+    let mutation = super::is_mutation(&request);
+    // A query invalidation can drop this entire future. Own the stream during
+    // I/O so cancellation drops it instead of leaving a partial frame in a lane.
+    let mut client = slot.take().expect("initialized Git client");
+    let mut result = tokio::select! {
+        biased;
+        _ = session_cancel.changed() => Err(Error::new("CANCELLED", "Git session was disconnected.")),
+        result = tokio::time::timeout(deadline, client.request(request)) =>
+            result.unwrap_or_else(|_| Err(Error::transport("Git request timed out. Reconnect before continuing."))),
+    };
+    if !mutation
+        && let Err(error) = &mut result
+        && matches!(error.code.as_str(), "TRANSPORT_ERROR" | "PROTOCOL_ERROR")
+    {
+        // This stream cannot be reused, but its SSH connection
+        // may still be serving other read lanes successfully.
+        error.code = "READ_CHANNEL_ERROR".into();
+        error.message = "The Git read channel was interrupted. Retry this read.".into();
+    } else {
+        *slot = Some(client);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
     async fn dropping_an_inflight_query_discards_its_partial_protocol_stream() {
-        use super::super::reads;
         use std::time::Duration;
         let (stream, mut peer) = tokio::io::duplex(4096);
         let mut slot = Some(Client {
@@ -271,13 +303,7 @@ mod tests {
         };
         let result = tokio::time::timeout(
             Duration::from_millis(20),
-            reads::response(
-                &mut slot,
-                request,
-                Duration::from_secs(10),
-                &mut cancel,
-                &mut None,
-            ),
+            response(&mut slot, request, Duration::from_secs(10), &mut cancel),
         )
         .await;
         assert!(result.is_err());
@@ -290,7 +316,6 @@ mod tests {
 
     #[tokio::test]
     async fn failed_reads_retire_their_channel_without_escalating_write_errors() {
-        use super::super::reads;
         use std::time::Duration;
         for mode in ["eof", "protocol", "timeout", "write"] {
             let (stream, mut peer) = tokio::io::duplex(4096);
@@ -321,15 +346,9 @@ mod tests {
                     path: protocol::Path::new(b"/tmp"),
                 }
             };
-            let error = reads::response(
-                &mut slot,
-                request,
-                Duration::from_millis(20),
-                &mut cancel,
-                &mut None,
-            )
-            .await
-            .unwrap_err();
+            let error = response(&mut slot, request, Duration::from_millis(20), &mut cancel)
+                .await
+                .unwrap_err();
             assert_eq!(
                 error.code,
                 if mode == "write" {
@@ -343,150 +362,6 @@ mod tests {
             agent.abort();
             let _ = agent.await;
         }
-    }
-
-    /// Controlled delayed replies isolate native cancellation latency from
-    /// repository scan cost. Baseline and cancelled reads use identical frames.
-    #[tokio::test]
-    async fn benchmark_native_read_cancellation() {
-        use super::super::reads;
-        use std::time::{Duration, Instant};
-        for size in [1024, 64 * 1024, 512 * 1024] {
-            for cancel_read in [false, true] {
-                let registry = reads::Reads::default();
-                let server = Uuid::new_v4();
-                let id = registry.register(server).unwrap();
-                let mut read = Some(registry.claim(server, id).unwrap());
-                let (stream, mut peer) = tokio::io::duplex(4096);
-                let mut slot = Some(Client {
-                    on_log: None,
-                    stream,
-                    methods: vec!["repo.open".into()],
-                });
-                let (_session, mut session_cancel) = tokio::sync::watch::channel(false);
-                let (sent, dispatched) = tokio::sync::oneshot::channel();
-                let agent = tokio::spawn(async move {
-                    let Message::Request { id, .. } = receive(&mut peer).await.unwrap() else {
-                        panic!("request expected")
-                    };
-                    sent.send(()).unwrap();
-                    tokio::time::sleep(Duration::from_millis(80)).await;
-                    let response = Message::success(id, json!({"data":"x".repeat(size)}));
-                    let bytes = protocol::encode(&response).unwrap().len();
-                    let _ = send(&mut peer, &response).await;
-                    bytes
-                });
-                let started = Instant::now();
-                let cancel = async {
-                    dispatched.await.unwrap();
-                    if cancel_read {
-                        registry.cancel(server, id);
-                    }
-                };
-                let (result, ()) = tokio::join!(
-                    reads::response(
-                        &mut slot,
-                        Request::Open {
-                            path: protocol::Path::new(b"/tmp")
-                        },
-                        Duration::from_secs(2),
-                        &mut session_cancel,
-                        &mut read
-                    ),
-                    cancel
-                );
-                let elapsed = started.elapsed().as_secs_f64() * 1000.;
-                let response_bytes = if cancel_read {
-                    assert_eq!(result.unwrap_err().code, "READ_CANCELLED");
-                    agent.abort();
-                    let _ = agent.await;
-                    0
-                } else {
-                    assert_eq!(result.unwrap()["data"].as_str().unwrap().len(), size);
-                    agent.await.unwrap()
-                };
-                eprintln!(
-                    "CANCEL_BENCH {}",
-                    json!({"payloadBytes":size,"cancelled":cancel_read,"elapsedMs":elapsed,"responseBytes":response_bytes,"simulatedReplyDelayMs":80})
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn cancelling_a_dispatched_read_closes_only_its_stream() {
-        use super::super::reads;
-        use std::time::Duration;
-        let registry = reads::Reads::default();
-        let server = Uuid::new_v4();
-        let id = registry.register(server).unwrap();
-        let mut read = Some(registry.claim(server, id).unwrap());
-        let (stream, mut peer) = tokio::io::duplex(1024);
-        let mut slot = Some(Client {
-            on_log: None,
-            stream,
-            methods: vec!["repo.open".into()],
-        });
-        let (session, mut session_cancel) = tokio::sync::watch::channel(false);
-        let request = Request::Open {
-            path: protocol::Path::new(b"/tmp"),
-        };
-        let cancel = async {
-            assert!(matches!(
-                receive(&mut peer).await.unwrap(),
-                Message::Request { .. }
-            ));
-            registry.cancel(server, id);
-            let mut byte = [0];
-            assert_eq!(peer.read(&mut byte).await.unwrap(), 0);
-        };
-        let (result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
-            tokio::join!(
-                reads::response(
-                    &mut slot,
-                    request,
-                    Duration::from_secs(35),
-                    &mut session_cancel,
-                    &mut read
-                ),
-                cancel
-            )
-        })
-        .await
-        .unwrap();
-        assert_eq!(result.unwrap_err().code, "READ_CANCELLED");
-        assert!(slot.is_none());
-        assert!(!*session.borrow());
-        // Another lane still completes a framed request on the same session.
-        let (stream, mut peer) = tokio::io::duplex(1024);
-        let mut other = Some(Client {
-            on_log: None,
-            stream,
-            methods: vec!["repo.open".into()],
-        });
-        let agent = async {
-            let Message::Request { id, .. } = receive(&mut peer).await.unwrap() else {
-                panic!("request expected")
-            };
-            send(&mut peer, &Message::success(id, json!({"ok":true})))
-                .await
-                .unwrap();
-        };
-        let mut no_read = None;
-        let (result, ()) = tokio::join!(
-            reads::response(
-                &mut other,
-                Request::Open {
-                    path: protocol::Path::new(b"/tmp")
-                },
-                Duration::from_secs(1),
-                &mut session_cancel,
-                &mut no_read
-            ),
-            agent
-        );
-        assert_eq!(result.unwrap()["ok"], true);
-        assert!(other.is_some());
     }
 
     #[tokio::test]

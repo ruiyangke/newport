@@ -1,4 +1,5 @@
-// Regenerate native SVGs from the exact icon dependency used by the Tauri UI.
+// Regenerate file-icon SVGs from the pinned @react-symbols/icons and lucide-react
+// packages in package.json.
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { FileIcon } from '@react-symbols/icons/utils';

@@ -48,7 +48,7 @@ fn forwarding_snapshot_changed(before: &Value, after: &Value, server: &str) -> b
         })
 }
 
-/// Match the same combined, curated context as Tauri's ConnectionsPanel.
+/// Search the combined, curated context of a project and its entry.
 /// All listeners remain searchable after dual-stack rows are merged.
 pub(super) fn entry_matches(
     project: &newport_domain::port_grouping::Project,

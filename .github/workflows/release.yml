@@ -198,7 +198,7 @@ jobs:
       - name: Prepare pinned terminal build dependencies
         run: node scripts/with-ghostty.mjs --github
       - run: node scripts/package-native.mjs --nsis
-      - name: Verify the release executable and installer preserve upgrade profiles
+      - name: Verify the release executable and installer preserve profiles
         shell: pwsh
         run: |
           $directory = Join-Path (Join-Path target $env:CARGO_BUILD_TARGET) 'release/native-package'
@@ -210,19 +210,6 @@ jobs:
           $env:NEWPORT_TEST_INSTALLER = $installers[0].FullName
           cargo test --locked --release -p newport-release --test native_package_runtime -- --ignored --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { throw 'Release installer runtime acceptance failed' }
-          $baseline = Get-Content resources/test-fixtures/legacy-desktop-release.json -Raw | ConvertFrom-Json
-          $arch = $env:CARGO_BUILD_TARGET.Split('-')[0]
-          $assets = @($baseline.assets | Where-Object { $_.name -eq "Newport-0.3.0-windows-$arch-setup.exe" })
-          if ($assets.Count -ne 1) { throw 'Expected one pinned released installer for this architecture' }
-          $asset = $assets[0]
-          $download = Join-Path $env:RUNNER_TEMP $asset.name
-          Invoke-WebRequest -Uri $asset.url -OutFile $download -TimeoutSec 120
-          if ((Get-FileHash $download -Algorithm SHA256).Hash.ToLowerInvariant() -ne $asset.sha256) {
-            throw 'Released installer digest differs from the pinned baseline'
-          }
-          $env:NEWPORT_TEST_LEGACY_INSTALLER = $download
-          cargo test --locked --release -p newport-release --test native_package_runtime -- --ignored --nocapture --test-threads=1
-          if ($LASTEXITCODE -ne 0) { throw 'Released-to-native release installer acceptance failed' }
       - name: Sign updater package
         shell: pwsh
         env:

@@ -39,7 +39,6 @@ impl DesktopCommands for DesktopFixture {
 async fn start(directory: &Path) -> Application {
     Application::start(
         Store::for_test(directory.into()),
-        true,
         Arc::new(DesktopFixture),
         DesktopFixture,
     )
@@ -77,10 +76,10 @@ async fn long_profile_starts_restarts_and_preserves_single_instance_ownership() 
         let snapshot = call(&endpoint, "snapshot", json!({})).await.unwrap();
         assert_eq!(snapshot["loadError"], Value::Null);
         assert!(snapshot["config"]["servers"].as_array().unwrap().is_empty());
-        assert!(Instance::acquire(&directory, true).unwrap().is_none());
+        assert!(Instance::acquire(&directory).unwrap().is_none());
         application.stop().await.unwrap();
         assert!(!endpoint.exists());
-        assert!(Instance::acquire(&directory, true).unwrap().is_some());
+        assert!(Instance::acquire(&directory).unwrap().is_some());
     }
     std::fs::remove_dir(endpoint.parent().unwrap()).unwrap();
 }
@@ -99,7 +98,7 @@ async fn reservation_excludes_other_owners_before_any_service_starts_and_transfe
             Ok(zeroize::Zeroizing::new(vec![7; 32]))
         })
         .unwrap();
-        Application::reserve(store, true).unwrap()
+        Application::reserve(store).unwrap()
     };
     let reservation = reserve().unwrap();
     assert!(reserve().is_none());
@@ -141,7 +140,6 @@ async fn standalone_start_dispatch_shutdown_and_restart_preserve_profile_and_rel
     assert!(
         Application::start(
             Store::for_test(directory.path().into()),
-            true,
             Arc::new(DesktopFixture),
             DesktopFixture
         )
@@ -149,9 +147,13 @@ async fn standalone_start_dispatch_shutdown_and_restart_preserve_profile_and_rel
         .unwrap()
         .is_none()
     );
-    call(&endpoint, "set_sidebar_width", json!({"width":260.0}))
-        .await
-        .unwrap();
+    call(
+        &endpoint,
+        "set_window_preferences",
+        json!({"preferences":{"sidebarWidth":260.0}}),
+    )
+    .await
+    .unwrap();
     call(
         &endpoint,
         "save_server",
@@ -166,12 +168,10 @@ async fn standalone_start_dispatch_shutdown_and_restart_preserve_profile_and_rel
     let snapshot = call(&endpoint, "snapshot", json!({})).await.unwrap();
     assert_eq!(snapshot["config"]["servers"][0]["id"], id.to_string());
     assert!(!snapshot.to_string().contains("fixture secret"));
-    assert_eq!(
-        call(&endpoint, "get_sidebar_width", json!({}))
-            .await
-            .unwrap(),
-        260.0
-    );
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.path().join("preferences.json")).unwrap())
+            .unwrap();
+    assert_eq!(stored["sidebarWidth"], 260.0);
     assert_eq!(
         call(&endpoint, "git_pending_operations", json!({"serverId":id}))
             .await
@@ -219,7 +219,7 @@ async fn standalone_start_dispatch_shutdown_and_restart_preserve_profile_and_rel
     drop(restarted);
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(owner) = Instance::acquire(directory.path(), true).unwrap() {
+            if let Some(owner) = Instance::acquire(directory.path()).unwrap() {
                 drop(owner);
                 break;
             }
@@ -233,7 +233,7 @@ async fn standalone_start_dispatch_shutdown_and_restart_preserve_profile_and_rel
     // Unavailable credentials expose the existing recoverable load error, without
     // replacing the vault or silently falling back to an empty writable profile.
     let store = Store::open(directory.path().into(), |_| Err("Vault unavailable".into())).unwrap();
-    let locked = Application::start(store, true, Arc::new(DesktopFixture), DesktopFixture)
+    let locked = Application::start(store, Arc::new(DesktopFixture), DesktopFixture)
         .await
         .unwrap()
         .unwrap();
@@ -263,14 +263,13 @@ async fn invalid_preferences_abort_startup_without_claiming_credentials_or_repla
     std::fs::write(&path, "invalid").unwrap();
     let result = Application::start(
         Store::for_test(directory.path().into()),
-        true,
         Arc::new(DesktopFixture),
         DesktopFixture,
     )
     .await;
     assert!(matches!(result, Err(error) if error.contains("Preferences could not be read")));
     assert_eq!(std::fs::read_to_string(path).unwrap(), "invalid");
-    assert!(Instance::acquire(directory.path(), true).unwrap().is_some());
+    assert!(Instance::acquire(directory.path()).unwrap().is_some());
     assert!(!directory.path().join("native-client/desktop.sock").exists());
 }
 

@@ -1092,8 +1092,8 @@ fn local_shortcut(key: &Keystroke) -> Option<LocalShortcut> {
         };
     }
     if cfg!(windows) && !modifiers.platform {
-        // Ctrl+C and Ctrl+V retain their shell meanings. The original webview
-        // handles these clipboard gestures outside xterm's key encoder.
+        // Ctrl+C and Ctrl+V retain their shell meanings. These clipboard
+        // gestures are handled before the terminal key encoder.
         return match key.key.as_str() {
             "c" if modifiers.control && modifiers.shift => Some(LocalShortcut::Copy),
             "v" if modifiers.control && modifiers.shift => Some(LocalShortcut::Paste),

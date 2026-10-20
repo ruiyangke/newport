@@ -12,8 +12,3 @@ installation. Do not replace signed resources during unrelated development.
 existing installations. Keep that key compatible across releases.
 `test-fixtures/updater/` contains inert payloads and public signatures for tests,
 not executable updates or production private keys.
-
-`test-fixtures/legacy-desktop-release.json` pins the released desktop acceptance
-baseline by asset URL and SHA-256 digest. Follow the
-[acceptance instructions](../docs/testing.md#released-desktop-baseline).
-Pinning a baseline does not establish that an upgrade has passed.

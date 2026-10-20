@@ -11,7 +11,6 @@ use std::{
         net::UnixListener,
     },
     path::PathBuf,
-    time::Duration,
 };
 struct Cleanup(std::path::PathBuf);
 impl Drop for Cleanup {
@@ -154,22 +153,6 @@ impl Session {
                 io::Error::other("Clipboard is locked by another process.")
             }
         })?;
-        let legacy_active = fs::metadata(root.join("session"))
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age < Duration::from_secs(120));
-        if legacy_active
-            && fs::read_to_string(root.join("client"))
-                .ok()
-                .as_deref()
-                .map(str::trim)
-                != Some(client)
-        {
-            return Err(io::Error::other(
-                "Clipboard sync is active in another Newport installation.",
-            ));
-        }
         let _cleanup = Cleanup(root.clone());
         let snapshot = root.join("snapshot.tar");
         match fs::remove_file(&snapshot) {
@@ -191,7 +174,6 @@ impl Session {
         private_write(&root.join("agent-client"), client.as_bytes())?;
         for name in [
             "snapshot.tar",
-            "session",
             "client",
             "browser-url",
             "browser-lease",

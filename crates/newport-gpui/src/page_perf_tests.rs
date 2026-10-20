@@ -17,7 +17,6 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
     let window_state = window_state::WindowState::load(cx);
     let sidebar_layout = sidebar_layout::SidebarLayout::isolated(cx);
     let appearance = appearance::Appearance::Light;
-    let appearance_store = appearance::AppearanceStore::from_env();
     // A private nonexistent socket also isolates any accidental request from the host.
     let backend = backend::Backend::at_path(
         std::env::temp_dir().join(format!("np-page-bench-{}.sock", uuid::Uuid::new_v4())),
@@ -44,7 +43,6 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
         restore_git: restored.git,
         git_destinations: restored.git_destinations,
         appearance,
-        appearance_store,
         settings_state: newport_client::settings::Settings::new(backend.clone()),
         settings_ui: settings::SettingsUi::new(appearance, window, cx),
         account: newport_client::account::Account::new(backend.clone()),
@@ -2156,7 +2154,7 @@ fn connections_worktree_disclosure_survives_refresh_and_search(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn finished_setup_does_not_reenter_legacy_wizard_when_metrics_fail(cx: &mut TestAppContext) {
+fn finished_setup_does_not_reenter_agent_setup_when_metrics_fail(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::component::init(cx);
         theme::install(false, cx);
@@ -2217,11 +2215,6 @@ fn connections_query_navigation_retains_cache_and_fences_connection_changes(
         queued.iter().any(
             |request| request.method == "connections_query" && request.args["refresh"] == false
         )
-    );
-    assert!(
-        !queued
-            .iter()
-            .any(|request| request.method == "discover_ports")
     );
     view.update(visual, |v, cx| v.navigate(Page::Integration, cx));
     frame(visual);

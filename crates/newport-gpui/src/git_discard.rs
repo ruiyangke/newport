@@ -139,8 +139,9 @@ impl Confirmation {
                 true
             })
             .unwrap_or(false);
-        // The durable, session-owned operation panel now owns success/failure
-        // and ambiguous outcomes. Closing never cancels or repeats the write.
+        // Once started, the durable, session-owned operation panel owns
+        // success/failure and ambiguous outcomes. Closing never cancels or
+        // repeats the write.
         if started {
             window.close_dialog(cx);
         }

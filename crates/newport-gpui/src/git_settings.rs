@@ -410,8 +410,8 @@ impl Newport {
 
 impl Newport {
     pub(super) fn git_load_repository_settings(&mut self) {
-        // The current agent exposes repository preferences through repo.remotes.
-        // Keep this legacy read demand-driven, separate from name pagination.
+        // Repository preferences come from repo.remotes' configuration. Read
+        // them on demand, separate from the remote name pagination.
         self.request(
             "git-repository-settings",
             "native.repository_settings",

@@ -118,12 +118,9 @@ pub(super) fn path(path: String, cx: &App) -> Div {
         )
 }
 /// Changes navigator: identify the filename first; let the parent path yield
-/// space before truncating the name. Preserve a trailing slash for directory
-/// entries returned by older agents.
+/// space before truncating the name.
 pub(super) fn filename_first(path: &str, cx: &App) -> Div {
-    let directory = path.ends_with('/');
-    let (parent, name) = split_path(path.trim_end_matches('/'));
-    let name = format!("{name}{}", if directory { "/" } else { "" });
+    let (parent, name) = split_path(path);
     div()
         .flex()
         .items_center()
@@ -138,7 +135,7 @@ pub(super) fn filename_first(path: &str, cx: &App) -> Div {
                 .max_w_full()
                 .truncate()
                 .flex_shrink(0.0001)
-                .child(name),
+                .child(name.to_owned()),
         )
         .when(!parent.is_empty(), |row| {
             row.child(

@@ -296,7 +296,7 @@ fn series(history: &[Value], metric: usize, interface: &str, outgoing: bool) -> 
         })
         .collect()
 }
-// Match Tauri's duration-weighted long-window averages. Empty buckets remain
+// Long windows use duration-weighted averages. Empty buckets remain
 // missing, so a disconnected period is never drawn as zero activity.
 fn history_start(first: Option<f64>, end: f64, minutes: u64) -> f64 {
     let requested = end - minutes as f64 * 60_000.;
@@ -479,8 +479,8 @@ fn chart_dot(
         gpui::BorderStyle::Solid,
     ));
 }
-// Native vector paths retain every discontinuity and use actual sample times,
-// avoiding the evenly-spaced category axis used by the initial prototype.
+// Vector paths retain every discontinuity and use actual sample times, not an
+// evenly spaced category axis.
 #[derive(Clone, Copy, PartialEq)]
 enum GraphStyle {
     Sparkline,

@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// Preserve the shipping Tauri host's label and filename during upgrades.
+// The LaunchAgent label, matching the plist file name.
 const LABEL: &str = "Newport";
 pub(super) struct Registration {
     directory: PathBuf,
@@ -50,6 +50,23 @@ impl Registration {
                             .is_some_and(|path| !path.is_empty())
                     }),
         )
+    }
+
+    /// Enabled, and launching this executable. A registration left by a
+    /// copy of the app that moved or was replaced starts nothing useful, so
+    /// it reads as off and switching it on writes this path.
+    pub fn enabled_for(&self, executable: &Path) -> Result<bool, String> {
+        if !self.enabled()? {
+            return Ok(false);
+        }
+        let value = Value::from_file(self.path()).map_err(|error| error.to_string())?;
+        Ok(value
+            .as_dictionary()
+            .and_then(|value| value.get("ProgramArguments"))
+            .and_then(Value::as_array)
+            .and_then(|args| args.first())
+            .and_then(Value::as_string)
+            .is_some_and(|program| Path::new(program) == executable))
     }
 
     pub fn set_enabled(&self, executable: &Path, enabled: bool) -> Result<(), String> {
@@ -132,6 +149,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        // The registration now launches the second path, not the first.
+        assert!(!registration.enabled_for(executable).unwrap());
+        assert!(
+            registration
+                .enabled_for(Path::new(
+                    "/Applications/Newport.app/Contents/MacOS/newport"
+                ))
+                .unwrap()
+        );
         registration.set_enabled(executable, false).unwrap();
         registration.set_enabled(executable, false).unwrap();
         assert!(!registration.enabled().unwrap());

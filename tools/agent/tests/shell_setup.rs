@@ -26,6 +26,27 @@ impl RunOutput for Command {
     }
 }
 
+/// Stage this build and point `~/.local/bin/newport-agent` at it, as the desktop does.
+fn install_managed(home: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    let hash: String = Sha256::digest(fs::read(BIN).unwrap())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    for args in [
+        ["deployment", "prepare", &hash].as_slice(),
+        ["deployment", "activate", &hash, "missing"].as_slice(),
+    ] {
+        let output = Command::new(BIN).args(args).env("HOME", home).run_output();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    hash
+}
+
 #[test]
 fn removal_plan_composes_install_history_without_mutating_targets_or_receipts() {
     let home = tempfile::tempdir().unwrap();
@@ -46,9 +67,7 @@ fn removal_plan_composes_install_history_without_mutating_targets_or_receipts() 
 
     let shell = home.path().join(".bashrc");
     fs::write(&shell, "# original\n").unwrap();
-    let bin = home.path().join(".local/bin/newport-agent");
-    fs::create_dir_all(bin.parent().unwrap()).unwrap();
-    fs::copy(BIN, &bin).unwrap();
+    install_managed(home.path());
     let operation = uuid::Uuid::new_v4().to_string();
     let managed = run(&[
         "deployment",
@@ -181,7 +200,7 @@ fn installed_blocks_are_repeatable_and_survive_agent_removal() {
         fs::write(state.join("features"), "clipboard browser").unwrap();
         fs::write(state.join("display"), ":99").unwrap();
         // This shell-only fixture models the live bridge's ownership lease;
-        // metadata left by a dead bridge must no longer redirect a new shell.
+        // metadata left by a dead bridge must not redirect a new shell.
         let lease = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -259,7 +278,7 @@ fn installed_blocks_are_repeatable_and_survive_agent_removal() {
 }
 
 #[test]
-fn invalid_shell_configuration_fails_before_alias_or_legacy_changes() {
+fn invalid_shell_configuration_fails_before_alias_changes() {
     for content in [
         "# >>> Newport >>>\nincomplete",
         "# >>> Newport >>>\n# >>> Newport >>>\n# <<< Newport <<<\n",
@@ -267,13 +286,6 @@ fn invalid_shell_configuration_fails_before_alias_or_legacy_changes() {
         let home = tempfile::tempdir().unwrap();
         let bin = home.path().join(".local/bin");
         fs::create_dir_all(&bin).unwrap();
-        let legacy = bin.join("porthop-clip");
-        fs::write(
-            &legacy,
-            b"#!/usr/bin/env bash\n# Porthop clipboard helper v5\n",
-        )
-        .unwrap();
-        std::os::unix::fs::symlink("porthop-clip", bin.join("xclip")).unwrap();
         let rc = home.path().join(".bashrc");
         fs::write(&rc, content).unwrap();
         let result = Command::new(BIN)
@@ -282,12 +294,9 @@ fn invalid_shell_configuration_fails_before_alias_or_legacy_changes() {
             .env("SHELL", "/bin/bash")
             .run_output();
         assert!(!result.status.success());
-        assert_eq!(
-            fs::read_link(bin.join("xclip")).unwrap(),
-            std::path::Path::new("porthop-clip")
-        );
-        assert!(legacy.is_file());
-        assert!(fs::symlink_metadata(bin.join("newport-browser")).is_err());
+        for name in ["xclip", "wl-paste", "xdg-open", "newport-browser"] {
+            assert!(fs::symlink_metadata(bin.join(name)).is_err(), "{name}");
+        }
         assert_eq!(fs::read_to_string(&rc).unwrap(), content);
     }
 }
@@ -353,16 +362,21 @@ fn journaled_activation_records_helper_ownership_and_never_replays_completed_ins
 
 #[test]
 fn helper_only_operation_preserves_the_installed_entry_and_recovers_by_id() {
-    use sha2::{Digest, Sha256};
     use std::os::unix::fs::MetadataExt;
     let home = tempfile::tempdir().unwrap();
+    let protocol = Command::new(BIN)
+        .args(["deployment", "protocol"])
+        .env("HOME", home.path())
+        .run_output();
+    let value: serde_json::Value = serde_json::from_slice(&protocol.stdout).unwrap();
+    assert!(
+        !home.path().join(".local/share/newport/needle").exists(),
+        "capability probe is read-only"
+    );
+    let hash = install_managed(home.path());
+    assert_eq!(value["helperOperations"], true);
+    assert_eq!(value["buildSha256"], hash);
     let bin = home.path().join(".local/bin/newport-agent");
-    fs::create_dir_all(bin.parent().unwrap()).unwrap();
-    fs::copy(BIN, &bin).unwrap();
-    let hash: String = Sha256::digest(fs::read(&bin).unwrap())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
     let inode = fs::metadata(&bin).unwrap().ino();
     let run = |args: &[&str]| {
         Command::new(&bin)
@@ -371,14 +385,6 @@ fn helper_only_operation_preserves_the_installed_entry_and_recovers_by_id() {
             .env("SHELL", "/bin/bash")
             .run_output()
     };
-    let protocol = run(&["deployment", "protocol"]);
-    let value: serde_json::Value = serde_json::from_slice(&protocol.stdout).unwrap();
-    assert_eq!(value["helperOperations"], true);
-    assert_eq!(value["buildSha256"], hash);
-    assert!(
-        !home.path().join(".local/share/newport/needle").exists(),
-        "capability probe is read-only"
-    );
     let id = uuid::Uuid::new_v4().to_string();
     let result = run(&["deployment", "helpers", &hash, "--operation", &id]);
     assert!(
@@ -475,9 +481,8 @@ fn managed_shell_files_keep_agent_active_and_report_durable_manual_setup() {
     use std::os::unix::fs::symlink;
     for mode in ["symlink", "read-only", "unsupported"] {
         let home = tempfile::tempdir().unwrap();
+        install_managed(home.path());
         let bin = home.path().join(".local/bin/newport-agent");
-        fs::create_dir_all(bin.parent().unwrap()).unwrap();
-        fs::copy(BIN, &bin).unwrap();
         let target = home.path().join("managed-bashrc");
         fs::write(&target, "# managed configuration\n").unwrap();
         let rc = home.path().join(".bashrc");
@@ -602,9 +607,8 @@ fn unwritable_shell_parent_is_skipped_without_creating_missing_directories() {
 #[test]
 fn cancelled_shell_plan_does_not_require_recovery_or_replace_agent() {
     let home = tempfile::tempdir().unwrap();
+    install_managed(home.path());
     let bin = home.path().join(".local/bin/newport-agent");
-    fs::create_dir_all(bin.parent().unwrap()).unwrap();
-    fs::copy(BIN, &bin).unwrap();
     let rc = home.path().join(".bashrc");
     fs::write(&rc, "# >>> Newport >>>\nbroken block\n").unwrap();
     let run = |args: &[&str]| {

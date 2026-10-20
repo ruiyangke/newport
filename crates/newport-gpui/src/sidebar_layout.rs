@@ -1,14 +1,9 @@
-//! Native-only sidebar sizing. Preferences never touch the backend config.
+//! Native sidebar sizing. Width and the icon-only mode are window
+//! preferences (newport_client::window_preferences); this owns no files.
 use gpui_kit::component::resizable::{
     ResizablePanel, ResizablePanelGroup, ResizableState, h_resizable, resizable_panel,
 };
 use gpui_kit::{prelude::*, *};
-use serde::{Deserialize, Serialize};
-use std::{
-    fs::{self, OpenOptions},
-    io::{self, Write},
-    path::{Path, PathBuf},
-};
 
 pub const DEFAULT_WIDTH: f32 = 184.;
 pub const MIN_WIDTH: f32 = 176.;
@@ -26,92 +21,22 @@ fn clamp_width(width: f32, viewport: f32) -> f32 {
     width.clamp(MIN_WIDTH, maximum(viewport))
 }
 
-#[derive(Serialize, Deserialize)]
-struct Preferences {
-    sidebar_width: f32,
-    #[serde(default)]
-    compact: bool,
-}
-
-fn load_width(path: Option<&Path>) -> io::Result<f32> {
-    let Some(path) = path else {
-        return Ok(DEFAULT_WIDTH);
-    };
-    match fs::read(path) {
-        Ok(bytes) => {
-            let preferences: Preferences = serde_json::from_slice(&bytes)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            Ok(clamp_width(preferences.sidebar_width, f32::MAX))
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(DEFAULT_WIDTH),
-        Err(error) => Err(error),
-    }
-}
-
-fn save_preferences(path: &Path, width: f32, compact: bool) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let bytes = serde_json::to_vec_pretty(&Preferences {
-        sidebar_width: width,
-        compact,
-    })?;
-    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
-}
-
-fn load_compact(path: Option<&Path>) -> bool {
-    path.and_then(|path| fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice::<Preferences>(&bytes).ok())
-        .is_some_and(|preferences| preferences.compact)
-}
-#[cfg(test)]
-fn save_width(path: &Path, width: f32) -> io::Result<()> {
-    save_preferences(path, width, false)
-}
-
 pub struct SidebarLayout {
     pub state: Entity<ResizableState>,
     preferred_width: f32,
     compact: bool,
     viewport: Option<f32>,
-    preferences_path: Option<PathBuf>,
 }
 
 impl SidebarLayout {
-    pub fn new(cx: &mut App) -> (Self, Option<io::Error>) {
-        // No fallback to Newport/Porthop application data: the native prototype
-        // may only persist inside the explicitly selected isolated data dir.
-        let preferences_path = std::env::var_os("NEWPORT_DATA_DIR")
-            .filter(|path| !path.is_empty())
-            .map(|base| PathBuf::from(base).join("gpui-shell-preferences.json"));
-        let (preferred_width, load_error) = match load_width(preferences_path.as_deref()) {
-            Ok(width) => (width, None),
-            Err(error) => (DEFAULT_WIDTH, Some(error)),
-        };
-        (
-            Self {
-                state: cx.new(|_| ResizableState::default()),
-                preferred_width,
-                compact: load_compact(preferences_path.as_deref()),
-                viewport: None,
-                preferences_path,
-            },
-            load_error,
-        )
+    /// The saved width (None for the default) and icon-only mode.
+    pub fn new(width: Option<f32>, compact: bool, cx: &mut App) -> Self {
+        Self {
+            state: cx.new(|_| ResizableState::default()),
+            preferred_width: width.map_or(DEFAULT_WIDTH, |w| clamp_width(w, f32::MAX)),
+            compact,
+            viewport: None,
+        }
     }
 
     /// UI tests must never load or overwrite the running app's preferences.
@@ -122,16 +47,18 @@ impl SidebarLayout {
             preferred_width: DEFAULT_WIDTH,
             compact: false,
             viewport: None,
-            preferences_path: None,
         }
     }
 
     pub fn compact(&self) -> bool {
         self.compact
     }
-    pub fn set_compact(&mut self, compact: bool) -> io::Result<()> {
+    pub fn set_compact(&mut self, compact: bool) {
         self.compact = compact;
-        self.save()
+    }
+    /// The width to save: the user's choice, not the window-constrained one.
+    pub fn preferred_width(&self) -> f32 {
+        self.preferred_width
     }
     pub fn width(&self, viewport: f32) -> f32 {
         clamp_width(self.preferred_width, viewport)
@@ -162,106 +89,34 @@ impl SidebarLayout {
         resizable_panel().size_range(px(440.)..Pixels::MAX)
     }
 
-    /// Invoke from the group's on_resize callback (pointer release). The parent
-    /// should notify and surface any returned persistence error as a notice.
-    pub fn capture_resize(&mut self, viewport: f32, cx: &App) -> io::Result<()> {
-        if let Some(width) = self.state.read(cx).sizes().first().copied() {
-            self.preferred_width = clamp_width(f32::from(width), viewport);
-            self.save()?;
-        }
-        Ok(())
+    /// Invoke from the group's on_resize callback (pointer release). True when
+    /// the preferred width changed and should be saved.
+    pub fn capture_resize(&mut self, viewport: f32, cx: &App) -> bool {
+        let Some(width) = self.state.read(cx).sizes().first().copied() else {
+            return false;
+        };
+        let width = clamp_width(f32::from(width), viewport);
+        let changed = width != self.preferred_width;
+        self.preferred_width = width;
+        changed
     }
 
     /// A parent action/menu can use this for accessible keyboard resizing.
     /// Clearing state also works while collapsed, preserving the requested size
     /// for the next time the two-panel group is rendered.
-    pub fn set_width(&mut self, width: f32, viewport: f32, cx: &mut App) -> io::Result<()> {
+    pub fn set_width(&mut self, width: f32, viewport: f32, cx: &mut App) {
         self.preferred_width = clamp_width(width, viewport);
         self.state.update(cx, |state, _| state.clear());
-        self.save()
     }
 
-    pub fn reset(&mut self, viewport: f32, cx: &mut App) -> io::Result<()> {
+    pub fn reset(&mut self, viewport: f32, cx: &mut App) {
         self.set_width(DEFAULT_WIDTH, viewport, cx)
-    }
-
-    fn save(&self) -> io::Result<()> {
-        let Some(path) = &self.preferences_path else {
-            return Ok(());
-        };
-        save_preferences(path, self.preferred_width, self.compact)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DEFAULT_WIDTH, clamp_width, load_compact, load_width, maximum, save_preferences, save_width,
-    };
-    use std::{fs, io, path::PathBuf};
-
-    struct TestDirectory(PathBuf);
-    impl TestDirectory {
-        fn new() -> Self {
-            let path =
-                std::env::temp_dir().join(format!("newport-sidebar-{}", uuid::Uuid::new_v4()));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    #[test]
-    fn preference_load_distinguishes_missing_corrupt_and_unreadable_files() {
-        let directory = TestDirectory::new();
-        let path = directory.0.join("preferences.json");
-        assert_eq!(load_width(None).unwrap(), DEFAULT_WIDTH);
-        assert_eq!(load_width(Some(&path)).unwrap(), DEFAULT_WIDTH);
-        fs::write(&path, "invalid").unwrap();
-        assert_eq!(
-            load_width(Some(&path)).unwrap_err().kind(),
-            io::ErrorKind::InvalidData
-        );
-        assert_eq!(fs::read_to_string(&path).unwrap(), "invalid");
-        assert!(load_width(Some(&directory.0)).is_err());
-        save_width(&path, 280.).unwrap();
-        assert_eq!(load_width(Some(&path)).unwrap(), 280.);
-        save_width(&path, 999.).unwrap();
-        assert_eq!(load_width(Some(&path)).unwrap(), 300.);
-        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn navigation_mode_round_trips_and_accepts_existing_preferences() {
-        let directory = TestDirectory::new();
-        let path = directory.0.join("preferences.json");
-        fs::write(&path, r#"{"sidebar_width":240}"#).unwrap();
-        assert!(!load_compact(Some(&path)));
-        assert_eq!(load_width(Some(&path)).unwrap(), 240.);
-        save_preferences(&path, 240., true).unwrap();
-        assert!(load_compact(Some(&path)));
-        assert_eq!(load_width(Some(&path)).unwrap(), 240.);
-        save_preferences(&path, 260., true).unwrap();
-        assert!(load_compact(Some(&path)));
-        assert_eq!(load_width(Some(&path)).unwrap(), 260.);
-        save_preferences(&path, 260., false).unwrap();
-        assert!(!load_compact(Some(&path)));
-    }
-
-    #[test]
-    fn failed_preference_replacement_cleans_up_temporary_file() {
-        let directory = TestDirectory::new();
-        let path = directory.0.join("preferences.json");
-        fs::create_dir(&path).unwrap();
-        fs::write(path.join("keep"), "original").unwrap();
-        assert!(save_width(&path, 250.).is_err());
-        assert_eq!(fs::read_to_string(path.join("keep")).unwrap(), "original");
-        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
-    }
+    use super::{DEFAULT_WIDTH, clamp_width, maximum};
 
     #[test]
     fn width_limits_leave_room_for_content() {

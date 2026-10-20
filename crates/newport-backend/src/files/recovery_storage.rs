@@ -17,25 +17,22 @@ type Owner<Q> = Result<Arc<Mutex<Q>>, String>;
 type Slot<Q> = Arc<OnceLock<Owner<Q>>>;
 
 pub(super) trait Queue: Default + Send {
-    const KIND: Kind;
     fn open(path: PathBuf) -> Self;
-    fn validate(bytes: &[u8], server: Option<Uuid>) -> Result<()>;
+    fn validate(bytes: &[u8], server: Uuid) -> Result<()>;
 }
 impl Queue for UploadCleanup {
-    const KIND: Kind = Kind::Upload;
     fn open(path: PathBuf) -> Self {
         Self::open(path)
     }
-    fn validate(bytes: &[u8], server: Option<Uuid>) -> Result<()> {
-        Self::validate(bytes, server)
+    fn validate(bytes: &[u8], server: Uuid) -> Result<()> {
+        Self::validate(bytes, Some(server))
     }
 }
 impl Queue for DownloadCleanup {
-    const KIND: Kind = Kind::Download;
     fn open(path: PathBuf) -> Self {
         Self::open(path)
     }
-    fn validate(bytes: &[u8], _: Option<Uuid>) -> Result<()> {
+    fn validate(bytes: &[u8], _: Uuid) -> Result<()> {
         Self::validate(bytes)
     }
 }
@@ -62,23 +59,9 @@ impl<Q: Queue> Owners<Q> {
             ..Self::default()
         };
         let loaded = (|| -> Result<()> {
-            migrate::<Q>(&path)?;
+            initialise(&path)?;
             for item in fs::read_dir(&directory)?.collect::<std::io::Result<Vec<_>>>()? {
-                let name = item.file_name();
-                if name == "source.json" {
-                    continue;
-                }
-                if Q::KIND == Kind::Download && name == "unassigned" {
-                    // Old downloads did not record a server. Recover their exact
-                    // local paths at startup; no new transfer writes this file.
-                    check_directory(&item.path())?;
-                    let bytes = read(&item.path().join("journal.json"))?
-                        .context("Missing legacy download recovery")?;
-                    DownloadCleanup::validate(&bytes)?;
-                    drop(DownloadCleanup::open(item.path().join("journal.json")));
-                    continue;
-                }
-                let server = file_server(&name)?;
+                let server = file_server(&item.file_name())?;
                 // Preload before any live transfer, because download open()
                 // recovers abandoned files. A bad shard affects only its owner.
                 let _ = owners.get(server);
@@ -121,7 +104,7 @@ impl<Q: Queue> Owners<Q> {
                     }
                     let path = server_root.join("journal.json");
                     if let Some(bytes) = read(&path)? {
-                        Q::validate(&bytes, Some(server))?;
+                        Q::validate(&bytes, server)?;
                     } else if fs::read_dir(&server_root)?.next().is_some() {
                         bail!("Server file recovery journal is missing; evidence was preserved");
                     }
@@ -138,21 +121,11 @@ impl<Q: Queue> Owners<Q> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-pub(super) enum Kind {
-    Upload,
-    Download,
-}
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Descriptor {
     version: u32,
     storage: String,
-}
-#[derive(Deserialize, Serialize)]
-struct Legacy {
-    version: u32,
-    entries: HashMap<Uuid, Value>,
 }
 const LAYOUT: &str = "server-journals";
 
@@ -210,107 +183,27 @@ fn check_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Runs once at profile startup, before transfers exist. Stage the complete
-/// conversion, preserve exact source bytes, then replace the old journal with a
-/// descriptor. Old clients reject it rather than opening stale global records.
-fn migrate<Q: Queue>(path: &Path) -> Result<()> {
-    let source = read(path)?;
+/// Runs once at profile startup, before transfers exist. The server directory
+/// is created before the descriptor that names it, and a lost descriptor never
+/// reopens storage that still holds records.
+fn initialise(path: &Path) -> Result<()> {
     let destination = directory(path);
-    if let Some(bytes) = &source
-        && let Ok(descriptor) = serde_json::from_slice::<Descriptor>(bytes)
-    {
+    if let Some(bytes) = read(path)? {
+        let descriptor: Descriptor =
+            serde_json::from_slice(&bytes).context("Unknown file recovery storage layout")?;
         if descriptor.version != 2 || descriptor.storage != LAYOUT {
             bail!("Unknown file recovery storage layout");
         }
         return check_directory(&destination);
     }
-    let mut files = HashMap::<String, Vec<u8>>::new();
-    if let Some(bytes) = &source {
-        Q::validate(bytes, None)?;
-        files.insert("source.json".into(), bytes.clone());
-        match Q::KIND {
-            Kind::Upload => {
-                let legacy: Legacy = serde_json::from_slice(bytes)?;
-                let mut shards = HashMap::<Uuid, HashMap<Uuid, Value>>::new();
-                for (id, entry) in legacy.entries {
-                    shards
-                        .entry(scope_server(&entry["scope"])?)
-                        .or_default()
-                        .insert(id, entry);
-                }
-                for (server, entries) in shards {
-                    files.insert(
-                        format!("{server}/journal.json"),
-                        serde_json::to_vec(&Legacy {
-                            version: 1,
-                            entries,
-                        })?,
-                    );
-                }
-            }
-            Kind::Download => {
-                files.insert("unassigned/journal.json".into(), bytes.clone());
-            }
-        }
-    }
     let parent = path.parent().context("Missing file recovery directory")?;
     if destination.try_exists()? {
         check_directory(&destination)?;
-        let mut existing = HashMap::new();
-        for item in fs::read_dir(&destination)? {
-            let item = item?;
-            let name = item
-                .file_name()
-                .into_string()
-                .map_err(|_| anyhow::anyhow!("Invalid file recovery staging name"))?;
-            let (name, file) = if name == "source.json" {
-                (name, item.path())
-            } else {
-                if name != "unassigned" {
-                    file_server(std::ffi::OsStr::new(&name))?;
-                }
-                check_directory(&item.path())?;
-                let children = fs::read_dir(item.path())?.collect::<std::io::Result<Vec<_>>>()?;
-                if children.len() != 1 || children[0].file_name() != "journal.json" {
-                    bail!("File recovery migration contains unexpected records");
-                }
-                (
-                    format!("{name}/journal.json"),
-                    item.path().join("journal.json"),
-                )
-            };
-            existing.insert(
-                name,
-                read(&file)?.context("Missing file recovery staging record")?,
-            );
-        }
-        // Serialized map order can differ, but the saved original bytes must
-        // match exactly. Reject rollback/deletion of a descriptor after writes.
-        if existing.len() != files.len()
-            || files.iter().any(|(name, expected)| {
-                existing.get(name).is_none_or(|actual| {
-                    if name == "source.json" {
-                        actual != expected
-                    } else {
-                        serde_json::from_slice::<Value>(actual).ok()
-                            != serde_json::from_slice::<Value>(expected).ok()
-                    }
-                })
-            })
-        {
-            bail!("File recovery descriptor and server journals disagree; evidence was preserved");
+        if fs::read_dir(&destination)?.next().is_some() {
+            bail!("File recovery descriptor is missing; evidence was preserved");
         }
     } else {
-        let staging = tempfile::Builder::new()
-            .prefix(".files-migrate-")
-            .tempdir_in(parent)?;
-        for (name, bytes) in files {
-            let file = staging.path().join(name);
-            fs::create_dir_all(file.parent().unwrap())?;
-            write(&file, &bytes)?;
-        }
-        sync_directory(staging.path())?;
-        fs::rename(staging.path(), &destination)?;
+        fs::create_dir_all(&destination)?;
         sync_directory(parent)?;
     }
     write(

@@ -76,26 +76,9 @@ pub(super) fn render_setup(setup: Setup, cx: &App) -> AnyElement {
         "preparing" | "uploading" | "installing" | "verifying" | "activating"
     ) && !state.is_null();
     let failed = !active && error.is_some();
-    // Prefer structured progress. Older backends prefix installation errors
-    // with their stage; ordinary SSH/RPC errors must not imply an upload.
-    let failed_stage = state["failedStage"]
-        .as_str()
-        .or_else(|| {
-            error
-                .and_then(|error| error.split_once(':').map(|(stage, _)| stage))
-                .filter(|stage| {
-                    matches!(
-                        *stage,
-                        "preparing"
-                            | "uploading"
-                            | "installing"
-                            | "verifying"
-                            | "activating"
-                            | "ready"
-                    )
-                })
-        })
-        .unwrap_or(stage);
+    // Installation progress names the stage that failed; ordinary SSH/RPC
+    // errors keep the current stage and never imply an upload.
+    let failed_stage = state["failedStage"].as_str().unwrap_or(stage);
     let (failure_title, recovery, retry_label) = match failed_stage {
         "preparing" => (
             "Couldn’t check this server",

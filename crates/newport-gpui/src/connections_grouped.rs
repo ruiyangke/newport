@@ -1,4 +1,4 @@
-//! Project-oriented presentation, following the Tauri Connections view.
+//! Project-oriented presentation of the Connections view.
 use super::connections_selector::{Choice, Selector};
 use super::*;
 pub(super) use newport_domain::port_grouping::{Entry, Project};
@@ -1916,8 +1916,7 @@ mod tests {
             "tunnels":{"t":{"status":"connected"}},
             "tunnelHealth":{"t":[
                 {"remotePort":8079,"status":"unavailable","message":"Connection refused"},
-                {"remotePort":8080,"status":"reachable"},
-                {"status":"unknown","message":"Unscoped legacy result"}
+                {"remotePort":8080,"status":"reachable"}
             ]}
         });
         let tunnel = json!({"id":"t","remotePort":8079,"remotePortEnd":8080});

@@ -18,7 +18,7 @@ export function releaseBuildEnv(source = process.env) {
   const env = { ...source };
   for (const name of Object.keys(env))
     if (
-      /^(NEWPORT|TAURI)_SIGNING_PRIVATE_KEY(?:_PATH|_PASSWORD)?$/.test(name) ||
+      /^NEWPORT_SIGNING_PRIVATE_KEY(?:_PATH|_PASSWORD)?$/.test(name) ||
       [
         "APPLE_PASSWORD",
         "APPLE_CERTIFICATE",
@@ -32,13 +32,10 @@ export function signerEnv(source = process.env) {
   const env = {
     ...source,
     NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD:
-      source.NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD ??
-      source.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ??
-      "",
+      source.NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD ?? "",
   };
-  const key = env.NEWPORT_SIGNING_PRIVATE_KEY ?? env.TAURI_SIGNING_PRIVATE_KEY;
-  const path =
-    env.NEWPORT_SIGNING_PRIVATE_KEY_PATH ?? env.TAURI_SIGNING_PRIVATE_KEY_PATH;
+  const key = env.NEWPORT_SIGNING_PRIVATE_KEY;
+  const path = env.NEWPORT_SIGNING_PRIVATE_KEY_PATH;
   if (!key && !path)
     throw new Error(
       "NEWPORT_SIGNING_PRIVATE_KEY or NEWPORT_SIGNING_PRIVATE_KEY_PATH is required",
@@ -54,9 +51,6 @@ export function signerEnv(source = process.env) {
   if (path || file) env.NEWPORT_SIGNING_PRIVATE_KEY_PATH = path || key;
   else env.NEWPORT_SIGNING_PRIVATE_KEY = key;
   if (path || file) delete env.NEWPORT_SIGNING_PRIVATE_KEY;
-  delete env.TAURI_SIGNING_PRIVATE_KEY;
-  delete env.TAURI_SIGNING_PRIVATE_KEY_PATH;
-  delete env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD;
   return env;
 }
 export function plist(path) {

@@ -1,4 +1,4 @@
-//! Readable container lifecycle and failure context, shared by desktop clients.
+//! Readable container lifecycle and failure context.
 use crate::containers::{
     problem_reason, Container, ContainerHealth, ContainerInspect, ContainerState, ContainerVerb,
 };

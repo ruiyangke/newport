@@ -1,6 +1,5 @@
 # Signed fixtures must remain byte-for-byte identical on every platform.
 /resources/test-fixtures/updater/* -text
-/resources/test-fixtures/released-profile/*.stronghold -text
 /crates/newport-release/tests/fixtures/*.key* -text
 
 # Preserve binary PDF fixtures and whitespace in patch context lines.

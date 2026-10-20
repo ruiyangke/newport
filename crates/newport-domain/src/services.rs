@@ -1,5 +1,5 @@
-//! Systemd service contracts and domain rules shared by desktop clients.
-//! Mirrors `src/domain/services.ts`; no UI, transport, or runtime dependencies.
+//! Systemd service contracts and domain rules, with no UI, transport, or
+//! runtime dependencies.
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -210,8 +210,7 @@ pub fn is_problem(unit: &ServiceUnit) -> bool {
         || (unit.active == "activating" && unit.restarts.unwrap_or(0) > 0)
 }
 
-// Prefixes deliberately match the original anchored plumbing expression, not
-// only complete service names. User units always remain the user's services.
+// Prefixes deliberately match name prefixes, not only complete service names. User units always remain the user's services.
 const PLUMBING: &[&str] = &[
     "systemd-",
     "getty@",

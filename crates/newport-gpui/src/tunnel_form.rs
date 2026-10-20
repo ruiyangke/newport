@@ -243,8 +243,9 @@ impl Form {
         let scroll = modal::FormScroll::new(6 + usize::from(!projects.is_empty()), window, cx);
         let expected = existing.then(|| value.clone());
         let mut value = value;
-        // Preserve the existing startup intent when consolidating legacy policies.
-        // Keep `expected` untouched for optimistic concurrency on save.
+        // Always on is one intent. Forwards opened from a discovered port are
+        // saved with reconnect on and startup off, so the startup flag decides
+        // both. Keep `expected` untouched for optimistic concurrency on save.
         let always_on = value["autoConnect"] == true;
         value["autoConnect"] = json!(always_on);
         value["autoReconnect"] = json!(always_on);
@@ -875,7 +876,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn always_on_consolidates_legacy_policies_and_toggles_both_flags(cx: &mut TestAppContext) {
+    fn always_on_consolidates_mixed_policies_and_toggles_both_flags(cx: &mut TestAppContext) {
         for (auto_connect, auto_reconnect) in
             [(false, false), (false, true), (true, false), (true, true)]
         {

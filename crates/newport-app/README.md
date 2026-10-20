@@ -17,8 +17,8 @@ node scripts/build-grammars.mjs
 NEWPORT_DATA_DIR=/absolute/path/to/test-profile npm run dev
 ```
 
-Debug builds require an explicit isolated profile. Release builds resolve the
-existing profile and preserve recovery copies before migration. Never run two
+Debug builds require an explicit isolated profile. Release builds use the
+default profile and preserve a recovery copy before opening it. Never run two
 owners against the same profile. See [storage and recovery](../../docs/storage.md).
 
 The development command supplies the pinned Ghostty environment. On Windows,
@@ -88,7 +88,7 @@ The platform crate includes `update_check`, `update_transaction_check`, and
 example requires `NEWPORT_UPDATE_TEST_APP` pointing to a disposable older app;
 the startup example uses `NEWPORT_UPDATE_TEST_EXECUTABLE` and an isolated
 `NEWPORT_DATA_DIR`. Run with `--features updates`. Neither substitutes for the
-[signed upgrade acceptance procedure](../../docs/testing.md#released-desktop-baseline).
+[signed upgrade acceptance procedure](../../docs/testing.md#upgrade-acceptance).
 
 ## Script entry points
 
@@ -121,8 +121,8 @@ The runner launches the GUI through LaunchServices so 1Password attributes SSH
 approval to Newport. Do not launch `Newport.app/Contents/MacOS/newport` directly
 from an IDE or terminal for interactive SSH testing: macOS can attribute those
 requests to the parent application and 1Password suppresses its background prompts.
-The runner preserves `NEWPORT_DATA_DIR` (including relative paths), the legacy
-`PORTHOP_DATA_DIR`, `SSH_AUTH_SOCK`, and Rust logging settings. GUI output goes to
+The runner preserves `NEWPORT_DATA_DIR` (including relative paths),
+`NEWPORT_ACCOUNT_URL`, `SSH_AUTH_SOCK`, and Rust logging settings. GUI output goes to
 `newport-dev.log` beside the bundle; Cargo waits until the app quits. Headless
 `--check-*` probes and `--build-info` keep direct stdout and exit status.
 On an interactive Windows desktop, run

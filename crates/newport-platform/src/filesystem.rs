@@ -147,8 +147,8 @@ mod tests {
         }
     }
 
-    // Preserve the Windows regression from the retired desktop host: applying
-    // the private DACL must not prevent atomic replacement or subsequent reads.
+    // Applying the private DACL must not prevent atomic replacement or
+    // subsequent reads.
     #[test]
     fn protected_files_can_be_replaced_and_read() {
         let path = std::env::temp_dir().join(format!("newport-files-{}", uuid::Uuid::new_v4()));

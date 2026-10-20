@@ -1,5 +1,5 @@
-// Tauri-free NSIS packaging. This builds an unsigned candidate, never installs
-// it or publishes it. Signing and native upgrade acceptance are separate gates.
+// NSIS packaging for Windows. This builds an unsigned candidate, never installs
+// it or publishes it. Signing and upgrade acceptance are separate gates.
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {

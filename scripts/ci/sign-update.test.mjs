@@ -18,34 +18,25 @@ test("release Cargo builds preserve target routing without inheriting signing an
     NEWPORT_SIGNING_PRIVATE_KEY: "key",
     NEWPORT_SIGNING_PRIVATE_KEY_PATH: "/key",
     NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD: "password",
-    TAURI_SIGNING_PRIVATE_KEY: "old-key",
-    TAURI_SIGNING_PRIVATE_KEY_PATH: "/old-key",
-    TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "old-password",
   };
   const source = { ...routing, ...secrets };
   assert.deepEqual(releaseBuildEnv(source), routing);
   assert.deepEqual(source, { ...routing, ...secrets });
 });
 
-test("native signer accepts existing CI secret names without passing duplicate credentials", () => {
+test("native signer passes inline keys and defaults an empty password", () => {
   const result = signerEnv({
-    TAURI_SIGNING_PRIVATE_KEY: "fixture-base64",
-    TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "fixture-password",
+    NEWPORT_SIGNING_PRIVATE_KEY: "fixture-base64",
+    NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD: "fixture-password",
     PATH: "/bin",
   });
   assert.equal(result.NEWPORT_SIGNING_PRIVATE_KEY, "fixture-base64");
   assert.equal(result.NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD, "fixture-password");
+  assert.equal(result.NEWPORT_SIGNING_PRIVATE_KEY_PATH, undefined);
   assert.equal(result.PATH, "/bin");
   assert.equal(
-    Object.keys(result).some((key) => key.startsWith("TAURI_SIGNING")),
-    false,
-  );
-  assert.equal(
-    signerEnv({
-      NEWPORT_SIGNING_PRIVATE_KEY: "new",
-      NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD: "",
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "old",
-    }).NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD,
+    signerEnv({ NEWPORT_SIGNING_PRIVATE_KEY: "new" })
+      .NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD,
     "",
   );
   assert.throws(() => signerEnv({}), /required/);
@@ -65,7 +56,6 @@ test("key paths are normalized without reading their contents into child environ
     const path = join(directory, "secret.key");
     writeFileSync(path, "fixture-key-contents");
     for (const source of [
-      { TAURI_SIGNING_PRIVATE_KEY: path },
       { NEWPORT_SIGNING_PRIVATE_KEY: path },
       { NEWPORT_SIGNING_PRIVATE_KEY_PATH: path },
     ]) {

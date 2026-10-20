@@ -1,8 +1,8 @@
 # Optional native fixture and icon generators
 
 The native build consumes committed SVG assets and terminal JSON fixtures.
-It does not install npm dependencies. These optional scripts retain pinned
-reference implementations solely to reproduce that data. React renders the
+It does not install npm dependencies. These optional scripts use pinned npm
+packages solely to reproduce that data. React renders the
 file-icon SVGs offline; xterm supplies terminal compatibility fixtures. Neither
 is bundled with Newport.
 

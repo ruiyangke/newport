@@ -69,17 +69,17 @@ fn encrypted_key_import_accepts_the_password_and_never_echoes_key_material() {
 }
 
 #[test]
-fn imports_shipping_tauri_keys_with_empty_and_nonempty_passwords() {
+fn imports_wrapped_keys_with_empty_and_nonempty_passwords() {
     for (encoded, password, public) in [
         (
-            include_str!("../tests/fixtures/tauri-empty.key"),
+            include_str!("../tests/fixtures/empty-password.key"),
             "",
-            include_str!("../tests/fixtures/tauri-empty.key.pub"),
+            include_str!("../tests/fixtures/empty-password.key.pub"),
         ),
         (
-            include_str!("../tests/fixtures/tauri-password.key"),
+            include_str!("../tests/fixtures/fixture-password.key"),
             "fixture-password",
-            include_str!("../tests/fixtures/tauri-password.key.pub"),
+            include_str!("../tests/fixtures/fixture-password.key.pub"),
         ),
     ] {
         let key = secret_key(encoded, password.into()).unwrap();

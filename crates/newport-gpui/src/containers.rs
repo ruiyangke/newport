@@ -55,8 +55,8 @@ pub(super) struct PortTarget {
     pub name: String,
     pub port: domain::ContainerPort,
 }
-/// Session-only choices, keyed by stable server ID by the host. Match the
-/// Tauri workspace store; never include inspection reveals or action drafts.
+/// Session-only choices, keyed by stable server ID by the host. Never include
+/// inspection reveals or action drafts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Preferences {
     query: String,

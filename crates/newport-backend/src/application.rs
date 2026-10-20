@@ -1,4 +1,4 @@
-//! Tauri-free service composition. The application supplies platform adapters;
+//! Service composition. The application supplies platform adapters;
 //! this owner keeps its profile locked until RPC and background work have drained.
 use crate::{
     account::Account,
@@ -18,7 +18,7 @@ use std::{
 };
 use tokio::sync::oneshot;
 
-/// Updater, startup registration and legacy native dialogs belong to the host.
+/// Updater, startup registration and window activation belong to the host.
 pub trait DesktopCommands: Send + Sync + 'static {
     fn dispatch(
         &self,
@@ -60,8 +60,8 @@ impl Reservation {
 }
 
 impl Application {
-    pub fn reserve(store: Store, isolated: bool) -> Result<Option<Reservation>, String> {
-        let Some(instance) = Instance::acquire(&store.directory, isolated)
+    pub fn reserve(store: Store) -> Result<Option<Reservation>, String> {
+        let Some(instance) = Instance::acquire(&store.directory)
             .map_err(|error| format!("Cannot acquire Newport instance lock: {error}"))?
         else {
             return Ok(None);
@@ -73,11 +73,10 @@ impl Application {
     /// services are initialized. Must be called inside the host's Tokio runtime.
     pub async fn start<H: DesktopCommands>(
         store: Store,
-        isolated: bool,
         desktop: Desktop,
         commands: H,
     ) -> Result<Option<Self>, String> {
-        let Some(reserved) = Self::reserve(store, isolated)? else {
+        let Some(reserved) = Self::reserve(store)? else {
             return Ok(None);
         };
         reserved.start(desktop, commands).await.map(Some)
@@ -110,7 +109,6 @@ impl Application {
             metrics,
             terminals: terminal::Sessions::default(),
             files: files::Operations::persistent(&directory),
-            git: git::Sessions::default(),
             pending: git::pending::PendingOperations::new(directory.join("git-operations.json")),
             preferences,
             account,
@@ -151,7 +149,6 @@ impl Application {
             state.account.shutdown();
             state.terminals.close_server(None).await;
             state.files.shutdown().await;
-            state.git.shutdown().await;
             crate::manager::shutdown(&state.manager).await;
             state.metrics.close().await;
             result
@@ -204,7 +201,6 @@ struct State {
     metrics: MetricsDb,
     terminals: terminal::Sessions,
     files: files::Operations,
-    git: git::Sessions,
     pending: git::pending::PendingOperations,
     preferences: Preferences,
     account: Account,
@@ -231,7 +227,6 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
             git: rpc::git::Services {
                 identity: &state.preferences,
                 manager: &state.manager,
-                sessions: &state.git,
                 pending: &state.pending,
                 events: Arc::new(move |event| events.record(event)),
             },

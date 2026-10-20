@@ -161,20 +161,14 @@ pub async fn delete_server(
 }
 
 pub async fn save_tunnel(state: &Shared, tunnel: Tunnel) -> Result<(), String> {
-    save_tunnel_inner(state, tunnel, None, false).await
+    save_tunnel_inner(state, tunnel, None).await
 }
 
 /// An editor may remain open while another window changes or deletes its target.
 /// Recheck the original definition at commit so an edit cannot recreate a
 /// deleted forward or overwrite another editor's changes while encrypting.
 pub async fn update_tunnel(state: &Shared, tunnel: Tunnel, expected: Tunnel) -> Result<(), String> {
-    save_tunnel_inner(state, tunnel, Some(expected), false).await
-}
-
-/// Save first, then start only the committed definition and connection owner.
-/// Connection errors retain the saved configuration; callers must not retry blindly.
-pub async fn forward_port(state: &Shared, tunnel: Tunnel) -> Result<(), String> {
-    save_tunnel_inner(state, tunnel, None, true).await
+    save_tunnel_inner(state, tunnel, Some(expected)).await
 }
 
 pub async fn forward_discovered_port(
@@ -301,12 +295,10 @@ async fn save_tunnel_inner(
     state: &Shared,
     tunnel: Tunnel,
     expected: Option<Tunnel>,
-    connect: bool,
 ) -> Result<(), String> {
     tunnel.pairs()?;
-    let server_id = tunnel.server_id;
-    let owner = state.owner(server_id)?;
-    let (saved, connection) = state
+    let owner = state.owner(tunnel.server_id)?;
+    state
         .edit_configuration(None, move |m| {
             validate_forward_owner(m, &owner)?;
             m.server(tunnel.server_id)?;
@@ -320,17 +312,9 @@ async fn save_tunnel_inner(
             } else {
                 config.tunnels.push(tunnel.clone());
             }
-            Ok((config, (tunnel.clone(), m.connection_scope(server_id)?)))
+            Ok((config, ()))
         })
-        .await?;
-    // Publication restarts only forwards still active at commit time. A stop
-    // admitted during storage must not be undone by a stale pre-save snapshot.
-    if connect {
-        state
-            .connect_tunnel_batch(server_id, &[saved], Some(&connection))
-            .map_err(|error| format!("Forward saved, but connection failed: {error}"))?;
-    }
-    Ok(())
+        .await
 }
 pub async fn delete_tunnel(state: &Shared, id: Uuid) -> Result<(), String> {
     let Some(expected) = state
@@ -480,14 +464,6 @@ pub(crate) async fn probe_connection(state: &Shared, id: Uuid, retry: bool) -> R
     state.observe_connection(&server, revision, started, result.clone());
     result
 }
-pub async fn discover_ports(
-    state: &Shared,
-    id: Uuid,
-) -> Result<Vec<crate::ports::DiscoveredPort>, String> {
-    let owner = crate::server_session::resolve(state, id).await?;
-    crate::ports::query(&owner).refresh().await
-}
-
 /// Cheap cache observation. It never waits for SSH or another observer's fetch.
 pub async fn connections_query(
     state: &Shared,
@@ -656,12 +632,6 @@ pub async fn inspect_agent(
     owner.acquire(&server).await?.check_installation().await
 }
 
-pub async fn install_clipboard_helper(state: &Shared, id: Uuid) -> Result<String, String> {
-    let (server, _) = state.current(id)?;
-    let session = crate::server_session::acquire(state, &server).await?;
-
-    session.configure_integrations().await
-}
 pub async fn open_tunnel(
     state: &Shared,
     desktop: crate::desktop_integration::Desktop,

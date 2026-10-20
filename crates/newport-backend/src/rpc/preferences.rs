@@ -1,4 +1,4 @@
-//! Native preference routes share the same transactions as the legacy desktop.
+//! Preference routes; each one is a transaction on the shared preferences file.
 use super::arguments::{argument, encode, error};
 use crate::preferences::{self, Preferences, projects, remote_apps};
 use serde::Deserialize;
@@ -7,8 +7,7 @@ use serde_json::Value;
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Command {
-    GetSidebarWidth,
-    SetSidebarWidth,
+    SetWindowPreferences,
     GitProjectsList,
     GitProjectsSave,
     GitProjectsRemove,
@@ -27,17 +26,8 @@ impl Command {
     }
     pub async fn dispatch(self, state: &Preferences, args: &Value) -> Result<Value, Value> {
         match self {
-            Self::GetSidebarWidth => {
-                let state = state.clone();
-                encode(
-                    tokio::task::spawn_blocking(move || preferences::get_sidebar_width(&state))
-                        .await
-                        .map_err(|e| error(e.to_string()))?
-                        .map_err(error)?,
-                )
-            }
-            Self::SetSidebarWidth => encode(
-                preferences::set_sidebar_width(state, argument(args, "width")?)
+            Self::SetWindowPreferences => encode(
+                preferences::set_window_preferences(state, argument(args, "preferences")?)
                     .await
                     .map_err(error)?,
             ),

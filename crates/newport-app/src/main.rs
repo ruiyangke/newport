@@ -57,7 +57,7 @@ fn run() -> Result<(), String> {
         newport_gpui::check_grammars()?;
         newport_platform::pdf::check_renderer()?;
     }
-    let isolated = startup::profile_policy(
+    startup::profile_policy(
         cfg!(debug_assertions),
         newport_backend::profile::data_directory_override().as_deref(),
     )?;
@@ -73,11 +73,12 @@ fn run() -> Result<(), String> {
         None
     };
     let store = newport_backend::profile::open()?;
+    // The window keeps its own preferences beside the backend's profile.
+    newport_client::profile::set_directory(store.directory.clone());
     let endpoint = newport_platform::ipc::profile_endpoint(&store.directory);
     #[cfg(target_os = "macos")]
     let profile_directory = store.directory.clone();
-    let Some(reserved) = newport_backend::application::Application::reserve(store, isolated)?
-    else {
+    let Some(reserved) = newport_backend::application::Application::reserve(store)? else {
         #[cfg(target_os = "macos")]
         drop(startup_guard);
         if launch.check.is_some() {

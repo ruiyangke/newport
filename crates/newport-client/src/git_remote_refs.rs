@@ -94,22 +94,20 @@ impl Listing {
         {
             return Err(CHANGED.into());
         }
-        // Older agents may omit totals. If present, a bounded page must agree
-        // with them; a truncated advertisement never claims completeness.
-        if let Some(total) = metadata.get("totalEntries") {
-            let total = total.as_u64().ok_or(INVALID)?;
-            let loaded = keys.len()
-                + if cursor.is_some() {
-                    self.references.len()
-                } else {
-                    0
-                };
-            if loaded as u64 > total
-                || (next.is_some() && loaded as u64 >= total)
-                || (next.is_none() && metadata["truncated"] == false && loaded as u64 != total)
-            {
-                return Err(INVALID.into());
-            }
+        // A bounded page must agree with the advertised total; a truncated
+        // advertisement never claims completeness.
+        let total = metadata["totalEntries"].as_u64().ok_or(INVALID)?;
+        let loaded = keys.len()
+            + if cursor.is_some() {
+                self.references.len()
+            } else {
+                0
+            };
+        if loaded as u64 > total
+            || (next.is_some() && loaded as u64 >= total)
+            || (next.is_none() && metadata["truncated"] == false && loaded as u64 != total)
+        {
+            return Err(INVALID.into());
         }
         if let Some(cursor) = cursor {
             let Value::Array(mut previous) = self.page["entries"].take() else {
@@ -140,33 +138,38 @@ mod tests {
     fn remote() -> Value {
         json!({"name":"team/upstream","token":"config"})
     }
+    /// One page whose listing holds exactly these names.
     fn page(names: &[&str], next: Option<&str>) -> Value {
+        paged(names, next, names.len())
+    }
+    /// One page of a listing that holds `total` references in all.
+    fn paged(names: &[&str], next: Option<&str>, total: usize) -> Value {
         json!({"snapshot":"s", "entries":names.iter().map(|name|json!({
             "reference":{"display":name,"bytesB64":STANDARD.encode(name)},
             "kind":"branch","oid":{"hex":"a".repeat(40)},"symbolicTarget":null
         })).collect::<Vec<_>>(),"nextCursor":next,"metadata":{
             "remote":"team/upstream","remoteToken":"config","forPush":true,
-            "basis":"remote_advertisement","truncated":false
+            "basis":"remote_advertisement","truncated":false,"totalEntries":total
         }})
     }
     #[test]
     fn appends_only_the_requested_snapshot_and_refresh_starts_new_identity() {
         let mut list = Listing::default();
-        list.accept(page(&["main"], Some("a")), &remote(), None)
+        list.accept(paged(&["main"], Some("a"), 2), &remote(), None)
             .unwrap();
         let before = list.page().clone();
         for field in ["snapshot", "metadata"] {
-            let mut invalid = page(&["topic"], None);
+            let mut invalid = paged(&["topic"], None, 2);
             invalid[field] = json!("changed");
             assert!(list.accept(invalid, &remote(), Some("a")).is_err());
             assert_eq!(list.page(), &before);
         }
-        list.accept(page(&["topic"], None), &remote(), Some("a"))
+        list.accept(paged(&["topic"], None, 2), &remote(), Some("a"))
             .unwrap();
         assert_eq!(list.page()["entries"].as_array().unwrap().len(), 2);
-        list.accept(page(&["main"], Some("a")), &remote(), None)
+        list.accept(paged(&["main"], Some("a"), 2), &remote(), None)
             .unwrap();
-        list.accept(page(&["topic"], None), &remote(), Some("a"))
+        list.accept(paged(&["topic"], None, 2), &remote(), Some("a"))
             .unwrap();
     }
     #[test]
@@ -176,25 +179,25 @@ mod tests {
             list.accept(page(&["main", "main"], None), &remote(), None)
                 .is_err()
         );
-        list.accept(page(&["main"], Some("a")), &remote(), None)
+        list.accept(paged(&["main"], Some("a"), 3), &remote(), None)
             .unwrap();
         assert!(
-            list.accept(page(&["main"], Some("b")), &remote(), Some("a"))
+            list.accept(paged(&["main"], Some("b"), 3), &remote(), Some("a"))
                 .is_err()
         );
         assert!(
-            list.accept(page(&[], Some("b")), &remote(), Some("a"))
+            list.accept(paged(&[], Some("b"), 3), &remote(), Some("a"))
                 .is_err()
         );
         assert!(
-            list.accept(page(&["topic"], Some("a")), &remote(), Some("a"))
+            list.accept(paged(&["topic"], Some("a"), 3), &remote(), Some("a"))
                 .is_err()
         );
-        list.accept(page(&["topic"], Some("b")), &remote(), Some("a"))
+        list.accept(paged(&["topic"], Some("b"), 3), &remote(), Some("a"))
             .unwrap();
         let before = list.page().clone();
         assert!(
-            list.accept(page(&["third"], Some("a")), &remote(), Some("b"))
+            list.accept(paged(&["third"], Some("a"), 3), &remote(), Some("b"))
                 .is_err()
         );
         assert_eq!(list.page(), &before);
@@ -239,9 +242,13 @@ mod tests {
         assert!(list.accept(data.clone(), &remote(), None).is_err());
         data["metadata"]["truncated"] = json!(true);
         list.accept(data, &remote(), None).unwrap();
-        let mut complete = page(&[], None);
-        complete["metadata"]["totalEntries"] = json!(0);
-        list.accept(complete, &remote(), None).unwrap();
+        list.accept(page(&[], None), &remote(), None).unwrap();
+        let mut missing = page(&["main"], None);
+        missing["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("totalEntries");
+        assert!(Listing::default().accept(missing, &remote(), None).is_err());
     }
     #[test]
     fn display_collisions_do_not_merge_different_raw_references() {

@@ -1,4 +1,4 @@
-//! Immutable commit actions shared by desktop frontends.
+//! Immutable commit actions.
 use base64::Engine as _;
 use serde_json::{Value, json};
 

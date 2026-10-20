@@ -16,7 +16,8 @@ const CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PROGRESS_NAME: usize = 4096;
 const MAX_CANCEL_ERROR: usize = 4096;
 type Reply = Result<Value, String>;
-pub type Completion = Result<Option<String>, String>;
+/// The transferred file's path, or why the transfer failed.
+pub type Completion = Result<String, String>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -42,8 +43,7 @@ pub struct Progress {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Update {
     pub changed: bool,
-    /// Emitted once. A null backend completion is retained for compatibility;
-    /// native chooser cancellation happens before a Transfer is created.
+    /// Emitted once. Chooser cancellation happens before a Transfer is created.
     pub completion: Option<Completion>,
 }
 
@@ -227,8 +227,7 @@ impl Transfer {
             return;
         };
         let result = reply.and_then(|value| match value {
-            Value::Null => Ok(None),
-            Value::String(path) => Ok(Some(path)),
+            Value::String(path) => Ok(path),
             _ => Err("Invalid file transfer result. Check the destination before retrying; the request was not replayed.".into()),
         });
         if result.is_err() {
@@ -484,7 +483,7 @@ mod tests {
             reply(original, Ok(json!("/completed/資料.txt")));
             assert_eq!(
                 until(&mut transfer, now, Transfer::finished),
-                vec![Ok(Some("/completed/資料.txt".into()))]
+                vec![Ok("/completed/資料.txt".into())]
             );
             assert_eq!(
                 transfer.poll_at(now + Duration::from_secs(60)),
@@ -496,15 +495,21 @@ mod tests {
         }
     }
     #[test]
-    fn null_backend_completion_is_delivered_once() {
+    fn completion_without_a_path_is_invalid_and_cancels() {
         let host = Host::new();
         let (mut transfer, original, now) = start(&host, Direction::Download);
         reply(original, Ok(Value::Null));
-        assert_eq!(
-            until(&mut transfer, now, Transfer::finished),
-            vec![Ok(None)]
+        let completions = until(&mut transfer, now, Transfer::finished);
+        assert_eq!(completions.len(), 1);
+        assert!(
+            completions[0]
+                .as_ref()
+                .unwrap_err()
+                .contains("Invalid file transfer result")
         );
-        assert!(transfer.progress().is_none());
+        let (cancel, request) = host.next("files_cancel");
+        assert_eq!(request.args, json!({"operation":transfer.operation()}));
+        reply(cancel, Ok(Value::Null));
         host.quiet();
     }
     #[test]
@@ -629,7 +634,7 @@ mod tests {
         reply(original, Ok(json!("/saved")));
         assert_eq!(
             until(&mut transfer, now, Transfer::finished),
-            vec![Ok(Some("/saved".into()))]
+            vec![Ok("/saved".into())]
         );
         reply(late_cancel, Err("late cancellation error".into()));
         reply(

@@ -1,4 +1,4 @@
-//! Non-secret preferences, compatible with the original Store plugin's JSON object.
+//! Non-secret preferences, stored as one JSON object.
 //! The application owns the profile instance lock and shares one Preferences clone
 //! family. Transactions reload the file, preserve unknown keys, and publish by rename.
 use serde_json::{Map, Value, json};
@@ -90,20 +90,31 @@ impl Preferences {
     }
 }
 
-pub fn get_sidebar_width(state: &Preferences) -> Result<Option<f64>, String> {
-    Ok(state
-        .get("sidebarWidth")?
-        .and_then(|v| v.as_f64())
-        .filter(|v| (176.0..=300.0).contains(v)))
-}
-pub async fn set_sidebar_width(state: &Preferences, width: f64) -> Result<(), String> {
-    if !width.is_finite() || !(176.0..=300.0).contains(&width) {
-        return Err("Sidebar width must be between 176 and 300".into());
+/// The window's own choices: sidebar width, the icon-only sidebar and the
+/// theme. The window reads them from the file at startup and saves them here,
+/// so this process stays the file's only writer. Absent keys are unchanged.
+pub async fn set_window_preferences(state: &Preferences, values: Value) -> Result<(), String> {
+    let values = values
+        .as_object()
+        .ok_or("Window preferences must be an object.")?
+        .clone();
+    for (key, value) in &values {
+        let valid = match key.as_str() {
+            "sidebarWidth" => value
+                .as_f64()
+                .is_some_and(|width| (176.0..=300.0).contains(&width)),
+            "sidebarCompact" => value.is_boolean(),
+            "appearance" => matches!(value.as_str(), Some("system" | "light" | "dark")),
+            _ => false,
+        };
+        if !valid {
+            return Err(format!("Invalid window preference: {key}"));
+        }
     }
     let state = state.clone();
     tokio::task::spawn_blocking(move || {
-        state.update(|values| {
-            values.insert("sidebarWidth".into(), json!(width));
+        state.update(|stored| {
+            stored.extend(values);
             Ok(())
         })
     })

@@ -71,14 +71,13 @@ pub(crate) async fn launch_worker(
         Service::Integration { client, .. } => format!("integration {client}"),
     };
     // Activation can change the entry point while this runtime is still serving
-    // admitted work. Prefer its retained immutable build; legacy installations
-    // remain usable until their next explicit lifecycle operation.
-    let stream = session.stream(&format!("needle=\"$HOME/.local/share/newport/needle/builds/{build}/newport-agent\"; if ! test -x \"$needle\"; then needle=\"$HOME/.local/bin/newport-agent\"; fi; exec env NEWPORT_GIT_BACKEND=cli \"$needle\" worker {build} {runtime} {socket} {worker} {arguments}")).await?;
+    // admitted work, so launch the runtime's own retained, immutable build.
+    let stream = session.stream(&format!("exec env NEWPORT_GIT_BACKEND=cli \"$HOME/.local/share/newport/needle/builds/{build}/newport-agent\" worker {build} {runtime} {socket} {worker} {arguments}")).await?;
     Ok((stream, String::new()))
 }
 
-/// Compatibility entry points for explicit installer commands in the legacy host.
-/// Feature startup uses `launch`, which never calls these operations.
+/// Explicit install and reinstall for remote tests. Feature startup uses
+/// `launch`, which never calls these operations.
 #[cfg(test)]
 pub async fn install(session: &ExecSession) -> Result<String, String> {
     crate::agent_lifecycle::manage_test(session, false, true).await

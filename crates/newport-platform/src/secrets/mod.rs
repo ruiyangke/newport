@@ -1,10 +1,9 @@
-//! OS credential storage. Namespace selection and migration policy belong to
-//! the backend; these adapters preserve platform access and protection rules.
+//! OS credential storage. Namespace selection and key policy belong to the
+//! backend; these adapters preserve platform access and protection rules.
 use zeroize::Zeroizing;
 
 pub trait KeyStorage {
-    fn modern(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String>;
-    fn legacy(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String>;
+    fn read(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String>;
     fn create(&self, key: &[u8]) -> Result<(), String>;
     fn generate(&self) -> Result<Zeroizing<Vec<u8>>, String>;
 }

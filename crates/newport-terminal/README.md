@@ -84,7 +84,7 @@ enabling additional features. Desktop packaging includes them under `Licenses`.
   explicit UI copy/paste actions. OSC links are filtered through Newport's
   shared HTTP(S) URL policy.
 - Primary-screen resizing preserves output, including rows below the cursor;
-  this is a user-approved difference from the old xterm edge-case behavior.
+  this intentionally differs from xterm's edge-case behavior.
 - Scrollback uses Ghostty's page-based 5,000-line retention policy. Pruning can
   remove a complete page, so the retained count is approximate. Resize tests
   separately require that every already-retained row survives growth.

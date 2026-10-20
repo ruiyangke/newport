@@ -29,8 +29,8 @@ pub fn install(dark: bool, cx: &mut App) {
         c.muted_foreground = rgb(if dark { 0xa9abb3 } else { 0x626670 }).into();
         c.border = rgb(if dark { 0x3c3b40 } else { 0xdedde1 }).into();
         c.input = c.border;
-        // React's Switch uses the border token for its off track and a white
-        // thumb in both appearances, independent of the page background.
+        // A switch uses the border token for its off track and a white thumb
+        // in both appearances, independent of the page background.
         c.switch = c.border;
         c.switch_thumb = rgb(0xffffff).into();
         c.sidebar = rgb(if dark { 0x242528 } else { 0xf5f5f6 }).into();
@@ -64,7 +64,7 @@ pub fn install(dark: bool, cx: &mut App) {
         c.tab_active = c.background;
         c.tab_active_foreground = c.foreground;
         c.tab_foreground = c.muted_foreground;
-        // Match the Tauri dialog backdrop in both appearances.
+        // Dialog backdrop, dimmer in dark appearance.
         c.overlay = gpui_kit::hsla(0., 0., 0., if dark { 0.42 } else { 0.22 });
 
         // Syntax themes supply token colors, not a separate editor surface.
@@ -172,8 +172,8 @@ pub fn warning(dark: bool) -> gpui_kit::Hsla {
     rgb(if dark { 0xdbbc76 } else { 0x896218 }).into()
 }
 
-// Shared with the Tauri diff palette in diffExtensions.ts. Opaque surfaces
-// keep unified/split previews consistent regardless of their parent surface.
+// Diff palette. Opaque surfaces keep unified/split previews consistent
+// regardless of their parent surface.
 pub fn diff_add(dark: bool) -> gpui_kit::Hsla {
     rgb(if dark { 0x1e2e26 } else { 0xedf8f0 }).into()
 }

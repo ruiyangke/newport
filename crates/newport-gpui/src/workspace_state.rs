@@ -1,4 +1,4 @@
-//! Native navigation preferences stay in the explicitly selected data profile.
+//! Native navigation preferences stay in the opened data profile.
 use super::Page;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -55,9 +55,7 @@ fn valid_path(value: &serde_json::Value) -> bool {
             .is_some_and(|bytes| bytes.starts_with(b"/") && !bytes.contains(&0))
 }
 fn path() -> Option<PathBuf> {
-    std::env::var_os("NEWPORT_DATA_DIR")
-        .filter(|s| !s.is_empty())
-        .map(|base| PathBuf::from(base).join("gpui-workspace-state.json"))
+    newport_client::profile::directory().map(|base| base.join("gpui-workspace-state.json"))
 }
 fn decode(bytes: &[u8]) -> io::Result<Selection> {
     let mut selection: Selection =
@@ -243,7 +241,7 @@ mod tests {
     #[test]
     fn overview_preferences_roundtrip_per_server_and_normalize_invalid_choices() {
         let input = serde_json::json!({"server":"a","page":"overview","workspace_page":"overview","overview_preferences":{
-            "a":{"metric":3,"auto_refresh":false,"minutes":60,"virtual_open":true,"sort":1,"ascending":true,"all":true,"process_filter":"node"},
+            "a":{"metric":3,"minutes":60,"virtual_open":true,"sort":1,"ascending":true,"process_filter":"node"},
             "b":{"metric":1,"minutes":15,"process_filter":"postgres"},
             "bad":{"metric":9,"minutes":42,"sort":99,"ascending":true},
             "":{"metric":2}
@@ -257,19 +255,10 @@ mod tests {
         );
         assert_eq!(restored.overview_preferences["a"].process_filter, "node");
         assert_eq!(restored.overview_preferences["b"].minutes, 15);
-        // Legacy paused preferences are ignored: Overview always refreshes.
-        assert!(
-            serde_json::to_value(&restored.overview_preferences).unwrap()["a"]
-                .get("auto_refresh")
-                .is_none()
-        );
         assert_eq!(restored.overview_preferences["bad"].metric, 0);
         assert_eq!(restored.overview_preferences["bad"].minutes, 5);
         assert_eq!(restored.overview_preferences["bad"].sort, 0);
         assert!(!restored.overview_preferences["bad"].ascending);
-        let legacy =
-            decode(br#"{"server":"a","page":"overview","workspace_page":"overview"}"#).unwrap();
-        assert!(legacy.overview_preferences.is_empty());
     }
     #[test]
     fn per_server_destinations_survive_other_pages_and_validate_identity() {

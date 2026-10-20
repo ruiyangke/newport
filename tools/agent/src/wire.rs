@@ -98,7 +98,7 @@ mod tests {
         assert!(input.is_empty());
     }
     #[test]
-    fn rejects_legacy_oversized_trailing_and_invalid_browser_messages() {
+    fn rejects_unknown_oversized_trailing_and_invalid_browser_messages() {
         for marker in *b"JCO" {
             assert!(payload_length(&[marker, 0, 0, 0, 1], MAX_FRAME).is_err());
         }

@@ -1,7 +1,7 @@
 # Newport platform adapters
 
 This crate owns OS-specific primitives shared by the native client and
-standalone backend. It has no Tauri or GPUI dependency.
+standalone backend. It has no GPUI dependency.
 
 `ipc::{Stream, Listener}` provides blocking byte streams for client worker
 threads and local contract fixtures. macOS retains standard Unix sockets.
@@ -29,9 +29,9 @@ SID. These policies intentionally have different lifetimes.
 
 `secrets::SystemStorage` supplies protected macOS Keychain and Windows
 Credential Manager access to the shared backend. It preserves the device-local
-key policy, secure random generation, legacy protected-Keychain restrictions,
-and explicit access errors. The backend supplies stable namespaces/account
-hashes and owns migration, verification and recovery markers. The adapters do
+key policy, secure random generation and explicit access errors. The backend
+supplies stable namespaces/account hashes and owns key verification and
+recovery markers. The adapters do
 not select profiles, replace missing keys or fall back to plaintext storage.
 
 `clipboard` supplies native format offers and revision-checked, on-demand reads.

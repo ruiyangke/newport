@@ -47,8 +47,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Interactive launch/IME/clipboard/DPI acceptance remains a release gate
-  # even when native build/test jobs pass. Compare against the released app.
+  # Interactive launch/IME/clipboard/DPI acceptance is a separate release gate;
+  # these build/test jobs do not cover it.
   native-core:
     name: Native contracts and IPC (${{ matrix.arch }})
     needs: agents
@@ -95,7 +95,7 @@ jobs:
         run: env -u CARGO_BUILD_TARGET cargo run --locked --manifest-path tools/test-harness/Cargo.toml -- ssh
       - name: Verify Windows credential storage and cleanup
         if: runner.os == 'Windows'
-        run: cargo test --locked -p newport-platform --lib secrets::windows::tests::credential_manager_preserves_legacy_key_and_isolates_profiles -- --exact --ignored
+        run: cargo test --locked -p newport-platform --lib secrets::windows::tests::credential_manager_stores_and_isolates_profile_keys -- --exact --ignored
       - name: Verify native system notification delivery
         if: runner.os == 'macOS'
         run: cargo run --locked -p newport-platform --example system_events_check
@@ -199,7 +199,7 @@ jobs:
       - name: Build native Windows installer candidate
         if: runner.os == 'Windows'
         run: node scripts/package-native.mjs --debug --skip-build --nsis
-      - name: Exercise native Windows install, rollback, released upgrade and uninstall
+      - name: Exercise native Windows install, rollback and uninstall
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -209,19 +209,6 @@ jobs:
           $env:NEWPORT_TEST_INSTALLER = $installers[0].FullName
           cargo test --locked -p newport-release --test native_package_runtime -- --ignored --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'Native installer runtime acceptance failed' }
-          $baseline = Get-Content resources/test-fixtures/legacy-desktop-release.json -Raw | ConvertFrom-Json
-          $arch = $env:CARGO_BUILD_TARGET.Split('-')[0]
-          $assets = @($baseline.assets | Where-Object { $_.name -eq "Newport-0.3.0-windows-$arch-setup.exe" })
-          if ($assets.Count -ne 1) { throw 'Expected one pinned released installer for this architecture' }
-          $asset = $assets[0]
-          $download = Join-Path $env:RUNNER_TEMP $asset.name
-          Invoke-WebRequest -Uri $asset.url -OutFile $download -TimeoutSec 120
-          if ((Get-FileHash $download -Algorithm SHA256).Hash.ToLowerInvariant() -ne $asset.sha256) {
-            throw 'Released installer digest differs from the pinned baseline'
-          }
-          $env:NEWPORT_TEST_LEGACY_INSTALLER = $download
-          cargo test --locked -p newport-release --test native_package_runtime -- --ignored --nocapture
-          if ($LASTEXITCODE -ne 0) { throw 'Released-to-native installer acceptance failed' }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: runner.os == 'Windows'
         with:

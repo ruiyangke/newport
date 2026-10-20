@@ -1,5 +1,5 @@
 //! Immutable recovery snapshots made while profile ownership is reserved and
-//! before any credential migration, database opening, or background worker.
+//! before any credential read, database opening, or background worker.
 use newport_platform::filesystem;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,7 +22,7 @@ struct Manifest {
 pub(crate) fn preserve(directory: &Path, version: &str) -> Result<(), String> {
     preserve_inner(directory, version).map_err(|error| {
         format!(
-            "Cannot preserve the profile before upgrading: {error}. Original data was not migrated."
+            "Cannot preserve the profile before upgrading: {error}. Original data was not changed."
         )
     })
 }
@@ -73,7 +73,7 @@ fn preserve_inner(directory: &Path, version: &str) -> Result<(), String> {
             );
         }
         // A previous attempt may have published successfully but failed while
-        // syncing its parent. Retry durability before allowing any migration.
+        // syncing its parent. Retry durability before opening the profile.
         filesystem::sync_directory(&root).map_err(|e| e.to_string())?;
         filesystem::sync_directory(directory).map_err(|e| e.to_string())?;
         return Ok(());
@@ -155,7 +155,7 @@ fn inventory(
         let name = entry.file_name();
         if profile
             && relative.as_os_str().is_empty()
-            && [BACKUPS, "native-client", super::legacy::INSTANCE_LOCK]
+            && [BACKUPS, "native-client", super::instance::LOCK_FILE]
                 .iter()
                 .any(|s| name == *s)
         {
@@ -256,16 +256,16 @@ mod tests {
     }
 
     #[test]
-    fn preserves_released_vault_wal_preferences_and_unknown_data_without_overwriting() {
+    fn preserves_vault_wal_preferences_and_unknown_data_without_overwriting() {
         let profile = tempfile::tempdir().unwrap();
         let root = profile.path();
-        fs::write(
-            root.join("profiles.stronghold"),
-            include_bytes!(
-                "../../../../resources/test-fixtures/released-profile/v0.3.0.stronghold"
-            ),
-        )
+        let config: newport_domain::model::Config = serde_json::from_value(serde_json::json!({
+            "servers": [{"id": uuid::Uuid::new_v4(), "name": "Backup fixture",
+                "sshHost": "127.0.0.1", "sshPort": 22, "sshUser": "fixture"}],
+            "tunnels": []
+        }))
         .unwrap();
+        super::super::vault::write(&root.join("profiles.stronghold"), &[7; 32], &config).unwrap();
         for name in [
             "metrics.sqlite3",
             "metrics.sqlite3-wal",
@@ -282,11 +282,11 @@ mod tests {
         .unwrap();
         fs::create_dir(root.join("native-client")).unwrap();
         fs::write(root.join("native-client/transient"), "socket fixture").unwrap();
-        fs::write(root.join(super::super::legacy::INSTANCE_LOCK), "locked").unwrap();
+        fs::write(root.join(super::super::instance::LOCK_FILE), "locked").unwrap();
         preserve(root, "0.3.1").unwrap();
         let saved = root.join("upgrade-backups/native-0.3.1/data");
         assert!(!saved.join("native-client").exists());
-        assert!(!saved.join("porthop.lock").exists());
+        assert!(!saved.join("newport.lock").exists());
         assert_eq!(
             fs::read(saved.join("profiles.stronghold")).unwrap(),
             fs::read(root.join("profiles.stronghold")).unwrap()

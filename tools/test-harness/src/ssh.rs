@@ -7,8 +7,6 @@ use anyhow::{ensure, Result};
 use std::{fs, time::Duration};
 pub fn run(args: &[String]) -> Result<()> {
     ensure!(cfg!(unix), "SSH PTY fixture requires Unix");
-    // Compatibility with earlier extraction runs; all fixture tests now live in the backend.
-    let args: Vec<_> = args.iter().filter(|arg| *arg != "--backend-only").collect();
     process::run(command("cargo").args([
         "build",
         "--manifest-path",
@@ -81,7 +79,7 @@ pub fn run(args: &[String]) -> Result<()> {
                 "crates/newport-backend/Cargo.toml",
                 "--locked",
             ])
-            .args(&args)
+            .args(args)
             .args([
                 "--",
                 "--ignored",

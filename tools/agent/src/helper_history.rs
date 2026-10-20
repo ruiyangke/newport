@@ -303,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_deployment_journal_does_not_turn_old_or_managed_records_into_standalone() {
+    fn missing_deployment_journal_does_not_turn_unattributed_or_managed_records_into_standalone() {
         let home = tempfile::tempdir().unwrap();
         let id = apply(home.path(), "managed");
         let mut read = read(home.path()).unwrap().unwrap();
@@ -313,7 +313,7 @@ mod tests {
         let owned = HashSet::new(); // No deployment journal is available.
         assert!(history(home.path(), &owned).unwrap().1.is_empty());
         let mut read = super::read(home.path()).unwrap().unwrap();
-        read.journal.records[0].origin = None; // Legacy provenance was not recorded.
+        read.journal.records[0].origin = None; // Provenance was not recorded.
         read.journal.save(&read.root).unwrap();
         drop(read);
         let row = history(home.path(), &owned).unwrap().1.remove(0);

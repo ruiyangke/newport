@@ -1,7 +1,7 @@
 // Native desktop owners are optional; all formats remain available through the agent.
 use std::{
     env, fs,
-    io::{Read, Seek, Write},
+    io::{Seek, Write},
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::{Command, Stdio},
@@ -17,10 +17,6 @@ pub fn find(name: &str) -> Option<PathBuf> {
                 && p.metadata()
                     .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
                 && p.canonicalize().is_ok_and(|p| p != ours)
-                && !fs::File::open(p).is_ok_and(|mut f| {
-                    let mut prefix = [0; 64];
-                    f.read(&mut prefix).is_ok() && crate::migration::helper_script(&prefix)
-                })
         })
 }
 fn publish(mut command: Command, data: Vec<u8>) -> bool {
@@ -55,7 +51,7 @@ fn publish(mut command: Command, data: Vec<u8>) -> bool {
     success
 }
 pub fn update(path: &std::path::Path) -> &'static str {
-    if crate::migration::native_clipboard_disabled() {
+    if env::var("NEWPORT_CLIPBOARD_NATIVE").as_deref() == Ok("0") {
         return "Clipboard synced.";
     }
     let Ok(formats) = crate::snapshot::read(path) else {
@@ -69,7 +65,7 @@ pub fn update(path: &std::path::Path) -> &'static str {
     let wayland = env::var("WAYLAND_DISPLAY").unwrap_or_default();
     let root = path.parent().unwrap();
     let fake_wayland = wayland == root.join("wayland.sock").to_string_lossy()
-        || crate::migration::fake_wayland(&wayland);
+        || crate::paths::integration_display_path(&wayland);
     let fake_x = fs::read_to_string(root.join("display"))
         .ok()
         .is_some_and(|v| env::var("DISPLAY").ok().as_deref() == Some(v.trim()));

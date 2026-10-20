@@ -19,7 +19,6 @@ impl ClientIdentity for Identity {
 struct GitHost {
     identity: Arc<dyn ClientIdentity>,
     manager: Shared,
-    sessions: Arc<Sessions>,
     pending: PendingOperations,
     events: rpc::EventLog,
 }
@@ -32,7 +31,6 @@ impl rpc::Host for GitHost {
                 &Services {
                     identity: self.identity.as_ref(),
                     manager: &self.manager,
-                    sessions: &self.sessions,
                     pending: &self.pending,
                     events: Arc::new(move |event| events.record(event)),
                 },
@@ -50,6 +48,7 @@ struct Fixture {
     server: Server,
     pending: PendingOperations,
     manager: Shared,
+    identity: Arc<dyn ClientIdentity>,
     task: tokio::task::JoinHandle<std::io::Result<()>>,
 }
 impl Fixture {
@@ -59,7 +58,6 @@ impl Fixture {
         let mut manager = Manager::new(Store::for_test(directory.path().into()));
         manager.config.servers.push(server.clone());
         let pending = PendingOperations::new(directory.path().join("git-operations.json"));
-        let sessions = Arc::new(Sessions::default());
         let listener = rpc::Server::bind(&endpoint).unwrap();
         let identity: Arc<dyn ClientIdentity> = match identity {
             Ok(id) => {
@@ -76,9 +74,8 @@ impl Fixture {
         };
         let manager = crate::manager::share(manager);
         let host = GitHost {
-            identity,
+            identity: identity.clone(),
             manager: manager.clone(),
-            sessions: sessions.clone(),
             pending: pending.clone(),
             events: listener.events(),
         };
@@ -89,6 +86,7 @@ impl Fixture {
             server,
             pending,
             manager,
+            identity,
             task,
         }
     }
@@ -110,12 +108,10 @@ impl Fixture {
         .await
         .unwrap()
     }
-    async fn request(&self, request: Request, read: Option<Value>) -> Result<Value, String> {
+    async fn request(&self, request: Request) -> Result<Value, String> {
         self.call(
             "git_request",
-            json!({
-                "serverId":self.server.id,"request":request,"readId":read
-            }),
+            json!({"serverId":self.server.id,"request":request}),
         )
         .await
     }
@@ -146,9 +142,6 @@ async fn explicit_checkout_retry_clears_cached_transport_failure_through_rpc() {
     assert!(fixture.call("git_request", args.clone()).await.is_err());
     assert_eq!(owner.transport_snapshot().error, failure);
     args["retryConnection"] = json!(true);
-    let mut invalid = args.clone();
-    invalid["readId"] = json!("not-a-read-id");
-    assert!(fixture.call("git_request", invalid).await.is_err());
     let mut other = args.clone();
     other["request"] = json!({"method":"repo.close","params":{"repoId":"checkout"}});
     assert!(fixture.call("git_request", other).await.is_err());
@@ -186,88 +179,6 @@ async fn repository_refresh_is_local_and_does_not_wait_for_configuration_storage
         assert!(fixture.call("git_refresh_repository", args).await.is_err());
     }
     drop(writer);
-    fixture.stop().await;
-}
-
-#[tokio::test]
-async fn native_git_validation_and_cancellation_precede_connection() {
-    let fixture = Fixture::offline();
-    let args = json!({"serverId":fixture.server.id});
-    let read = fixture
-        .call("git_register_read", args.clone())
-        .await
-        .unwrap();
-    let request = Request::Get {
-        operation_id: Uuid::new_v4().to_string(),
-    };
-    // A different server cannot consume or cancel this server's registration.
-    let stranger = json!({"serverId":Uuid::new_v4(),"readId":read});
-    fixture
-        .call("git_cancel_read", stranger.clone())
-        .await
-        .unwrap();
-    let error = fixture
-        .call(
-            "git_request",
-            json!({
-                "serverId":stranger["serverId"],"readId":read,"request":request
-            }),
-        )
-        .await
-        .unwrap_err();
-    assert!(error.contains("READ_CANCELLED"), "{error}");
-    let error = fixture
-        .request(request.clone(), Some(read.clone()))
-        .await
-        .unwrap_err();
-    assert!(error.contains("Identity could not be persisted"), "{error}");
-    // Once claimed, a registration is released even when bootstrap fails.
-    assert!(
-        fixture
-            .request(request.clone(), Some(read))
-            .await
-            .unwrap_err()
-            .contains("READ_CANCELLED")
-    );
-    let read = fixture
-        .call("git_register_read", args.clone())
-        .await
-        .unwrap();
-    fixture
-        .call(
-            "git_cancel_read",
-            json!({"serverId":fixture.server.id,"readId":read}),
-        )
-        .await
-        .unwrap();
-    assert!(
-        fixture
-            .request(request, Some(read))
-            .await
-            .unwrap_err()
-            .contains("READ_CANCELLED")
-    );
-
-    let error = fixture
-        .request(
-            Request::Review {
-                operation_id: Uuid::new_v4().to_string(),
-            },
-            Some(json!(Uuid::new_v4())),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        error.contains("Writes cannot use read cancellation"),
-        "{error}"
-    );
-    let error = fixture.call("git_connect", args).await.unwrap_err();
-    assert!(error.contains("Identity could not be persisted"), "{error}");
-    let error = fixture
-        .call("git_register_read", json!({"serverId":"bad"}))
-        .await
-        .unwrap_err();
-    assert!(error.contains("Invalid serverId"), "{error}");
     fixture.stop().await;
 }
 
@@ -337,7 +248,7 @@ mod remote_tests {
 
         #[tokio::test]
         #[ignore = "Requires npm run test:remote and real OpenSSH"]
-        async fn native_client_commit_recovery_and_logs_without_tauri() {
+        async fn native_client_commit_recovery_and_logs() {
             commit_across_runtime_change(false).await;
         }
         #[tokio::test]
@@ -366,29 +277,29 @@ mod remote_tests {
             // All mutations are confined to a generated path in the disposable container.
             let root = format!("/home/fixture/native-git-{}", Uuid::new_v4());
             setup.execute(&format!("mkdir {root}"), None).await.unwrap();
-            let connected = fixture.call("git_connect", args.clone()).await.unwrap();
+            let connected = crate::git::git_connect(
+                fixture.identity.as_ref(),
+                &fixture.manager,
+                fixture.server.id,
+            )
+            .await
+            .unwrap();
             assert_eq!(connected["info"]["capabilities"]["backend"], "cli");
             let init_id = Uuid::new_v4();
             let initialized = fixture
-                .request(
-                    Request::Init {
-                        operation_id: init_id.to_string(),
-                        path: Path::new(root.as_bytes()),
-                        initial_branch: "main".into(),
-                    },
-                    None,
-                )
+                .request(Request::Init {
+                    operation_id: init_id.to_string(),
+                    path: Path::new(root.as_bytes()),
+                    initial_branch: "main".into(),
+                })
                 .await
                 .unwrap();
             assert_eq!(initialized["state"], "succeeded", "{initialized}");
             setup.execute(&format!("git -C {root} config user.name Fixture && git -C {root} config user.email fixture@example.test && printf 'native Git fixture\\n' > {root}/sample.txt"), None).await.unwrap();
             let opened = fixture
-                .request(
-                    Request::Open {
-                        path: Path::new(root.as_bytes()),
-                    },
-                    None,
-                )
+                .request(Request::Open {
+                    path: Path::new(root.as_bytes()),
+                })
                 .await
                 .unwrap();
             let repo_id = opened["repoId"].as_str().unwrap().to_owned();
@@ -398,53 +309,23 @@ mod remote_tests {
                 page_size: 100,
                 cursor: None,
             };
-            let read = fixture
-                .call("git_register_read", args.clone())
-                .await
-                .unwrap();
-            fixture
-                .call(
-                    "git_cancel_read",
-                    json!({"serverId":fixture.server.id,"readId":read}),
-                )
-                .await
-                .unwrap();
-            assert!(
-                fixture
-                    .request(status_request.clone(), Some(read))
-                    .await
-                    .unwrap_err()
-                    .contains("READ_CANCELLED")
-            );
-            let read = fixture
-                .call("git_register_read", args.clone())
-                .await
-                .unwrap();
-            let status = fixture
-                .request(status_request.clone(), Some(read))
-                .await
-                .unwrap();
+            let status = fixture.request(status_request.clone()).await.unwrap();
             assert_eq!(status["entries"].as_array().unwrap().len(), 1);
             let stage_id = Uuid::new_v4();
             let staged = fixture
-                .request(
-                    Request::Start {
-                        operation_id: stage_id.to_string(),
-                        repo_id: repo_id.clone(),
-                        expected_snapshot: status["snapshot"].as_str().unwrap().into(),
-                        action: Action::Stage {
-                            entry_ids: vec![
-                                status["entries"][0]["entryId"].as_str().unwrap().into(),
-                            ],
-                            hunks: None,
-                        },
+                .request(Request::Start {
+                    operation_id: stage_id.to_string(),
+                    repo_id: repo_id.clone(),
+                    expected_snapshot: status["snapshot"].as_str().unwrap().into(),
+                    action: Action::Stage {
+                        entry_ids: vec![status["entries"][0]["entryId"].as_str().unwrap().into()],
+                        hunks: None,
                     },
-                    None,
-                )
+                })
                 .await
                 .unwrap();
             assert_eq!(staged["state"], "succeeded", "{staged}");
-            let status = fixture.request(status_request.clone(), None).await.unwrap();
+            let status = fixture.request(status_request.clone()).await.unwrap();
             let commit_id = Uuid::new_v4();
             let commit = Request::Start {
                 operation_id: commit_id.to_string(),
@@ -516,13 +397,12 @@ mod remote_tests {
                     .unwrap();
                 (lease, client)
             };
-            let (committed, _replacement) =
-                tokio::join!(fixture.request(commit.clone(), None), rotate);
+            let (committed, _replacement) = tokio::join!(fixture.request(commit.clone()), rotate);
             let committed = committed.unwrap();
             assert_eq!(committed["state"], "succeeded", "{committed}");
             if upgrade {
                 // Exercise the cached Git service before any explicit disconnect.
-                fixture.request(status_request.clone(), None).await.unwrap();
+                fixture.request(status_request.clone()).await.unwrap();
                 assert!(
                     owner
                         .agent_runtime
@@ -551,19 +431,18 @@ mod remote_tests {
                         && event["entry"].is_object())
             );
 
-            fixture.call("git_disconnect", args.clone()).await.unwrap();
+            crate::git::git_disconnect(&fixture.manager, fixture.server.id)
+                .await
+                .unwrap();
             // Reconnecting recovers the saved result; submitting the same write is rejected locally.
             let recovered = fixture
-                .request(
-                    Request::Get {
-                        operation_id: commit_id.to_string(),
-                    },
-                    None,
-                )
+                .request(Request::Get {
+                    operation_id: commit_id.to_string(),
+                })
                 .await
                 .unwrap();
             assert_eq!(recovered, committed);
-            let error = fixture.request(commit, None).await.unwrap_err();
+            let error = fixture.request(commit).await.unwrap_err();
             assert!(error.contains("already recorded"), "{error}");
             assert_eq!(
                 setup
@@ -598,7 +477,7 @@ mod remote_tests {
                 json!([])
             );
             assert!(
-                fixture.request(status_request, None).await.unwrap()["entries"]
+                fixture.request(status_request).await.unwrap()["entries"]
                     .as_array()
                     .unwrap()
                     .is_empty()

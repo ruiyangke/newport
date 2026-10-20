@@ -1,4 +1,4 @@
-//! Original xterm fixtures remain the compatibility oracle. Independently
+//! xterm fixtures are the compatibility oracle. Independently
 //! asserted resize cases preserve output rather than copy xterm's data loss.
 use newport_terminal::{
     Cell, CellWide, Engine, Point, PointCoordinate, Position, Row, ScrollViewport, StyleColor,
@@ -181,8 +181,7 @@ fn narrowing_keeps_the_complete_cursor_paragraph() {
     assert!(engine.frame().unwrap().rows[1].wrapped);
     engine.resize(6, 3, 8, 16).unwrap();
     assert_eq!(history(&mut engine), 1);
-    // Ghostty reflows the complete paragraph, preserving the suffix that
-    // the old cursor-paragraph special case clipped away.
+    // Ghostty reflows the complete paragraph, preserving its suffix.
     assert_eq!(lines(&mut engine), ["7890", "abcdef", "ghij"]);
     assert_eq!(retained_text(&mut engine), "1234567890abcdefghij");
     let frame = engine.frame().unwrap();
@@ -368,8 +367,7 @@ fn pinned_unicode_widths_keep_search_selection_links_and_cursor_in_sync() {
     for byte in input.as_bytes() {
         feed(&mut engine, [*byte]);
     }
-    // Ghostty's current Unicode data classifies both emoji as two cells.
-    // Newport no longer overrides these widths with the old xterm table.
+    // Ghostty's pinned Unicode data classifies both emoji as two cells.
     for (column, character) in [(1, "🪉"), (3, "🫩")] {
         let cell = cell(&mut engine, 0, column);
         assert_eq!(cell.text, character);
@@ -422,9 +420,8 @@ fn promotion_preserves_color_links_and_focus_changes_between_chunks() {
 
 #[test]
 fn long_combining_run_is_bounded_without_corrupting_adjacent_output() {
-    // Ghostty intentionally caps a cell at 64 suffix codepoints. Retain that
-    // memory/CPU bound rather than Newport's previous unbounded cluster data.
-    // Excess marks must not escape into adjacent cells or block later output.
+    // Ghostty intentionally caps a cell at 64 suffix codepoints, bounding
+    // memory and CPU. Excess marks must not escape into adjacent cells or block later output.
     let mut engine = Engine::new(10, 2).unwrap();
     let input = format!("e{}!", "\u{301}".repeat(16_384));
     for chunk in input.as_bytes().chunks(97) {
@@ -452,9 +449,9 @@ fn long_combining_run_is_bounded_without_corrupting_adjacent_output() {
 
 // These exact fixture alternatives are independently asserted, including cell
 // widths, cursor positions and byte fragmentation, in newport-terminal's
-// tests/unicode_contract.rs. They preserve the archived inputs and full grids.
+// tests/unicode_contract.rs. They preserve the fixture inputs and full grids.
 // Prepend is deliberately absent: patch 005 fixes the engine so it satisfies
-// the original expectation without an override.
+// the xterm expectation without an override.
 type UnicodeRows = ([usize; 2], Vec<Vec<(&'static str, usize)>>);
 fn reviewed_unicode_rows(name: &str) -> Option<UnicodeRows> {
     let (cursor, rows) = match name {
@@ -668,7 +665,7 @@ fn unicode_fixtures_use_independently_reviewed_cell_contracts() {
 // REP uses Terminal.previous_char (a scalar), not the previous cell's complete
 // grapheme. Terminal.printRepeat prints that base again; appending a combining
 // mark/ZWJ suffix does not replace previous_char. These explicit expectations
-// retain the original xterm fixture input and keep checking every cell/cursor.
+// retain the xterm fixture input and keep checking every cell/cursor.
 type RepRows = ([usize; 2], Vec<Vec<(&'static str, usize)>>);
 fn reviewed_rep_rows(name: &str) -> Option<RepRows> {
     let (cursor, rows) = match name {

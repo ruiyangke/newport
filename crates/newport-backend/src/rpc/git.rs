@@ -1,7 +1,7 @@
-//! Native Git dispatch. Session ownership, journals and requests are shared with the desktop adapter.
+//! Git dispatch. Session ownership, journals and requests live in `crate::git`.
 use super::arguments::{argument, encode, error};
 use crate::{
-    git::{ClientIdentity, LogSink, Sessions, pending::PendingOperations},
+    git::{ClientIdentity, LogSink, pending::PendingOperations},
     manager::Shared,
 };
 use serde::Deserialize;
@@ -13,7 +13,6 @@ mod tests;
 pub struct Services<'a> {
     pub identity: &'a dyn ClientIdentity,
     pub manager: &'a Shared,
-    pub sessions: &'a Sessions,
     pub pending: &'a PendingOperations,
     pub events: LogSink,
 }
@@ -21,12 +20,8 @@ pub struct Services<'a> {
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Command {
-    GitConnect,
     GitRequest,
     GitRefreshRepository,
-    GitRegisterRead,
-    GitCancelRead,
-    GitDisconnect,
     GitPendingOperations,
     GitAcknowledgeOperation,
     GitReviewOperation,
@@ -38,19 +33,9 @@ impl Command {
     }
     pub async fn dispatch(self, services: &Services<'_>, args: &Value) -> Result<Value, Value> {
         match self {
-            Self::GitConnect => encode(
-                crate::git::git_connect(
-                    services.identity,
-                    services.manager,
-                    argument(args, "serverId")?,
-                )
-                .await
-                .map_err(error)?,
-            ),
             Self::GitRequest => {
                 let server_id = argument(args, "serverId")?;
                 let request = argument(args, "request")?;
-                let read_id = argument(args, "readId")?;
                 if argument::<Option<bool>>(args, "retryConnection")?.unwrap_or(false) {
                     if !matches!(request, crate::git::protocol::Request::Open { .. }) {
                         return Err(error(
@@ -71,11 +56,9 @@ impl Command {
                         services.events.clone(),
                         services.identity,
                         services.manager,
-                        services.sessions,
                         services.pending,
                         server_id,
                         request,
-                        read_id,
                     )
                     .await
                     .map_err(error)?,
@@ -88,23 +71,6 @@ impl Command {
             )
             .await
             .map_err(error),
-            Self::GitRegisterRead => encode(
-                crate::git::git_register_read(services.sessions, argument(args, "serverId")?)
-                    .map_err(error)?,
-            ),
-            Self::GitCancelRead => {
-                crate::git::git_cancel_read(
-                    services.sessions,
-                    argument(args, "serverId")?,
-                    argument(args, "readId")?,
-                );
-                encode(())
-            }
-            Self::GitDisconnect => encode(
-                crate::git::git_disconnect(services.manager, argument(args, "serverId")?)
-                    .await
-                    .map_err(error)?,
-            ),
             Self::GitPendingOperations => encode(
                 crate::git::pending::git_pending_operations(
                     services.pending,
@@ -127,7 +93,6 @@ impl Command {
                     services.events.clone(),
                     services.identity,
                     services.manager,
-                    services.sessions,
                     services.pending,
                     argument(args, "serverId")?,
                     argument(args, "operationId")?,

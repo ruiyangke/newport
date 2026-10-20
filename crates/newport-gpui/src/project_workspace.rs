@@ -156,7 +156,7 @@ impl RenderOnce for DocumentTab {
         let focus = self.focus.unwrap_or_else(|| {
             Some(
                 window
-                    // Document tabs are Tab-key stops, like the buttons they replaced.
+                    // Document tabs are Tab-key stops.
                     .use_keyed_state(self.key.clone(), cx, |_, cx| {
                         cx.focus_handle().tab_stop(true)
                     })
@@ -546,7 +546,7 @@ impl Newport {
                     }
                 }
                 // This navigator has already obtained the exact status page
-                // for the selected entry. Retire a suspended/failed legacy list
+                // for the selected entry. Retire a suspended/failed list
                 // read so it cannot disable a fresh diff or overwrite it later.
                 self.resources.invalidate("git-list");
                 self.resources.invalidate("git-more");

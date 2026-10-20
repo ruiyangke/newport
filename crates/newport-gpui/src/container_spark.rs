@@ -124,7 +124,7 @@ fn positions(
         .as_secs_f64();
     let peak = values.iter().map(|point| point.value).fold(0., f64::max);
     // Docker CPU may exceed100% on multiple cores. Keep that visible, and use
-    // the memory limit when present; unbounded memory has25% headroom like Tauri.
+    // the memory limit when present; unbounded memory has 25% headroom.
     let top = if limit > 0. {
         limit.max(peak)
     } else {

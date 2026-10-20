@@ -30,17 +30,13 @@ export function validate(entitlements, profile, identifier) {
   const permitted = allowed["keychain-access-groups"] ?? [];
   if (!groups[0]?.endsWith(`.${identifier}`))
     throw new Error("The first Keychain group must be the Newport group");
-  if (!groups.some((group) => group.endsWith(".com.porthop.desktop")))
-    throw new Error(
-      "Retain the previous com.porthop.desktop Keychain group for credential migration",
-    );
   if (
     groups.some(
       (group) => !permitted.some((pattern) => matches(group, pattern)),
     )
   )
     throw new Error(
-      "Provisioning profile does not authorize all migration Keychain groups",
+      "Provisioning profile does not authorize all Keychain groups",
     );
 }
 export function profileEntitlements(xml) {

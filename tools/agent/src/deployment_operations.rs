@@ -111,7 +111,7 @@ pub(super) fn observe(installation: &Installation, id: Uuid) -> io::Result<Obser
         .operations
         .into_iter()
         .find(|r| r.intent.operation_id == id);
-    let active_build = installation.inspect_current(false)?;
+    let active_build = installation.current()?;
     let activation_observed = receipt
         .as_ref()
         .is_some_and(|r| active_build == r.intent.candidate);
@@ -131,7 +131,7 @@ pub(super) fn reconcile(installation: &Installation, id: Uuid) -> io::Result<Obs
         .ok_or_else(|| io::Error::other("Needle operation not found"))?;
     let receipt = &journal.operations[index];
     if matches!(receipt.state, State::Prepared | State::Activated) {
-        let active = installation.inspect_current(false)?;
+        let active = installation.current()?;
         let helpers_applied = if receipt.intent.integrations {
             let home = installation
                 .active
@@ -177,7 +177,7 @@ pub(super) fn review_helpers(
             "A later Needle deployment exists; review cannot change its ownership",
         ));
     }
-    let active = installation.inspect_current(false)?;
+    let active = installation.current()?;
     if active != receipt.intent.candidate && active != receipt.intent.previous {
         return Err(io::Error::other("Needle changed after this operation"));
     }
@@ -210,7 +210,7 @@ pub(super) fn recover(installation: &Installation, id: Uuid) -> io::Result<Obser
         ));
     }
     let receipt = journal.operations[index].clone();
-    let active = installation.inspect_current(false)?;
+    let active = installation.current()?;
     if active != receipt.intent.candidate && active != receipt.intent.previous {
         return Err(io::Error::other(
             "Needle changed after this operation; refusing to replace another installation",
@@ -287,8 +287,6 @@ pub(super) fn activate(
     {
         return Err(io::Error::other("Invalid helper-only operation"));
     }
-    // Retain an already-installed legacy entry point before recording helper
-    // intent. This copies the existing binary; it never deploys a new build.
     let current = installation.current()?;
     installation.verify(&intent.candidate)?;
     if current != intent.previous {

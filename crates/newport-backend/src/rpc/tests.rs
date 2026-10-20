@@ -122,7 +122,7 @@ fn response(stream: &mut newport_platform::ipc::Stream) -> Response {
 }
 
 #[tokio::test]
-async fn actual_client_uses_tauri_free_host_and_bounded_event_history() {
+async fn actual_client_uses_host_and_bounded_event_history() {
     let fixture = Fixture::start();
     assert_eq!(
         fixture

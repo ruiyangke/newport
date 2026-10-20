@@ -1,4 +1,4 @@
-//! Session choices follow the Tauri workspace store, not connection resources.
+//! Session choices are keyed by server, not by connection resources.
 use super::{
     ContainersPanel, Preferences,
     tests::{click, fixture, select, settle},

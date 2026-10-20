@@ -547,7 +547,7 @@ impl Newport {
                 |view| {
                     view.child(
                         crate::controls::compact_button("git-stage-file")
-                            .label(git_changes::index_action_label(true, &self.git.selected))
+                            .label(git_changes::index_action_label(true))
                             .disabled(!self.git_can_change_index(true))
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.git_change_index(true, cx)),
@@ -558,7 +558,7 @@ impl Newport {
             .when(working && self.git.selected["staged"] == true, |view| {
                 view.child(
                     crate::controls::compact_button("git-unstage-file")
-                        .label(git_changes::index_action_label(false, &self.git.selected))
+                        .label(git_changes::index_action_label(false))
                         .disabled(!self.git_can_change_index(false))
                         .on_click(cx.listener(|this, _, _, cx| this.git_change_index(false, cx))),
                 )
@@ -727,11 +727,7 @@ impl Newport {
             invalid || error.is_some(),
         );
         let partial_hint = (!self.git_is_inspection() && footer != Footer::Loading)
-            .then(|| presentation.review.as_ref().err().map(|reason| {
-                if text(&self.git.selected["path"], "display").ends_with('/') {
-                    "Folder preview. Stage folder includes all non-ignored files in this folder.".to_owned()
-                } else { reason.clone() }
-            }))
+            .then(|| presentation.review.as_ref().err().cloned())
             .flatten();
         let empty = presentation.lines.is_empty();
         let title = self.diff_title();
@@ -1162,8 +1158,8 @@ mod tests {
         ] {
             assert_eq!(view.file_at(row).as_deref(), Some(path));
         }
-        // A legacy collapsed directory containing one file still gets an exact
-        // sticky file identity without adding a redundant in-body heading.
+        // A single-file page still gets an exact sticky file identity without
+        // adding a redundant in-body heading.
         page["snapshot"] = json!("single");
         page["metadata"]["totalFiles"] = json!(1);
         page["entries"].as_array_mut().unwrap().truncate(1);

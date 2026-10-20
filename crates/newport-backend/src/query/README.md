@@ -85,9 +85,9 @@ owner publishes live tunnel status and controls listener lifetimes.
   cursor, snapshot token, filters and limits) in the owning Git session. Metadata
   and history lanes have 32 entries each; the diff/blob-page lane has 8. Results
   are fresh for 3 seconds. Repository writes invalidate that repository before
-  and after execution. Opens/closes, mutations, remote advertisements, legacy
-  unpaged blobs/diffs, and durable receipts are not cached. Read cancellation
-  detaches its waiter; dropping shared I/O always discards a partially read stream.
+  and after execution. Opens/closes, mutations, remote advertisements,
+  unpaged blobs/diffs, and durable receipts are not cached. Dropping a waiter
+  detaches it; dropping shared I/O always discards a partially read stream.
   Explicit repository refresh first invalidates that checkout across all cache
   lanes, then dispatches replacement reads after acknowledgement. It requires
   neither SSH startup nor configuration control. Other repositories keep their

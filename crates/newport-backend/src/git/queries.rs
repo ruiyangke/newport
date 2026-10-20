@@ -82,7 +82,6 @@ pub(super) async fn read(
     state: &Shared,
     pending: &pending::PendingOperations,
     request: Request,
-    read: &mut Option<reads::Read<'_>>,
 ) -> Result<Value, Error> {
     session
         .connection
@@ -116,7 +115,7 @@ pub(super) async fn read(
                 let state = state
                     .upgrade()
                     .ok_or_else(|| Error::transport("Application closed."))?;
-                execute(&session, events, &state, &pending, request, None).await
+                execute(&session, events, &state, &pending, request).await
             }
         },
     )?;
@@ -127,7 +126,6 @@ pub(super) async fn read(
     }
     let result = tokio::select! {
         biased;
-        _ = reads::cancelled(read) => Err(reads::cancelled_error()),
         _ = cancelled.changed() => Err(Error::transport("Git session closed.")),
         result = query.read() => result,
     };
@@ -228,12 +226,7 @@ mod tests {
                 "method":"repo.status", "params":{"repoId":"one","pageSize":1}
             }))
             .unwrap();
-            for unrelated in [
-                "AUTH_FAILED",
-                "READ_CANCELLED",
-                "READ_CHANNEL_ERROR",
-                "OUTCOME_UNKNOWN",
-            ] {
+            for unrelated in ["AUTH_FAILED", "READ_CHANNEL_ERROR", "OUTCOME_UNKNOWN"] {
                 let error = queries
                     .finish_read(&request, Err(Error::new(unrelated, "failed")))
                     .unwrap_err();

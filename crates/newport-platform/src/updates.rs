@@ -1,4 +1,5 @@
-//! Tauri-compatible release discovery and signed payload verification.
+//! Release discovery from the `latest.json` platform manifest and Minisign
+//! verification of downloaded payloads.
 //! Blocking I/O: call from a worker, never the GUI thread or async executor.
 //! This module does not install packages or modify the application bundle.
 use base64::{Engine, engine::general_purpose::STANDARD};

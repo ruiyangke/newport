@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn matching_scope_and_presentation_changes_allow_work_and_legacy_reads() {
+    async fn matching_scope_and_presentation_changes_allow_work_and_unscoped_reads() {
         let (_directory, state, server, connection) = fixture();
         let operations = Operations::default();
         for presentation_change in [false, true] {

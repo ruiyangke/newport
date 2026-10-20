@@ -945,14 +945,9 @@ impl Backend {
 }
 
 fn default_profile(root: &std::path::Path) -> PathBuf {
-    // Match the shipping host's legacy-profile preference. A named pipe has no
-    // filesystem socket entry; endpoint existence cannot select the profile.
-    let legacy = root.join("Porthop");
-    if legacy.try_exists().unwrap_or(true) {
-        legacy
-    } else {
-        root.join("Newport")
-    }
+    // Match the host's profile directory. A named pipe has no filesystem
+    // socket entry; endpoint existence cannot select the profile.
+    root.join("Newport")
 }
 
 // Agent setup can upload for up to 15 minutes; allow its result to reach the UI.
@@ -1015,16 +1010,8 @@ mod creation_transport_tests {
     #[test]
     fn profile_discovery_matches_the_host_without_requiring_a_socket_file() {
         let root = std::env::temp_dir().join(format!("np-profile-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&root).unwrap();
         assert_eq!(super::default_profile(&root), root.join("Newport"));
-        std::fs::create_dir(root.join("Porthop")).unwrap();
-        std::fs::create_dir(root.join("Newport")).unwrap();
-        assert_eq!(super::default_profile(&root), root.join("Porthop"));
-        std::fs::remove_dir(root.join("Porthop")).unwrap();
-        std::fs::write(root.join("Porthop"), "invalid legacy profile").unwrap();
-        // Preserve the host's refusal to fall back to a different profile.
-        assert_eq!(super::default_profile(&root), root.join("Porthop"));
-        std::fs::remove_dir_all(root).unwrap();
+        assert!(!root.exists());
     }
     impl Host {
         fn new() -> Self {

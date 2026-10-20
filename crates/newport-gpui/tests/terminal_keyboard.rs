@@ -1,7 +1,7 @@
-//! Preserve the original xterm oracle for the shared legacy keyboard behavior.
+//! xterm fixtures are the oracle for the shared legacy keyboard behavior.
 //! Ghostty intentionally adds fixterms/extended function keys; those differences
 //! are named below and exercised by the adapter's protocol tests, not silently
-//! accepted by replacing the original oracle with generated current output.
+//! accepted by regenerating the oracle from current output.
 #![cfg(any(target_os = "macos", windows))]
 use newport_gpui::terminal_input::{KeyEvent, encode_key, scroll_key};
 use newport_terminal::Engine;
@@ -18,7 +18,7 @@ struct Fixture {
     scroll: Option<i32>,
 }
 
-/// These categories no longer claim xterm byte-for-byte parity. Shell control
+/// These categories intentionally differ from xterm's bytes. Shell control
 /// aliases Ctrl+i/m/[ are deliberately absent: their legacy bytes are preserved.
 fn protocol_difference(f: &Fixture) -> Option<&'static str> {
     let key = f.key.as_str();
@@ -47,9 +47,9 @@ fn protocol_difference(f: &Fixture) -> Option<&'static str> {
         "insert" if m != 0 => return Some("modified Insert is encoded after local shortcuts"),
         _ => {}
     }
-    // Formerly ignored Ctrl+Shift/Ctrl+Alt letters and punctuation are encoded
-    // by Ghostty's legacy fixterms extension. AltGr continues through native
-    // text input on Windows, including Space (unlike the old xterm exception).
+    // Ctrl+Shift/Ctrl+Alt letters and punctuation, which xterm ignores, are
+    // encoded by Ghostty's legacy fixterms extension. AltGr continues through
+    // native text input on Windows, including Space, which xterm excepts.
     let printable = key == "space" || key.chars().count() == 1;
     if printable && m & 4 != 0 && (m != 4 || f.output.is_none()) {
         return Some("additional modified printable keys use Ghostty/native AltGr");
@@ -58,7 +58,7 @@ fn protocol_difference(f: &Fixture) -> Option<&'static str> {
 }
 
 #[test]
-fn shared_legacy_keyboard_behavior_matches_original_xterm() {
+fn shared_legacy_keyboard_behavior_matches_xterm() {
     #[cfg(target_os = "macos")]
     let source = include_str!("fixtures/terminal-keyboard.json");
     #[cfg(windows)]
@@ -72,7 +72,7 @@ fn shared_legacy_keyboard_behavior_matches_original_xterm() {
         let shift = fixture.modifiers & 1 != 0;
         let alt = fixture.modifiers & 2 != 0;
         let control = fixture.modifiers & 4 != 0;
-        // Local scrolling remains identical for every original fixture,
+        // Local scrolling matches every fixture,
         // including the protocol-specific cases below.
         assert_eq!(scroll_key(&fixture.key, shift, 24), fixture.scroll);
         if let Some(reason) = protocol_difference(&fixture) {
@@ -107,7 +107,7 @@ fn shared_legacy_keyboard_behavior_matches_original_xterm() {
             }
         }
     }
-    eprintln!("Compared {checked} original key cases; explicit protocol differences: {excluded:?}");
+    eprintln!("Compared {checked} xterm key cases; explicit protocol differences: {excluded:?}");
     assert_eq!(
         checked,
         if cfg!(windows) { 570 } else { 378 },

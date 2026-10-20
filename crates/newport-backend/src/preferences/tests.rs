@@ -5,6 +5,13 @@ use uuid::Uuid;
 
 struct NativeHost(Preferences);
 
+fn sidebar_width(state: &Preferences) -> Option<f64> {
+    state.get("sidebarWidth").unwrap().and_then(|v| v.as_f64())
+}
+async fn set_sidebar_width(state: &Preferences, width: f64) -> Result<(), String> {
+    set_window_preferences(state, json!({ "sidebarWidth": width })).await
+}
+
 #[test]
 fn failed_atomic_publication_preserves_previous_file_and_cleans_temporary_file() {
     let directory = tempfile::tempdir().unwrap();
@@ -25,7 +32,7 @@ fn failed_atomic_publication_preserves_previous_file_and_cleans_temporary_file()
     assert_eq!(fs::read(&backup).unwrap(), original);
     fs::remove_dir(&path).unwrap();
     fs::rename(&backup, &path).unwrap();
-    assert_eq!(get_sidebar_width(&state).unwrap(), Some(220.));
+    assert_eq!(sidebar_width(&state), Some(220.));
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
 }
 impl crate::rpc::Host for NativeHost {
@@ -41,10 +48,11 @@ impl crate::rpc::Host for NativeHost {
 }
 
 #[tokio::test]
-async fn native_rpc_edits_and_reopens_preferences_without_tauri() {
+async fn native_rpc_edits_and_reopens_preferences() {
     let directory = tempfile::tempdir().unwrap();
     let endpoint = directory.path().join("native-client/desktop.sock");
     let state = Preferences::open(directory.path()).unwrap();
+    assert_eq!(sidebar_width(&state), None);
     let listener = crate::rpc::Server::bind(&endpoint).unwrap();
     let task = tokio::spawn(listener.run(NativeHost(state)));
     let server = Uuid::new_v4();
@@ -52,12 +60,11 @@ async fn native_rpc_edits_and_reopens_preferences_without_tauri() {
     let expected = bookmark.clone();
     tokio::task::spawn_blocking(move || {
         let client = newport_client::backend::Backend::at_path(endpoint);
-        assert_eq!(
-            client.call("get_sidebar_width", json!({})).unwrap(),
-            Value::Null
-        );
         client
-            .call("set_sidebar_width", json!({"width":260}))
+            .call(
+                "set_window_preferences",
+                json!({"preferences":{"sidebarWidth":260}}),
+            )
             .unwrap();
         assert_eq!(
             client
@@ -73,12 +80,11 @@ async fn native_rpc_edits_and_reopens_preferences_without_tauri() {
         );
         assert!(
             client
-                .call("set_sidebar_width", json!({"width":999}))
+                .call(
+                    "set_window_preferences",
+                    json!({"preferences":{"sidebarWidth":999}}),
+                )
                 .is_err()
-        );
-        assert_eq!(
-            client.call("get_sidebar_width", json!({})).unwrap(),
-            json!(260.)
         );
         client
             .call(
@@ -98,7 +104,7 @@ async fn native_rpc_edits_and_reopens_preferences_without_tauri() {
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     let reopened = Preferences::open(directory.path()).unwrap();
-    assert_eq!(get_sidebar_width(&reopened).unwrap(), Some(260.));
+    assert_eq!(sidebar_width(&reopened), Some(260.));
     assert_eq!(
         serde_json::to_value(git_projects_list(&reopened, server).await.unwrap()).unwrap(),
         json!([expected])
@@ -122,7 +128,7 @@ async fn existing_identity_unknown_preferences_and_binary_project_paths_survive_
     fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
     let before = fs::read(&path).unwrap();
     let state = Preferences::open(directory.path()).unwrap();
-    assert_eq!(get_sidebar_width(&state).unwrap(), Some(222.));
+    assert_eq!(sidebar_width(&state), Some(222.));
     assert_eq!(fs::read(&path).unwrap(), before, "Opening is read-only");
     assert_eq!(state.git_client_id().await.unwrap(), id);
     assert_eq!(
@@ -137,7 +143,7 @@ async fn existing_identity_unknown_preferences_and_binary_project_paths_survive_
     assert_eq!(state.git_client_id().await.unwrap(), id);
     let reopened = Preferences::open(directory.path()).unwrap();
     assert_eq!(reopened.git_client_id().await.unwrap(), id);
-    assert_eq!(get_sidebar_width(&reopened).unwrap(), Some(245.));
+    assert_eq!(sidebar_width(&reopened), Some(245.));
     assert_eq!(
         serde_json::to_value(git_projects_list(&reopened, server).await.unwrap()).unwrap(),
         json!([bookmark])
@@ -227,7 +233,7 @@ async fn failed_save_never_exposes_a_new_identity_or_unsaved_preference() {
     );
     assert_eq!(fs::read_to_string(&parent).unwrap(), "do not replace");
     fs::remove_file(&parent).unwrap();
-    assert_eq!(get_sidebar_width(&state).unwrap(), None);
+    assert_eq!(sidebar_width(&state), None);
     assert!(
         git_projects_list(&state, Uuid::new_v4())
             .await
@@ -370,4 +376,38 @@ async fn cancelled_identity_waiter_still_persists_one_identity_before_caching() 
     assert_eq!(json!(state.git_client_id().await.unwrap()), persisted);
     let reopened = Preferences::open(directory.path()).unwrap();
     assert_eq!(json!(reopened.git_client_id().await.unwrap()), persisted);
+}
+
+#[tokio::test]
+async fn window_preferences_merge_validate_and_keep_other_keys() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = Preferences::open(directory.path()).unwrap();
+    set_sidebar_width(&state, 245.).await.unwrap();
+    crate::preferences::set_window_preferences(
+        &state,
+        json!({"sidebarCompact": true, "appearance": "dark"}),
+    )
+    .await
+    .unwrap();
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(directory.path().join("preferences.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        stored,
+        json!({"sidebarWidth": 245.0, "sidebarCompact": true, "appearance": "dark"})
+    );
+    for invalid in [
+        json!({"appearance": "blue"}),
+        json!({"sidebarWidth": 999}),
+        json!({"sidebarCompact": "yes"}),
+        json!({"unknown": 1}),
+        json!([]),
+    ] {
+        assert!(
+            crate::preferences::set_window_preferences(&state, invalid.clone())
+                .await
+                .is_err(),
+            "{invalid}"
+        );
+    }
 }

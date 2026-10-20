@@ -1,4 +1,4 @@
-//! Encrypted profile snapshots. The unlock key never crosses the webview boundary.
+//! Encrypted profile snapshots. The unlock key is never sent to the UI.
 use super::snapshot::Snapshot as Stronghold;
 use newport_domain::model::Config;
 use std::{collections::BTreeMap, fs, path::Path};
@@ -7,7 +7,6 @@ use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
 const CLIENT: &[u8] = b"newport-profiles-v1";
-use super::legacy::VAULT_CLIENT as LEGACY_CLIENT;
 const RECORD: &[u8] = b"config";
 
 // v3 prevents older apps from reinterpreting reverse forwards or erasing consent.
@@ -33,26 +32,20 @@ fn decode_record(data: &[u8]) -> Result<ProfileRecord, String> {
     #[derive(serde::Deserialize)]
     struct Version {
         #[serde(rename = "schemaVersion")]
-        schema_version: Option<u64>,
+        schema_version: u64,
     }
     let version: Version =
         serde_json::from_slice(data).map_err(|_| "Invalid encrypted profile format".to_string())?;
-    let record = match version.schema_version {
-        Some(1 | 2 | SCHEMA_VERSION) => {
-            serde_json::from_slice(data).map_err(|_| "Invalid encrypted profiles".to_string())?
-        }
-        Some(_) => {
-            return Err(
-                "Unsupported profile version. Update Newport before editing these profiles.".into(),
-            );
-        }
-        None => ProfileRecord {
-            schema_version: SCHEMA_VERSION,
-            config: serde_json::from_slice(data)
-                .map_err(|_| "Invalid encrypted profiles".to_string())?,
-            passwords: BTreeMap::new(),
-        },
-    };
+    if version.schema_version > SCHEMA_VERSION {
+        return Err(
+            "Unsupported profile version. Update Newport before editing these profiles.".into(),
+        );
+    }
+    if version.schema_version < SCHEMA_VERSION {
+        return Err("Unsupported profile version from an older app.".into());
+    }
+    let record: ProfileRecord =
+        serde_json::from_slice(data).map_err(|_| "Invalid encrypted profiles".to_string())?;
     record.config.validate()?;
     Ok(record)
 }
@@ -69,10 +62,7 @@ fn read_record(path: &Path, key: &[u8]) -> Result<ProfileRecord, String> {
         "Cannot unlock saved profiles. Check the vault key in your system credential storage."
             .to_string()
     })?;
-    let client = vault
-        .load_client(CLIENT)
-        .or_else(|_| vault.load_client(LEGACY_CLIENT))
-        .map_err(|e| e.to_string())?;
+    let client = vault.load_client(CLIENT).map_err(|e| e.to_string())?;
     let data = Zeroizing::new(
         client
             .store()
@@ -207,39 +197,6 @@ pub(crate) fn prepare(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn legacy_snapshot_moves_to_new_namespace_without_losing_passwords() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("profiles.stronghold");
-        let key = vec![7; 32];
-        let config = config();
-        let id = config.servers[0].id;
-        let record = ProfileRecord {
-            schema_version: 2,
-            config: config.clone(),
-            passwords: BTreeMap::from([(id, "migration-test".into())]),
-        };
-        let old = Stronghold::new(&path, key.clone()).unwrap();
-        old.create_client(LEGACY_CLIENT)
-            .unwrap()
-            .store()
-            .insert(RECORD.to_vec(), serde_json::to_vec(&record).unwrap(), None)
-            .unwrap();
-        old.save().unwrap();
-        drop(old);
-        assert_eq!(
-            password(&path, &key, id).unwrap().as_str(),
-            "migration-test"
-        );
-        write(&path, &key, &config).unwrap();
-        assert_eq!(
-            password(&path, &key, id).unwrap().as_str(),
-            "migration-test"
-        );
-        let migrated = Stronghold::new(&path, key).unwrap();
-        assert!(migrated.load_client(CLIENT).is_ok());
-        assert!(migrated.load_client(LEGACY_CLIENT).is_err());
-    }
     fn config() -> Config {
         serde_json::from_value(serde_json::json!({"servers":[{"id":uuid::Uuid::new_v4(),"name":"Private production","sshHost":"private.internal.example","sshPort":22,"sshUser":"private-user","identityFile":"/private/key"}],"tunnels":[]})).unwrap()
     }
@@ -263,33 +220,29 @@ mod tests {
     }
 
     #[test]
-    fn versions_preserve_legacy_profiles_and_reject_future_records() {
+    fn only_the_current_schema_is_accepted() {
         let config = config();
+        let record = serde_json::json!({"schemaVersion": SCHEMA_VERSION, "config": config});
         assert_eq!(
-            decode(&serde_json::to_vec(&config).unwrap()).unwrap(),
+            decode(&serde_json::to_vec(&record).unwrap()).unwrap(),
             config
         );
-        let record = serde_json::json!({"schemaVersion": 1, "config": config});
-        for version in [1, 2, 3] {
-            let mut supported = record.clone();
-            supported["schemaVersion"] = version.into();
-            assert_eq!(
-                decode(&serde_json::to_vec(&supported).unwrap()).unwrap(),
-                config
-            );
-        }
+        // Bare configs and other schema versions are never reinterpreted.
+        assert!(decode(&serde_json::to_vec(&config).unwrap()).is_err());
         for version in [
+            serde_json::json!(1),
+            serde_json::json!(2),
             serde_json::json!(4),
-            serde_json::json!("1"),
+            serde_json::json!("3"),
             serde_json::Value::Null,
         ] {
-            let mut future = record.clone();
-            future["schemaVersion"] = version;
-            assert!(decode(&serde_json::to_vec(&future).unwrap()).is_err());
+            let mut other = record.clone();
+            other["schemaVersion"] = version;
+            assert!(decode(&serde_json::to_vec(&other).unwrap()).is_err());
         }
     }
     #[test]
-    fn native_fields_are_preserved_and_cannot_be_silently_read_as_v030_profiles() {
+    fn install_consent_and_reverse_forwards_round_trip_with_the_current_schema() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("profiles.stronghold");
         let key = [7; 32];
@@ -320,10 +273,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        // Released v0.3.0 decode_record accepts exactly schema 1 or 2 and
-        // rejects other numbers before deserializing its older tunnel model.
-        assert_eq!(envelope["schemaVersion"], 3);
-        assert!(!matches!(envelope["schemaVersion"].as_u64(), Some(1 | 2)));
+        assert_eq!(envelope["schemaVersion"], SCHEMA_VERSION);
     }
     #[test]
     fn encrypted_roundtrip_and_wrong_key_preserve_snapshot() {

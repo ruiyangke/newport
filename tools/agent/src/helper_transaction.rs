@@ -135,7 +135,7 @@ struct Change {
     path: PathBuf,
     before: Snapshot,
     after: Snapshot,
-    /// Only shell planning may grant block-level ownership. Old records retain
+    /// Only shell planning may grant block-level ownership. Other records keep
     /// whole-file comparison semantics rather than inferring ownership by name.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     shell: bool,
@@ -163,7 +163,8 @@ struct Record {
     changes: Vec<Change>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     removal: bool,
-    /// Absence in older records is unknown provenance, never proof of standalone ownership.
+    /// Absence (removals and generic applies) is unknown provenance, never proof
+    /// of standalone ownership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     origin: Option<Origin>,
 }
@@ -1015,7 +1016,7 @@ mod tests {
         }
     }
     #[test]
-    fn legacy_receipt_never_infers_block_ownership_from_shell_markers() {
+    fn whole_file_receipt_never_infers_block_ownership_from_shell_markers() {
         let home = tempfile::tempdir().unwrap();
         let id = Uuid::new_v4();
         shell_plan(home.path(), id, None).apply().unwrap();

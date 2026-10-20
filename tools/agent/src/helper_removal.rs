@@ -355,14 +355,14 @@ mod tests {
     }
 
     #[test]
-    fn restores_legacy_alias_target_and_detects_corrupt_backup() {
+    fn restores_previous_alias_target_and_detects_corrupt_backup() {
         let home = tempfile::tempdir().unwrap();
         let alias = home.path().join("xclip");
-        symlink("legacy-helper", &alias).unwrap();
+        symlink("previous-helper", &alias).unwrap();
         let mut tx = Transaction::open(home.path(), Uuid::new_v4()).unwrap();
         tx.plan(
             &alias,
-            Snapshot::Link("legacy-helper".into()),
+            Snapshot::Link("previous-helper".into()),
             Snapshot::Link("newport-agent".into()),
         )
         .unwrap();

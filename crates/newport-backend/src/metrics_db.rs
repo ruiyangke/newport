@@ -13,7 +13,7 @@ use std::{
 
 const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const SCHEMA: &str = include_str!("../migrations/001_metrics.sql");
-// Persisted endpoint identity: keep the original salt across host migrations.
+// Persisted endpoint identity: changing the salt orphans saved history.
 const METRICS_SALT: &[u8] = b"porthop-metrics-endpoint-v2\0";
 
 #[derive(Clone)]
@@ -46,7 +46,8 @@ fn endpoint(server: &Server) -> String {
 
 fn migrations() -> sqlx::migrate::Migrator {
     use sqlx::migrate::{Migration, MigrationType, Migrator};
-    // Exactly the SQL, descriptions and migration kind used by the old plugin.
+    // Exactly the SQL, descriptions and migration kind recorded in existing
+    // databases.
     // Do not derive descriptions from filenames or regenerate SQL checksums.
     Migrator {
         migrations: vec![
@@ -165,33 +166,13 @@ impl MetricsDb {
             .execute(&mut *connection)
             .await
             .map_err(|e| e.to_string())?;
+        // Version 2 marks HMAC endpoint fingerprints; new databases start there.
         if version < 2 {
-            use sqlx::Connection;
-            let mut tx = connection.begin().await.map_err(|e| e.to_string())?;
-            let endpoints: Vec<String> =
-                sqlx::query_scalar("SELECT DISTINCT endpoint FROM samples")
-                    .fetch_all(&mut *tx)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            for value in endpoints {
-                sqlx::query("UPDATE samples SET endpoint=?1 WHERE endpoint=?2")
-                    .bind(self.fingerprint(&value)?)
-                    .bind(value)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            }
             sqlx::query("PRAGMA user_version=2")
-                .execute(&mut *tx)
+                .execute(&mut *connection)
                 .await
                 .map_err(|e| e.to_string())?;
-            tx.commit().await.map_err(|e| e.to_string())?;
         }
-        // Retry physical cleanup after an interrupted legacy endpoint migration.
-        sqlx::raw_sql("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
-            .execute(&mut *connection)
-            .await
-            .map_err(|e| format!("Cannot compact metric history: {e}"))?;
         Ok(())
     }
     pub async fn record(&self, server: &Server, at: i64, overview: &Value) -> Result<(), String> {
@@ -376,7 +357,7 @@ mod tests {
         MetricsDb::open(path, Ok(vec![key; 32])).await
     }
     #[test]
-    fn migration_checksums_match_shipped_plugin_history() {
+    fn migration_checksums_match_recorded_history() {
         let actual: Vec<String> = migrations()
             .iter()
             .map(|migration| {
@@ -658,43 +639,15 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(applied, 2);
+        let user_version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(db.pool().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(user_version, 2);
         db.pool().unwrap().close().await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn legacy_migration_preserves_history_and_removes_readable_endpoints() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("metrics.sqlite3");
-        let s = server();
-        let now = now_ms();
-        let old = SqlitePool::connect_with(database_options(&path).unwrap())
-            .await
-            .unwrap();
-        sqlx::raw_sql(SCHEMA).execute(&old).await.unwrap();
-        sqlx::query("PRAGMA user_version=1")
-            .execute(&old)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO samples VALUES(?1,?2,?3,?4)")
-            .bind(s.id.to_string())
-            .bind(endpoint(&s))
-            .bind(now)
-            .bind(sample().to_string())
-            .execute(&old)
-            .await
-            .unwrap();
-        old.close().await;
-        let db = open(&path, 7).await.unwrap();
-        assert_eq!(db.history(&s, now).await.unwrap().len(), 1);
-        db.pool().unwrap().close().await;
-        let other_key = open(&path, 8).await.unwrap();
-        assert!(other_key.history(&s, now).await.unwrap().is_empty());
-        other_key.pool().unwrap().close().await;
-        let bytes = std::fs::read(path).unwrap();
-        let plain = endpoint(&s);
-        assert!(!bytes.windows(plain.len()).any(|w| w == plain.as_bytes()));
-    }
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn existing_v2_fingerprints_are_not_migrated_twice() {
+    async fn existing_v2_fingerprints_are_stable_across_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("metrics.sqlite3");
         let s = server();

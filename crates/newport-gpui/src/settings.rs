@@ -143,7 +143,7 @@ pub(super) struct SettingsUi {
     theme: Entity<ThemeSelect>,
     scroll: ScrollHandle,
     reveal: Rc<FocusReveal>,
-    appearance_error: Option<String>,
+    preferences_error: Option<String>,
     /// Restart confirmation belongs to the version the user actually reviewed.
     confirmation: Option<String>,
     _subscriptions: Vec<Subscription>,
@@ -159,22 +159,9 @@ impl SettingsUi {
             let SelectEvent::Confirm(Some(value)) = event else {
                 return;
             };
-            match this.appearance_store.save(*value) {
-                Ok(()) => {
-                    this.settings_ui.appearance_error = None;
-                    this.appearance = *value;
-                    theme::install(value.is_dark(window.appearance()), cx);
-                }
-                Err(_) => {
-                    this.settings_ui.appearance_error =
-                        Some("Couldn’t save your appearance preference. Try again.".into());
-                    let previous = this.appearance;
-                    this.settings_ui.theme.update(cx, |select, cx| {
-                        select.set_selected_value(&previous, window, cx);
-                        cx.notify();
-                    });
-                }
-            }
+            this.appearance = *value;
+            theme::install(value.is_dark(window.appearance()), cx);
+            this.save_window_preferences(json!({ "appearance": value }));
             cx.notify();
         });
         let scroll = ScrollHandle::new();
@@ -183,7 +170,7 @@ impl SettingsUi {
             theme,
             scroll,
             reveal,
-            appearance_error: None,
+            preferences_error: None,
             confirmation: None,
             _subscriptions: vec![subscription],
         }
@@ -207,6 +194,37 @@ fn theme_select<T: 'static>(
         select.set_selected_value(&appearance, window, cx);
         select
     })
+}
+
+pub(super) const WINDOW_PREFERENCES: &str = "window-preferences";
+
+impl Newport {
+    /// Theme and sidebar choices go to preferences.json through the backend,
+    /// its only writer, so drawing never waits on the disk.
+    pub(super) fn save_window_preferences(&mut self, preferences: Value) {
+        self.request(
+            WINDOW_PREFERENCES,
+            "set_window_preferences",
+            json!({ "preferences": preferences }),
+        );
+    }
+    pub(super) fn save_sidebar(&mut self) {
+        self.save_window_preferences(json!({
+            "sidebarWidth": self.sidebar_layout.preferred_width(),
+            "sidebarCompact": self.sidebar_layout.compact(),
+        }));
+    }
+    pub(super) fn window_preferences_saved(&mut self) {
+        let error = self
+            .resources
+            .get(WINDOW_PREFERENCES)
+            .and_then(|r| r.error.clone())
+            .map(|error| format!("Couldn’t save your preferences: {error}"));
+        if let Some(message) = &error {
+            self.notification = Some(Notification::error(message.clone()));
+        }
+        self.settings_ui.preferences_error = error;
+    }
 }
 
 impl Newport {
@@ -257,13 +275,13 @@ impl Newport {
             theme: self.settings_ui.theme.clone(),
             scroll: self.settings_ui.scroll.clone(),
             reveal: self.settings_ui.reveal.clone(),
-            appearance_error: self.settings_ui.appearance_error.clone(),
+            preferences_error: self.settings_ui.preferences_error.clone(),
             confirmation: self.settings_ui.confirmation.clone(),
             on_action: Rc::new(move |action, _, cx| {
                 let _ = owner.update(cx, |this, cx| {
                     match action {
                         Action::Startup(enabled) => {
-                            this.settings_ui.appearance_error = None;
+                            this.settings_ui.preferences_error = None;
                             this.settings_state.set_launch_at_login(enabled);
                         }
                         Action::RetryStartup => {
@@ -466,7 +484,7 @@ struct SettingsView {
     theme: Entity<ThemeSelect>,
     scroll: ScrollHandle,
     reveal: Rc<FocusReveal>,
-    appearance_error: Option<String>,
+    preferences_error: Option<String>,
     confirmation: Option<String>,
     on_action: ActionHandler,
 }
@@ -742,7 +760,7 @@ impl SettingsView {
 impl RenderOnce for SettingsView {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let problem = self
-            .appearance_error
+            .preferences_error
             .clone()
             .or_else(|| self.state.startup_write.error.clone())
             .or_else(|| self.state.startup.error.clone());
@@ -927,7 +945,7 @@ mod tests {
                 theme: self.theme.clone(),
                 scroll: self.scroll.clone(),
                 reveal: self.reveal.clone(),
-                appearance_error: None,
+                preferences_error: None,
                 confirmation: self.confirmation.clone(),
                 on_action: Rc::new(move |action, _, cx| {
                     let _ = weak.update(cx, |view, cx| {

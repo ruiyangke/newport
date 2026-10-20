@@ -128,7 +128,7 @@ impl PreviewText {
                     .bordered(false)
                     // Keep the inset inside the editor's scrolling surface.
                     // Frame padding clips text early and leaves a permanent
-                    // blank band above the footer, unlike the original <pre>.
+                    // blank band above the footer.
                     .content_padding(Edges {
                         top: px(20.),
                         right: px(20.),

@@ -326,7 +326,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migration_host_reports_unavailable_installation_features_and_refuses_writes() {
+    async fn disabled_host_reports_unavailable_installation_features_and_refuses_writes() {
         let (desktop, _requests) = Integration::new();
         let commands = Commands::new(desktop, newport_platform::startup::Startup::disabled());
         assert_eq!(

@@ -277,8 +277,8 @@ pub struct OutputLine<'a> {
     pub severity: Severity,
 }
 
-/// Split a retained contiguous output suffix exactly as the Tauri Activity
-/// viewer does: preserve blank lines and omit only the final empty split.
+/// Split a retained contiguous output suffix into lines, preserving blank lines
+/// and omitting only the final empty split.
 /// The agent already converts CR/CRLF progress and strips terminal escapes;
 /// this layer does not reinterpret text or alter its cumulative byte offsets.
 pub fn output_lines(output: &str, end_offset: u64) -> Result<Vec<OutputLine<'_>>, &'static str> {

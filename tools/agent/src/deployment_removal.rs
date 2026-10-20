@@ -84,86 +84,6 @@ pub(super) fn require_ready(home: &Path) -> io::Result<()> {
     Ok(())
 }
 
-#[derive(PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Compatibility {
-    version: u32,
-    build: String,
-    removal_admission: u32,
-}
-
-/// Only the running, checksum-verified candidate can record its own support.
-pub(super) fn record_compatibility(installation: &Installation, hash: &str) -> io::Result<()> {
-    let path = installation.verify(hash)?;
-    let directory = path.parent().unwrap();
-    let value = Compatibility {
-        version: 1,
-        build: hash.into(),
-        // v2 admission uses a persistent home lock. Older removers reject this
-        // build instead of assuming their /tmp lock excludes its services.
-        removal_admission: 2,
-    };
-    let destination = directory.join("lifecycle.json");
-    match private_file(&destination) {
-        Ok(file) => {
-            let mut bytes = Vec::new();
-            file.take(513).read_to_end(&mut bytes)?;
-            if bytes.len() <= 512
-                && serde_json::from_slice::<Compatibility>(&bytes)
-                    .is_ok_and(|existing| existing == value)
-            {
-                return Ok(());
-            }
-            return Err(io::Error::other(
-                "Existing Needle lifecycle metadata is unrecognized; preserving it",
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => (),
-        Err(error) => return Err(error),
-    }
-    let mut file = tempfile::NamedTempFile::new_in(directory)?;
-    serde_json::to_writer(file.as_file_mut(), &value)?;
-    file.as_file().sync_all()?;
-    file.persist_noclobber(destination)
-        .map_err(io::Error::other)?;
-    fs::File::open(directory)?.sync_all()
-}
-
-fn compatible(installation: &Installation) -> io::Result<()> {
-    // Retained builds may be launched by another desktop. A build that lacks
-    // durable admission cannot be treated as idle merely because the lease is free.
-    let mut count = 0;
-    super::check_directory(&installation.root.join("builds"))?;
-    for entry in fs::read_dir(installation.root.join("builds"))? {
-        count += 1;
-        if count > 128 {
-            return Err(io::Error::other(
-                "Too many retained builds to verify removal compatibility",
-            ));
-        }
-        let entry = entry?;
-        super::check_directory(&entry.path())?;
-        let name = entry.file_name();
-        let hash = name
-            .to_str()
-            .ok_or_else(|| io::Error::other("Unknown retained Needle build"))?;
-        installation.verify(hash)?;
-        let file = private_file(&entry.path().join("lifecycle.json")).map_err(|_| io::Error::other("A retained Needle build cannot coordinate removal. Preserve the installation until older-client compatibility is resolved."))?;
-        let mut bytes = Vec::new();
-        file.take(513).read_to_end(&mut bytes)?;
-        if bytes.len() > 512 {
-            return Err(io::Error::other("Invalid Needle lifecycle metadata"));
-        }
-        let value: Compatibility = serde_json::from_slice(&bytes)?;
-        // A retained v1 executable could create its old /tmp lock after our
-        // legacy-path probe. Refuse removal rather than race that service.
-        if value.version != 1 || value.build != hash || value.removal_admission != 2 {
-            return Err(io::Error::other("A retained Needle build uses older installation locks. Preserve it until older-client compatibility is resolved."));
-        }
-    }
-    Ok(())
-}
-
 pub(super) fn observe(installation: &Installation, id: Uuid) -> io::Result<Option<Record>> {
     Ok(Journal::load(&installation.root)?
         .records
@@ -214,9 +134,8 @@ fn remove_with(
     }
     super::operations::require_settled(installation)?;
     let lease = MaintenanceLease::acquire(home)?;
-    compatible(installation)?;
     installation.verify(build)?;
-    let active = installation.inspect_current(false)?;
+    let active = installation.current()?;
     if active != build && !(existing.is_some() && active == "missing") {
         return Err(io::Error::other(
             "Needle changed since removal was requested",
@@ -255,7 +174,7 @@ fn remove_with(
     }
     checkpoint("helpers")?;
     lease.validate()?;
-    let active = installation.inspect_current(false)?;
+    let active = installation.current()?;
     if active == build {
         installation.replace("missing")?;
     } else if active != "missing" {
@@ -282,10 +201,9 @@ pub(super) fn restore(installation: &Installation, home: &Path, id: Uuid) -> io:
     }
     super::operations::require_settled(installation)?;
     let lease = MaintenanceLease::acquire(home)?;
-    compatible(installation)?;
     let build = journal.records[index].build.clone();
     installation.verify(&build)?;
-    let active = installation.inspect_current(false)?;
+    let active = installation.current()?;
     if active != "missing" && active != build {
         return Err(io::Error::other("Needle changed after removal"));
     }
@@ -296,9 +214,9 @@ pub(super) fn restore(installation: &Installation, home: &Path, id: Uuid) -> io:
         helper_transaction::Transaction::recover(home, id)?;
     }
     lease.validate()?;
-    if installation.inspect_current(false)? == "missing" {
+    if installation.current()? == "missing" {
         installation.replace(&build)?;
-    } else if installation.inspect_current(false)? != build {
+    } else if installation.current()? != build {
         return Err(io::Error::other("Needle changed during restoration"));
     }
     journal.records[index].state = Phase::Restored;
@@ -331,7 +249,7 @@ pub(super) fn review(
     }
     super::operations::require_settled(installation)?;
     installation.verify(build)?;
-    let active = installation.inspect_current(false)?;
+    let active = installation.current()?;
     if active != "missing" && active != build {
         return Err(io::Error::other("Needle changed after removal"));
     }
@@ -386,27 +304,6 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    #[test]
-    fn removal_refuses_retained_builds_with_the_old_lock_scheme() {
-        let home = tempfile::tempdir().unwrap();
-        let install = Installation::open(home.path()).unwrap();
-        let binary = std::env::current_exe().unwrap();
-        let hash = super::super::checksum(&binary).unwrap();
-        install.retain(&binary, &hash).unwrap();
-        record_compatibility(&install, &hash).unwrap();
-        compatible(&install).unwrap();
-        let metadata = install.binary(&hash).with_file_name("lifecycle.json");
-        let mut old: Compatibility = serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
-        old.removal_admission = 1;
-        fs::write(&metadata, serde_json::to_vec(&old).unwrap()).unwrap();
-        assert!(compatible(&install)
-            .unwrap_err()
-            .to_string()
-            .contains("older installation locks"));
-        assert!(install.binary(&hash).exists());
-        assert!(!install.root.join("removals.json").exists());
-    }
-
     struct ChildGuard(Child);
     impl Drop for ChildGuard {
         fn drop(&mut self) {
@@ -426,7 +323,6 @@ mod tests {
         installation
             .retain(&std::env::current_exe().unwrap(), &hash)
             .unwrap();
-        record_compatibility(&installation, &hash).unwrap();
         installation.replace(&hash).unwrap();
         let path = home.join(".bashrc");
         fs::write(&path, "original settings").unwrap();
@@ -499,7 +395,7 @@ mod tests {
                 fs::read_to_string(home.path().join(".bashrc")).unwrap(),
                 "original settings"
             );
-            assert_eq!(installation.inspect_current(false).unwrap(), "missing");
+            assert_eq!(installation.current().unwrap(), "missing");
             assert!(require_ready(home.path()).is_err());
             assert_eq!(
                 restore(&installation, home.path(), id).unwrap().state,
@@ -509,7 +405,7 @@ mod tests {
                 fs::read_to_string(home.path().join(".bashrc")).unwrap(),
                 "installed settings"
             );
-            assert_eq!(installation.inspect_current(false).unwrap(), hash);
+            assert_eq!(installation.current().unwrap(), hash);
             require_ready(home.path()).unwrap();
         }
     }

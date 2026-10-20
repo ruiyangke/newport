@@ -68,7 +68,7 @@ impl From<&str> for LogLine {
     }
 }
 
-/// Match Tauri's log allowlist: styling and horizontal progress controls only.
+/// Keep only styling and horizontal progress controls from log escapes.
 fn sanitize(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars().peekable();

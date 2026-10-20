@@ -1,4 +1,4 @@
-//! Lifetime ownership for background services shared by desktop hosts.
+//! Lifetime ownership for background services.
 use crate::{
     account::Account,
     connectivity,

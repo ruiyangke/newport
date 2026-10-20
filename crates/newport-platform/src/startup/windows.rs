@@ -51,8 +51,8 @@ impl Registration {
         let Some(approval) = self.read(APPROVAL)? else {
             return Ok(true);
         };
-        // Preserve a user's Task Manager decision. Like the original adapter,
-        // a nonzero FILETIME denotes a disabled startup entry.
+        // Preserve a user's Task Manager decision. A nonzero FILETIME denotes a
+        // disabled startup entry.
         if approval.vtype != REG_BINARY || approval.bytes.len() != 12 {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,

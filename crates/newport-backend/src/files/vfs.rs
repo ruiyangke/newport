@@ -108,8 +108,8 @@ impl Vfs {
                 self.invalidate(&request.root, &paths, reply["reset"] == true);
                 return Ok(reply);
             }
-            // Old signed Needle builds and hosts without native watches keep
-            // working. Probe again after an upgrade without hammering the agent.
+            // Without a native watch, poll metadata over SFTP. Probe the agent
+            // again later without hammering it.
             self.fallback.lock().await.native_retry =
                 Some(Instant::now() + Duration::from_secs(300));
         }
@@ -324,7 +324,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "Run with npm run test:ssh -- files::vfs"]
-    async fn old_agent_metadata_fallback_detects_create_replace_delete_and_releases() {
+    async fn metadata_poll_fallback_detects_create_replace_delete_and_releases() {
         let server:crate::model::Server=serde_json::from_value(json!({"id":Uuid::new_v4(),"name":"VFS fixture",
             "sshUser":"fixture","sshHost":"127.0.0.1","sshPort":std::env::var("NEWPORT_TEST_SSH_PORT").unwrap().parse::<u16>().unwrap(),
             "identityFile":std::env::var("NEWPORT_TEST_IDENTITY").unwrap(),"agentInstallApproved":false})).unwrap();

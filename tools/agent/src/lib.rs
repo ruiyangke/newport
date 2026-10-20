@@ -16,7 +16,6 @@ pub mod install;
 pub mod installation_use;
 pub use runtime_protocol::integration as integration_control;
 mod local_socket;
-pub mod migration;
 pub mod monitor;
 mod native;
 mod owned_directory;

@@ -1,4 +1,4 @@
-//! Diff presentation controls, matching React's persistent settings popover.
+//! Diff presentation controls in a persistent settings popover.
 use super::*;
 use git_diff_split::Layout;
 use gpui_kit::component::{

@@ -1,4 +1,4 @@
-//! Reviewed upstream transfers shared by desktop frontends.
+//! Reviewed upstream transfers.
 use base64::Engine as _;
 use serde_json::{Value, json};
 
@@ -54,9 +54,7 @@ impl Target {
             .and_then(|name| name.strip_prefix("refs/heads/"))
             .filter(|name| !name.is_empty())
             .ok_or("A valid local branch is required.")?;
-        let upstream = metadata
-            .get("upstream")
-            .ok_or("Update the server agent and refresh to resolve the configured upstream.")?;
+        let upstream = &metadata["upstream"];
         let remote = reference(&upstream["remote"])
             .filter(|name| !name.is_empty() && *name != ".")
             .ok_or("This branch has no remote upstream. Configure one in the branch menu, or use Remotes.")?;
@@ -180,7 +178,7 @@ mod tests {
                 .unwrap();
             assert_eq!(action["remote"], "team/upstream");
         }
-        // An older agent must never cause the UI to guess from a tracking path.
+        // Without the resolved upstream the UI never guesses from a tracking path.
         status["metadata"]
             .as_object_mut()
             .unwrap()

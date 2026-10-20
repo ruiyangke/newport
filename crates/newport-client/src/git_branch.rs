@@ -1,4 +1,4 @@
-//! Reviewed local branch actions shared by desktop UIs.
+//! Reviewed local branch actions.
 //!
 //! Review state is immutable: a refresh must never silently substitute a newer
 //! branch OID, tracking token, or repository snapshot into a pending action.

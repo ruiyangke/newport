@@ -1,5 +1,5 @@
-//! Per-server durable journals with a one-time, recoverable legacy migration.
-use super::{Journal, Loaded, RemovalPhase, Store};
+//! Per-server durable journals behind a versioned layout descriptor.
+use super::{Journal, RemovalPhase, Store};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -22,10 +22,6 @@ struct Descriptor {
     version: u32,
     storage: String,
 }
-struct Legacy {
-    journal: Journal,
-    bytes: Option<Vec<u8>>,
-}
 #[derive(Default)]
 struct Index {
     servers: HashMap<Uuid, Arc<ServerStorage>>,
@@ -37,8 +33,9 @@ pub(super) struct Storage {
     path: Option<PathBuf>,
     initial_error: Option<String>,
     index: Mutex<Index>,
-    migrated: AtomicBool,
-    migration: Mutex<Option<Legacy>>,
+    // The descriptor is written once, before the first server journal.
+    described: AtomicBool,
+    describing: Mutex<()>,
 }
 pub(super) struct ServerStorage {
     writer: Mutex<()>,
@@ -65,20 +62,20 @@ impl ServerStorage {
 }
 impl Default for Store {
     fn default() -> Self {
-        Self::loaded(None, HashMap::new(), None, None)
+        Self::loaded(None, HashMap::new(), true, None)
     }
 }
 impl Store {
     pub fn new(path: PathBuf) -> Self {
         match load(&path) {
-            Ok((journals, legacy)) => Self::loaded(Some(path), journals, legacy, None),
-            Err(error) => Self::loaded(Some(path), HashMap::new(), None, Some(error)),
+            Ok((journals, described)) => Self::loaded(Some(path), journals, described, None),
+            Err(error) => Self::loaded(Some(path), HashMap::new(), false, Some(error)),
         }
     }
     fn loaded(
         path: Option<PathBuf>,
         mut journals: Journals,
-        legacy: Option<Legacy>,
+        described: bool,
         error: Option<String>,
     ) -> Self {
         let mut index = Index::default();
@@ -116,8 +113,8 @@ impl Store {
                 path,
                 initial_error: error,
                 index: Mutex::new(index),
-                migrated: AtomicBool::new(legacy.is_none()),
-                migration: Mutex::new(legacy),
+                described: AtomicBool::new(described),
+                describing: Mutex::new(()),
             }),
         }
     }
@@ -203,7 +200,7 @@ impl Store {
             for (id, _) in journal.identities() {
                 index.operations.insert(id, Some(server));
             }
-        } // No registry lock is held during migration, file I/O or publication.
+        } // No registry lock is held during file I/O or publication.
         owner.published.write().unwrap().pending_removals = journal
             .removals
             .iter()
@@ -217,7 +214,7 @@ impl Store {
                 before_save();
             }
         }
-        let saved = self.migrate().and_then(|_| self.save(server, &journal));
+        let saved = self.describe().and_then(|_| self.save(server, &journal));
         let next = saved
             .as_ref()
             .map(|_| Arc::new(journal))
@@ -248,62 +245,23 @@ impl Store {
             &serde_json::to_vec(journal).map_err(|e| e.to_string())?,
         )
     }
-    fn migrate(&self) -> Result<(), String> {
-        if self.inner.migrated.load(Ordering::Acquire) {
+    fn describe(&self) -> Result<(), String> {
+        if self.inner.described.load(Ordering::Acquire) {
             return Ok(());
         }
-        // One-time format conversion only. Once published, every server writes
-        // independently and this gate is never visited again.
-        let mut migration = self.inner.migration.lock().unwrap();
-        if self.inner.migrated.load(Ordering::Acquire) {
+        let _describing = self.inner.describing.lock().unwrap();
+        if self.inner.described.load(Ordering::Acquire) {
             return Ok(());
         }
-        let legacy = migration
-            .as_ref()
-            .ok_or("Missing Needle migration source")?;
         let path = self
             .inner
             .path
             .as_ref()
             .ok_or("Missing Needle journal path")?;
         let parent = path.parent().ok_or("Invalid Needle journal path")?;
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        let destination = directory(path);
-        let journals = partition(&legacy.journal);
-        if destination.try_exists().map_err(|e| e.to_string())? {
-            // A crash may leave the fully staged tree before the descriptor is
-            // committed. Reuse it only when it exactly matches the legacy input.
-            let existing = load_servers(&destination)?;
-            if existing != journals
-                || read_optional(&destination.join("legacy.json"))? != legacy.bytes
-            {
-                return Err(
-                    "Needle migration directory does not match its preserved source".into(),
-                );
-            }
-        } else {
-            let staging = tempfile::Builder::new()
-                .prefix(".needle-migrate-")
-                .tempdir_in(parent)
-                .map_err(|e| e.to_string())?;
-            if let Some(bytes) = &legacy.bytes {
-                write_atomic(&staging.path().join("legacy.json"), bytes)?;
-            }
-            for (server, journal) in &journals {
-                let root = staging.path().join(server.to_string());
-                fs::create_dir(&root).map_err(|e| e.to_string())?;
-                write_atomic(
-                    &root.join("journal.json"),
-                    &serde_json::to_vec(journal.as_ref().map_err(Clone::clone)?)
-                        .map_err(|e| e.to_string())?,
-                )?;
-            }
-            sync_directory(staging.path())?;
-            fs::rename(staging.path(), &destination).map_err(|e| e.to_string())?;
-            sync_directory(parent)?;
-        }
-        // Older clients reject this descriptor rather than reopening an obsolete
-        // global journal. Its source bytes remain inside the committed tree.
+        // The server directory exists before the descriptor that names it.
+        fs::create_dir_all(directory(path)).map_err(|e| e.to_string())?;
+        sync_directory(parent)?;
         write_atomic(
             path,
             &serde_json::to_vec(&Descriptor {
@@ -312,62 +270,37 @@ impl Store {
             })
             .map_err(|e| e.to_string())?,
         )?;
-        self.inner.migrated.store(true, Ordering::Release);
-        *migration = None;
+        self.inner.described.store(true, Ordering::Release);
         Ok(())
     }
 }
 
 type Journals = HashMap<Uuid, Result<Journal, String>>;
-fn partition(journal: &Journal) -> Journals {
-    journal
-        .identities()
-        .map(|(_, server)| server)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .map(|server| (server, Ok(journal.for_owner(server))))
-        .collect()
-}
 fn directory(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(".servers");
     PathBuf::from(name)
 }
-fn load(path: &Path) -> Result<(Journals, Option<Legacy>), String> {
-    let bytes = read_optional(path)?;
-    if let Some(bytes) = &bytes
-        && let Ok(descriptor) = serde_json::from_slice::<Descriptor>(bytes)
-    {
-        if descriptor.version != 2 || descriptor.storage != LAYOUT {
-            return Err("Unknown Needle journal layout".into());
-        }
-        return Ok((load_servers(&directory(path))?, None));
-    }
-    let journal = match &bytes {
-        None => Journal::default(),
-        Some(bytes) => match serde_json::from_slice::<Loaded>(bytes)
-            .map_err(|e| format!("Cannot read Needle recovery journal: {e}"))?
+/// Returns the server journals and whether the layout descriptor exists.
+fn load(path: &Path) -> Result<(Journals, bool), String> {
+    let Some(bytes) = read_optional(path)? else {
+        let servers = directory(path);
+        if servers.try_exists().map_err(|error| error.to_string())?
+            && !load_servers(&servers)?.is_empty()
         {
-            Loaded::Versioned(journal) => journal,
-            Loaded::Legacy(operations) => Journal {
-                operations,
-                ..Default::default()
-            },
-        },
+            // Never reopen empty admission after the descriptor was lost.
+            return Err(
+                "Needle journal descriptor is missing; server storage was preserved".into(),
+            );
+        }
+        return Ok((HashMap::new(), false));
     };
-    journal.validate()?;
-    let journals = partition(&journal);
-    let staged = directory(path);
-    if staged.try_exists().map_err(|error| error.to_string())?
-        && (load_servers(&staged)? != journals
-            || read_optional(&staged.join("legacy.json"))? != bytes)
-    {
-        // Never reopen stale/empty admission after a descriptor was lost or
-        // replaced with an older global file. Only an exact pre-commit staging
-        // tree is a recoverable interrupted migration.
-        return Err("Needle journal descriptor and server storage disagree; recovery evidence was preserved".into());
+    let descriptor = serde_json::from_slice::<Descriptor>(&bytes)
+        .map_err(|e| format!("Cannot read Needle recovery journal: {e}"))?;
+    if descriptor.version != 2 || descriptor.storage != LAYOUT {
+        return Err("Unknown Needle journal layout".into());
     }
-    Ok((journals, Some(Legacy { journal, bytes })))
+    Ok((load_servers(&directory(path))?, true))
 }
 fn load_servers(path: &Path) -> Result<Journals, String> {
     if !fs::symlink_metadata(path)
@@ -379,9 +312,6 @@ fn load_servers(path: &Path) -> Result<Journals, String> {
     let mut journals = HashMap::new();
     for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
-        if entry.file_name() == "legacy.json" {
-            continue;
-        }
         let name = entry
             .file_name()
             .into_string()

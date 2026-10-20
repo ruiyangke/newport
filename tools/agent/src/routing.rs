@@ -159,9 +159,9 @@ pub(crate) fn select(capability: Option<&str>) -> io::Result<Selection> {
             let home = PathBuf::from(
                 env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is required"))?,
             );
-            let legacy = crate::migration::cache_root(&home)?;
-            // A legacy bridge is another possible destination, even if disabled.
-            if !active(&legacy) {
+            let standalone = crate::paths::standalone_root(&home);
+            // A standalone bridge is another possible destination, even if disabled.
+            if !active(&standalone) {
                 if let Some(record) = history::recover_unknown(&records, selector, capability)? {
                     candidates.push(Selection {
                         root: record.root,
@@ -182,15 +182,15 @@ pub(crate) fn select(capability: Option<&str>) -> io::Result<Selection> {
             }
         }
     }
-    // Standalone/legacy bridges participate in ambiguity checks, but an explicit
-    // modern selector must never fall back to another computer or old bridge.
+    // Standalone bridges participate in ambiguity checks, but an explicit
+    // session selector must never fall back to another computer or bridge.
     if selector.is_none() {
         let home =
             PathBuf::from(env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is required"))?);
-        let legacy = crate::migration::cache_root(&home)?;
-        if active(&legacy) && enabled(&legacy, capability) {
+        let standalone = crate::paths::standalone_root(&home);
+        if active(&standalone) && enabled(&standalone, capability) {
             candidates.push(Selection {
-                root: legacy,
+                root: standalone,
                 session: None,
             });
         }
@@ -244,8 +244,8 @@ fn records() -> io::Result<Vec<Record>> {
             && uuid::Uuid::parse_str(&record.runtime).is_ok()
             && record.root.is_absolute()
         {
-            // Older publications used only the endpoint's ownership lock. Honor
-            // that lock too, and delete only our recognized, unchanged record.
+            // A record whose endpoint no longer holds its ownership lock is stale.
+            // Delete only our recognized, unchanged record.
             if !active(&record.root)
                 && path
                     .file_name()

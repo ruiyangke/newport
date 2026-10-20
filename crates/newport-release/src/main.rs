@@ -1,4 +1,4 @@
-//! Offline release signing, independent of either desktop host.
+//! Offline release signing.
 use anyhow::{Context, Result, bail};
 use std::{env, fs, path::PathBuf};
 use zeroize::Zeroizing;

@@ -29,34 +29,25 @@ A profile backup requires both the encrypted snapshot and its original vault key
 
 A missing key or damaged snapshot blocks edits instead of replacing existing data. Unsupported profile versions also block loading. Preserve the files and original Keychain or Credential Manager entries when troubleshooting; do not delete them to dismiss an error.
 
-Native 0.3.1 reads the older vault formats but writes schema 3 when a profile is
-edited. This protects reverse forwards and setup consent: released 0.3.0 rejects
-that schema instead of silently treating a reverse forward as local or dropping
-new settings. Simply reading an existing vault does not rewrite it. Downgrading
-after a native edit therefore requires deliberate recovery, not opening the live
-profile in an older app.
+### Upgrade recovery snapshots
 
-Older installations may retain a login-Keychain key after transfer to the Data Protection Keychain. That item is a recovery copy; ordinary launches use the transferred key.
-
-### Native upgrade recovery snapshots
-
-Before the native app opens credentials, migrates profiles, opens metric history,
-or starts workers, it reserves profile ownership and preserves a recovery copy
-under `upgrade-backups/native-<version>/data`. It copies existing profile files,
+Before Newport opens credentials, opens metric history, or starts
+workers, it reserves profile ownership and preserves a recovery copy under
+`upgrade-backups/native-<version>/data`. It copies existing profile files,
 including the encrypted vault, preferences, pending-operation records, unknown
 files, and SQLite database/WAL files. Runtime sockets, lock files, and older
 backup directories are excluded. Symlinks and special files are rejected rather
 than followed. The copy has private permissions and a SHA-256 manifest; it is
 published only after verification and filesystem synchronization.
 
-A failed or damaged backup blocks startup before migration. Retrying does not
+A failed or damaged backup blocks startup before the profile is opened. Retrying does not
 overwrite an existing recovery snapshot. New installations may have an empty
 pre-startup snapshot. These copies are retained locally and require disk space;
 they are not portable exports and do not contain keys from OS credential storage.
 
 Newport never automatically restores an older profile during application
 rollback: that could discard edits made after upgrading or rewind pending remote
-operations. For recovery, first quit every Newport/Porthop instance, retain the
+operations. For recovery, first quit every Newport instance, retain the
 current profile and OS key, and work from a separate copy of the snapshot. Do not
 open the immutable backup directly in SQLite. Keep the original canonical profile
 path when restoring encrypted data, and reconcile pending operations before
@@ -70,19 +61,15 @@ Renaming a server preserves active sessions. Connection and authentication chang
 
 ## Protection limits
 
-Profile saves are verified before atomic replacement. The encrypted vault protects saved profiles, not everything on your computer or server. Metric measurements, external SSH files, old backups and legacy `SSHTunnelBar` files remain outside the vault.
+Profile saves are verified before atomic replacement. The encrypted vault protects saved profiles, not everything on your computer or server. Metric measurements, external SSH files and old backups remain outside the vault.
 
 Remote clipboard files may remain after a lost connection. Database migrations cannot erase filesystem snapshots or old backups. See [clipboard cleanup](clipboard.md#reconnection-and-troubleshooting) and [security notes](security.md).
 
-## Upgrading from Porthop
+## Profile directory and ownership
 
-Newport adopts an existing `Porthop` profile folder in place. New installations use `Newport`. The folder name is kept for existing profiles because vault keys are tied to its canonical path; renaming it manually can prevent decryption. Servers, saved passwords, metrics, sidebar preferences, and integration identities remain together.
+`NEWPORT_DATA_DIR` selects an isolated profile. The vault key lives in
+`app.newport.profile-vault` on macOS and `app.newport/vault/…` on Windows.
+Missing or inaccessible keys never cause a replacement vault to be created.
 
-New credential entries use `app.newport.profile-vault` on macOS and `app.newport/vault/…` on Windows. Migration verifies the existing encrypted snapshot and the newly saved key before switching. The old credential is retained as a recovery copy. Missing or inaccessible keys never cause a replacement vault to be created.
-
-`NEWPORT_DATA_DIR` selects an isolated profile. `PORTHOP_DATA_DIR` remains a compatibility alias, with the new variable taking precedence.
-
-Native launches always acquire the profile-local lock. A default-profile launch,
-including an override pointing at that same canonical directory, also acquires
-the released application's legacy lock. Both remain held through service drain,
-preventing old and new hosts from writing the profile concurrently.
+Each launch acquires the profile-local `newport.lock` and holds it through
+service drain, preventing two hosts from writing the profile concurrently.

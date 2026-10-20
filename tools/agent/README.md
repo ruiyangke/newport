@@ -58,8 +58,8 @@ off sharing does not mean that all agent services stop.
 
 Runtime directories are private and use OS lifetime locks. Startup sweeps only
 recognized abandoned directories; unknown or ambiguous paths are retained.
-Installation admission uses `~/.local/state/newport/usage`. Existing legacy locks
-are honored for compatibility; new installations do not require writable `/tmp`.
+Installation admission uses `~/.local/state/newport/usage` and does not require
+writable `/tmp`.
 
 ## Deployment and recovery
 

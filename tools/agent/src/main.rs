@@ -12,7 +12,7 @@ fn run(args: &[String]) -> std::io::Result<()> {
         .unwrap_or_default()
         .to_string_lossy();
     // Hold admission for the complete service process, including registered
-    // workers and direct/legacy CLI entry points. Lifecycle commands obtain
+    // workers and command aliases. Lifecycle commands obtain
     // their own maintenance authority rather than a conflicting shared lease.
     let service = matches!(
         name.as_ref(),

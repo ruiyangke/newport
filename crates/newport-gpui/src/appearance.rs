@@ -1,6 +1,6 @@
 //! Resolve the shared appearance preference against the native window state.
 use gpui_kit::WindowAppearance;
-pub use newport_client::appearance::{Appearance, AppearanceStore};
+pub use newport_client::appearance::Appearance;
 
 /// Native appearance interpretation belongs to the UI; storage and preference
 /// values live in the UI-independent client crate.

@@ -1,4 +1,4 @@
-//! Shared by the remote agent and Tauri. No Git engine or UI dependencies.
+//! Shared by the remote agent and the desktop. No Git engine or UI dependencies.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -986,7 +986,7 @@ pub fn write(output: &mut impl Write, message: &Message) -> io::Result<()> {
 mod tests {
     use super::*;
     #[test]
-    fn rejects_legacy_frames_truncation_and_oversize() {
+    fn rejects_unknown_frames_truncation_and_oversize() {
         for marker in *b"JCX" {
             assert!(payload_length([marker, 0, 0, 0, 1]).is_err());
         }

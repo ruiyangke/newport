@@ -1047,7 +1047,7 @@ impl Lease {
                         .await
                     {
                         self.validate()?;
-                        // Restoration is explicit and may return to a legacy
+                        // Restoration is explicit and may return to an older
                         // build that cannot host the current control protocol.
                         // Stop this desktop runtime instead of leaving recovery
                         // permanently unfinished after confirmed remote rollback.

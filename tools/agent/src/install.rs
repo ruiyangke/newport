@@ -20,7 +20,8 @@ fn install_with_origin(origin: Origin, operation_id: Uuid) -> io::Result<Option<
         for name in ["xclip", "wl-paste", "xdg-open", "newport-browser"] {
             let path = dir.join(name);
             let before = transaction.read(&path)?;
-            let managed = matches!(&before, Snapshot::Link(target) if crate::migration::managed_alias(target));
+            let managed =
+                matches!(&before, Snapshot::Link(target) if target.as_os_str() == "newport-agent");
             if name == "newport-browser" && before != Snapshot::Missing && !managed {
                 return Err(io::Error::other(
                     "newport-browser is occupied by an unrelated command",
@@ -30,7 +31,6 @@ fn install_with_origin(origin: Origin, operation_id: Uuid) -> io::Result<Option<
                 transaction.plan(&path, before, Snapshot::Link("newport-agent".into()))?;
             }
         }
-        crate::migration::plan_commands(&dir, &mut transaction)?;
         crate::shell_setup::plan(&mut transaction)
     })();
     let notices = match planned {

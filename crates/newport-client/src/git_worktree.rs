@@ -1,4 +1,4 @@
-//! Worktree identity, review guards and mutation inputs shared by desktop clients.
+//! Worktree identity, review guards and mutation inputs.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 

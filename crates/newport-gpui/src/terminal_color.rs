@@ -17,7 +17,7 @@ pub(super) fn hex(color: Rgb) -> u32 {
 /// Default palette shared with OSC color-query replies. Explicit OSC overrides
 /// are resolved from the Ghostty frame by the renderer.
 pub fn palette(index: usize, dark: bool) -> Rgb {
-    // The React theme overrides only default fg/bg, not the ANSI palette.
+    // The app theme overrides only default fg/bg, not the ANSI palette.
     const ANSI: [u32; 16] = [
         0x2e3436, 0xcc0000, 0x4e9a06, 0xc4a000, 0x3465a4, 0x75507b, 0x06989a, 0xd3d7cf, 0x555753,
         0xef2929, 0x8ae234, 0xfce94f, 0x729fcf, 0xad7fa8, 0x34e2e2, 0xeeeeec,

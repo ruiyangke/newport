@@ -166,7 +166,7 @@ fn resource_sparks_follow_real_snapshots_keep_small_geometry_and_clear_for_recre
     settle(&panel, cx);
     assert!(
         cx.debug_bounds("container-cpu-spark").is_none(),
-        "Tauri shows stats only for running containers"
+        "stats show only for running containers"
     );
     data.containers[0].state = ContainerState::Running;
     data.containers[0].id = "f".repeat(64);

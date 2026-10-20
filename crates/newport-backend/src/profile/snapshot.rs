@@ -1,5 +1,5 @@
-//! Direct Stronghold ownership. Preserve the existing raw 32-byte key provider;
-//! the Tauri plugin's optional webview password KDF was never used by profiles.
+//! Direct Stronghold ownership. The vault key is used as a raw 32-byte key
+//! provider; no password KDF is applied.
 use iota_stronghold::{Client, KeyProvider, SnapshotPath, Stronghold};
 use std::path::Path;
 use zeroize::Zeroizing;

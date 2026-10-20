@@ -418,96 +418,26 @@ fn installer_replaces_our_shims_but_preserves_unrelated_commands() {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join(".local/bin");
     fs::create_dir_all(&bin).unwrap();
-    fs::write(
-        bin.join("porthop-clip"),
-        "#!/usr/bin/env bash\n# Porthop clipboard helper v5\n",
-    )
-    .unwrap();
-    symlink("porthop-clip", bin.join("xclip")).unwrap();
-    symlink("porthop-agent", bin.join("porthop-browser")).unwrap();
+    symlink("newport-agent", bin.join("xclip")).unwrap();
+    symlink("custom-clip", bin.join("wl-paste")).unwrap();
     fs::write(bin.join("xdg-open"), "unrelated").unwrap();
-    assert!(cmd(home.path(), &["install"]).status.success());
-    assert_eq!(
-        fs::read_link(bin.join("xclip")).unwrap().to_str(),
-        Some("newport-agent")
-    );
-    assert_eq!(
-        fs::read_to_string(bin.join("xdg-open")).unwrap(),
-        "unrelated"
-    );
-    assert!(!bin.join("porthop-clip").exists());
-    assert_eq!(
-        fs::symlink_metadata(bin.join("porthop-browser"))
-            .unwrap_err()
-            .kind(),
-        std::io::ErrorKind::NotFound
-    );
-}
-
-#[test]
-fn legacy_agent_cleanup_is_idempotent_and_preserves_unrelated_files() {
-    let home = tempfile::tempdir().unwrap();
-    let bin = home.path().join(".local/bin");
-    fs::create_dir_all(&bin).unwrap();
-    let old = bin.join("porthop-agent");
-    fs::write(&old, b"legacy executable\0porthop-agent/5\0").unwrap();
     for _ in 0..2 {
         assert!(cmd(home.path(), &["install"]).status.success());
-        assert_eq!(
-            fs::symlink_metadata(&old).unwrap_err().kind(),
-            std::io::ErrorKind::NotFound
-        );
-    }
-    fs::write(&old, "unrelated executable").unwrap();
-    assert!(cmd(home.path(), &["install"]).status.success());
-    assert_eq!(fs::read_to_string(&old).unwrap(), "unrelated executable");
-}
-
-#[test]
-fn installer_removes_legacy_aliases_but_preserves_unrelated_links() {
-    use std::os::unix::fs::symlink;
-    for target in ["newport-agent", "custom-agent"] {
-        let home = tempfile::tempdir().unwrap();
-        let bin = home.path().join(".local/bin");
-        fs::create_dir_all(&bin).unwrap();
-        for name in ["porthop-agent", "porthop-browser"] {
-            symlink(target, bin.join(name)).unwrap();
-        }
-        for _ in 0..2 {
-            assert!(cmd(home.path(), &["install"]).status.success());
-            for name in ["porthop-agent", "porthop-browser"] {
-                let path = bin.join(name);
-                if target == "newport-agent" {
-                    assert_eq!(
-                        fs::symlink_metadata(&path).unwrap_err().kind(),
-                        std::io::ErrorKind::NotFound
-                    );
-                } else {
-                    assert_eq!(fs::read_link(&path).unwrap(), std::path::Path::new(target));
-                }
-            }
+        for name in ["xclip", "newport-browser"] {
             assert_eq!(
-                fs::read_link(bin.join("newport-browser")).unwrap(),
-                std::path::Path::new("newport-agent")
+                fs::read_link(bin.join(name)).unwrap().to_str(),
+                Some("newport-agent")
             );
         }
+        assert_eq!(
+            fs::read_link(bin.join("wl-paste")).unwrap().to_str(),
+            Some("custom-clip")
+        );
+        assert_eq!(
+            fs::read_to_string(bin.join("xdg-open")).unwrap(),
+            "unrelated"
+        );
     }
-}
-
-#[test]
-fn rebrand_preserves_socket_paths_for_existing_shells() {
-    use std::os::unix::fs::PermissionsExt;
-    let home = tempfile::tempdir().unwrap();
-    let old = home.path().join(".cache/porthop/clipboard");
-    fs::create_dir_all(&old).unwrap();
-    fs::set_permissions(&old, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut agent = Agent::features(home.path(), false, &["--browser"]);
-    assert_eq!(agent.event(b'R'), b"newport-agent/6");
-    assert!(old.join("agent.sock").exists());
-    assert!(!home.path().join(".cache/newport").exists());
-    agent.send(b'Q', &[]);
-    agent.stopped();
-    assert!(!old.join("agent.sock").exists());
 }
 #[test]
 fn web_requests_reject_unsafe_schemes_and_frames_preserve_binary_data() {
@@ -761,9 +691,6 @@ fn xdg_open_preserves_real_desktop_opener() {
     fs::set_permissions(&native, fs::Permissions::from_mode(0o700)).unwrap();
     let result = xdg_command(home.path())
         .env("DISPLAY", ":0")
-        // Obsolete overrides must not change automatic desktop routing.
-        .env("NEWPORT_OPEN_ON_MAC", "1")
-        .env("PORTHOP_OPEN_ON_MAC", "1")
         .arg("file:///desktop.txt")
         .output()
         .unwrap();
@@ -793,8 +720,6 @@ fn clipboard_display_wrappers_route_browser_without_an_override() {
             .env("HOME", home.path())
             .env("PATH", home.path().join("native"))
             .env_remove("NEWPORT_SESSION")
-            .env_remove("NEWPORT_OPEN_ON_MAC")
-            .env_remove("PORTHOP_OPEN_ON_MAC")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()

@@ -117,7 +117,7 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn native_client_reads_and_clears_real_metric_storage_without_tauri() {
+async fn native_client_reads_and_clears_real_metric_storage() {
     let fixture = Fixture::start().await;
     let snapshot = fixture.call("snapshot", json!({})).await.unwrap();
     assert_eq!(
@@ -266,7 +266,7 @@ async fn native_feature_routes_preserve_validation_before_any_remote_action() {
 
 #[tokio::test]
 #[ignore = "Run with npm run test:ssh"]
-async fn native_file_client_roundtrip_preserves_scope_and_cancellation_without_tauri() {
+async fn native_file_client_roundtrip_preserves_scope_and_cancellation() {
     let mut fixture = Fixture::start().await;
     fixture.server.ssh_port = std::env::var("NEWPORT_TEST_SSH_PORT")
         .unwrap()

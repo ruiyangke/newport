@@ -134,7 +134,7 @@ fn message_body(body: String, state: &State, background: Hsla) -> Div {
                 .line_height(px(18.))
                 .child(body),
         )
-        // Match React's collapsed-message mask: the first 55% stays opaque,
+        // Collapsed-message mask: the first 55% stays opaque,
         // then the remaining text fades into the inspector surface.
         .when(!state.expanded && state.overflow.get(), |view| {
             view.child(

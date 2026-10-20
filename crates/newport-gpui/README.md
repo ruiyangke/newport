@@ -2,8 +2,7 @@
 
 This library renders Newport with GPUI. The [application host](../newport-app/README.md)
 owns process startup, the backend, tray, OS callbacks, and update installation.
-It opens the UI through `run_with_options_and_ready`; there is no separate UI
-application or development bundle.
+It opens the UI through `run_with_options_and_ready`.
 
 ## Responsibilities
 

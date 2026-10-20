@@ -65,6 +65,11 @@ pub(crate) fn runtime() -> io::Result<PathBuf> {
     private_home_directory(Path::new(&home), ".cache/newport/run")
 }
 
+/// The clipboard root a desktop publishes to when it runs without a session registry.
+pub(crate) fn standalone_root(home: &Path) -> PathBuf {
+    home.join(".cache/newport/clipboard")
+}
+
 pub(crate) fn integration_display_path(value: &str) -> bool {
     let Ok(root) = runtime() else {
         return false;
@@ -86,7 +91,7 @@ pub(crate) fn integration_display_path(value: &str) -> bool {
 pub fn root() -> io::Result<PathBuf> {
     let home =
         PathBuf::from(env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is required"))?);
-    let root = crate::migration::cache_root(&home)?;
+    let root = standalone_root(&home);
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)

@@ -1,4 +1,4 @@
-//! Manager-level profile invariants shared by both desktop hosts.
+//! Manager-level profile invariants.
 use super::snapshot::Snapshot as Stronghold;
 use crate::model::Config;
 use std::fs;

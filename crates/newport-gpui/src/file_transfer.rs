@@ -280,10 +280,7 @@ impl Newport {
             && current.as_ref() == Some(transfer.connection());
         let uploaded = current_scope
             && transfer.direction() == Direction::Upload
-            && update
-                .completion
-                .as_ref()
-                .is_some_and(|result| matches!(result, Ok(Some(_))));
+            && update.completion.as_ref().is_some_and(Result::is_ok);
         let refresh = uploaded
             && self.page == Page::Files
             && self.server == transfer.server()
@@ -295,8 +292,7 @@ impl Newport {
         let destination = refresh.then(|| transfer.path().to_owned());
         if current_scope && let Some(result) = update.completion {
             self.notification = match result {
-                Ok(Some(_)) => Some(Notification::success(success_message(transfer.direction()))),
-                Ok(None) => None,
+                Ok(_) => Some(Notification::success(success_message(transfer.direction()))),
                 Err(error) if error == "File operation cancelled" => None,
                 Err(error) => Some(Notification::error(error)),
             };

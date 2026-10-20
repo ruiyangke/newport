@@ -577,7 +577,7 @@ impl Newport {
                                                     "{} {path}",
                                                     if stage { "Stage" } else { "Unstage" }
                                                 ))
-                                                .hover_hint(index_action_label(stage, entry))
+                                                .hover_hint(index_action_label(stage))
                                                 .disabled(!this.git_can_change_entry(stage, entry))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     this.change_entries(
@@ -628,6 +628,10 @@ pub(super) fn selected_mark(entry: &Value, staged: bool) -> &'static str {
         Group::Unstaged
     };
     group.mark(entry)
+}
+
+pub(super) fn index_action_label(stage: bool) -> &'static str {
+    if stage { "Stage file" } else { "Unstage file" }
 }
 
 #[cfg(test)]
@@ -809,36 +813,5 @@ mod tests {
             "loaded"
         );
         assert_eq!(scope(&json!({}), true), "shown");
-    }
-}
-
-/// Older agents may return collapsed untracked directories.
-pub(super) fn index_action_label(stage: bool, entry: &Value) -> &'static str {
-    match (stage, text(&entry["path"], "display").ends_with('/')) {
-        (true, true) => "Stage folder",
-        (false, true) => "Unstage folder",
-        (true, false) => "Stage file",
-        (false, false) => "Unstage file",
-    }
-}
-
-#[cfg(test)]
-mod action_label_tests {
-    use super::index_action_label;
-    use serde_json::json;
-    #[test]
-    fn folder_actions_name_their_actual_scope() {
-        assert_eq!(
-            index_action_label(true, &json!({"path":{"display":"docs/"}})),
-            "Stage folder"
-        );
-        assert_eq!(
-            index_action_label(false, &json!({"path":{"display":"docs/"}})),
-            "Unstage folder"
-        );
-        assert_eq!(
-            index_action_label(true, &json!({"path":{"display":"docs/a.md"}})),
-            "Stage file"
-        );
     }
 }

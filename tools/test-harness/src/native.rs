@@ -9,9 +9,8 @@ pub fn run(args: &[String]) -> Result<()> {
     );
     let headless = args == ["--headless"];
 
-    // Keep the persistence checks from the former desktop smoke test. These
-    // exercise the same services composed by the standalone application, with
-    // stronger migration, corrupt-file and concurrency coverage.
+    // Persistence checks for the services composed by the desktop application,
+    // with corrupt-file and concurrency coverage.
     for filter in ["profile::", "preferences::", "metrics_db::"] {
         process::run(command("cargo").args([
             "test",

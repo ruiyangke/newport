@@ -1,4 +1,4 @@
-//! Bounded remote discovery and configuration reads shared by desktop frontends.
+//! Bounded remote discovery and configuration reads.
 use crate::backend::Backend;
 use serde::Deserialize;
 use serde_json::{Value, json};

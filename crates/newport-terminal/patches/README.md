@@ -30,10 +30,10 @@ actual patch application, cache invalidation, and rejection of modified files.
 - **005 — Prepend graphemes:** apply GB9b to ASCII after a Prepend prefix and
   derive the cluster's width from its base. Ordinary ASCII still uses bulk
   printing. Includes scalar/batched, right-margin, one-column, cursor movement,
-  style, and fragmented-input regressions. The original Prepend fixture passes
+  style, and fragmented-input regressions. The xterm Prepend fixture passes
   without changing its expected cells.
 
-The full original xterm fixture suite remains a migration gate. Modern Unicode
+The full xterm fixture suite in newport-gpui is an acceptance gate. Modern Unicode
 widths, complete-paragraph reflow, and Ghostty's bounded combining storage are
 documented differences; they do not excuse unrelated data corruption. Passing
 these focused patch tests alone is not desktop acceptance.

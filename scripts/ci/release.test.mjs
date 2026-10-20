@@ -118,7 +118,7 @@ test("a rerun started after listing invalidates the previous CI success", () => 
   assert.throws(check, /has not passed/);
 });
 
-test("native notarization supports local keychain and existing CI credentials", () => {
+test("notarization supports local keychain and CI credentials", () => {
   assert.deepEqual(notarizationAuth({ NEWPORT_NOTARY_PROFILE: "release" }), [
     "--keychain-profile",
     "release",
@@ -145,7 +145,7 @@ test("native notarization supports local keychain and existing CI credentials", 
     );
   }
 });
-test("native release retains the installed product and updater identity", () => {
+test("release retains the installed product and updater identity", () => {
   const product = JSON.parse(
     readFileSync(join(root, "resources/app.json"), "utf8"),
   );
@@ -163,8 +163,7 @@ test("native release retains the installed product and updater identity", () => 
   assert.deepEqual(updater.endpoints, [
     "https://github.com/ruiyangke/newport/releases/latest/download/latest.json",
   ]);
-  // This key is already trusted by installed releases. Removing the old host
-  // must not silently rotate the update signing identity.
+  // Installed releases trust this key; rotating it would strand their updates.
   assert.equal(
     updater.pubkey,
     "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc3MjIzQTY2RTM2QkJERDIKUldUU3ZXdmpaam9pZDhjZjFHN1ZGWmlSZ1crL2NoRUZYd0JUU0RGbE9tc1k4OWN6dnZkOFFnOTYK",
@@ -252,10 +251,10 @@ test("release requires matching versions and an immutable tag", () => {
     rmSync(temp, { recursive: true, force: true });
   }
 });
-test("signing retains only authorized migration keychain groups", () => {
+test("signing requires the Newport keychain group and authorized groups only", () => {
   const ent = {
     "com.apple.application-identifier": "TEAM.app.newport",
-    "keychain-access-groups": ["TEAM.app.newport", "TEAM.com.porthop.desktop"],
+    "keychain-access-groups": ["TEAM.app.newport"],
   };
   const profile = {
     Entitlements: {
@@ -265,11 +264,12 @@ test("signing retains only authorized migration keychain groups", () => {
   };
   validate(ent, profile, "app.newport");
   for (const bad of [
-    { ...ent, "com.apple.application-identifier": "TEAM.ke.ry.porthop" },
+    { ...ent, "com.apple.application-identifier": "TEAM.com.example.other" },
     ...[
-      ["TEAM.app.newport"],
-      ["TEAM.app.newport", "TEAM.ke.ry.porthop"],
-      ["TEAM.app.newport", "OTHER.com.porthop.desktop"],
+      [],
+      ["TEAM.com.example.other", "TEAM.app.newport"],
+      ["OTHER.app.newport"],
+      ["TEAM.app.newport", "OTHER.com.example.other"],
     ].map((groups) => ({ ...ent, "keychain-access-groups": groups })),
   ])
     assert.throws(() => validate(bad, profile, "app.newport"));

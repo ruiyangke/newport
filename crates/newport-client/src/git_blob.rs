@@ -62,8 +62,8 @@ impl Content {
         self.size = Some(size);
         self.cursor = next;
         // Decode only the new suffix, retaining an unfinished UTF-8 sequence
-        // until the next page. Like TextDecoder in Tauri, invalid bytes display
-        // as replacement characters; NUL marks binary content.
+        // until the next page. Invalid bytes display as replacement
+        // characters; NUL marks binary content.
         if self.bytes[self.decoded..].contains(&0) {
             self.binary = true;
         }

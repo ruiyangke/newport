@@ -9,7 +9,7 @@ pub const LINUX: &[&str] = &[
 ];
 
 pub fn runs(names: Vec<String>) -> Vec<Vec<String>> {
-    // The original remote suite restores its fixture changes. Lifecycle tests
+    // The shared remote_tests suite restores its fixture changes. Lifecycle tests
     // intentionally leave corrupt journals, signed metadata or removed builds;
     // each of those must receive a fresh server, including after a panic.
     let (shared, isolated): (Vec<_>, Vec<_>) = names

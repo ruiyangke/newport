@@ -7,14 +7,36 @@ use std::{
 };
 const BIN: &str = env!("CARGO_BIN_EXE_newport-agent");
 
+/// Stage this build and point `~/.local/bin/newport-agent` at it, as the desktop does.
+fn install_managed(home: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    let hash: String = Sha256::digest(fs::read(BIN).unwrap())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    for args in [
+        ["deployment", "prepare", &hash].as_slice(),
+        ["deployment", "activate", &hash, "missing"].as_slice(),
+    ] {
+        let output = Command::new(BIN)
+            .args(args)
+            .env("HOME", home)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    hash
+}
+
 struct Fixture(tempfile::TempDir);
 impl Fixture {
     fn new() -> Self {
         let fixture = Self(tempfile::tempdir().unwrap());
         fs::write(fixture.0.path().join(".bashrc"), "# personal settings\n").unwrap();
-        let bin = fixture.0.path().join(".local/bin/newport-agent");
-        fs::create_dir_all(bin.parent().unwrap()).unwrap();
-        fs::copy(BIN, bin).unwrap();
         fixture
     }
     fn run(&self, args: &[&str]) -> Output {
@@ -83,6 +105,7 @@ fn standalone_history_requires_no_managed_installation_and_does_not_create_one()
 #[test]
 fn managed_ids_are_excluded_and_personal_edits_require_file_review() {
     let fixture = Fixture::new();
+    install_managed(fixture.0.path());
     fixture.success(&["install"]);
     let first = fixture.history();
     let hash = first["buildSha256"].as_str().unwrap();

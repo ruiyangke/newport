@@ -18,8 +18,7 @@ pub fn open(args: &[String], desktop: bool) -> io::Result<()> {
         .as_ref()
         .is_ok_and(|s| wayland == s.root.join("wayland.sock").to_string_lossy())
         || wayland.starts_with("/tmp/newport-runtime-")
-        || crate::paths::integration_display_path(&wayland)
-        || crate::migration::fake_wayland(&wayland);
+        || crate::paths::integration_display_path(&wayland);
     let fake_x = authority.starts_with("/tmp/newport-runtime-")
         || crate::x_endpoint::is_authority_path(&authority)
         || crate::paths::integration_display_path(&authority)

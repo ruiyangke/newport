@@ -1,4 +1,4 @@
-//! Remote/configuration write planning shared by desktop frontends.
+//! Remote/configuration write planning.
 //! UI drafts stay with their form; these rules never read display URLs back into
 //! configuration or silently replace a captured configuration token.
 use serde_json::{Value, json};

@@ -14,40 +14,35 @@ fn value(path: &Path) -> Value {
 }
 
 #[test]
-fn upload_migration_preserves_source_and_partitions_connection_scoped_records() {
+fn fresh_storage_writes_descriptor_and_keeps_server_journals_independent() {
     let profile = tempfile::tempdir().unwrap();
     let path = profile.path().join("upload-recovery.json");
     let a = Uuid::new_v4();
     let b = Uuid::new_v4();
-    let old_a = json!([a, "old-host", "user"]);
-    let new_a = json!([a, "new-host", "user"]);
+    let scope_a = json!([a, "host", "user"]);
     let scope_b = json!([b, "host", "user"]);
-    let mut legacy = UploadCleanup::open(path.clone());
-    let id = legacy.register(old_a.clone(), staging()).unwrap();
-    legacy.register(new_a.clone(), staging()).unwrap();
-    legacy.register(scope_b.clone(), staging()).unwrap();
-    let bytes = fs::read(&path).unwrap();
-    drop(legacy);
     let owners = Owners::<UploadCleanup>::open(path.clone());
     assert_eq!(
         value(&path),
         json!({"version":2,"storage":"server-journals"})
     );
-    assert_eq!(
-        fs::read(directory(&path).join("source.json")).unwrap(),
-        bytes
-    );
     let a_owner = owners.get(a).unwrap();
     let b_owner = owners.get(b).unwrap();
     assert!(!Arc::ptr_eq(&a_owner, &b_owner));
-    assert_eq!(a_owner.lock().unwrap().take(&old_a)[0].0, id);
-    assert!(a_owner.lock().unwrap().take(&scope_b).is_empty());
-    assert_eq!(a_owner.lock().unwrap().take(&new_a).len(), 1);
+    let id = a_owner
+        .lock()
+        .unwrap()
+        .register(scope_a.clone(), staging())
+        .unwrap();
+    b_owner
+        .lock()
+        .unwrap()
+        .register(scope_b.clone(), staging())
+        .unwrap();
     let b_before = fs::read(shard(&path, b)).unwrap();
     a_owner.lock().unwrap().finish(id, true);
     assert_eq!(fs::read(shard(&path, b)).unwrap(), b_before);
-    assert_eq!(value(&path)["version"], 2);
-    drop(owners);
+    drop((a_owner, b_owner, owners));
     let reopened = Owners::<UploadCleanup>::open(path.clone());
     assert!(
         reopened
@@ -55,7 +50,7 @@ fn upload_migration_preserves_source_and_partitions_connection_scoped_records() 
             .unwrap()
             .lock()
             .unwrap()
-            .take(&old_a)
+            .take(&scope_a)
             .is_empty()
     );
     assert_eq!(
@@ -67,56 +62,6 @@ fn upload_migration_preserves_source_and_partitions_connection_scoped_records() 
             .take(&scope_b)
             .len(),
         1
-    );
-    // The obsolete monolithic reader refuses the descriptor.
-    assert!(
-        UploadCleanup::open(path)
-            .register(old_a, staging())
-            .is_err()
-    );
-}
-
-#[test]
-fn legacy_downloads_recover_without_assigning_them_to_a_different_server() {
-    let profile = tempfile::tempdir().unwrap();
-    let folder = tempfile::tempdir().unwrap();
-    let path = profile.path().join("download-recovery.json");
-    let mut legacy = DownloadCleanup::open(path.clone());
-    let (_, file) = legacy.create(folder.path()).unwrap();
-    let (handle, staged) = file.keep().unwrap();
-    drop(handle);
-    fs::write(folder.path().join("keep"), b"destination").unwrap();
-    let bytes = fs::read(&path).unwrap();
-    drop(legacy);
-    let owners = Owners::<DownloadCleanup>::open(path.clone());
-    assert!(!staged.exists());
-    assert_eq!(
-        fs::read(folder.path().join("keep")).unwrap(),
-        b"destination"
-    );
-    assert_eq!(
-        fs::read(directory(&path).join("source.json")).unwrap(),
-        bytes
-    );
-    let unassigned = directory(&path).join("unassigned/journal.json");
-    assert!(
-        value(&unassigned)["entries"]
-            .as_object()
-            .unwrap()
-            .is_empty()
-    );
-    let before = fs::read(&unassigned).unwrap();
-    let server = Uuid::new_v4();
-    let owner = owners.get(server).unwrap();
-    let (id, file) = owner.lock().unwrap().create(folder.path()).unwrap();
-    file.close().unwrap();
-    owner.lock().unwrap().finish(id);
-    assert_eq!(fs::read(unassigned).unwrap(), before);
-    assert!(
-        value(&shard(&path, server))["entries"]
-            .as_object()
-            .unwrap()
-            .is_empty()
     );
 }
 
@@ -238,35 +183,6 @@ fn failed_download_write_and_corrupt_shard_are_isolated_from_other_servers() {
 }
 
 #[test]
-fn interrupted_migration_resumes_only_an_exact_staged_source() {
-    for changed in [false, true] {
-        let profile = tempfile::tempdir().unwrap();
-        let path = profile.path().join("upload-recovery.json");
-        let server = Uuid::new_v4();
-        let mut legacy = UploadCleanup::open(path.clone());
-        legacy.register(json!([server]), staging()).unwrap();
-        let source = fs::read(&path).unwrap();
-        drop(legacy);
-        migrate::<UploadCleanup>(&path).unwrap();
-        if changed {
-            UploadCleanup::open(shard(&path, server))
-                .register(json!([server]), staging())
-                .unwrap();
-        }
-        fs::write(&path, &source).unwrap();
-        let before = fs::read(shard(&path, server)).unwrap();
-        let owners = Owners::<UploadCleanup>::open(path.clone());
-        assert_eq!(owners.get(server).is_err(), changed);
-        assert_eq!(fs::read(shard(&path, server)).unwrap(), before);
-        if changed {
-            assert_eq!(fs::read(&path).unwrap(), source);
-        } else {
-            assert_eq!(value(&path)["version"], 2);
-        }
-    }
-}
-
-#[test]
 fn missing_descriptor_or_storage_preserves_evidence_and_refuses_new_writes() {
     for remove_descriptor in [false, true] {
         let profile = tempfile::tempdir().unwrap();
@@ -299,7 +215,7 @@ fn missing_descriptor_or_storage_preserves_evidence_and_refuses_new_writes() {
 }
 
 #[test]
-fn invalid_legacy_records_are_never_overwritten_or_migrated() {
+fn invalid_descriptors_are_never_overwritten() {
     for source in [
         b"broken".to_vec(),
         serde_json::to_vec(&json!({"version":3,"entries":{}})).unwrap(),

@@ -343,7 +343,7 @@ mod tests {
         assert_ne!(forwarding_host("::1"), forwarding_host("127.0.0.1"));
     }
     #[test]
-    fn legacy_tunnels_are_local_without_a_project() {
+    fn tunnels_default_to_local_without_a_project() {
         let t = tunnel();
         assert_eq!(t.direction, Direction::Local);
         assert_eq!(t.project, None);

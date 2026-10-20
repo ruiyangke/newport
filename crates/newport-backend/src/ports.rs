@@ -383,7 +383,7 @@ mod tests {
         assert!(port.working_directory_deleted);
         assert_eq!(port.executable.as_deref(), Some("/usr/bin/node"));
         assert!(port.executable_deleted);
-        // The suffix no longer leaks into the name built from the folder.
+        // The suffix does not leak into the name built from the folder.
         assert_eq!(port.application_name.as_deref(), Some("node · preview"));
         assert_eq!(
             serde_json::to_value(port).unwrap()["workingDirectoryDeleted"],

@@ -42,7 +42,7 @@ pub async fn monitor(backend: Backend, desktop: Integration) {
 mod tests {
     use super::*;
     #[test]
-    fn status_matches_original_connected_count_and_error_precedence() {
+    fn status_counts_connected_tunnels_and_reports_errors() {
         assert_eq!(status(&json!({"runtime":{"tunnels":{}}})), Some((0, false)));
         assert_eq!(
             status(&json!({"runtime":{"tunnels":{

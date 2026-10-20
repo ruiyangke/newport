@@ -36,7 +36,7 @@ impl Actions {
         let apply = self.apply.clone();
         let hunk = hunk.to_owned();
         let discard_hunk = hunk.clone();
-        // An inline action fits the diff's 22px line grid, like the Tauri hunk band.
+        // An inline action fits the diff's 22px line grid.
         let button = crate::controls::button(SharedString::from(format!("apply-diff-hunk-{hunk}")))
             .small()
             .ghost()
@@ -147,7 +147,7 @@ impl Actions {
             );
             if run.first {
                 // Kit Base supplies mixed-state accessibility, keyboard activation
-                // and focus; the narrow strip follows the original diff gutter.
+                // and focus; the narrow strip stays inside the diff gutter.
                 strip = strip.child(
                     gpui_kit::base::Checkbox::new(SharedString::from(format!(
                         "select-diff-run-{}",
@@ -447,7 +447,7 @@ impl Newport {
     }
 }
 
-/// Use the line number itself as the selection target, matching the React diff.
+/// Use the line number itself as the selection target.
 /// Kit's unstyled checkbox retains keyboard and accessibility semantics without
 /// adding a square checkbox to every code row.
 pub(super) fn line_number(

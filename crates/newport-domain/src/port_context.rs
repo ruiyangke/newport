@@ -1,7 +1,7 @@
 //! Observed service identity and useful process context for discovered listeners.
 //!
-//! Mirrors the Tauri `portDetails` and `portProjects` rules. Never infer a service
-//! from a port number or thread name, and never tokenize a reconstructed command.
+//! Never infer a service from a port number or thread name, and never tokenize a
+//! reconstructed command.
 use serde_json::Value;
 use std::collections::HashSet;
 
@@ -465,7 +465,7 @@ pub fn tooltip(port: &Value, addresses: &[String]) -> String {
 }
 
 /// Lowercase port-specific search corpus. Callers prepend project identity and
-/// append saved-forward names/ports, keeping the Tauri cross-field search order.
+/// append saved-forward names/ports, so fields are searched in that order.
 pub fn search_text(port: &Value, addresses: &[String]) -> String {
     let mut parts = Vec::new();
     if let Some(number) = port["port"].as_u64() {
@@ -489,7 +489,7 @@ pub fn search_text(port: &Value, addresses: &[String]) -> String {
     }
     parts.extend(kinds(port).into_iter().map(str::to_owned));
     parts.extend(process_details(port).into_iter().map(|detail| detail.value));
-    // Tauri only exposes worktree context when discovery supplied its path.
+    // Worktree context is searchable only when discovery supplied its path.
     if text(port, "worktreePath").is_some() {
         if let Some(value) = port["worktreeBranch"].as_str() {
             parts.push(value.to_owned());

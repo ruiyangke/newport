@@ -1,9 +1,9 @@
 //! Connections project identity and listener aggregation.
 //!
-//! Mirrors `src/portProjects.ts`: one owner's dual-stack listeners form one
-//! service, saved project roots absorb nested discoveries, and saved forwards
-//! stay visible even when no listener accounts for them. This module has no
-//! dependency on a UI, connection state, or transport.
+//! One owner's dual-stack listeners form one service, saved project roots absorb
+//! nested discoveries, and saved forwards stay visible even when no listener
+//! accounts for them. This module has no dependency on a UI, connection state,
+//! or transport.
 
 use crate::forwarding;
 use serde_json::Value;
@@ -337,8 +337,8 @@ fn owner(port: &Value) -> String {
 ///
 /// Known projects may use the UI's string path or the protocol's `path.display`
 /// form. Explicitly foreign `serverId` records are ignored. Input order is
-/// preserved for equal-rank listeners and equal-name entries, matching Tauri's
-/// stable sorting; hash maps are only indexes and never determine row order.
+/// preserved for equal-rank listeners and equal-name entries (stable sorting);
+/// hash maps are only indexes and never determine row order.
 pub fn group(ports: Vec<Value>, saved: &[Value], server: &str, known: &[Value]) -> Vec<Project> {
     group_inner(ports, saved, server, known, None)
 }
@@ -808,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    fn project_names_sources_and_catch_all_follow_tauri() {
+    fn project_names_sources_and_catch_all() {
         let ports = vec![
             listener(22, 1, "127.0.0.1", ""),
             json!({"port":5432,"address":"0.0.0.0","containerName":"ledger-db-1","projectRoot":"/srv/odd-directory","composeProject":"ledger","projectMarker":"compose"}),

@@ -1,5 +1,4 @@
-//! Container log severity and local filtering shared by desktop clients.
-//! Matches `logTone`, `ContainerDetail.toLines`, and `LogViewer` in Tauri.
+//! Container log severity and local filtering.
 use crate::containers::ContainerLogEntry;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -29,7 +28,7 @@ impl Level {
 }
 
 /// Infer severity from message text only. Stderr is not itself an error level.
-/// ASCII word boundaries deliberately match JavaScript's non-Unicode `\b`.
+/// Word boundaries are ASCII: only `[A-Za-z0-9_]` are word characters.
 pub fn severity(message: &str) -> Severity {
     let lower = message.to_ascii_lowercase();
     let mut warning = false;

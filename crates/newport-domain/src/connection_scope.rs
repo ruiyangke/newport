@@ -1,4 +1,5 @@
-//! Mirror src/types.ts serverConnectionKey and src/query/keys.tsx serverScope.
+//! A server's connection identity: every field whose change requires a new SSH
+//! session, plus the connection revision and backend instance.
 use serde_json::{json, Value};
 
 pub fn connection(server: &Value, snapshot: &Value) -> Value {

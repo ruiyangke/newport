@@ -1,4 +1,4 @@
-// Transport-free boundary for the retained protocol oracle. No desktop adapter.
+// Transport-free boundary for the protocol oracle. No desktop adapter.
 import type { GitRequest } from "../domain/git";
 export interface GitSession {
   request(request: GitRequest, signal?: AbortSignal): Promise<unknown>;

@@ -289,7 +289,7 @@ pub(super) fn overlay(syntax: &[Span], search: &[Span]) -> Vec<Span> {
 fn diff_theme(source: &HighlightTheme, dark: bool) -> HighlightTheme {
     let mut theme = source.clone();
     if !dark {
-        // CodeMirror's default light vocabulary, used by the original UI.
+        // CodeMirror's default light vocabulary.
         let color = |hex| json!({"color": Hsla::from(rgb(hex))});
         theme.style.syntax = serde_json::from_value(json!({
             "comment": color(0x994400), "comment_doc": color(0x994400),

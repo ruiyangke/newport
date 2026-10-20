@@ -630,7 +630,7 @@ impl Containers {
     pub fn retry_disk(&mut self) {
         self.request(Kind::Disk, true);
         // A refresh re-measures volumes too, but only where the quick reading
-        // cannot size them; a full reading from an older agent already did.
+        // could not size them; engines before API 1.42 size them in it.
         if self
             .disk
             .data
@@ -1685,7 +1685,8 @@ impl Containers {
                 if accepted {
                     self.merge_disk();
                     // Volumes are measured only when the quick reading could
-                    // not size them, so older agents never scan twice. A
+                    // not size them, so engines that measure on the quick
+                    // reading never scan twice. A
                     // volume created since the last measurement is measured
                     // at once rather than when that measurement goes stale.
                     if self.disk_view.as_ref().is_some_and(|d| !d.volumes_measured)
@@ -4189,7 +4190,7 @@ mod tests {
     }
 
     #[test]
-    fn full_reading_from_an_older_agent_never_scans_volumes_twice() {
+    fn measured_quick_reading_never_scans_volumes_twice() {
         let mut h = Harness::new();
         h.controller.set_disk_active(true);
         h.controller.retry_disk();

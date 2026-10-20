@@ -42,14 +42,13 @@ fn available(debug: bool, profile_override: bool) -> bool {
     !debug && !profile_override
 }
 
-pub fn profile_policy(debug: bool, path: Option<&std::path::Path>) -> Result<bool, String> {
+pub fn profile_policy(debug: bool, path: Option<&std::path::Path>) -> Result<(), String> {
     match path {
         Some(path) if path.as_os_str().is_empty() => {
             Err("The profile directory override is empty.".into())
         }
-        Some(_) => Ok(true),
         None if debug => Err("Development builds require an explicit NEWPORT_DATA_DIR.".into()),
-        None => Ok(false),
+        _ => Ok(()),
     }
 }
 
@@ -71,11 +70,11 @@ mod tests {
     #[test]
     fn released_launch_uses_default_profile_and_debug_requires_an_override() {
         use std::path::Path;
-        assert_eq!(profile_policy(false, None), Ok(false));
+        assert!(profile_policy(false, None).is_ok());
         assert!(profile_policy(true, None).is_err());
         for debug in [false, true] {
             assert!(profile_policy(debug, Some(Path::new(""))).is_err());
-            assert_eq!(profile_policy(debug, Some(Path::new("fixture"))), Ok(true));
+            assert!(profile_policy(debug, Some(Path::new("fixture"))).is_ok());
         }
     }
 

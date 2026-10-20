@@ -73,9 +73,7 @@ pub struct WindowState {
 
 impl WindowState {
     pub fn load(cx: &App) -> Self {
-        let path = std::env::var_os("NEWPORT_DATA_DIR")
-            .filter(|p| !p.is_empty())
-            .map(|p| PathBuf::from(p).join("gpui-window-state.json"));
+        let path = newport_client::profile::directory().map(|p| p.join("gpui-window-state.json"));
         let fallback =
             Placement::from_bounds(Bounds::centered(None, size(px(1074.), px(726.)), cx));
         let mut placement = path

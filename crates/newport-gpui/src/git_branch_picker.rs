@@ -2,7 +2,7 @@
 use super::*;
 use gpui_kit::component::popover::Popover;
 
-/// Match the facts shown by the Tauri branch rows without another read.
+/// Branch row facts, read from the listing without another request.
 /// Keep the remote label because this picker has one mixed list.
 fn branch_details(entry: &Value) -> String {
     let status = if entry["current"] == true {

@@ -19,7 +19,7 @@ pub(super) fn description(
         .line_height(px(18.))
 }
 
-/// Match React's GitFormActions. Callers add Cancel before the primary action
+/// Form action row. Callers add Cancel before the primary action
 /// so keyboard order follows the same order as the visible controls.
 pub(super) fn actions() -> Div {
     div()
@@ -32,7 +32,7 @@ pub(super) fn actions() -> Div {
         .flex_shrink_0()
 }
 
-/// React GitForm: space fields apart, keep each label close to its control.
+/// Form layout: space fields apart, keep each label close to its control.
 pub(super) fn form() -> Div {
     div()
         .w_full()
@@ -229,7 +229,7 @@ impl Newport {
         };
         title.unwrap_or(kind.label()).into()
     }
-    /// Single-line fields submit like React's GitForm. Multiline editors and
+    /// Single-line fields submit the form on Enter. Multiline editors and
     /// destructive confirmation buttons deliberately use their own handlers.
     pub(super) fn project_form_input(
         input: &Entity<InputState>,

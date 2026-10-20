@@ -13,8 +13,8 @@ pub struct Services<'a> {
     pub terminals: &'a Sessions,
 }
 
-/// The existing feature allowlist. The native client uses the separate terminal
-/// lease protocol; the legacy terminal-open command retains its existing contract.
+/// Feature command allowlist. The desktop client opens terminals through the
+/// terminal lease protocol rather than `terminal_open`.
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Command {

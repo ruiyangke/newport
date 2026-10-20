@@ -1,10 +1,12 @@
-//! Shared vault-key migration policy; platform adapters only read/write/generate keys.
+//! Vault-key policy; platform adapters only read, write and generate keys.
 use std::path::Path;
 use zeroize::Zeroizing;
+/// Written once a vault key has been created or verified for this profile.
+/// A missing key is then an error, never a reason to generate a new one.
 const MARKER: &str = "vault-key.newport.storage";
 pub use newport_platform::secrets::KeyStorage;
 
-/// The same OS namespace and account hash used by the shipping application.
+/// The OS namespace and per-profile account hash for the vault key.
 /// Unsupported platforms must never substitute plaintext or a generated key.
 pub fn system_key(directory: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
     if let Some(key) = test_key()? {
@@ -17,19 +19,10 @@ pub fn system_key(directory: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
             .map_err(|error| error.to_string())?;
         let account = account_for_path(&directory);
         #[cfg(target_os = "macos")]
-        let storage = newport_platform::secrets::SystemStorage::new(
-            "app.newport.profile-vault",
-            super::legacy::MAC_VAULT_SERVICE,
-            &account,
-            directory.join(super::legacy::PROTECTED_KEY_MARKER).exists(),
-        );
+        let storage =
+            newport_platform::secrets::SystemStorage::new("app.newport.profile-vault", &account);
         #[cfg(windows)]
-        let storage = newport_platform::secrets::SystemStorage::new(
-            "app.newport/vault",
-            &format!("{}/vault", super::legacy::APP_ID),
-            &account,
-            false,
-        );
+        let storage = newport_platform::secrets::SystemStorage::new("app.newport/vault", &account);
         load(&directory, &storage)
     }
     #[cfg(not(any(target_os = "macos", windows)))]
@@ -55,45 +48,30 @@ fn mark(directory: &Path) -> Result<(), String> {
     Ok(())
 }
 pub fn load(directory: &Path, storage: &impl KeyStorage) -> Result<Zeroizing<Vec<u8>>, String> {
-    if let Some(key) = storage.modern()? {
+    let vault = directory.join("profiles.stronghold");
+    if let Some(key) = storage.read()? {
         let key = valid(key)?;
         if !directory.join(MARKER).exists() {
-            if directory.join("profiles.stronghold").exists() {
-                super::vault::read(&directory.join("profiles.stronghold"), &key)?;
+            if vault.exists() {
+                super::vault::read(&vault, &key)?;
             }
             mark(directory)?;
         }
         return Ok(key);
     }
-    // Never silently fall back to an old key after a successful transfer.
-    if directory.join(MARKER).exists() {
+    // Never replace a key that protected data in this profile.
+    if directory.join(MARKER).exists() || vault.exists() {
         return Err("The Newport vault key is missing. Restore the original key; profiles have not been changed.".into());
     }
-    let key = match storage.legacy()? {
-        Some(key) => valid(key)?,
-        None if directory.join("profiles.stronghold").exists() => {
-            return Err(
-                "Profile vault key is missing. Restore the original key to unlock your profiles."
-                    .into(),
-            );
-        }
-        None => storage.generate()?,
-    };
-    if directory.join("profiles.stronghold").exists() {
-        super::vault::read(&directory.join("profiles.stronghold"), &key)?;
-    }
+    let key = storage.generate()?;
     storage.create(&key)?;
     let verified = storage
-        .modern()?
+        .read()?
         .ok_or("The new vault key could not be verified")?;
     if verified.as_slice() != key.as_slice() {
-        return Err(
-            "Vault key verification failed. The original key and profiles were preserved.".into(),
-        );
+        return Err("Vault key verification failed; profiles have not been changed.".into());
     }
     mark(directory)?;
-    // Retain the legacy item as a recovery copy; ordinary launches never read it again.
-    eprintln!("Newport: vault key migration verified");
     Ok(key)
 }
 pub fn account_for_path(directory: &Path) -> String {
@@ -107,7 +85,6 @@ pub fn account_for_path(directory: &Path) -> String {
 pub fn test_key() -> Result<Option<Zeroizing<Vec<u8>>>, String> {
     if super::data_directory_override().is_some()
         && let Some(path) = std::env::var_os("NEWPORT_TEST_VAULT_KEY_FILE")
-            .or_else(|| std::env::var_os(super::legacy::TEST_KEY_ENV))
     {
         return valid(Zeroizing::new(
             std::fs::read(path).map_err(|e| e.to_string())?,
@@ -123,26 +100,20 @@ mod tests {
     #[test]
     fn account_hash_is_stable_across_crypto_upgrades() {
         assert_eq!(
-            account_for_path(Path::new(
-                "/Users/test/Library/Application Support/com.porthop.app"
-            )),
-            "9270e56f575a05fedd2a451768eb360d5571955d3726c3cab0995b79c7bdbd91"
+            account_for_path(Path::new("/Users/test/Library/Application Support/Newport")),
+            "c70d210acb98917454d7b7e9f149173f8f167d2dc7d18cceb9d125adb22e93bf"
         );
     }
     struct Fake {
-        modern: RefCell<Option<Vec<u8>>>,
-        legacy: Option<Vec<u8>>,
-        legacy_reads: Cell<usize>,
+        saved: RefCell<Option<Vec<u8>>>,
         writes: Cell<usize>,
         fail_write: bool,
         fail_read: bool,
     }
     impl Fake {
-        fn new(legacy: Option<Vec<u8>>) -> Self {
+        fn new() -> Self {
             Self {
-                modern: RefCell::new(None),
-                legacy,
-                legacy_reads: Cell::new(0),
+                saved: RefCell::new(None),
                 writes: Cell::new(0),
                 fail_write: false,
                 fail_read: false,
@@ -153,63 +124,45 @@ mod tests {
         fn generate(&self) -> Result<Zeroizing<Vec<u8>>, String> {
             Ok(Zeroizing::new(vec![7; 32]))
         }
-        fn modern(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
+        fn read(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
             if self.fail_read {
                 return Err("Access unavailable".into());
             }
-            Ok(self.modern.borrow().clone().map(Zeroizing::new))
-        }
-        fn legacy(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-            self.legacy_reads.set(self.legacy_reads.get() + 1);
-            Ok(self.legacy.clone().map(Zeroizing::new))
+            Ok(self.saved.borrow().clone().map(Zeroizing::new))
         }
         fn create(&self, key: &[u8]) -> Result<(), String> {
             self.writes.set(self.writes.get() + 1);
             if self.fail_write {
                 return Err("Write rejected".into());
             }
-            *self.modern.borrow_mut() = Some(key.to_vec());
+            *self.saved.borrow_mut() = Some(key.to_vec());
             Ok(())
         }
     }
     #[test]
-    fn transfer_preserves_key_and_future_launches_skip_legacy() {
+    fn failed_write_does_not_mark_a_key() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Fake::new(Some(vec![4; 32]));
-        assert_eq!(*load(dir.path(), &storage).unwrap(), vec![4; 32]);
-        assert!(dir.path().join(MARKER).exists());
-        assert_eq!(*load(dir.path(), &storage).unwrap(), vec![4; 32]);
-        assert_eq!(storage.legacy_reads.get(), 1);
-        assert_eq!(storage.writes.get(), 1);
-        assert_eq!(storage.legacy, Some(vec![4; 32]));
-    }
-    #[test]
-    fn failed_transfer_retains_original_and_does_not_mark_success() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut storage = Fake::new(Some(vec![4; 32]));
+        let mut storage = Fake::new();
         storage.fail_write = true;
         assert!(load(dir.path(), &storage).is_err());
         assert!(!dir.path().join(MARKER).exists());
-        assert_eq!(storage.legacy, Some(vec![4; 32]));
     }
     #[test]
-    fn unavailable_or_missing_modern_key_never_downgrades() {
+    fn unavailable_or_missing_key_is_never_replaced() {
         let dir = tempfile::tempdir().unwrap();
-        let mut storage = Fake::new(Some(vec![4; 32]));
+        let mut storage = Fake::new();
         storage.fail_read = true;
         assert!(load(dir.path(), &storage).is_err());
-        assert_eq!(storage.legacy_reads.get(), 0);
         storage.fail_read = false;
         mark(dir.path()).unwrap();
         assert!(load(dir.path(), &storage).is_err());
-        assert_eq!(storage.legacy_reads.get(), 0);
         assert_eq!(storage.writes.get(), 0);
     }
     #[test]
     fn existing_profiles_never_get_a_replacement_key() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("profiles.stronghold"), b"preserve").unwrap();
-        let storage = Fake::new(None);
+        let storage = Fake::new();
         assert!(load(dir.path(), &storage).is_err());
         assert_eq!(storage.writes.get(), 0);
         assert_eq!(
@@ -220,9 +173,11 @@ mod tests {
     #[test]
     fn fresh_install_creates_and_verifies_a_random_key() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Fake::new(None);
+        let storage = Fake::new();
         assert_eq!(load(dir.path(), &storage).unwrap().len(), 32);
         assert_eq!(storage.writes.get(), 1);
         assert!(dir.path().join(MARKER).exists());
+        assert_eq!(*load(dir.path(), &storage).unwrap(), vec![7; 32]);
+        assert_eq!(storage.writes.get(), 1);
     }
 }

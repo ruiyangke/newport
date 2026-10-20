@@ -52,8 +52,8 @@ async fn owned_removal_restores_services_and_cancels_uncertain_dispatch() {
     let registry = Registry::new(directory.path());
     let owner = registry.session(&server, 0);
     let ssh = owner.acquire(&server).await.unwrap();
-    // The fixture has a preseeded legacy binary. Start with this test's own
-    // installation, avoiding compatibility evidence from another test release.
+    // The fixture has a preseeded Needle binary. Start with this test's own
+    // installation, avoiding evidence from another test release.
     ssh.execute("rm -rf \"$HOME/.local/share/newport/needle\"; rm -f \"$HOME/.local/bin/newport-agent\"; printf '# fixture personal settings\\n' > \"$HOME/.bashrc\"", None).await.unwrap();
     ssh.install_operation(true, false, Uuid::new_v4())
         .await

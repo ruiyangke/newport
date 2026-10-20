@@ -73,7 +73,7 @@ impl ContainersPanel {
             && self.active_selection.as_deref() == Some(domain::project_key(project).as_str())
             && self.client.selected_project() == Some(project)
     }
-    /// Ordinary Compose commands start directly, as in the Tauri reference.
+    /// Ordinary Compose commands start directly.
     /// Destructive options and scale have a separate explicit review below.
     pub(crate) fn propose_compose(&mut self, action: Value) {
         if self.has_review_dialog() {

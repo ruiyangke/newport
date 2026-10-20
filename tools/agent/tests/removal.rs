@@ -459,31 +459,9 @@ fn removal_preserves_user_edits_blocks_readmission_and_restores_by_id() {
 }
 
 #[test]
-fn older_build_evidence_and_corrupt_admission_fail_without_target_changes() {
+fn corrupt_admission_fails_without_target_changes() {
     let fixture = Fixture::new();
-    let compatibility = fixture
-        .root()
-        .join("builds")
-        .join(&fixture.hash)
-        .join("lifecycle.json");
-    fs::remove_file(&compatibility).unwrap();
     let before = fs::read(fixture.home.path().join(".bashrc")).unwrap();
-    let result = fixture.remove(&uuid::Uuid::new_v4().to_string());
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("older-client compatibility"));
-    assert_eq!(
-        fs::read(fixture.home.path().join(".bashrc")).unwrap(),
-        before
-    );
-    assert!(!fixture.root().join("removals.json").exists());
-    // Explicit staging by this executable can establish only its own support.
-    fixture.success(&["deployment", "prepare", &fixture.hash]);
-    fs::write(&compatibility, b"unknown future format").unwrap();
-    assert!(!fixture
-        .run(&["deployment", "prepare", &fixture.hash])
-        .status
-        .success());
-    assert_eq!(fs::read(&compatibility).unwrap(), b"unknown future format");
     fs::write(fixture.root().join("removals.json"), b"not a receipt").unwrap();
     for args in [vec!["runtime", "--stdio"], vec!["install"]] {
         assert!(!fixture.run(&args).status.success());

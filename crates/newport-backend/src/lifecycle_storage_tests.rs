@@ -382,55 +382,23 @@ async fn operation_id_reservations_do_not_hold_the_registry_during_a_save() {
 }
 
 #[tokio::test]
-async fn versioned_migration_preserves_every_server_and_the_original_source() {
+async fn first_write_creates_the_descriptor_and_every_kind_survives_reopen() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("journal.json");
     let a = server();
     let b = server();
-    let mut installed = record(&a);
-    installed.phase = Phase::Ready;
-    let removal = Removal {
-        server_id: a.id,
-        connection: scope(&a),
-        operation_id: Uuid::new_v4(),
-        build: "a".repeat(64),
-        phase: RemovalPhase::Removing,
-        error: Some("lost reply".into()),
-    };
-    let helpers = HelperRecovery {
-        server_id: b.id,
-        connection: scope(&b),
-        operation_id: Uuid::new_v4(),
-        build: "b".repeat(64),
-        fingerprint: "c".repeat(64),
-        phase: HelperRecoveryPhase::Restoring,
-        error: Some("edited file".into()),
-    };
-    let legacy = Journal {
-        operations: vec![installed.clone()],
-        removals: vec![removal.clone()],
-        helper_recoveries: vec![helpers.clone()],
-        ..Default::default()
-    };
-    let source = serde_json::to_vec_pretty(&legacy).unwrap();
-    fs::write(&path, &source).unwrap();
     let store = Store::new(path.clone());
-    assert!(store.require_agent_available(&a).is_err());
-    assert_eq!(
-        store.helper_recovery(&b, helpers.operation_id).unwrap(),
-        Some(helpers.clone())
-    );
-    assert_eq!(fs::read(&path).unwrap(), source);
     assert_eq!(
         fs::read_dir(directory.path()).unwrap().count(),
-        1,
+        0,
         "opening is read-only"
     );
-    let c = server();
-    store.begin(record(&c)).await.unwrap();
-    let shard = store.journal_path(a.id).unwrap();
-    let root = shard.parent().unwrap().parent().unwrap();
-    assert_eq!(fs::read(root.join("legacy.json")).unwrap(), source);
+    let installed = record(&a);
+    store.begin(installed.clone()).await.unwrap();
+    let removal = store
+        .begin_removal(&b, Uuid::new_v4(), &"a".repeat(64))
+        .await
+        .unwrap();
     let descriptor: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(
         descriptor,
@@ -442,59 +410,10 @@ async fn versioned_migration_preserves_every_server_and_the_original_source() {
         Some(installed)
     );
     assert_eq!(
-        reopened.removal(&a, removal.operation_id).unwrap(),
+        reopened.removal(&b, removal.operation_id).unwrap(),
         Some(removal)
     );
-    assert_eq!(
-        reopened.helper_recovery(&b, helpers.operation_id).unwrap(),
-        Some(helpers)
-    );
-    assert!(reopened.require_agent_available(&a).is_err());
-    assert!(reopened.require_agent_available(&b).is_ok());
-    assert_eq!(reopened.for_server(&c).unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn interrupted_migration_reuses_only_the_exact_staged_source() {
-    for matching in [true, false] {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("journal.json");
-        let a = server();
-        let b = server();
-        let first = record(&a);
-        let legacy = Journal {
-            operations: vec![first.clone()],
-            ..Default::default()
-        };
-        let source = serde_json::to_vec(&legacy).unwrap();
-        fs::write(&path, &source).unwrap();
-        let store = Store::new(path.clone());
-        let shard = store.journal_path(a.id).unwrap();
-        let root = shard.parent().unwrap().parent().unwrap();
-        fs::create_dir_all(shard.parent().unwrap()).unwrap();
-        fs::write(&shard, &source).unwrap();
-        let backup = if matching {
-            source.as_slice()
-        } else {
-            b"preserve foreign evidence"
-        };
-        fs::write(root.join("legacy.json"), backup).unwrap();
-        let result = store.begin(record(&b)).await;
-        assert_eq!(result.is_ok(), matching);
-        assert_eq!(fs::read(root.join("legacy.json")).unwrap(), backup);
-        assert_eq!(fs::read(&shard).unwrap(), source);
-        assert_eq!(store.get(first.intent.operation_id).unwrap(), Some(first));
-        if !matching {
-            assert_eq!(fs::read(&path).unwrap(), source);
-        }
-        let reopened = Store::new(path);
-        if matching {
-            assert_eq!(reopened.for_server(&a).unwrap().len(), 1);
-            assert_eq!(reopened.for_server(&b).unwrap().len(), 1);
-        } else {
-            assert!(reopened.require_agent_available(&a).is_err());
-        }
-    }
+    assert!(reopened.require_agent_available(&b).is_err());
 }
 
 #[tokio::test]
@@ -594,15 +513,18 @@ async fn missing_or_rolled_back_descriptors_cannot_reopen_removed_server_admissi
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("journal.json");
         let a = server();
-        let mut installed = record(&a);
-        installed.phase = Phase::Ready;
+        let installed = record(&a);
         let old = serde_json::to_vec(&Journal {
-            operations: vec![installed],
+            operations: vec![installed.clone()],
             ..Default::default()
         })
         .unwrap();
-        fs::write(&path, &old).unwrap();
         let store = Store::new(path.clone());
+        store.begin(installed.clone()).await.unwrap();
+        store
+            .update(installed.intent.operation_id, Some(Phase::Ready), None)
+            .await
+            .unwrap();
         store
             .begin_removal(&a, Uuid::new_v4(), &"a".repeat(64))
             .await
