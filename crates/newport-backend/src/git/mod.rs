@@ -118,15 +118,6 @@ impl Drop for Slot {
         }
     }
 }
-fn verify_backend(info: &Value) -> Result<(), Error> {
-    if info["capabilities"]["backend"].as_str() != Some("cli") {
-        return Err(Error::new(
-            "UNSUPPORTED_CAPABILITY",
-            "The agent requires an update to support the Git CLI backend. Update the agent and reconnect.",
-        ));
-    }
-    Ok(())
-}
 const DEADLINE: Duration = Duration::from_secs(35);
 /// A connection unused this long is closed; the next request reconnects. Safe
 /// only because the agent keeps no state a request depends on.
@@ -303,7 +294,6 @@ async fn connection(
             return Err(e);
         }
     };
-    verify_backend(&info)?;
     if owner.is_revoked() {
         return Err(Error::new(
             "STALE_CONNECTION",
@@ -493,7 +483,6 @@ async fn execute(
                 .map_err(Error::transport)?;
             let (client, info) =
                 Client::start_with_identity(stream, session.client_id.clone()).await?;
-            verify_backend(&info)?;
             Ok((client, info))
         };
         let initialized = tokio::select! {
@@ -1121,17 +1110,6 @@ mod connection_tests {
         let needle = ["Close an unused", " Git session first."].concat();
         assert!(!source.contains(&needle));
         assert!(!source.contains(&["Sema", "phore"].concat()));
-    }
-}
-
-#[cfg(test)]
-mod backend_selection_tests {
-    use super::*;
-    #[test]
-    fn selection_is_fixed_and_never_silently_falls_back() {
-        assert!(verify_backend(&json!({"capabilities":{}})).is_err());
-        assert!(verify_backend(&json!({"capabilities":{"backend":"cli"}})).is_ok());
-        assert!(verify_backend(&json!({"capabilities":{"backend":"git2"}})).is_err());
     }
 }
 

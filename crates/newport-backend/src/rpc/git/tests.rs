@@ -284,7 +284,6 @@ mod remote_tests {
             )
             .await
             .unwrap();
-            assert_eq!(connected["info"]["capabilities"]["backend"], "cli");
             let init_id = Uuid::new_v4();
             let initialized = fixture
                 .request(Request::Init {

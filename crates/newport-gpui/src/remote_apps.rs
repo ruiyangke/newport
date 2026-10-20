@@ -1236,9 +1236,7 @@ impl Launchpad {
         if let Some(Install::Diagnosing(diagnosis)) = self.installs.get_mut(&self.server) {
             // Only a read finished after the check began counts, not an
             // older reading the page hadn't drawn yet.
-            let fresh = read
-                .finished_at
-                .is_some_and(|at| at >= diagnosis.started);
+            let fresh = read.finished_at.is_some_and(|at| at >= diagnosis.started);
             diagnosis.arrived |= fresh && !read.pending;
             diagnosis.confirmed |= diagnosis.arrived && !read.pending && read.error.is_none();
         }

@@ -535,7 +535,6 @@ mod tests {
         let Message::Ready { capabilities, .. } = protocol::read(&mut input).unwrap() else {
             panic!("Expected CLI handshake");
         };
-        assert_eq!(capabilities["backend"], "cli");
         assert!(capabilities["actions"].as_array().unwrap().is_empty());
         assert!(
             matches!(protocol::read(&mut input).unwrap(),Message::Response { error:Some(Error { code,.. }),.. } if code=="UNSUPPORTED_METHOD")

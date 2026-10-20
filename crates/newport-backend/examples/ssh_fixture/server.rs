@@ -346,9 +346,9 @@ async fn execute(channel: Channel<Msg>, command: &[u8], config: Config) -> anyho
     let worker_args = std::str::from_utf8(command)
         .ok()
         .and_then(|s| {
-            s.split_once("; fi; exec env NEWPORT_GIT_BACKEND=cli \"$needle\" worker ")
+            s.strip_prefix("exec \"$HOME/.local/share/newport/needle/builds/")?
+                .split_once("/newport-agent\" worker ")
                 .map(|(_, args)| args)
-                .or_else(|| s.strip_prefix("exec env NEWPORT_GIT_BACKEND=cli \"$HOME/.local/bin/newport-agent\" worker "))
         })
         .map(|s| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
         .map(|mut args| {
@@ -481,7 +481,6 @@ async fn execute(channel: Channel<Msg>, command: &[u8], config: Config) -> anyho
                 .env("HOME", config.home)
                 .env("XDG_RUNTIME_DIR", config.runtime)
                 .env("NEWPORT_CLIPBOARD_NATIVE", "0")
-                .env("NEWPORT_GIT_BACKEND", "cli")
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::inherit())

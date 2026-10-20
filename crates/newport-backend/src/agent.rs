@@ -35,9 +35,13 @@ impl Service {
     #[cfg(test)]
     fn command(&self) -> String {
         match self {
-            Self::Git => "exec env NEWPORT_GIT_BACKEND=cli \"$HOME/.local/bin/newport-agent\" git-rpc --stdio".into(),
+            Self::Git => "exec \"$HOME/.local/bin/newport-agent\" git-rpc --stdio".into(),
             Self::Monitor => "exec \"$HOME/.local/bin/newport-agent\" monitor --stdio".into(),
-            Self::Integration { client, clipboard, browser } => format!(
+            Self::Integration {
+                client,
+                clipboard,
+                browser,
+            } => format!(
                 "exec \"$HOME/.local/bin/newport-agent\" serve {client} --managed {} {}",
                 if *clipboard { "--clipboard" } else { "" },
                 if *browser { "--browser" } else { "" },
@@ -72,7 +76,7 @@ pub(crate) async fn launch_worker(
     };
     // Activation can change the entry point while this runtime is still serving
     // admitted work, so launch the runtime's own retained, immutable build.
-    let stream = session.stream(&format!("exec env NEWPORT_GIT_BACKEND=cli \"$HOME/.local/share/newport/needle/builds/{build}/newport-agent\" worker {build} {runtime} {socket} {worker} {arguments}")).await?;
+    let stream = session.stream(&format!("exec \"$HOME/.local/share/newport/needle/builds/{build}/newport-agent\" worker {build} {runtime} {socket} {worker} {arguments}")).await?;
     Ok((stream, String::new()))
 }
 

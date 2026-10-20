@@ -427,10 +427,10 @@ async fn services_require_explicit_install_and_preserve_damaged_installations() 
         .execute("test ! -x ~/.local/bin/newport-agent", None)
         .await
         .unwrap();
-    // Explicit fixture recovery; neither feature startup nor installation may
-    // silently replace an unreadable/damaged executable as if it were absent.
+    // Explicit fixture recovery: remove the damaged entry point, and
+    // installation relinks the retained build without uploading it again.
     session
-        .execute("chmod 700 ~/.local/bin/newport-agent", None)
+        .execute("rm ~/.local/bin/newport-agent", None)
         .await
         .unwrap();
     let mut stream = agent(&session).await;

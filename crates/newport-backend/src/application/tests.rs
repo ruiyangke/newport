@@ -338,12 +338,6 @@ mod remote_tests {
             )
             .await
             .unwrap();
-        assert_eq!(
-            call(&endpoint, "git_connect", json!({"serverId":id}))
-                .await
-                .unwrap()["info"]["capabilities"]["backend"],
-            "cli"
-        );
         let opened = call(
             &endpoint,
             "git_request",
@@ -415,12 +409,14 @@ mod remote_tests {
             .unwrap_err()
             .contains("Terminal is closed")
         );
-        assert_eq!(
-            call(restarted.endpoint(), "git_connect", json!({"serverId":id}))
-                .await
-                .unwrap()["info"]["capabilities"]["backend"],
-            "cli"
-        );
+        let reopened = call(
+            restarted.endpoint(),
+            "git_request",
+            json!({"serverId":id,"request":Request::Open { path: GitPath::new(root.as_bytes()) }}),
+        )
+        .await
+        .unwrap();
+        assert!(reopened["repoId"].is_string(), "{reopened}");
         restarted.stop().await.unwrap();
         setup
             .execute(&format!("rm -rf {root}"), None)

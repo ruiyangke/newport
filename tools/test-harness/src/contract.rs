@@ -103,7 +103,7 @@ pub fn run(local: bool, args: &[String]) -> Result<()> {
     if let Some(output) = output {
         write_report(
             &output,
-            &json!({"backend":"cli","transport":if local{"service-level"}else{"OpenSSH MessagePack v4"},"nativeVerified":true,"referenceVerified":reference,"responses":rows.len(),"methods":methods,"actions":actions,"samples":samples}),
+            &json!({"transport":if local{"service-level"}else{"OpenSSH MessagePack v4"},"nativeVerified":true,"referenceVerified":reference,"responses":rows.len(),"methods":methods,"actions":actions,"samples":samples}),
         )?;
     }
     println!(
