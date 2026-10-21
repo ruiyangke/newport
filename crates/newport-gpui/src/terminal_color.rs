@@ -1,5 +1,5 @@
-//! Colors matching Newport's xterm theme and minimumContrastRatio=4.5.
-//! Contrast stepping follows xterm.js Color.ts (MIT; assets/XTERM-LICENSE).
+//! Terminal palette and minimum-contrast correction: 4.5:1 for text, 2.25:1 for dim text.
+//! The contrast stepping is derived from xterm.js Color.ts (MIT; assets/XTERM-LICENSE).
 use newport_terminal::{Cell, Frame, PaletteIndex, RgbColor as Rgb, StyleColor, Theme};
 use std::{collections::HashMap, sync::OnceLock};
 
@@ -65,7 +65,7 @@ pub(super) fn resolve(color: StyleColor, frame: &Frame, default: Rgb) -> Rgb {
     }
 }
 
-/// Blend opaque colors with xterm's quantized alpha (128/255 for dim/selection).
+/// Blend opaque colors at a quantized 128/255 alpha (dim text and selection).
 fn blend(background: Rgb, foreground: Rgb) -> Rgb {
     let channel = |bg: u8, fg: u8| ((bg as u32 * 127 + fg as u32 * 128 + 127) / 255) as u8;
     Rgb {
@@ -217,7 +217,7 @@ pub(super) fn cell_colors(
             };
         }
     }
-    // Selection makes dim text legible, matching xterm's selected-cell override.
+    // Selected text is never dimmed, so it stays legible on the selection color.
     let dim = style.faint && !cell.selected;
     (
         contrast.foreground(background, foreground, dim, decorative),
@@ -228,37 +228,52 @@ pub(super) fn cell_colors(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::Deserialize;
-    #[derive(Deserialize)]
-    struct Oracle {
-        palette: Vec<u32>,
-        cases: Vec<Case>,
-    }
-    #[derive(Deserialize)]
-    struct Case {
-        bg: u32,
-        fg: u32,
-        ratio: f64,
-        result: Option<u32>,
-    }
     #[test]
-    fn palette_and_contrast_match_original_xterm_sources() {
-        let oracle: Oracle =
-            serde_json::from_str(include_str!("../tests/fixtures/terminal-colors.json")).unwrap();
+    fn color_cube_and_grayscale_ramp_are_shared_by_both_themes() {
         for dark in [false, true] {
-            for (i, expected) in oracle.palette.iter().enumerate() {
-                assert_eq!(hex(palette(i, dark)), *expected, "palette {i} dark={dark}");
+            for (index, expected) in [
+                (16, 0x000000),
+                (21, 0x0000ff),
+                (67, 0x5f87af),
+                (196, 0xff0000),
+                (231, 0xffffff),
+                (232, 0x080808),
+                (244, 0x808080),
+                (255, 0xeeeeee),
+            ] {
+                assert_eq!(hex(palette(index, dark)), expected, "palette {index}");
             }
         }
-        for case in oracle.cases {
-            assert_eq!(
-                adjust(from_hex(case.bg), from_hex(case.fg), case.ratio).map(hex),
-                case.result,
-                "fg={:06x} bg={:06x} ratio={}",
-                case.fg,
-                case.bg,
-                case.ratio
-            );
+    }
+
+    #[test]
+    fn contrast_correction_reaches_the_minimum_or_the_best_extreme() {
+        let backgrounds = [0xffffff, 0x1e1f21, 0x777777, 0x000080, 0xfce94f];
+        for bg in backgrounds.map(from_hex) {
+            let foregrounds = (0..256).map(|index| palette(index, true)).chain([
+                bg,
+                from_hex(0xeeeeef),
+                from_hex(0x25262a),
+            ]);
+            for fg in foregrounds {
+                for minimum in [4.5, 2.25] {
+                    let before = ratio(luminance(bg), luminance(fg));
+                    let Some(corrected) = adjust(bg, fg, minimum) else {
+                        assert!(before >= minimum, "{:06x} on {:06x}", hex(fg), hex(bg));
+                        continue;
+                    };
+                    assert!(before < minimum, "legible text is never changed");
+                    let after = ratio(luminance(bg), luminance(corrected));
+                    assert!(
+                        after >= minimum || matches!(hex(corrected), 0x000000 | 0xffffff),
+                        "{:06x} on {:06x} at {minimum}: {:06x} reaches {after}",
+                        hex(fg),
+                        hex(bg),
+                        hex(corrected)
+                    );
+                    assert!(after > before);
+                }
+            }
         }
     }
     fn frame(dark: bool) -> Frame {

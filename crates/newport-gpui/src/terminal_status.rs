@@ -86,7 +86,7 @@ impl TerminalStatus {
     pub fn connected(&self) -> bool {
         matches!(self.phase, Phase::Connected)
     }
-    /// States for which the reference hides the verbose status text.
+    /// States that hide the verbose status text.
     pub fn steady(&self) -> bool {
         matches!(self.phase, Phase::Connected | Phase::Disconnected)
     }

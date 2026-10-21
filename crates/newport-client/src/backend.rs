@@ -861,6 +861,27 @@ impl Backend {
         Ok(stream)
     }
 
+    /// Start a language server for a worktree. Write raw LSP to the returned
+    /// socket and read relay frames from it; closing it stops the server.
+    pub fn open_lsp(&self, open: crate::lsp::Open) -> Result<Stream, String> {
+        let (_, stream) = self
+            .exchange_with_timeout(
+                protocol::LSP_OPEN,
+                serde_json::json!({
+                    "serverId": open.server_id,
+                    "expectedConnection": open.expected_connection,
+                    "root": open.root,
+                    "server": open.server,
+                    "envrc": open.envrc,
+                }),
+                Duration::from_secs(45),
+            )
+            .map_err(|error| error.message)?;
+        stream.set_read_timeout(None).map_err(|e| e.to_string())?;
+        stream.set_write_timeout(None).map_err(|e| e.to_string())?;
+        Ok(stream)
+    }
+
     pub(crate) fn open_terminal_lease(&self, args: Value) -> Result<Stream, String> {
         self.exchange_with_timeout(protocol::TERMINAL_OPEN_LEASE, args, Duration::from_secs(10))
             .map(|(_, stream)| stream)

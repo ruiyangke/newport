@@ -128,6 +128,3 @@ The runner preserves `NEWPORT_DATA_DIR` (including relative paths),
 On an interactive Windows desktop, run
 `./scripts/test-windows-activation.ps1 -BinaryPath C:\path\to\newport.exe`
 to check close-to-tray and second-instance activation using a disposable profile.
-Offline asset/terminal generators remain in
-[the UI scripts package](../newport-gpui/scripts/README.md); the desktop does not
-install those npm dependencies.

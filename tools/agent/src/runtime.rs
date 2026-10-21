@@ -68,6 +68,7 @@ fn describe() -> io::Result<protocol::Hello> {
             "Monitoring requires Linux.",
         ),
         ("integration", crate::integration_control::VERSION, true, ""),
+        ("lsp", crate::lsp::VERSION, true, ""),
     ] {
         capabilities.insert(
             name.into(),
@@ -242,6 +243,7 @@ pub fn worker(expected_build: &str, args: &[String]) -> io::Result<()> {
     match args[3].as_str() {
         "git" if args.len() == 4 => crate::git::serve_bound(cancellation),
         "monitor" if args.len() == 4 => crate::monitor::serve_bound(cancellation),
+        "lsp" if args.len() == 7 => crate::lsp::serve_bound(&args[4..], cancellation),
         "integration" if args.len() == 5 => crate::agent::serve_bound(
             &args[4],
             cancellation,

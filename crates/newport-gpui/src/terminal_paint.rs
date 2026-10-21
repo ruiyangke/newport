@@ -54,8 +54,8 @@ pub fn cell_size(window: &mut Window, cx: &App) -> Size<Pixels> {
     )
 }
 
-/// Match xterm's WebGL cell dimensions with lineHeight=1 and letterSpacing=0.
-/// Snap in device pixels, then convert back to logical coordinates so paint,
+/// Cells use the glyph advance and ascent+descent, with no extra line height or
+/// letter spacing. Snap in device pixels, then convert back to logical coordinates so paint,
 /// hit testing and PTY sizing all use the same grid, including after a display move.
 fn device_cell_size(measured: Size<Pixels>, scale: f32) -> Size<Pixels> {
     size(
@@ -362,7 +362,7 @@ fn underline_runs(cells: &[PaintCell]) -> Vec<UnderlineRun> {
 
 /// Build the actual filled geometry submitted to GPUI. Patterns are anchored to
 /// grid columns, so a color/selection boundary cannot restart a dotted pattern.
-/// The five styles and device-pixel stroke width follow xterm's TextureAtlas.
+/// Strokes are a whole number of device pixels thick.
 fn underline_path(
     run: &UnderlineRun,
     cell: Size<Pixels>,
@@ -411,7 +411,7 @@ fn underline_path(
             }
         }
         Underline::Dashed => {
-            // Repeat xterm's 60% line / 30% gap / remaining end segment per cell.
+            // Each cell repeats a 60% dash, a 30% gap and the remaining end segment.
             let length = (unit * scale * 0.6).floor().max(1.) / scale;
             let gap = (unit * scale * 0.3).floor().max(1.) / scale;
             for column in 0..run.columns {
@@ -544,7 +544,7 @@ mod tests {
     use newport_terminal::{CursorVisualStyle, Engine, ScrollViewport, Style, Underline};
 
     #[test]
-    fn terminal_grid_uses_xterm_device_pixel_rounding() {
+    fn terminal_grid_snaps_cells_to_device_pixels() {
         let measured = size(px(7.2246094), px(13.96875));
         for (scale, width, height) in [(1., 7., 14.), (2., 7., 14.), (1.5, 10. / 1.5, 21. / 1.5)] {
             let cell = device_cell_size(measured, scale);

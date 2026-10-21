@@ -14,7 +14,8 @@ fi
 grep -q 'only HTTP and HTTPS' "$HOME/open.log"
 test -f "$HOME/.local/state/newport/usage/lease"
 "$agent" runtime --stdio < /dev/null > "$HOME/hello"
-grep -aq "$HOME/.cache/newport/run/" "$HOME/hello"
+# Skip the 4-byte length: a byte above 0x7f there is invalid UTF-8 to BusyBox grep.
+tail -c +5 "$HOME/hello" | grep -q "$HOME/.cache/newport/run/"
 "$agent" display --backend wayland -- sh -c 'test -S "$WAYLAND_DISPLAY"'
 # Optional X11 failure must not prevent Browser/CLI/Wayland session startup.
 "$agent" serve fixture --browser --clipboard < /dev/null > "$HOME/ready" 2> "$HOME/session.log"

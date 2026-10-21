@@ -1,6 +1,6 @@
-//! Independent contracts for intentional differences from the xterm
-//! grapheme fixtures. Expectations come from pinned Ghostty's UUCODE tables and
-//! `src/unicode/grapheme.zig`, not from snapshots of the engine under test.
+//! Grapheme segmentation and cell-width contracts. Expectations come from
+//! pinned Ghostty's UUCODE tables and `src/unicode/grapheme.zig`, not from
+//! snapshots of the engine under test.
 //!
 //! Cell width is a terminal policy in addition to Unicode segmentation. The
 //! Prepend contract additionally covers Newport's upstream patch for GB9b.

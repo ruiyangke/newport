@@ -269,6 +269,33 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
             guard: Box::new(lease),
         })
     }
+    async fn open_lsp(&self, request: rpc::LspOpen) -> Result<rpc::LspChannel, String> {
+        let manager = &self.state.manager;
+        if !manager.configuration_available() {
+            return Err("Server configuration is unavailable.".into());
+        }
+        let (profile, owner) = manager.current(request.server_id)?;
+        let scope = serde_json::to_value(&profile).map_err(|error| error.to_string())?;
+        let snapshot = serde_json::json!({"instanceId": manager.instance_id,
+            "runtime": {"connectionRevisions": {request.server_id.to_string(): owner.revision()}}});
+        if newport_domain::connection_scope::connection(&scope, &snapshot)
+            != request.expected_connection
+        {
+            return Err("The server connection changed. Reopen the project.".into());
+        }
+        let lease = owner.acquire(&profile).await?;
+        let (stream, _) = lease
+            .launch(crate::agent::Service::Lsp {
+                root: request.root,
+                server: request.server,
+                envrc: request.envrc,
+            })
+            .await?;
+        Ok(rpc::LspChannel {
+            stream: Box::new(stream),
+            guard: Box::new(lease),
+        })
+    }
 }
 
 struct TerminalLease {

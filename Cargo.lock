@@ -5746,8 +5746,11 @@ dependencies = [
 name = "newport-client"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "base64 0.23.1",
  "dirs 7.0.0",
+ "futures-lite",
+ "lsp-types",
  "newport-domain",
  "newport-platform",
  "rmp-serde",
@@ -5770,6 +5773,7 @@ dependencies = [
 name = "newport-gpui"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-channel",
  "base64 0.23.1",
  "chrono",
@@ -5778,6 +5782,7 @@ dependencies = [
  "gpui-kit",
  "image",
  "libloading",
+ "lsp-types",
  "newport-client",
  "newport-domain",
  "newport-platform",

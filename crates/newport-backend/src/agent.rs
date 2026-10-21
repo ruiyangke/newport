@@ -23,6 +23,13 @@ pub enum Service {
         clipboard: bool,
         browser: bool,
     },
+    /// A language server in a worktree; `envrc` is false when the user chose
+    /// to start without a blocked `.envrc`.
+    Lsp {
+        root: String,
+        server: String,
+        envrc: bool,
+    },
 }
 impl Service {
     pub(crate) fn capability(&self) -> (&'static str, u32) {
@@ -30,6 +37,7 @@ impl Service {
             Self::Git => ("git", crate::git::protocol::VERSION),
             Self::Monitor => ("monitor", 1),
             Self::Integration { .. } => ("integration", control::VERSION),
+            Self::Lsp { .. } => ("lsp", 1),
         }
     }
     #[cfg(test)]
@@ -46,6 +54,7 @@ impl Service {
                 if *clipboard { "--clipboard" } else { "" },
                 if *browser { "--browser" } else { "" },
             ),
+            Self::Lsp { .. } => unreachable!("language servers start only as registered workers"),
         }
     }
 }
@@ -68,11 +77,21 @@ pub(crate) async fn launch_worker(
     hello.validate().map_err(|e| e.to_string())?;
     let build = &hello.build_sha256;
     let runtime = &hello.instance_id;
-    let socket = format!("'{}'", hello.worker_socket.replace('\'', "'\"'\"'"));
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
+    let socket = quote(&hello.worker_socket);
     let arguments = match service {
         Service::Git => "git".into(),
         Service::Monitor => "monitor".into(),
         Service::Integration { client, .. } => format!("integration {client}"),
+        Service::Lsp {
+            root,
+            server,
+            envrc,
+        } => format!(
+            "lsp {} {server} {}",
+            quote(&root),
+            if envrc { "envrc" } else { "skip-envrc" }
+        ),
     };
     // Activation can change the entry point while this runtime is still serving
     // admitted work, so launch the runtime's own retained, immutable build.

@@ -1,5 +1,5 @@
 //! Reflow must preserve logical paragraphs, including spaces and output below
-//! the cursor. Expected strings are independent of the xterm fixture snapshots.
+//! the cursor.
 use newport_terminal::{Engine, PointCoordinate};
 
 fn feed(engine: &mut Engine, input: &str, chunk: usize) {

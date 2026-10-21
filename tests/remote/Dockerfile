@@ -11,7 +11,7 @@ RUN cargo build --release --locked
 
 # The CLI backend requires Git with --attr-source (Git 2.43+).
 FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-server git bash zsh fish ca-certificates procps iproute2 xclip wl-clipboard \
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server git bash zsh fish ca-certificates procps iproute2 xclip wl-clipboard direnv \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -s /bin/bash fixture \
     && echo 'fixture:unused-container-only-password' | chpasswd \

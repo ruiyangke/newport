@@ -23,6 +23,7 @@ pub mod git_read_recovery;
 pub mod git_remote_refs;
 pub mod git_remotes;
 pub mod git_selection;
+pub mod lsp;
 pub mod profile;
 pub mod resources;
 pub mod services;

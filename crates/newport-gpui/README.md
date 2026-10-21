@@ -60,8 +60,7 @@ node scripts/with-ghostty.mjs cargo test --locked --release -p newport-gpui --li
 
 The `input_focus_probe` and `terminal_render_probe` examples are manual native
 input/rendering diagnostics. Run them through the same wrapper with
-`cargo run --locked -p newport-gpui --example NAME`. Optional offline asset and
-terminal-fixture generators are documented in [scripts/README.md](scripts/README.md).
+`cargo run --locked -p newport-gpui --example NAME`.
 
 Unit tests and benchmarks do not replace native interaction checks. See the
 [testing guide](../../docs/testing.md) for lifecycle and release acceptance.

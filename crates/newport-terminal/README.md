@@ -83,8 +83,7 @@ enabling additional features. Desktop packaging includes them under `Licenses`.
 - OSC clipboard handlers are deliberately absent. Clipboard access comes from
   explicit UI copy/paste actions. OSC links are filtered through Newport's
   shared HTTP(S) URL policy.
-- Primary-screen resizing preserves output, including rows below the cursor;
-  this intentionally differs from xterm's edge-case behavior.
+- Primary-screen resizing preserves output, including rows below the cursor.
 - Scrollback uses Ghostty's page-based 5,000-line retention policy. Pruning can
   remove a complete page, so the retained count is approximate. Resize tests
   separately require that every already-retained row survives growth.
@@ -95,8 +94,8 @@ enabling additional features. Desktop packaging includes them under `Licenses`.
 ## Validation
 
 The GPUI terminal, painter, input dispatch, selection, find, and Git log text
-renderer use this engine. Retain the independent Unicode/reflow contracts and
-generated terminal fixtures when updating it.
+renderer use this engine. Retain the Unicode, reflow, resize and grapheme
+contract tests when updating it.
 
 Test native keyboard layouts, IME composition, shortcuts, links, accessibility,
 selection, scrollback, resize, and detached windows on macOS and Windows. Key

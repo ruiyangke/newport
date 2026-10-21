@@ -19,6 +19,8 @@ use std::collections::{BTreeMap, HashSet};
 mod conflict;
 #[path = "project_editor_document.rs"]
 mod document;
+#[path = "project_editor_lsp.rs"]
+mod lsp;
 #[path = "project_editor_reveal.rs"]
 mod reveal;
 #[path = "project_editor_tree_keys.rs"]
@@ -87,6 +89,10 @@ struct Buffer {
     error: Option<String>,
     /// Why this file could not be opened; the tab shows it instead of text.
     failure: Option<String>,
+    /// The language server following this tab, if its language has one.
+    lsp: Option<lsp::Attached>,
+    /// Sends edits to the language server once typing pauses.
+    lsp_sync: Option<Task<()>>,
     _subscription: Subscription,
 }
 impl Buffer {
@@ -173,6 +179,10 @@ pub(super) struct CodeWorkspace {
     tree_focus: FocusHandle,
     tree_cursor: Option<String>,
     tree_status: tree_status::State,
+    /// Language servers by server id, started when a tab first needs one.
+    language_servers: std::collections::HashMap<&'static str, std::rc::Rc<lsp::Server>>,
+    /// A definition to move to once its file's tab opens.
+    pending_jump: Option<lsp::Jump>,
     #[cfg(test)]
     test_rpc: Option<TestRpc>,
 }
@@ -218,6 +228,8 @@ impl CodeWorkspace {
             tree_focus: cx.focus_handle(),
             tree_cursor: None,
             tree_status: Default::default(),
+            language_servers: Default::default(),
+            pending_jump: None,
             #[cfg(test)]
             test_rpc: None,
         }
@@ -396,6 +408,8 @@ impl CodeWorkspace {
     /// same path, and activate it when it is still the requested file.
     fn place_buffer(&mut self, buffer: Buffer, window: &mut Window, cx: &mut Context<Self>) {
         let path = buffer.path.clone();
+        // A replaced tab's server document closes before the new one opens.
+        self.detach_language_server(&path, cx);
         let index = match self.buffers.iter().position(|b| b.path == path) {
             Some(index) => {
                 self.buffers[index] = buffer;
@@ -419,6 +433,16 @@ impl CodeWorkspace {
             }
             self.reveal_active(false, window, cx);
         }
+        #[cfg(test)]
+        let hermetic = self.test_rpc.is_some();
+        #[cfg(not(test))]
+        let hermetic = false;
+        if !hermetic {
+            self.attach_language_server(&path, cx);
+        }
+        // A definition waiting for this file moves there whether or not the
+        // file has a language server.
+        self.apply_pending_jump(window, cx);
         cx.notify();
     }
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -465,6 +489,7 @@ impl CodeWorkspace {
                         buffer.changed.set(buffer.editor.read(cx).text() != &sent);
                         buffer.saved = sent;
                         buffer.revision = text(&value, "revision");
+                        this.language_saved(&path, cx);
                         cx.emit(Saved);
                     }
                     Err(error) => buffer.error = Some(error),
@@ -543,6 +568,7 @@ impl CodeWorkspace {
             .and_then(|i| self.buffers.get(i))
             .map(|b| b.path.clone());
         let closing_active = active_path.as_deref() == Some(path);
+        self.detach_language_server(path, cx);
         self.buffers.retain(|b| b.path != path);
         self.active = active_path
             .and_then(|p| self.buffers.iter().position(|b| b.path == p))
@@ -1001,7 +1027,13 @@ impl CodeWorkspace {
                         let open = cx.entity().downgrade();
                         let owner = cx.entity().downgrade();
                         let title = format!("{label}{}", if buffer.dirty(cx) { " •" } else { "" });
-                        project_workspace::document_tab(
+                        let problems = lsp::problem_count(buffer);
+                        let described = match problems {
+                            0 => title.clone(),
+                            1 => format!("{title}, 1 error"),
+                            n => format!("{title}, {n} errors"),
+                        };
+                        let tab = project_workspace::document_tab(
                             ("code-tab", i),
                             active,
                             Some(file_icon::tree_icon(
@@ -1011,9 +1043,20 @@ impl CodeWorkspace {
                             )),
                             cx,
                         )
-                        .accessibility_label(title.clone())
-                        .child(project_workspace::document_tab_title(title))
-                        .on_click(move |_, window, cx| {
+                        .accessibility_label(described)
+                        .child(project_workspace::document_tab_title(title));
+                        let tab = if problems > 0 {
+                            tab.child(
+                                div()
+                                    .debug_selector(|| "code-tab-problems".into())
+                                    .flex_shrink_0()
+                                    .text_color(crate::theme::error(cx.theme().is_dark()))
+                                    .child(problems.to_string()),
+                            )
+                        } else {
+                            tab
+                        };
+                        tab.on_click(move |_, window, cx| {
                             let _ = open.update(cx, |this, cx| this.open(path.clone(), window, cx));
                         })
                         .on_close(
@@ -1125,6 +1168,8 @@ impl CodeWorkspace {
                     .is_some_and(|(kind, _)| *kind == "folder")
             })
         });
+        let language = self.language_status(cx);
+        let notice = self.language_notice(cx);
         div()
             .flex()
             .flex_col()
@@ -1172,6 +1217,7 @@ impl CodeWorkspace {
                         view.when(buffer.dirty(cx), |view| {
                             view.child(div().flex_shrink_0().child("Unsaved"))
                         })
+                        .children(language)
                         .child(div().flex_shrink_0().child(if buffer.crlf {
                             "UTF-8 · CRLF"
                         } else {
@@ -1179,6 +1225,7 @@ impl CodeWorkspace {
                         }))
                     }),
             )
+            .children(notice)
             .when_some(active.filter(|b| b.conflict.is_some()), |view, buffer| {
                 view.child(self.conflict_strip(buffer, cx))
             })
@@ -2034,6 +2081,66 @@ mod interaction_tests {
             }));
         });
         (view, cx, calls)
+    }
+    #[gpui::test]
+    fn the_language_server_shows_in_the_header_tab_and_notice(cx: &mut TestAppContext) {
+        use super::lsp::Status;
+        let (view, cx, _) = fixture(cx);
+        open(&view, cx, "/repo/main.rs");
+        assert!(cx.debug_bounds("code-language-status").is_none());
+        view.update(cx, |v, _| {
+            v.attach_test_server("/repo/main.rs", Status::Ready, 2)
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("code-language-status").is_some());
+        assert!(cx.debug_bounds("code-tab-problems").is_some());
+        assert!(cx.debug_bounds("code-language-notice").is_none());
+        let blocked = Status::EnvrcBlocked {
+            path: "/repo/.envrc".into(),
+            denied: false,
+        };
+        view.update(cx, |v, _| v.attach_test_server("/repo/main.rs", blocked, 0));
+        draw(cx);
+        assert!(cx.debug_bounds("code-language-notice").is_some());
+        assert!(cx.debug_bounds("code-tab-problems").is_none());
+    }
+    #[gpui::test]
+    fn detaching_a_tab_lets_its_language_server_shut_down(cx: &mut TestAppContext) {
+        use super::lsp::Status;
+        let (view, cx, _) = fixture(cx);
+        open(&view, cx, "/repo/main.rs");
+        let server = view.update(cx, |v, cx| {
+            v.attach_test_server("/repo/main.rs", Status::Ready, 1);
+            v.install_test_hooks("/repo/main.rs", cx)
+        });
+        assert!(server.upgrade().is_some());
+        view.update(cx, |v, cx| v.detach_language_server("/repo/main.rs", cx));
+        assert!(
+            server.upgrade().is_none(),
+            "the editor's hooks must not keep a detached server running"
+        );
+        let editor = view.read_with(cx, |v, _| v.buffers[0].editor.clone());
+        editor.update(cx, |editor, _| {
+            let lsp = editor.lsp_mut();
+            assert!(lsp.completion_provider.is_none() && lsp.hover_provider.is_none());
+        });
+    }
+    #[gpui::test]
+    fn a_definition_in_a_file_without_a_language_server_still_moves_there(cx: &mut TestAppContext) {
+        let (view, cx, _) = fixture(cx);
+        view.update(cx, |v, _| v.set_test_jump("/repo/notes.txt", 0, 3));
+        open(&view, cx, "/repo/notes.txt");
+        let editor = view.read_with(cx, |v, _| {
+            v.buffers
+                .iter()
+                .find(|b| b.path == "/repo/notes.txt")
+                .unwrap()
+                .editor
+                .clone()
+        });
+        let at = editor.read_with(cx, |editor, _| editor.cursor_position());
+        assert_eq!((at.line, at.character), (0, 3));
+        assert!(view.read_with(cx, |v, _| v.pending_jump.is_none()));
     }
     #[gpui::test]
     fn edits_and_saves_twelve_megabytes_with_undo(cx: &mut TestAppContext) {

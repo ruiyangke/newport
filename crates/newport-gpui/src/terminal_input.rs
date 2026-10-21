@@ -750,7 +750,6 @@ mod tests {
     #[test]
     fn ghostty_extended_legacy_keys_retain_modifier_identity() {
         let mut engine = Engine::new(80, 24).unwrap();
-        // These are intentional differences from the historical xterm oracle:
         // Ghostty supports extended functions and disambiguates modified keys.
         for (key, shift, alt, control, expected) in [
             ("f13", false, false, false, b"\x1b[25~".as_slice()),

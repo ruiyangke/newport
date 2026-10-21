@@ -18,6 +18,7 @@ mod boundaries;
 mod compose;
 mod containers;
 mod git;
+mod lsp;
 mod monitor;
 mod ports;
 mod recovery;

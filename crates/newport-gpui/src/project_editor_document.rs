@@ -114,6 +114,8 @@ impl CodeWorkspace {
                 buffer
                     .changed
                     .set(buffer.page.is_none() && source.read(cx).text() != &buffer.saved);
+                let path = buffer.path.clone();
+                this.schedule_language_sync(&path, cx);
             }
             cx.notify();
         });
@@ -130,6 +132,8 @@ impl CodeWorkspace {
             conflict: None,
             page: loaded.page,
             failure: None,
+            lsp: None,
+            lsp_sync: None,
             _subscription: subscription,
         })
     }
@@ -161,6 +165,8 @@ impl CodeWorkspace {
             conflict: None,
             page: None,
             failure: Some(failure),
+            lsp: None,
+            lsp_sync: None,
             _subscription: subscription,
         }
     }

@@ -25,6 +25,10 @@ pub const TERMINAL_OPEN_LEASE: &str = "$terminal_open_lease";
 pub const REMOTE_STREAM_OPEN: &str = "$remote_stream_open";
 pub const REMOTE_STREAM_DATA: u8 = 0;
 pub const REMOTE_STREAM_EXIT: u8 = 1;
+/// A language server for a worktree, started by a Needle `lsp` worker. Framing
+/// matches `REMOTE_STREAM_OPEN`: raw LSP input in, stdout frames out, then one
+/// exit frame `{error}`.
+pub const LSP_OPEN: &str = "$lsp_open";
 /// Raise the existing application window without creating another profile owner.
 pub const ACTIVATE_WINDOW: &str = "native.activate";
 /// Admission priority only; callers still require normal connection validation.

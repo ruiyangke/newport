@@ -5,6 +5,7 @@ mod arguments;
 pub mod control;
 pub mod features;
 pub mod git;
+mod lsp_stream;
 pub mod preferences;
 mod progress;
 mod remote_stream;
@@ -57,6 +58,33 @@ pub trait Host: Send + Sync + 'static {
     ) -> impl Future<Output = Result<RemoteChannel, String>> + Send {
         async { Err("Remote streams aren’t available.".to_owned()) }
     }
+    /// Start a language server for a worktree through a Needle worker.
+    fn open_lsp(
+        &self,
+        _request: LspOpen,
+    ) -> impl Future<Output = Result<LspChannel, String>> + Send {
+        async { Err("Language servers aren’t available.".to_owned()) }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LspOpen {
+    pub server_id: Uuid,
+    /// The connection the editor was opened for; a changed server is refused.
+    pub expected_connection: Value,
+    pub root: String,
+    pub server: String,
+    pub envrc: bool,
+}
+
+pub trait LspIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin> LspIo for T {}
+
+/// A started language server worker, and whatever keeps its connection open.
+pub struct LspChannel {
+    pub stream: Box<dyn LspIo>,
+    pub guard: Box<dyn Send>,
 }
 
 /// A started remote command, and whatever keeps its connection open.
@@ -204,6 +232,9 @@ async fn serve<H: Host>(
     }
     if request.method == protocol::REMOTE_STREAM_OPEN {
         return remote_stream::serve(stream, host.as_ref(), request.args).await;
+    }
+    if request.method == protocol::LSP_OPEN {
+        return lsp_stream::serve(stream, host.as_ref(), request.args).await;
     }
     // Feature calls and consent waits cannot consume revocation admission.
     // This reserves capacity only; the host still validates scope and permissions.

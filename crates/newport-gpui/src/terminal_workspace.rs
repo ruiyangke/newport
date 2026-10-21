@@ -265,7 +265,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut workspace = Self::empty(server, connection, endpoint, cx);
-        workspace.add_command(draft, cx);
+        workspace.add_command(draft, "Service command", cx);
         workspace
     }
 
@@ -322,15 +322,21 @@ impl Workspace {
     }
 
     fn add(&mut self, cx: &mut Context<Self>) {
+        let draft = self.project_root.as_ref().map(|root| {
+            CommandDraft::project_directory(root).expect("validated project directory")
+        });
+        self.add_tab(draft, cx);
+    }
+
+    /// A new tab, with `draft` delivered once its shell is ready.
+    fn add_tab(&mut self, draft: Option<CommandDraft>, cx: &mut Context<Self>) {
         if self.tabs.len() >= MAX_TERMINALS {
             return;
         }
         let view = cx.new(|cx| TerminalView::new(self.server.clone(), cx));
-        if let Some(root) = &self.project_root {
-            let draft = CommandDraft::project_directory(root).expect("validated project directory");
-            view.update(cx, |view, _| {
-                view.prepare_command(draft);
-            });
+        if let Some(draft) = draft {
+            // A fresh view always takes its one draft.
+            assert!(view.update(cx, |view, _| view.prepare_command(draft)));
         }
         // Output, selection and pointer changes repaint the terminal itself.
         // Only presentation changes need to rebuild the surrounding tab bar.
@@ -377,15 +383,29 @@ impl Workspace {
         if self.tabs.len() >= MAX_TERMINALS {
             return Err("Close a terminal tab before opening this service command.".into());
         }
-        self.add_command(draft, cx);
+        self.add_command(draft, "Service command", cx);
         Ok(())
     }
 
-    fn add_command(&mut self, draft: CommandDraft, cx: &mut Context<Self>) {
-        self.add(cx);
-        let tab = &mut self.tabs[self.active];
-        tab.custom = Some("Service command".into());
-        assert!(tab.view.update(cx, |view, _| view.prepare_command(draft)));
+    /// A handover named for what it does, such as setting up a language server.
+    pub(super) fn open_named_command(
+        &mut self,
+        draft: CommandDraft,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.tabs.len() >= MAX_TERMINALS {
+            return Err("Close a terminal tab before opening this command.".into());
+        }
+        self.add_command(draft, title, cx);
+        Ok(())
+    }
+
+    /// The handover replaces a project terminal's change of directory, so a
+    /// command that needs the project folder changes into it itself.
+    fn add_command(&mut self, draft: CommandDraft, title: &str, cx: &mut Context<Self>) {
+        self.add_tab(Some(draft), cx);
+        self.tabs[self.active].custom = Some(title.into());
         cx.notify();
     }
 
@@ -403,7 +423,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Match the reference: the last session remains available to reconnect.
+        // The last session remains available to reconnect.
         if self.tabs.len() <= 1 {
             return;
         }
@@ -956,6 +976,33 @@ mod tests {
                     .iter()
                     .all(|t| !t.view.read(cx).status.started)
             );
+        });
+    }
+
+    #[gpui::test]
+    fn project_terminals_take_named_commands_in_a_new_tab(cx: &mut TestAppContext) {
+        init(cx);
+        cx.update(|cx| {
+            let workspace = cx.new(|cx| {
+                Workspace::for_project(
+                    "fixture".into(),
+                    json!(["scope"]),
+                    "/repo/worktree".into(),
+                    cx,
+                )
+                .unwrap()
+            });
+            let draft = CommandDraft::new("cd -- /repo/worktree && direnv allow".into()).unwrap();
+            workspace
+                .update(cx, |workspace, cx| {
+                    workspace.open_named_command(draft, "Allow .envrc", cx)
+                })
+                .unwrap();
+            let workspace = workspace.read(cx);
+            assert_eq!(workspace.tabs.len(), 2);
+            assert_eq!(workspace.active, 1);
+            assert_eq!(workspace.tabs[1].custom.as_deref(), Some("Allow .envrc"));
+            assert!(!workspace.tabs[1].view.read(cx).status.started);
         });
     }
 

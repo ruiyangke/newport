@@ -242,7 +242,7 @@ impl TerminalView {
         self.status.disconnected();
     }
     /// A new backend/credential/destination scope must never reuse old PTY data.
-    /// Inactive tabs remain lazy, matching the reference's remounted sessions.
+    /// Inactive tabs remain lazy.
     pub fn reset_connection(&mut self, cx: &mut Context<Self>) {
         self.clear_find(cx);
         self.close();
@@ -293,7 +293,7 @@ impl TerminalView {
         self.title = "Terminal".into();
         self.input_error = None;
         // Explicit reconnect applies to background tabs too. Use their last
-        // measured dimensions (80x24 before the first display), as xterm does;
+        // measured dimensions (80x24 before the first display);
         // only automatic first opens and scope changes wait for layout.
         self.open();
         cx.notify();

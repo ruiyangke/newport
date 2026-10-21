@@ -1,4 +1,4 @@
-//! User-visible engine guarantees carried forward from Newport's former host.
+//! User-visible guarantees for links, accessible text, titles and reconnect.
 use newport_terminal::{Engine, Point, PointCoordinate, ScrollViewport};
 
 fn active(x: u16, y: u32) -> Point {

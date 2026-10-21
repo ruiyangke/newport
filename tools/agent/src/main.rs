@@ -73,6 +73,7 @@ fn run(args: &[String]) -> std::io::Result<()> {
             Some("open") => newport_agent::browser::open(&args[2..], false),
             Some("sessions") => newport_agent::routing::list(),
             Some("listeners") if args.len() == 2 => newport_agent::ports::print_listeners(),
+            Some("print-env") if args.len() == 2 => newport_agent::lsp::print_env(),
             Some("env") => newport_agent::environment::print(&args[2..]),
             Some("install") => newport_agent::install::install(),
             Some("deployment") => newport_agent::deployment::run(&args[2..]),
