@@ -1,5 +1,5 @@
 //! Offline visual fixture for the native terminal renderer. Opens no PTY.
-//! node scripts/with-ghostty.mjs cargo run --locked -p newport-gpui --example terminal_render_probe
+//! cargo xtask env -- cargo run --locked -p newport-gpui --example terminal_render_probe
 #[path = "../src/terminal_color.rs"]
 mod terminal_color;
 #[path = "../src/terminal_paint.rs"]

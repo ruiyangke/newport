@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 #[test]
-#[ignore = "requires a real agent trace; run npm run test:git-cli-contract"]
+#[ignore = "requires a real agent trace; run cargo xtask test git-cli-contract"]
 fn real_agent_responses_satisfy_native_contracts() {
     let path = std::env::var("NEWPORT_GIT_TRACE_PATH").expect("agent trace path required");
     let trace = std::fs::read_to_string(path).expect("read agent trace");

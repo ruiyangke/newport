@@ -278,7 +278,7 @@ mod remote_tests {
     use crate::git::protocol::{Path as GitPath, Request};
 
     #[tokio::test]
-    #[ignore = "Requires npm run test:remote and disposable OpenSSH"]
+    #[ignore = "Requires cargo xtask test remote and disposable OpenSSH"]
     async fn standalone_services_reach_real_ssh_git_files_and_terminal_then_restart() {
         let _owner = BACKEND_OWNER.lock().await;
         let directory = tempfile::tempdir().unwrap();

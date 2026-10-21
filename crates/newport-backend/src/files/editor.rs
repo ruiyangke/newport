@@ -378,7 +378,7 @@ pub(super) async fn prefetch_document(
 mod tests {
     use super::*;
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- files::editor"]
+    #[ignore = "Run with cargo xtask test ssh -- files::editor"]
     async fn atomic_save_conflict_and_path_guards_over_sftp() {
         let server: crate::model::Server = serde_json::from_value(serde_json::json!({
             "id":Uuid::new_v4(),"name":"Editor fixture","sshUser":"fixture","sshHost":"127.0.0.1",

@@ -1,0 +1,11 @@
+[alias]
+xtask = "run --quiet --locked --manifest-path tools/xtask/Cargo.toml --"
+
+[env]
+# `cargo xtask env` points this at the patched Ghostty source. Without it, the
+# Ghostty build stops on this missing directory instead of fetching upstream.
+GHOSTTY_SOURCE_DIR = { value = ".cache/newport/ghostty/prepare-with-cargo-xtask-env", relative = true }
+
+# Bundles, signs and launches `newport` on macOS; other binaries run directly.
+[target.'cfg(target_os = "macos")']
+runner = "tools/xtask/runner.sh"

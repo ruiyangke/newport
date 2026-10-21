@@ -358,7 +358,7 @@ pub async fn files_preview(
 mod tests {
     use super::*;
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- files::tests::query"]
+    #[ignore = "Run with cargo xtask test ssh -- files::tests::query"]
     async fn query_lists_over_sftp_reuses_fresh_data_and_validates_cached_reads() {
         let directory = tempfile::tempdir().unwrap();
         let server: crate::model::Server = serde_json::from_value(serde_json::json!({
@@ -526,7 +526,7 @@ mod integration_tests {
     use crate::model::{AuthMethod, Server};
     use std::sync::Arc;
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh"]
+    #[ignore = "Run with cargo xtask test ssh"]
     async fn sftp_browse_preview_and_atomic_transfers() {
         let server = Server {
             id: Uuid::new_v4(),

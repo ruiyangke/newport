@@ -6,29 +6,34 @@ ownership, tray, window lifecycle, OS event registration, and updates. The
 
 ## Development
 
-Use the pinned Rust toolchain and Node.js. macOS builds require Xcode and its
+Use the pinned Rust toolchain. macOS builds require Xcode and its
 Metal tools. Windows builds require the MSVC toolchain and Windows SDK; terminal
 builds also use NASM for x64 or LLVM for ARM64.
 
 Run from the repository root:
 
 ```sh
-node scripts/build-grammars.mjs
-NEWPORT_DATA_DIR=/absolute/path/to/test-profile npm run dev
+cargo xtask dev
 ```
+
+This builds missing Linux agents in Docker, stages the grammar libraries when
+their sources change (and PDFium on Windows), and runs the app with the
+disposable profile `target/dev-profile`. Set `NEWPORT_DATA_DIR` to an absolute
+path to use another isolated profile.
 
 Debug builds require an explicit isolated profile. Release builds use the
 default profile and preserve a recovery copy before opening it. Never run two
 owners against the same profile. See [storage and recovery](../../docs/storage.md).
 
 The development command supplies the pinned Ghostty environment. On Windows,
-run `node scripts/stage-pdfium.mjs` before preview checks. When cross-compiling
+run `cargo xtask pdfium` before preview checks. When cross-compiling
 on Windows ARM64, use the same `CARGO_BUILD_TARGET` for resource staging, build,
 and packaging; running x64 under emulation is not native x64 acceptance.
 
-Needle binaries must already be present in `resources/agents`. To rebuild them
-intentionally, use `npm run build:agent` with Docker. This replaces local agent
-resources; do not rebuild them merely to run the desktop with verified resources.
+Needle binaries live in `resources/agents`; `cargo xtask dev` builds them with
+Docker only when they are missing. To rebuild them intentionally, use
+`cargo xtask agents`. This replaces local agent resources; do not rebuild them
+merely to run the desktop with verified resources.
 
 ## Lifecycle and diagnostics
 
@@ -61,7 +66,7 @@ PDFium on Windows. Needle binaries are compressed resources verified before
 remote installation.
 
 ```sh
-node scripts/package-native.mjs
+cargo xtask package
 ```
 
 This produces a development package. On Windows, add `--nsis` to build the
@@ -90,44 +95,38 @@ the startup example uses `NEWPORT_UPDATE_TEST_EXECUTABLE` and an isolated
 `NEWPORT_DATA_DIR`. Run with `--features updates`. Neither substitutes for the
 [signed upgrade acceptance procedure](../../docs/testing.md#upgrade-acceptance).
 
-## Script entry points
+## Tooling entry points
 
-Use root npm commands for development and checks. The files under `scripts/ci/`
-contain CI setup, artifact validation, and tooling tests; they are not additional
-application launch paths.
+Development, checks, packaging and release run through `cargo xtask`; see
+[tools/xtask](../../tools/xtask/README.md) for every command.
 
 | Task | Entry point |
 | --- | --- |
-| Run / build the desktop | `npm run dev` / `npm run build` |
-| Format / validate the workspace | `npm run format` / `npm run check` |
-| Build Linux agents | `npm run build:agent` (delegates to the Rust harness) |
-| Native / SSH / container tests | `npm test` / `npm run test:ssh` / `npm run test:remote` |
-| Grammar / PDFium resources | `scripts/build-grammars.mjs` / `scripts/stage-pdfium.mjs` |
-| Development packages | `scripts/package-native.mjs` |
-| macOS distribution | `scripts/release-native-macos.mjs` |
-| Windows installer / update payload | `scripts/package-windows-native.mjs` / `scripts/package-windows-update.mjs` |
-| Needle release identity | `scripts/sign-needle-release.mjs` |
-| Verify and combine updater manifests | `scripts/merge-update-manifests.mjs` |
+| Run / build the desktop | `cargo xtask dev` / `cargo xtask build` |
+| Format / validate the workspace | `cargo fmt --all` / `cargo xtask check` |
+| Build Linux agents | `cargo xtask agents` |
+| Native / SSH / container tests | `cargo xtask test native` / `cargo xtask test ssh` / `cargo xtask test remote` |
+| Grammar / PDFium resources | `cargo xtask grammars` / `cargo xtask pdfium` |
+| Development packages | `cargo xtask package` |
+| macOS distribution | `cargo xtask release macos` |
+| Windows update payload | `cargo xtask release windows-update` |
+| Needle release identity | `cargo xtask release sign-needle` |
+| Verify and combine updater manifests | `cargo xtask release merge` |
 
-Run JavaScript entry points with Node. `with-ghostty.mjs` prepares the pinned
-terminal toolchain; its source/stdlib helpers keep patches isolated. Shared
-signing, notarization, build-info, and grammar modules serve the packaging steps.
-They should stay separate from OS-specific installers and release credentials.
-
-`scripts/run-signed-dev.sh` is an optional local Cargo runner for a provisioned
-macOS development app. It is not a production signing shortcut. Protected-Keychain
-acceptance uses `scripts/test-macos-keychain.mjs` with explicit test configuration.
-The runner launches the GUI through LaunchServices so 1Password attributes SSH
-approval to Newport. Do not launch `Newport.app/Contents/MacOS/newport` directly
-from an IDE or terminal for interactive SSH testing: macOS can attribute those
-requests to the parent application and 1Password suppresses its background prompts.
-The runner preserves `NEWPORT_DATA_DIR` (including relative paths),
-`NEWPORT_ACCOUNT_URL`, `SSH_AUTH_SOCK`, and Rust logging settings. GUI output goes to
+On macOS, `cargo run -p newport-app` goes through the committed Cargo runner,
+`tools/xtask/runner.sh`, which runs `cargo xtask dev-run`. It bundles and signs
+a provisioned development app with the settings described in
+[local signing](../../tools/xtask/README.md#local-signing); it is not a
+production signing shortcut. Protected-Keychain acceptance uses
+`cargo xtask test keychain`. The runner launches the GUI through LaunchServices
+so 1Password attributes SSH approval to Newport. Do not launch
+`Newport.app/Contents/MacOS/newport` directly from an IDE or terminal for
+interactive SSH testing: macOS can attribute those requests to the parent
+application and 1Password suppresses its background prompts. The runner
+preserves `NEWPORT_DATA_DIR` (including relative paths), `NEWPORT_ACCOUNT_URL`,
+`SSH_AUTH_SOCK`, and Rust logging settings. GUI output goes to
 `newport-dev.log` beside the bundle; Cargo waits until the app quits. Headless
 `--check-*` probes and `--build-info` keep direct stdout and exit status.
 On an interactive Windows desktop, run
 `./scripts/test-windows-activation.ps1 -BinaryPath C:\path\to\newport.exe`
 to check close-to-tray and second-instance activation using a disposable profile.
-Offline asset/terminal generators remain in
-[the UI scripts package](../newport-gpui/scripts/README.md); the desktop does not
-install those npm dependencies.

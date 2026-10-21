@@ -141,7 +141,7 @@ fn up(services: &[&str], force_recreate: bool) -> ComposeAction {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn project_view_reports_cli_files_services_and_config_errors() {
     let server = docker("fixture").await;
     let scratch = Scratch::new(&server).await;
@@ -245,7 +245,7 @@ async fn project_view_reports_cli_files_services_and_config_errors() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn up_recreate_scale_build_pull_and_down() {
     let server = docker("fixture").await;
     let scratch = Scratch::new(&server).await;
@@ -352,7 +352,7 @@ async fn up_recreate_scale_build_pull_and_down() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn one_job_per_project_streaming_and_cancel() {
     let server = docker("fixture").await;
     let scratch = Scratch::new(&server).await;

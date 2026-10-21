@@ -247,7 +247,7 @@ mod remote_tests {
         };
 
         #[tokio::test]
-        #[ignore = "Requires npm run test:remote and real OpenSSH"]
+        #[ignore = "Requires cargo xtask test remote and real OpenSSH"]
         async fn native_client_commit_recovery_and_logs() {
             commit_across_runtime_change(false).await;
         }

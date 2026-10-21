@@ -363,7 +363,7 @@ async fn backend_crash_recovers_upload_staging() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote; replaces the disposable server agent"]
+#[ignore = "Requires cargo xtask test remote; replaces the disposable server agent"]
 async fn services_require_explicit_install_and_preserve_damaged_installations() {
     let session = ExecSession::connect(&server()).await.unwrap();
     let services = || {
@@ -456,7 +456,7 @@ async fn services_require_explicit_install_and_preserve_damaged_installations() 
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn clipboard_copy_during_transfer_rejects_late_old_response() {
     let session = ExecSession::connect(&server()).await.unwrap();
     let mut stream = agent(&session).await;
@@ -489,7 +489,7 @@ async fn clipboard_copy_during_transfer_rejects_late_old_response() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn clipboard_concurrent_readers_share_one_request() {
     let session = ExecSession::connect(&server()).await.unwrap();
     let mut stream = agent(&session).await;
@@ -511,7 +511,7 @@ async fn clipboard_concurrent_readers_share_one_request() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn crashed_agent_restarts_without_serving_old_clipboard() {
     let session = ExecSession::connect(&server()).await.unwrap();
     crate::agent::install(&session).await.unwrap();
@@ -553,7 +553,7 @@ async fn crashed_agent_restarts_without_serving_old_clipboard() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn cancelled_upload_cleans_staging_and_can_be_retried() {
     use crate::files::{Operations, transfer};
     let session = ExecSession::connect(&server()).await.unwrap();
@@ -613,7 +613,7 @@ async fn cancelled_upload_cleans_staging_and_can_be_retried() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn cancelled_download_preserves_destination_and_removes_partial_file() {
     use crate::files::transfer;
     let session = ExecSession::connect(&server()).await.unwrap();
@@ -662,7 +662,7 @@ async fn cancelled_download_preserves_destination_and_removes_partial_file() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn agent_upgrade_and_bad_upload_preserve_working_installation() {
     let session = ExecSession::connect(&server()).await.unwrap();
     crate::agent::install(&session).await.unwrap();
@@ -711,7 +711,7 @@ async fn agent_upgrade_and_bad_upload_preserve_working_installation() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn discovery_and_unavailable_capabilities_report_real_server_state() {
     let server = super::installed_server(
         "NEWPORT_TEST_SSH_PORT",
@@ -744,7 +744,7 @@ async fn discovery_and_unavailable_capabilities_report_real_server_state() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn disk_full_reports_retryable_error_and_recovers_after_space_is_freed() {
     let session = ExecSession::connect(&server()).await.unwrap();
     crate::agent::install(&session).await.unwrap();
@@ -856,7 +856,7 @@ async fn http(port: u16) {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn persistent_tunnel_reconnects_after_real_ssh_disconnect_and_stop_cancels_retry() {
     use crate::{
         manager::Manager,
@@ -907,7 +907,7 @@ async fn persistent_tunnel_reconnects_after_real_ssh_disconnect_and_stop_cancels
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn changing_local_file_during_upload_does_not_publish_partial_content() {
     use crate::files::{Operations, transfer};
     use std::{
@@ -956,7 +956,7 @@ async fn changing_local_file_during_upload_does_not_publish_partial_content() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn changing_remote_file_during_download_preserves_local_destination() {
     use crate::files::transfer;
     let session = ExecSession::connect(&server()).await.unwrap();

@@ -329,32 +329,32 @@ async fn restart(backend: Backend) {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn x11_arboard_sequence_text_images_empty_and_compressed_chunks() {
     sequence(Backend::X11).await;
 }
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn wayland_arboard_sequence_text_images_empty_and_compressed_chunks() {
     sequence(Backend::Wayland).await;
 }
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn x11_arboard_rejects_superseded_image() {
     superseded_image(Backend::X11).await;
 }
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn wayland_arboard_rejects_superseded_image() {
     superseded_image(Backend::Wayland).await;
 }
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn x11_arboard_restart_does_not_return_stale_pixels() {
     restart(Backend::X11).await;
 }
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn wayland_arboard_restart_does_not_return_stale_pixels() {
     restart(Backend::Wayland).await;
 }

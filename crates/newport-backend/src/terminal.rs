@@ -500,7 +500,7 @@ mod tests {
         .unwrap()
     }
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh; runs a real Bash PTY in an isolated HOME"]
+    #[ignore = "Run with cargo xtask test ssh; runs a real Bash PTY in an isolated HOME"]
     async fn interactive_pty_input_resize_interrupt_exit_and_close() {
         let sessions = Sessions::default();
         let server = fixture();
@@ -616,7 +616,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- terminal::tests"]
+    #[ignore = "Run with cargo xtask test ssh -- terminal::tests"]
     async fn twelve_terminals_keep_independent_connections_while_app_session_slots_are_full() {
         let sessions = Sessions::default();
         let server = fixture();
@@ -703,7 +703,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- terminal::tests"]
+    #[ignore = "Run with cargo xtask test ssh -- terminal::tests"]
     async fn terminals_use_dedicated_transports_without_needle_and_close_only_their_shell() {
         let sessions = Sessions::default();
         let mut server = fixture();
@@ -764,7 +764,7 @@ mod tests {
         registry.shutdown().await;
     }
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh; runs a real Bash PTY in an isolated HOME"]
+    #[ignore = "Run with cargo xtask test ssh; runs a real Bash PTY in an isolated HOME"]
     async fn interrupted_terminal_reconnects_with_a_fresh_shell() {
         let sessions = Sessions::default();
         let server = fixture();

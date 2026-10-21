@@ -410,7 +410,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- ssh::exec::tests::session_capacity"]
+    #[ignore = "Run with cargo xtask test ssh -- ssh::exec::tests::session_capacity"]
     async fn session_capacity_concurrent_sftp_uses_one_slot_and_replaces_closed_stream() {
         let session = std::sync::Arc::new(
             ExecSession::connect(&super::super::integration_tests::server())
@@ -467,7 +467,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- ssh::exec::tests::session_capacity"]
+    #[ignore = "Run with cargo xtask test ssh -- ssh::exec::tests::session_capacity"]
     async fn session_capacity_waits_for_release_and_cancellation_preserves_transport() {
         let session = std::sync::Arc::new(
             ExecSession::connect(&super::super::integration_tests::server())
@@ -522,7 +522,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- session_capacity"]
+    #[ignore = "Run with cargo xtask test ssh -- session_capacity"]
     async fn session_capacity_cancelled_exec_releases_its_slot() {
         let session = std::sync::Arc::new(
             ExecSession::connect(&super::super::integration_tests::server())
@@ -572,7 +572,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- ssh::exec::tests::session_capacity"]
+    #[ignore = "Run with cargo xtask test ssh -- ssh::exec::tests::session_capacity"]
     async fn session_capacity_reclaims_idle_git_and_keeps_active_workers() {
         struct Identity;
         impl crate::git::ClientIdentity for Identity {

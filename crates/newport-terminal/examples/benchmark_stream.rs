@@ -1,5 +1,5 @@
 //! CPU-only terminal parsing and viewport capture; no GPUI, GPU, IPC, or SSH.
-//! Run through scripts/with-ghostty.mjs with cargo run --release.
+//! Run with `cargo xtask env -- cargo run --release`.
 use newport_terminal::Engine;
 use std::{hint::black_box, time::Instant};
 

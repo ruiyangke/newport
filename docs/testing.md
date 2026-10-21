@@ -8,22 +8,23 @@ credential access, or a successful signed upgrade.
 ## Automated suites
 
 Run commands from the repository root. Native builds use the pinned Rust and
-Ghostty toolchains; the npm commands supply the Ghostty wrapper where needed.
+Ghostty toolchains; `cargo xtask` supplies the Ghostty environment where needed.
+Every command is described in [tools/xtask](../tools/xtask/README.md).
 
 | Command | Coverage / requirements |
 | --- | --- |
-| `npm run check:rust` | Desktop crates: formatting, Clippy, and tests |
-| `npm run check:agent` | Linux agent formatting, Clippy, and tests |
-| `npm run check:harness` | Native/remote harness checks |
-| `npm run test:tooling` | Release scripts, resources, installers, and manifests |
-| `npm run test:ssh` | Disposable SSH fixture, terminal, file, and RPC operations |
-| `npm run test:remote` | Docker/Testcontainers with real OpenSSH and remote services |
-| `npm run test:git-contract` | Real agent Git responses through the native validators |
-| `npm run test:git-cli-contract` | Agent Git CLI responses through the native validators |
-| `npm run test:native` | Profile/preferences/metrics, resource staging, and native lifecycle |
-| `npm run test:native -- --headless` | Lifecycle checks without a GUI session |
+| `cargo xtask check rust` | Desktop crates: formatting, Clippy, and tests |
+| `cargo xtask check agent` | Linux agent formatting, Clippy, and tests |
+| `cargo xtask check xtask` | Build, packaging, release and harness tooling, with its unit tests |
+| `cargo xtask test ssh` | Disposable SSH fixture, terminal, file, and RPC operations |
+| `cargo xtask test remote` | Docker/Testcontainers with real OpenSSH and remote services |
+| `cargo xtask test https` | Agent Git over HTTPS against a local `git http-backend` |
+| `cargo xtask test git-contract` | Real agent Git responses through the native validators |
+| `cargo xtask test git-cli-contract` | Agent Git CLI responses through the native validators |
+| `cargo xtask test native` | Profile/preferences/metrics, resource staging, and native lifecycle |
+| `cargo xtask test native --headless` | Lifecycle checks without a GUI session |
 
-`npm run check` combines static checks and unit and tooling suites. Remote
+`cargo xtask check` runs all three checks. Remote
 checks use OrbStack by default; set `NEWPORT_TEST_DOCKER_CONTEXT=default` for the
 standard Docker context. These fixtures mutate disposable test servers, not saved
 production servers.
@@ -31,15 +32,15 @@ production servers.
 ## Native behavior and rendering
 
 ```sh
-node scripts/build-grammars.mjs
-node scripts/with-ghostty.mjs cargo test --locked -p newport-gpui --lib
+cargo xtask grammars
+cargo xtask env -- cargo test --locked -p newport-gpui --lib
 ```
 
-Stage PDFium on Windows with `node scripts/stage-pdfium.mjs`. For lifecycle tests
+Stage PDFium on Windows with `cargo xtask pdfium`. For lifecycle tests
 alone, after staging resources:
 
 ```sh
-node scripts/with-ghostty.mjs cargo test --locked -p newport-app --test standalone_lifecycle -- --ignored --nocapture
+cargo xtask env -- cargo test --locked -p newport-app --test standalone_lifecycle -- --ignored --nocapture
 ```
 
 Lifecycle fixtures cover encrypted profile retention, ownership exclusion,
@@ -54,20 +55,18 @@ the commit, build profile, platform, and fixture size with each result.
 
 ## Signing and installation checks
 
-The opt-in macOS Keychain test uses a disposable signed/provisioned bundle:
+The opt-in macOS Keychain test signs a disposable provisioned bundle with the
+[local signing settings](../tools/xtask/README.md#local-signing):
 
 ```sh
-APPLE_SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)' \
-NEWPORT_PROVISIONING_PROFILE=/absolute/path/Newport.provisionprofile \
-NEWPORT_SIGNING_ENTITLEMENTS=/absolute/path/Newport.entitlements \
-node scripts/test-macos-keychain.mjs
+cargo xtask test keychain
 ```
 
 It checks protected credential persistence and isolation using uniquely named
 test accounts, then removes them. It does not establish access to a real user's
 vault or certify an upgrade. Never log credentials or private key contents.
 
-Packaging tests live in `scripts/ci/`. The opt-in `newport-release` integration
+Packaging and release tooling tests are the `tools/xtask` unit tests. The opt-in `newport-release` integration
 test `native_package_runtime` exercises staged packages on the matching host;
 read its required environment before running it. Confirm native Windows x64 and
 ARM64 separately. Emulation is useful evidence but not a replacement for native

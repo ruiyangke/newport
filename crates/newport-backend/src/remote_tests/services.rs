@@ -40,7 +40,7 @@ async fn settled(server: &Server, ready: impl Fn(&Value) -> bool) -> Value {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn snapshot_reports_services_timers_and_the_user_manager() {
     let server = systemd("fixture").await;
     let snapshot = settled(&server, |s| {
@@ -124,7 +124,7 @@ async fn snapshot_reports_services_timers_and_the_user_manager() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn logs_follow_a_cursor_and_unit_files_include_drop_ins() {
     let server = systemd("fixture").await;
     let demo = Some("newport-demo.service");
@@ -309,7 +309,7 @@ async fn logs_follow_a_cursor_and_unit_files_include_drop_ins() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn actions_use_sudo_or_ask_for_a_password() {
     let server = systemd("fixture").await;
     let demo = "newport-demo.service";

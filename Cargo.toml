@@ -12,7 +12,7 @@ members = [
 ]
 default-members = ["crates/newport-domain", "crates/newport-client", "crates/newport-platform", "crates/newport-backend", "crates/newport-gpui"]
 # Linux agent and test tooling have independent dependency graphs and lockfiles.
-exclude = ["tools/agent", "tools/test-harness", "tests/remote/fixture", "tests/remote/arboard-probe"]
+exclude = ["tools/agent", "tools/xtask", "tests/remote/fixture", "tests/remote/arboard-probe"]
 resolver = "3"
 
 [profile.dev]

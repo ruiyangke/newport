@@ -830,7 +830,7 @@ mod connection_tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- git::connection_tests::service_owner"]
+    #[ignore = "Run with cargo xtask test ssh -- git::connection_tests::service_owner"]
     async fn removal_drain_waits_for_admitted_work_and_leaves_ssh_alive() {
         let directory = tempfile::tempdir().unwrap();
         let server: crate::model::Server = serde_json::from_value(json!({
@@ -880,7 +880,7 @@ mod connection_tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- git::connection_tests::service_owner"]
+    #[ignore = "Run with cargo xtask test ssh -- git::connection_tests::service_owner"]
     async fn service_owner_shares_channels_and_fences_interrupted_startup() {
         let directory = tempfile::tempdir().unwrap();
         let server: crate::model::Server = serde_json::from_value(json!({

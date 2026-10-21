@@ -11,7 +11,7 @@ Needle bundled with the desktop. Ordinary feature access starts the installed bu
 From the repository root, with Rust and Docker installed:
 
 ```sh
-npm run build:agent
+cargo xtask agents
 cargo test --locked --manifest-path tools/agent/Cargo.toml
 ```
 

@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- ports::tests::session_query"]
+    #[ignore = "Run with cargo xtask test ssh -- ports::tests::session_query"]
     async fn session_query_without_the_agent_says_it_is_needed() {
         let server = serde_json::from_value(json!({
             "id":uuid::Uuid::new_v4(), "name":"Query SSH fixture", "sshUser":"fixture",

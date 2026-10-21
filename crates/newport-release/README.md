@@ -19,9 +19,9 @@ key through `NEWPORT_SIGNING_PRIVATE_KEY` or `NEWPORT_SIGNING_PRIVATE_KEY_PATH`,
 and its password through `NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD` (empty by default).
 Keys and passwords are never command-line arguments; this tool never prompts.
 
-The packaging scripts use `scripts/sign-update.mjs`, which selects
-`resources/updater.json` as the trust root and strips updater credentials before
-building the tool.
+`cargo xtask release` signs through this crate as a library, with
+`resources/updater.json` as the trust root. The release workflow compiles the
+tool before any step receives updater credentials.
 
 This authenticates updater packages, not OS code signatures. macOS Developer ID
 signing/notarization, Windows distribution acceptance, profile upgrades and
@@ -32,7 +32,7 @@ rollback remain separate release requirements. No update is published here.
 `newport-release needle <agent-directory> <version> <public-key-file>` signs a
 manifest binding both Linux payload hashes to one release version. The output
 is `needle-release.json`; its base64 envelope preserves the exact signed bytes.
-`scripts/sign-needle-release.mjs` verifies the existing CI artifact before
+`cargo xtask release sign-needle` verifies the existing CI artifact before
 signing with the same trust root and credential isolation as desktop updates.
 The release workflow records the resulting artifact and supplies it to both
 desktop builds.

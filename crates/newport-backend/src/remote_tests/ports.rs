@@ -68,7 +68,7 @@ fn on(ports: &[DiscoveredPort], port: u16) -> &DiscoveredPort {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote and real OpenSSH"]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
 async fn discovery_attributes_listeners_to_projects_and_worktrees() {
     let base = run(LAYOUT).await;
     let shop = format!("{base}/shop");
@@ -132,7 +132,7 @@ async fn discovery_attributes_listeners_to_projects_and_worktrees() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote and real OpenSSH"]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
 async fn reverse_forward_serves_this_machine_on_the_server() {
     // The service on "this Mac": echoes what it receives.
     let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -190,7 +190,7 @@ async fn reverse_forward_serves_this_machine_on_the_server() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote and real OpenSSH"]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
 async fn local_forward_reaches_a_discovered_port() {
     // Discover a listener, then forward to exactly what discovery reported.
     run(

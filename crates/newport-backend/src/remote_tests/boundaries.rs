@@ -2,7 +2,7 @@
 use super::*;
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn destination_health_distinguishes_unavailable_service_from_broken_ssh() {
     use crate::model::DestinationStatus;
     let server = server();
@@ -42,7 +42,7 @@ async fn destination_health_distinguishes_unavailable_service_from_broken_ssh() 
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn browser_only_rejects_clipboard_and_unsafe_urls_but_accepts_matching_ack() {
     let session = ExecSession::connect(&server()).await.unwrap();
     crate::agent::install(&session).await.unwrap();
@@ -112,7 +112,7 @@ async fn browser_only_rejects_clipboard_and_unsafe_urls_but_accepts_matching_ack
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn callback_leases_are_bounded_and_rollback_releases_port() {
     let session = ExecSession::connect(&server()).await.unwrap();
     let mut callbacks = session.callbacks();
@@ -170,7 +170,7 @@ async fn callback_leases_are_bounded_and_rollback_releases_port() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn sftp_permission_failure_is_reported_without_harming_session() {
     use crate::files::{Operations, transfer};
     let server = server();
@@ -214,7 +214,7 @@ async fn sftp_permission_failure_is_reported_without_harming_session() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn port_range_bind_conflict_rolls_back_without_stealing_existing_listener() {
     let (first, second) = loop {
         let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -254,7 +254,7 @@ async fn port_range_bind_conflict_rolls_back_without_stealing_existing_listener(
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn temporary_callback_does_not_reconnect_a_closed_ssh_session() {
     let server = server();
     let control = ExecSession::connect(&server).await.unwrap();
@@ -319,7 +319,7 @@ async fn temporary_callback_does_not_reconnect_a_closed_ssh_session() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn file_listing_and_preview_enforce_types_and_size_limits() {
     use crate::files;
     let server = server();
