@@ -15,8 +15,7 @@ playwright-report/
 __pycache__/
 
 # Machine-specific development signing
-.cargo/config.toml
-
+.cargo/signing.toml
 .cargo/*.provisionprofile
 .cargo/*.entitlements
 
@@ -30,5 +29,5 @@ __pycache__/
 *.provisionprofile
 
 tests/remote/arboard-probe/target/
-tools/test-harness/target/
+tools/xtask/target/
 tests/remote/fixture/target/

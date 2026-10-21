@@ -5,6 +5,8 @@ edition = "2021"
 publish = false
 license = "MIT"
 
+[workspace]
+
 [dependencies]
 # Match the agent's existing arboard compatibility suite, without patching arboard.
 arboard = { version = "=3.6.1", default-features = false, features = ["image-data", "wayland-data-control"] }

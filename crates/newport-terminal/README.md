@@ -8,14 +8,14 @@ Newport SSH session sends and receives bytes.
 ## Build
 
 ```sh
-node scripts/with-ghostty.mjs cargo test --locked -p newport-terminal
-node scripts/with-ghostty.mjs cargo clippy --locked -p newport-terminal --all-targets -- -D warnings
+cargo xtask env -- cargo test --locked -p newport-terminal
+cargo xtask env -- cargo clippy --locked -p newport-terminal --all-targets -- -D warnings
 ```
 
 For an optimized CPU stream benchmark:
 
 ```sh
-node scripts/with-ghostty.mjs cargo run --locked --release -p newport-terminal --example benchmark_stream
+cargo xtask env -- cargo run --locked --release -p newport-terminal --example benchmark_stream
 ```
 
 It reports three runs each of ASCII, ANSI-styled, and Unicode output, at least

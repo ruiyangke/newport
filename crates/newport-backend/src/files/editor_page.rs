@@ -147,7 +147,7 @@ pub async fn read_document(
 mod tests {
     use super::*;
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- files::editor"]
+    #[ignore = "Run with cargo xtask test ssh -- files::editor"]
     async fn large_files_are_bounded_readonly_and_complete_over_sftp() {
         let server: crate::model::Server = serde_json::from_value(serde_json::json!({
             "id":Uuid::new_v4(),"name":"Paged editor fixture","sshUser":"fixture","sshHost":"127.0.0.1",

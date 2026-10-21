@@ -471,7 +471,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
     use sha2::{Digest, Sha256};
-    let report = json!({"transport":"local stdio, production MessagePack v4 codec","scope":"Disposable CLI read workloads; fixture construction excluded. Write correctness is covered by test-git-cli-contract.mjs.","simulatedLatencyMs":latency,"latencyModel":"Synchronous delay before every outbound frame; ACK pacing included, not a network throughput model","agentSha256":Sha256::digest(std::fs::read(&binary)?).iter().map(|b|format!("{b:02x}")).collect::<String>(),"size":size,"dimensions":dimensions,"samples":samples});
+    let report = json!({"transport":"local stdio, production MessagePack v4 codec","scope":"Disposable CLI read workloads; fixture construction excluded. Write correctness is covered by cargo xtask test git-cli-contract.","simulatedLatencyMs":latency,"latencyModel":"Synchronous delay before every outbound frame; ACK pacing included, not a network throughput model","agentSha256":Sha256::digest(std::fs::read(&binary)?).iter().map(|b|format!("{b:02x}")).collect::<String>(),"size":size,"dimensions":dimensions,"samples":samples});
     if let Some(parent) = Path::new(output)
         .parent()
         .filter(|p| !p.as_os_str().is_empty())

@@ -329,7 +329,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Requires npm run test:remote and real OpenSSH"]
+    #[ignore = "Requires cargo xtask test remote and real OpenSSH"]
     async fn remote_terminal_link_forwards_once_reuses_and_reaches_http() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let directory = tempfile::tempdir().unwrap();

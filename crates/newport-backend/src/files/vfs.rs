@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- files::vfs"]
+    #[ignore = "Run with cargo xtask test ssh -- files::vfs"]
     async fn metadata_poll_fallback_detects_create_replace_delete_and_releases() {
         let server:crate::model::Server=serde_json::from_value(json!({"id":Uuid::new_v4(),"name":"VFS fixture",
             "sshUser":"fixture","sshHost":"127.0.0.1","sshPort":std::env::var("NEWPORT_TEST_SSH_PORT").unwrap().parse::<u16>().unwrap(),

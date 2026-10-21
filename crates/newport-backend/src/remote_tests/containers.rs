@@ -119,7 +119,7 @@ async fn state_of(server: &Server, name: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn snapshot_reports_state_health_ports_compose_and_figures() {
     let server = docker("fixture").await;
     let scratch = Scratch::new(&server).await;
@@ -240,7 +240,7 @@ async fn snapshot_reports_state_health_ports_compose_and_figures() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn inspect_reports_env_mounts_networks_and_labels() {
     let server = docker("fixture").await;
     let scratch = Scratch::new(&server).await;
@@ -354,7 +354,7 @@ fn messages(page: &Value) -> Vec<String> {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn logs_page_tail_streams_and_project_merge() {
     let server = docker("fixture").await;
     let scratch = Scratch::new(&server).await;
@@ -563,7 +563,7 @@ async fn logs_page_tail_streams_and_project_merge() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn actions_change_state_and_pass_on_engine_errors() {
     let server = docker("fixture").await;
     let scratch = Scratch::new(&server).await;
@@ -677,7 +677,7 @@ async fn actions_change_state_and_pass_on_engine_errors() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn project_action_requires_the_reviewed_containers() {
     let server = docker("fixture").await;
     let scratch = Scratch::new(&server).await;
@@ -813,7 +813,7 @@ async fn project_action_requires_the_reviewed_containers() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn remove_refuses_running_containers_and_keeps_volumes() {
     let server = docker("fixture").await;
     let scratch = Scratch::new(&server).await;
@@ -868,7 +868,7 @@ async fn remove_refuses_running_containers_and_keeps_volumes() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn disk_usage_and_prune() {
     let server = docker("fixture").await;
     let scratch = Scratch::new(&server).await;
@@ -988,7 +988,7 @@ async fn disk_usage_and_prune() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn an_account_without_docker_access_is_told_why() {
     let error = containers::snapshot(&crate::remote_tests::owner(&docker("outsider").await))
         .await

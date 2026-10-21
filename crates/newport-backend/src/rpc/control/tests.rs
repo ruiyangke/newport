@@ -532,7 +532,7 @@ mod remote_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
-    #[ignore = "Requires npm run test:remote and real OpenSSH"]
+    #[ignore = "Requires cargo xtask test remote and real OpenSSH"]
     async fn native_forward_lifecycle_reaches_real_http_and_releases_listener() {
         let fixture = Fixture::start().await;
         let mut server = server();

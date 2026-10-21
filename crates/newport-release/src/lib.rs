@@ -5,4 +5,6 @@ pub mod needle;
 #[cfg(feature = "signing")]
 mod signing;
 #[cfg(feature = "signing")]
+pub use minisign::SecretKey;
+#[cfg(feature = "signing")]
 pub use signing::{secret_key, sign, sign_needle};

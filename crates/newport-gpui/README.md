@@ -43,19 +43,18 @@ a service action, Git mutation, or terminal command.
 Run from the repository root with an isolated development profile:
 
 ```sh
-node scripts/build-grammars.mjs
-NEWPORT_DATA_DIR=/absolute/path/to/test-profile npm run dev
-node scripts/with-ghostty.mjs cargo test --locked -p newport-gpui --lib
+cargo xtask dev
+cargo xtask env -- cargo test --locked -p newport-gpui --lib
 ```
 
 The wrapper supplies the pinned Ghostty build environment. On Windows, stage
-PDFium with `node scripts/stage-pdfium.mjs` before preview checks.
+PDFium with `cargo xtask pdfium` before preview checks.
 
 For rendering benchmarks:
 
 ```sh
-node scripts/build-grammars.mjs --release
-node scripts/with-ghostty.mjs cargo test --locked --release -p newport-gpui --lib benchmark_ -- --ignored --nocapture --test-threads=1
+cargo xtask grammars --release
+cargo xtask env -- cargo test --locked --release -p newport-gpui --lib benchmark_ -- --ignored --nocapture --test-threads=1
 ```
 
 The `input_focus_probe` and `terminal_render_probe` examples are manual native

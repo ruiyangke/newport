@@ -4,7 +4,7 @@ use crate::{cockpit, ssh};
 use tokio::time::{Duration, sleep};
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote and disposable Linux OpenSSH"]
+#[ignore = "Requires cargo xtask test remote and disposable Linux OpenSSH"]
 async fn overview_query_records_in_background_without_profile_or_service_lock_and_clear_restarts_cleanly()
  {
     use crate::{commands, manager, metrics_db::MetricsDb, metrics_sampler, profile::Store};
@@ -77,7 +77,7 @@ async fn overview_query_records_in_background_without_profile_or_service_lock_an
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote and real OpenSSH"]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
 async fn overview_comes_from_the_agent_with_recent_process_cpu() {
     let server =
         super::installed_server("NEWPORT_TEST_SSH_PORT", "Disposable metrics", "fixture").await;
@@ -142,7 +142,7 @@ async fn overview_comes_from_the_agent_with_recent_process_cpu() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote and real OpenSSH"]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
 async fn monitoring_requires_explicit_install_without_changing_shell_integration() {
     let mut server = server();
     server.agent_install_approved = false;

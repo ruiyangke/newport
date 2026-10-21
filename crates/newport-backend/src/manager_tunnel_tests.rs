@@ -591,7 +591,7 @@ async fn shutdown_drains_pending_stops_and_rejects_new_forwarding() {
 }
 
 #[tokio::test]
-#[ignore = "Run with npm run test:ssh and its ephemeral SSH fixture"]
+#[ignore = "Run with cargo xtask test ssh and its ephemeral SSH fixture"]
 async fn command_edits_replace_live_forwards_and_release_listeners() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     async fn connected(state: &Shared, id: Uuid) {

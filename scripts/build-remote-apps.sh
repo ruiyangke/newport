@@ -143,35 +143,15 @@ if [ -n "$duplicates" ]; then
     exit 1
 fi
 # shellcheck disable=SC2086
-NEWPORT_REMOTE_APPS=1 node scripts/with-ghostty.mjs cargo build $patch -p newport-app "$@"
+NEWPORT_REMOTE_APPS=1 cargo xtask env -- cargo build $patch -p newport-app "$@"
 # The private crates are only needed to compile; they are out of the
 # manifests again before the app starts.
 finish
 [ "$run" = 1 ] || exit 0
 
-# Launch as `cargo run` would: through the configured runner, with the
-# environment the local Cargo configuration sets for it.
+# Launch as `cargo run` would, through the development runner.
 profile=debug
 for argument in "$@"; do
     [ "$argument" = --release ] && profile=release
 done
-binary="${CARGO_TARGET_DIR:-$newport/target}/$profile/newport"
-if [ -f .cargo/config.toml ]; then
-    # `NAME = "value"`, or `NAME = { value = "path", relative = true }`
-    # (relative to this checkout), in the [env] table.
-    eval "$(awk -v root="$newport" '
-        /^\[/ { env = ($0 == "[env]"); next }
-        env && /^[A-Z_][A-Z0-9_]* *= *\{/ {
-            name = $1
-            value = $0; sub(/.*value *= *"/, "", value); sub(/".*/, "", value)
-            if ($0 ~ /relative *= *true/) value = root "/" value
-            printf "export %s=\x27%s\x27\n", name, value
-            next
-        }
-        env && /^[A-Z_][A-Z0-9_]* *= *"/ {
-            name = $1
-            value = $0; sub(/^[^"]*"/, "", value); sub(/"[^"]*$/, "", value)
-            printf "export %s=\x27%s\x27\n", name, value
-        }' .cargo/config.toml)"
-fi
-exec ./scripts/run-signed-dev.sh "$binary"
+exec cargo xtask dev-run "${CARGO_TARGET_DIR:-$newport/target}/$profile/newport"

@@ -1,5 +1,5 @@
 //! Real Linux feature checks, owned by the standalone backend.
-//! Run serially with `npm run test:remote`; the Rust harness owns the fixtures.
+//! Run serially with `cargo xtask test remote`; the Rust harness owns the fixtures.
 use crate::{
     agent::wire,
     model::{Server, Tunnel},
@@ -61,7 +61,7 @@ async fn installed_server(port_variable: &str, name: &str, user: &str) -> Server
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote and real OpenSSH"]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
 async fn authentication_exec_sftp_and_metrics() {
     let mut server = server();
     let session = ExecSession::connect(&server).await.unwrap();
@@ -144,7 +144,7 @@ async fn authentication_exec_sftp_and_metrics() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote and real OpenSSH"]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
 async fn forwarding_roundtrip_and_shutdown() {
     let server = server();
     let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -177,7 +177,7 @@ async fn forwarding_roundtrip_and_shutdown() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote and real OpenSSH"]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
 async fn deploy_reinstall_and_agent_protocol() {
     let server = server();
     let session = ExecSession::connect(&server).await.unwrap();
@@ -279,7 +279,7 @@ async fn deploy_reinstall_and_agent_protocol() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote and real OpenSSH"]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
 async fn interactive_shell_resize_and_exit() {
     use crate::terminal::{Event, Input};
     let (input, receiver) = tokio::sync::mpsc::channel(8);
@@ -323,7 +323,7 @@ async fn interactive_shell_resize_and_exit() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote and real OpenSSH"]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
 async fn changed_host_key_is_rejected_and_restoration_recovers() {
     struct Restore(std::path::PathBuf, Vec<u8>);
     impl Drop for Restore {
@@ -354,7 +354,7 @@ async fn changed_host_key_is_rejected_and_restoration_recovers() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn shell_setup_is_idempotent_and_respects_protected_files() {
     let session = ExecSession::connect(&server()).await.unwrap();
     crate::agent::install(&session).await.unwrap();
@@ -400,7 +400,7 @@ async fn receive(stream: &mut (impl tokio::io::AsyncRead + Unpin), kind: u8) -> 
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn demand_clipboard_compression_freshness_and_failed_transfer_recovery() {
     use std::io::Write;
     let session = ExecSession::connect(&server()).await.unwrap();
@@ -486,7 +486,7 @@ async fn demand_clipboard_compression_freshness_and_failed_transfer_recovery() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn files_transfer_roundtrip_and_existing_file_protection() {
     use crate::files::{Operations, transfer};
     use std::sync::Arc;
@@ -533,7 +533,7 @@ async fn files_transfer_roundtrip_and_existing_file_protection() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn browser_callback_http_roundtrip_conflict_and_cleanup() {
     let session = ExecSession::connect(&server()).await.unwrap();
     let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -604,7 +604,7 @@ async fn browser_callback_http_roundtrip_conflict_and_cleanup() {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote"]
+#[ignore = "Requires cargo xtask test remote"]
 async fn native_x11_and_wayland_clients_fetch_png_on_demand() {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use sha2::{Digest, Sha256};

@@ -148,7 +148,7 @@ async fn run(session: &ExecSession, command: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "Requires npm run test:remote and real OpenSSH"]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
 async fn language_servers_start_in_the_worktree_environment() {
     let server = installed_server("NEWPORT_TEST_SSH_PORT", "Language servers", "fixture").await;
     let session = ExecSession::connect(&server).await.unwrap();

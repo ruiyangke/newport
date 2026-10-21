@@ -215,7 +215,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh"]
+    #[ignore = "Run with cargo xtask test ssh"]
     async fn callback_uses_existing_ssh_and_releases_listener_on_drop() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let session =

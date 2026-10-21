@@ -1,4 +1,4 @@
-//! Opt-in local TLS fixture, started by scripts/test-git-https.mjs.
+//! Opt-in local TLS fixture, started by `cargo xtask test https`.
 use newport_agent::git::protocol::{self, Message, Path as WirePath};
 use serde_json::{json, Value};
 use std::{
@@ -54,7 +54,7 @@ fn git(root: &Path, args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap().trim().into()
 }
 #[test]
-#[ignore = "Run with node scripts/test-git-https.mjs; disposable authenticated HTTPS fixture"]
+#[ignore = "Run with cargo xtask test https; disposable authenticated HTTPS fixture"]
 fn authenticated_https_respects_repository_configuration() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

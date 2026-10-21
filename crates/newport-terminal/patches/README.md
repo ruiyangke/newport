@@ -5,7 +5,7 @@ These are temporary source fixes, not a separate terminal parser. Keep them
 small enough to review upstream and remove each when the pinned release
 contains an equivalent correction.
 
-`scripts/prepare-ghostty-source.mjs` applies the numbered patches to an archive
+`cargo xtask env` applies the numbered patches to an archive
 of the pinned Git tree. The original checkout stays unchanged. The patch hashes
 form part of the output directory name, so changing a patch also invalidates
 the Rust binding's native build through `GHOSTTY_SOURCE_DIR`. Nested CI and

@@ -1567,7 +1567,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- server_session::tests"]
+    #[ignore = "Run with cargo xtask test ssh -- server_session::tests"]
     async fn removal_admission_keeps_existing_ssh_transport_usable() {
         let registry = Registry::default();
         let mut server = profile();
@@ -1622,7 +1622,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- server_session::tests"]
+    #[ignore = "Run with cargo xtask test ssh -- server_session::tests"]
     async fn shared_runtime_negotiates_once_and_does_not_serialize_feature_channels() {
         let registry = Registry::default();
         let mut server = profile();
@@ -1675,7 +1675,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- server_session::tests"]
+    #[ignore = "Run with cargo xtask test ssh -- server_session::tests"]
     async fn supervisor_recovers_lost_transport_once_for_all_services_with_backoff() {
         let registry = Registry::default();
         let mut server = profile();
@@ -1734,7 +1734,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- server_session::tests"]
+    #[ignore = "Run with cargo xtask test ssh -- server_session::tests"]
     async fn background_inspection_only_uses_connected_transports() {
         let directory = tempfile::tempdir().unwrap();
         let mut manager =
@@ -1817,7 +1817,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- server_session::tests"]
+    #[ignore = "Run with cargo xtask test ssh -- server_session::tests"]
     async fn shared_transport_survives_lease_drop_and_channel_failure() {
         let registry = Registry::default();
         let mut server = profile();
@@ -1885,7 +1885,7 @@ mod tests {
         assert!(approved.is_closed());
     }
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- server_session::tests"]
+    #[ignore = "Run with cargo xtask test ssh -- server_session::tests"]
     async fn registration_rotation_keeps_old_channels_alive_and_bounds_overlap() {
         use crate::git::client::Client;
         let registry = Registry::default();
@@ -1961,7 +1961,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Run with npm run test:ssh -- server_session::tests"]
+    #[ignore = "Run with cargo xtask test ssh -- server_session::tests"]
     async fn saturated_worker_admission_is_retryable_without_runtime_or_transport_replacement() {
         let registry = Registry::default();
         let mut server = profile();

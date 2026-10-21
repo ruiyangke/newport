@@ -265,7 +265,7 @@ async fn native_feature_routes_preserve_validation_before_any_remote_action() {
 }
 
 #[tokio::test]
-#[ignore = "Run with npm run test:ssh"]
+#[ignore = "Run with cargo xtask test ssh"]
 async fn native_file_client_roundtrip_preserves_scope_and_cancellation() {
     let mut fixture = Fixture::start().await;
     fixture.server.ssh_port = std::env::var("NEWPORT_TEST_SSH_PORT")

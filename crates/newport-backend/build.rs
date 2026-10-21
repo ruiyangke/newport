@@ -2,7 +2,13 @@ fn main() {
     use sha2::{Digest, Sha256};
     use std::{fs, io::Write, path::Path};
     let metadata = "../../resources/agents/needle-release.json";
-    println!("cargo:rerun-if-changed={metadata}");
+    // Development builds have no signed metadata; a missing watched file would
+    // rerun this script on every build, so watch the directory it appears in.
+    if Path::new(metadata).exists() {
+        println!("cargo:rerun-if-changed={metadata}");
+    } else {
+        println!("cargo:rerun-if-changed=../../resources/agents");
+    }
     println!("cargo:rerun-if-changed=../../resources/updater.json");
     println!("cargo:rerun-if-changed=../../resources/app.json");
     println!("cargo:rerun-if-env-changed=NEWPORT_REQUIRE_NEEDLE_RELEASE");
@@ -32,7 +38,7 @@ fn main() {
         let path = format!("../../resources/agents/newport-agent-{arch}");
         assert!(
             std::path::Path::new(&path).is_file(),
-            "Run npm run build:agent, or download the verified linux-agents artifact into resources/agents before building the backend."
+            "Run cargo xtask agents, or download the verified linux-agents artifact into resources/agents before building the backend."
         );
         println!("cargo:rerun-if-changed={path}");
         let bytes = fs::read(&path).expect("Cannot read Needle payload");

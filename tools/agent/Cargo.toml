@@ -6,6 +6,8 @@ license = "MIT"
 default-run = "newport-agent"
 description = "Remote clipboard and browser agent for Newport"
 
+[workspace]
+
 [[bin]]
 name = "newport-agent"
 path = "src/main.rs"
