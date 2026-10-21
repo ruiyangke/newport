@@ -31,3 +31,6 @@ __pycache__/
 tests/remote/arboard-probe/target/
 tools/xtask/target/
 tests/remote/fixture/target/
+
+# Local Claude Code instructions
+CLAUDE.local.md
