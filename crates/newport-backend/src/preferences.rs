@@ -90,9 +90,10 @@ impl Preferences {
     }
 }
 
-/// The window's own choices: sidebar width, the icon-only sidebar and the
-/// theme. The window reads them from the file at startup and saves them here,
-/// so this process stays the file's only writer. Absent keys are unchanged.
+/// The window's own choices: sidebar width, the icon-only sidebar, the theme
+/// and whether Option is Meta in terminals. The window reads them from the
+/// file at startup and saves them here, so this process stays the file's only
+/// writer. Absent keys are unchanged.
 pub async fn set_window_preferences(state: &Preferences, values: Value) -> Result<(), String> {
     let values = values
         .as_object()
@@ -105,6 +106,7 @@ pub async fn set_window_preferences(state: &Preferences, values: Value) -> Resul
                 .is_some_and(|width| (176.0..=300.0).contains(&width)),
             "sidebarCompact" => value.is_boolean(),
             "appearance" => matches!(value.as_str(), Some("system" | "light" | "dark")),
+            "terminalOptionAsMeta" => value.is_boolean(),
             _ => false,
         };
         if !valid {

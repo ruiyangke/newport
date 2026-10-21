@@ -228,7 +228,6 @@ impl Newport {
             let id = id.clone();
             let view = view.clone();
             dialog
-                .aria_label(title.clone())
                 .title(crate::controls::dialog_title(title.clone()))
                 .w(px(480.))
                 .max_w((window.viewport_size().width - px(32.)).max(px(240.)))

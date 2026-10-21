@@ -418,10 +418,8 @@ fn service_menu_scale_opens_current_replicas_and_cancel_never_writes(cx: &mut Te
     settle(&panel, cx);
 
     click_button_id(cx, &format!("compose-service-{}-more", "e".repeat(64)));
-    assert_ne!(menu_item(cx, "Scale…").disabled(), Some(true));
     click_menu(cx, "Scale…");
     cx.update(|window, cx| assert!(window.has_active_dialog(cx)));
-    assert!(element(cx, "Scale web").visible());
     assert_eq!(element(cx, "Containers").value(), Some("2"));
     assert!(element(cx, "Run 2").visible());
     assert!(!has_menu_item(cx, "Scale…"));

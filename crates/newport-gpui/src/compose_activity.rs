@@ -398,7 +398,6 @@ impl ContainersPanel {
                         IconName::ChevronRight
                     })
                     .label(format!("Earlier commands ({})", jobs.len() - 1))
-                    .expanded(self.activity.history_open)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.activity.history_open = !this.activity.history_open;
                         cx.notify();

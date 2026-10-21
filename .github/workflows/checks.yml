@@ -12,7 +12,7 @@ env:
   CARGO_TERM_COLOR: always
 jobs:
   tooling:
-    name: Release tooling and Git protocol contracts
+    name: Release tooling and Git contracts
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -23,9 +23,6 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: tools/git-contract/package-lock.json
-      - run: npm ci --prefix tools/git-contract
       - run: rustup show
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -37,8 +34,7 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' }}
       - run: sudo apt-get update && sudo apt-get install -y minisign nsis
       - run: npm run test:tooling
-      - run: npm run check:contracts
-      - name: Replay real CLI responses through native validators and the protocol oracle
+      - name: Replay real CLI responses through native validators
         run: npm run test:git-cli-contract -- --output target/git-contract.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

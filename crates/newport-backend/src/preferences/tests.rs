@@ -385,7 +385,7 @@ async fn window_preferences_merge_validate_and_keep_other_keys() {
     set_sidebar_width(&state, 245.).await.unwrap();
     crate::preferences::set_window_preferences(
         &state,
-        json!({"sidebarCompact": true, "appearance": "dark"}),
+        json!({"sidebarCompact": true, "appearance": "dark", "terminalOptionAsMeta": false}),
     )
     .await
     .unwrap();
@@ -394,12 +394,14 @@ async fn window_preferences_merge_validate_and_keep_other_keys() {
             .unwrap();
     assert_eq!(
         stored,
-        json!({"sidebarWidth": 245.0, "sidebarCompact": true, "appearance": "dark"})
+        json!({"sidebarWidth": 245.0, "sidebarCompact": true, "appearance": "dark",
+            "terminalOptionAsMeta": false})
     );
     for invalid in [
         json!({"appearance": "blue"}),
         json!({"sidebarWidth": 999}),
         json!({"sidebarCompact": "yes"}),
+        json!({"terminalOptionAsMeta": "yes"}),
         json!({"unknown": 1}),
         json!([]),
     ] {

@@ -392,6 +392,39 @@ fn workspace_bindings_preserve_terminal_flow_control_and_history(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn tab_reaches_the_shell_instead_of_moving_focus(cx: &mut TestAppContext) {
+    cx.update(crate::navigation::install_workspace_shortcuts);
+    let peer = Peer::new();
+    let (view, cx) = connect(&peer, cx);
+    cx.simulate_keystrokes("tab shift-tab");
+    let expected = b"\t\x1b[Z";
+    wait(&view, cx, |_| peer.written().len() >= expected.len());
+    assert_eq!(peer.written(), expected);
+    cx.update(|window, cx| assert!(view.read(cx).focus.is_focused(window)));
+}
+
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn option_follows_the_option_as_meta_setting(cx: &mut TestAppContext) {
+    let peer = Peer::new();
+    let (view, cx) = connect(&peer, cx);
+    // Without a saved choice, Option is Meta.
+    cx.simulate_keystrokes("alt-f alt-b");
+    let mut expected = b"\x1bf\x1bb".to_vec();
+    wait(&view, cx, |_| peer.written().len() >= expected.len());
+    assert_eq!(peer.written(), expected);
+    cx.update(|_, cx| cx.set_global(super::OptionAsMeta(false)));
+    cx.simulate_keystrokes("alt-f ctrl-a");
+    expected.push(0x01);
+    wait(&view, cx, |_| peer.written().len() >= expected.len());
+    assert_eq!(
+        peer.written(),
+        expected,
+        "Option composes text when it is not Meta"
+    );
+}
+
+#[gpui::test]
 fn paste_shortcuts_deliver_exact_bytes_over_owned_terminal_ipc(cx: &mut TestAppContext) {
     let peer = Peer::new();
     let (view, cx) = connect(&peer, cx);

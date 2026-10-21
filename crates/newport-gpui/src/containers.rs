@@ -961,7 +961,6 @@ impl ContainersPanel {
                     } else {
                         IconName::ChevronRight
                     })
-                    .expanded(row.open)
                     .accessibility_label(format!(
                         "{} {project}",
                         if row.open { "Fold" } else { "Unfold" }

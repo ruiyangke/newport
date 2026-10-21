@@ -35,6 +35,7 @@ type ThemeSelect = SelectState<Vec<ThemeChoice>>;
 #[repr(usize)]
 enum FocusTarget {
     Theme,
+    OptionAsMeta,
     Startup,
     Update,
     Later,
@@ -65,7 +66,7 @@ struct FocusReveal {
 }
 impl FocusReveal {
     fn new<T: 'static>(scroll: ScrollHandle, window: &mut Window, cx: &mut Context<T>) -> Self {
-        let regions: Vec<_> = (0..8)
+        let regions: Vec<_> = (0..9)
             .map(|_| FocusRegion {
                 focus: cx.focus_handle().tab_stop(false),
                 measured: Rc::new(Cell::new(None)),
@@ -273,6 +274,7 @@ impl Newport {
         SettingsView {
             state,
             theme: self.settings_ui.theme.clone(),
+            option_as_meta: crate::terminal_view::option_as_meta(cx),
             scroll: self.settings_ui.scroll.clone(),
             reveal: self.settings_ui.reveal.clone(),
             preferences_error: self.settings_ui.preferences_error.clone(),
@@ -280,6 +282,13 @@ impl Newport {
             on_action: Rc::new(move |action, _, cx| {
                 let _ = owner.update(cx, |this, cx| {
                     match action {
+                        Action::OptionAsMeta(enabled) => {
+                            this.settings_ui.preferences_error = None;
+                            cx.set_global(crate::terminal_view::OptionAsMeta(enabled));
+                            this.save_window_preferences(
+                                json!({ "terminalOptionAsMeta": enabled }),
+                            );
+                        }
                         Action::Startup(enabled) => {
                             this.settings_ui.preferences_error = None;
                             this.settings_state.set_launch_at_login(enabled);
@@ -425,6 +434,7 @@ impl PageState {
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Action {
+    OptionAsMeta(bool),
     Startup(bool),
     RetryStartup,
     RetryCache,
@@ -436,6 +446,7 @@ enum Action {
 impl Action {
     fn focus_target(self) -> FocusTarget {
         match self {
+            Self::OptionAsMeta(_) => FocusTarget::OptionAsMeta,
             Self::Startup(_) => FocusTarget::Startup,
             Self::RetryStartup => FocusTarget::StartupRetry,
             Self::RetryCache => FocusTarget::CacheRetry,
@@ -482,6 +493,7 @@ impl RenderOnce for RevealedButton {
 struct SettingsView {
     state: PageState,
     theme: Entity<ThemeSelect>,
+    option_as_meta: bool,
     scroll: ScrollHandle,
     reveal: Rc<FocusReveal>,
     preferences_error: Option<String>,
@@ -505,6 +517,34 @@ impl SettingsView {
                     .w(px(160.))
                     .h(px(crate::controls::CONTROL_HEIGHT)),
             ),
+        )
+    }
+    fn terminal(&self, cx: &App) -> impl IntoElement {
+        let callback = self.on_action.clone();
+        section("terminal", "Terminal", false, cx).child(
+            row()
+                .child(
+                    div()
+                        .min_w_0()
+                        .line_height(relative(1.428571))
+                        .child("Use Option as Meta key")
+                        .child(help(
+                            "Option+F, Option+B and Option+D move and delete by word. \
+                             Turn off to type special characters with Option.",
+                            cx,
+                        )),
+                )
+                .child(
+                    self.reveal.wrap(
+                        FocusTarget::OptionAsMeta,
+                        crate::controls::switch("option-as-meta")
+                            .accessibility_label("Use Option as Meta key")
+                            .checked(self.option_as_meta)
+                            .on_click(move |checked, window, cx| {
+                                callback(Action::OptionAsMeta(*checked), window, cx)
+                            }),
+                    ),
+                ),
         )
     }
     fn startup(&self, cx: &App) -> impl IntoElement {
@@ -782,6 +822,9 @@ impl RenderOnce for SettingsView {
                     .line_height(relative(1.428571))
                     .child(crate::controls::page_title("Settings", None, cx).mb(px(16.)))
                     .child(self.appearance(cx))
+                    .when(cfg!(target_os = "macos"), |panel| {
+                        panel.child(self.terminal(cx))
+                    })
                     .child(self.startup(cx))
                     .child(self.updates(cx))
                     .child(self.cache(cx))
@@ -935,6 +978,7 @@ mod tests {
         scroll: ScrollHandle,
         reveal: Rc<FocusReveal>,
         confirmation: Option<String>,
+        option_as_meta: bool,
         actions: Vec<Action>,
     }
     impl Render for Harness {
@@ -943,6 +987,7 @@ mod tests {
             div().size_full().flex().flex_col().child(SettingsView {
                 state: self.state.clone(),
                 theme: self.theme.clone(),
+                option_as_meta: self.option_as_meta,
                 scroll: self.scroll.clone(),
                 reveal: self.reveal.clone(),
                 preferences_error: None,
@@ -960,6 +1005,7 @@ mod tests {
                             Action::Install => view.state.update_install.pending = true,
                             Action::ClearCache => view.state.cache_clear.pending = true,
                             Action::Startup(_) => view.state.startup_write.pending = true,
+                            Action::OptionAsMeta(enabled) => view.option_as_meta = enabled,
                             _ => {}
                         }
                         cx.notify();
@@ -1004,6 +1050,7 @@ mod tests {
                     reveal: Rc::new(FocusReveal::new(scroll.clone(), window, cx)),
                     scroll,
                     confirmation: None,
+                    option_as_meta: true,
                     actions: vec![],
                 }
             });
@@ -1100,14 +1147,20 @@ mod tests {
         cx.update(|window, cx| view.read(cx).theme.focus_handle(cx).focus(window, cx));
         draw(cx);
         focused_and_visible(&view, "Theme", cx);
-        for label in [
+        // The Terminal section exists only on macOS.
+        let terminal: &[&str] = if cfg!(target_os = "macos") {
+            &["Use Option as Meta key"]
+        } else {
+            &[]
+        };
+        for label in terminal.iter().chain(&[
             "Launch at login",
             "Restart to update",
             "Later",
             "Restart now",
             "Clear cache",
             "Try reading the cache size again",
-        ] {
+        ]) {
             key(cx, "tab");
             focused_and_visible(&view, label, cx);
         }
@@ -1121,8 +1174,11 @@ mod tests {
             "Later",
             "Restart to update",
             "Launch at login",
-            "Theme",
-        ] {
+        ]
+        .iter()
+        .chain(terminal)
+        .chain(&["Theme"])
+        {
             key(cx, "shift-tab");
             focused_and_visible(&view, label, cx);
         }
@@ -1134,14 +1190,14 @@ mod tests {
             cx.notify();
         });
         draw(cx);
-        for label in [
+        for label in terminal.iter().chain(&[
             "Restart to update",
             "Later",
             "Restart now",
             "Clear cache",
             "Try reading the cache size again",
             "Try again",
-        ] {
+        ]) {
             key(cx, "tab");
             focused_and_visible(&view, label, cx);
         }
@@ -1151,8 +1207,11 @@ mod tests {
             "Restart now",
             "Later",
             "Restart to update",
-            "Theme",
-        ] {
+        ]
+        .iter()
+        .chain(terminal)
+        .chain(&["Theme"])
+        {
             key(cx, "shift-tab");
             focused_and_visible(&view, label, cx);
         }
@@ -1180,7 +1239,17 @@ mod tests {
         let startup = cx.debug_bounds("settings-startup").unwrap();
         let updates = cx.debug_bounds("settings-updates").unwrap();
         let cache = cx.debug_bounds("settings-cache").unwrap();
-        assert_eq!(appearance.bottom(), startup.top());
+        match cx.debug_bounds("settings-terminal") {
+            Some(terminal) => {
+                assert_eq!(appearance.bottom(), terminal.top());
+                assert_eq!(terminal.bottom(), startup.top());
+            }
+            None => assert_eq!(appearance.bottom(), startup.top()),
+        }
+        assert_eq!(
+            cx.debug_bounds("settings-terminal").is_some(),
+            cfg!(target_os = "macos")
+        );
         assert_eq!(startup.bottom(), updates.top());
         assert_eq!(updates.bottom(), cache.top());
         assert_eq!(
@@ -1203,9 +1272,25 @@ mod tests {
         assert!(clear.bounds().bottom() <= px(260.));
     }
 
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn option_as_meta_switch_shows_and_changes_the_setting(cx: &mut TestAppContext) {
+        let (view, cx) = harness(cx, loaded());
+        assert_eq!(element(cx, "Use Option as Meta key").checked(), Some(true));
+        click(cx, "Use Option as Meta key");
+        assert_eq!(
+            view.read_with(cx, |view, _| view.actions.clone()),
+            vec![Action::OptionAsMeta(false)]
+        );
+        assert_eq!(element(cx, "Use Option as Meta key").checked(), Some(false));
+    }
+
     #[gpui::test]
     fn settings_load_independently_and_report_each_read_error(cx: &mut TestAppContext) {
         let (view, cx) = harness(cx, PageState::default());
+        // Tall enough that every section's retry control is on screen.
+        cx.simulate_resize(size(px(1000.), px(1000.)));
+        draw(cx);
         assert_eq!(element(cx, "Theme").role(), Some(gpui::Role::ComboBox));
         for label in ["Launch at login", "Check for updates", "Clear cache"] {
             click(cx, label);

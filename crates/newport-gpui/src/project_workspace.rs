@@ -290,7 +290,6 @@ impl Newport {
                 header.child(
                     crate::controls::tabs("project-navigation")
                         .underline()
-                        .accessibility_label("Project navigation")
                         .flex_1()
                         .min_w_0()
                         .selected_index(editor.read(cx).navigator.panel.saturating_sub(1))

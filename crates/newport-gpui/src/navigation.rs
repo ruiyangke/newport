@@ -212,6 +212,12 @@ pub(super) fn install_workspace_shortcuts(cx: &mut App) {
     // Refresh uses F5 there; quitting remains available through the app menu.
     #[cfg(not(target_os = "macos"))]
     cx.bind_keys([KeyBinding::new("f5", Refresh, Some("!Terminal"))]);
+    // Key bindings run before the terminal's key handler, and Kit's Root binds
+    // Tab to focus traversal. Inside a terminal, Tab belongs to the shell.
+    cx.bind_keys([
+        KeyBinding::new("tab", gpui::NoAction, Some("Terminal")),
+        KeyBinding::new("shift-tab", gpui::NoAction, Some("Terminal")),
+    ]);
     // Control+Alt is AltGr on Windows layouts. Keep these macOS-only;
     // the focused divider supports keyboard resizing on both platforms.
     #[cfg(target_os = "macos")]

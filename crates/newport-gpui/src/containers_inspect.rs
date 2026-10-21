@@ -391,7 +391,6 @@ impl ContainersPanel {
                             } else {
                                 IconName::ChevronRight
                             })
-                            .expanded(self.labels_open)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.inspect_action(&labels_id, InspectAction::ToggleLabels, cx);
                             })),

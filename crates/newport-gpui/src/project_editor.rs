@@ -1301,7 +1301,6 @@ impl CodeWorkspace {
             let previous_focus = previous_focus.clone();
             dialog
                 .title("Open file")
-                .aria_label("Open project file")
                 .w(px(620.).min(window.viewport_size().width - px(32.)))
                 .on_close(move |_, window, cx| {
                     close.update(cx, |p, _| p.cancel());
@@ -3647,10 +3646,10 @@ mod interaction_tests {
         click(cx, "Untracked");
         cx.update(|window, _| {
             let rows = gpui::base::test_support::snapshots(window);
-            assert!(rows.iter().any(|e| {
-                e.label().is_some_and(|l| l.starts_with("Untracked, "))
-                    && e.expanded() == Some(false)
-            }));
+            assert!(
+                rows.iter()
+                    .any(|e| e.label().is_some_and(|l| l.starts_with("Untracked, ")))
+            );
             assert!(
                 !rows
                     .iter()

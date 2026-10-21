@@ -59,7 +59,6 @@ impl Newport {
         window.open_dialog(cx, move |dialog, window, _| {
             let owner = owner.clone();
             dialog
-                .aria_label(title)
                 .title(crate::controls::dialog_title(title))
                 .w(px(440.))
                 .max_w((window.viewport_size().width - px(32.)).max(px(240.)))

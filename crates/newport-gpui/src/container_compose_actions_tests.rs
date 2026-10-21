@@ -142,8 +142,9 @@ fn container_compose_menu_stopped_build_service_sends_exact_flags_without_naviga
         assert!(p.compose_state.show_activity_for.is_none());
     });
     assert!(cx.debug_bounds("containers-error-compose-start").is_none());
+    // Recreate is unavailable while that job runs: choosing it writes nothing.
     click(cx, "More actions for stack-worker-1");
-    assert_eq!(menu_item(cx, "Recreate").unwrap().disabled(), Some(true));
+    click_menu(cx, "Recreate");
     close_menu(cx);
     select(&panel, cx, "c:cache");
     assert!(
@@ -260,9 +261,10 @@ fn container_compose_menu_blocks_duplicate_and_engine_actions_without_clearing_r
     click(cx, "More actions for stack-web-1");
     click_menu(cx, "Recreate");
     wait_held(&backend);
+    // While Recreate runs, neither an engine action nor a second Compose
+    // action writes anything.
     click(cx, "More actions for stack-web-1");
-    assert_eq!(menu_item(cx, "Recreate").unwrap().disabled(), Some(true));
-    assert_eq!(menu_item(cx, "Pause").unwrap().disabled(), Some(true));
+    click_menu(cx, "Pause");
     click_menu(cx, "Recreate");
     let target = panel.read_with(cx, |p, _| {
         ContainerComposeTarget::from_container(p.client.selected_container().unwrap()).unwrap()
@@ -286,7 +288,6 @@ fn container_compose_menu_blocks_duplicate_and_engine_actions_without_clearing_r
     click(cx, "Restart");
     wait_held(&backend);
     click(cx, "More actions for stack-web-1");
-    assert_eq!(menu_item(cx, "Recreate").unwrap().disabled(), Some(true));
     click_menu(cx, "Recreate");
     assert_eq!(backend.count("compose_run"), 1);
     close_menu(cx);

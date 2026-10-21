@@ -274,11 +274,6 @@ impl Form {
             let compact = compact(window);
             let gutter = if compact { 18. } else { 24. };
             dialog
-                .aria_label(if existing {
-                    "Edit forward"
-                } else {
-                    "New forward"
-                })
                 .title(
                     div()
                         .flex()

@@ -29,6 +29,9 @@ pub struct KeyEvent<'a> {
     pub composing: bool,
     pub native_identity: Option<NativeKeyIdentity>,
     pub native_modifiers: Option<Modifiers>,
+    /// macOS only: Option sends Meta keys instead of composing text.
+    /// Elsewhere Alt is always Meta.
+    pub option_as_meta: bool,
 }
 
 impl<'a> KeyEvent<'a> {
@@ -43,6 +46,7 @@ impl<'a> KeyEvent<'a> {
             composing: false,
             native_identity: None,
             native_modifiers: None,
+            option_as_meta: false,
         }
     }
 }
@@ -425,12 +429,14 @@ pub fn encode_key(engine: &mut Engine, event: KeyEvent<'_>) -> Result<Option<Vec
     let alt = modifiers.contains(Modifiers::ALT);
     let control = modifiers.contains(Modifiers::CTRL);
     let is_text = printable.is_some();
-    // macOS Option and Windows AltGr presses/repeats must reach native
-    // composition even with an enhanced keyboard protocol. A release belongs
-    // to an already-forwarded press: modifiers may have changed while held.
+    // macOS Option (unless it is Meta) and Windows AltGr presses/repeats must
+    // reach native composition even with an enhanced keyboard protocol. A
+    // release belongs to an already-forwarded press: modifiers may have changed
+    // while held.
     if event.action != KeyAction::Release
         && is_text
-        && ((cfg!(target_os = "macos") && alt && !control) || (cfg!(windows) && alt && control))
+        && ((cfg!(target_os = "macos") && alt && !control && !event.option_as_meta)
+            || (cfg!(windows) && alt && control))
     {
         return Ok(None);
     }
@@ -469,7 +475,7 @@ pub fn encode_key(engine: &mut Engine, event: KeyEvent<'_>) -> Result<Option<Vec
         text,
         unshifted,
         composing: false,
-        option_as_alt: !cfg!(target_os = "macos"),
+        option_as_alt: option_as_alt(&event),
     })?;
     // Newport preserves the conventional readline/Vim aliases. Ghostty's
     // default fixterms encoder disambiguates these three keys, even without an
@@ -495,11 +501,15 @@ pub fn encode_key(engine: &mut Engine, event: KeyEvent<'_>) -> Result<Option<Vec
                 text: None,
                 unshifted: '\0',
                 composing: false,
-                option_as_alt: !cfg!(target_os = "macos"),
+                option_as_alt: option_as_alt(&event),
             })
             .map(Some);
     }
     Ok((!output.is_empty() || event.action == KeyAction::Release).then_some(output))
+}
+
+fn option_as_alt(event: &KeyEvent<'_>) -> bool {
+    !cfg!(target_os = "macos") || event.option_as_meta
 }
 
 fn key_identity(name: &str) -> (Key, Option<char>) {
@@ -1039,6 +1049,46 @@ mod tests {
             .unwrap()
             .unwrap(),
             b"\x1b[101;3:3u"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn option_as_meta_sends_meta_keys_instead_of_composed_text() {
+        let mut engine = Engine::new(80, 24).unwrap();
+        // macOS reports the composed character (Option+F is "ƒ") as the text.
+        let option = |key, text, option_as_meta| KeyEvent {
+            alt: true,
+            text: Some(text),
+            option_as_meta,
+            ..KeyEvent::press(key)
+        };
+        for (key, text, expected) in [
+            ("f", "ƒ", b"\x1bf"),
+            ("b", "∫", b"\x1bb"),
+            ("d", "∂", b"\x1bd"),
+        ] {
+            assert_eq!(
+                encode_key(&mut engine, option(key, text, true))
+                    .unwrap()
+                    .unwrap(),
+                expected,
+                "{key}"
+            );
+            assert!(
+                encode_key(&mut engine, option(key, text, false))
+                    .unwrap()
+                    .is_none(),
+                "{key} composes natively when Option is not Meta"
+            );
+        }
+        engine.advance(b"\x1b[>1u").unwrap();
+        assert_eq!(
+            encode_key(&mut engine, option("f", "ƒ", true))
+                .unwrap()
+                .unwrap(),
+            b"\x1b[102;3u",
+            "an enhanced keyboard protocol still reports the unmodified key"
         );
     }
 

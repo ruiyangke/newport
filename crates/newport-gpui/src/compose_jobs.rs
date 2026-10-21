@@ -207,7 +207,6 @@ impl ContainersPanel {
             let compact =
                 window.viewport_size().width < px(540.) || window.viewport_size().height < px(560.);
             dialog
-                .aria_label(title.clone())
                 .title(
                     div()
                         .min_w_0()

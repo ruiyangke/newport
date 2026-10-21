@@ -1,18 +1,31 @@
-//! The window's own preferences: sidebar width, the icon-only sidebar and the
-//! theme. They live in the profile's preferences.json, which the backend owns
-//! and writes; the window only reads it once at startup, before the first
-//! frame, and sends changes through `set_window_preferences`.
+//! The window's own preferences: sidebar width, the icon-only sidebar, the
+//! theme and whether Option is Meta in terminals. They live in the profile's
+//! preferences.json, which the backend owns and writes; the window only reads
+//! it once at startup, before the first frame, and sends changes through
+//! `set_window_preferences`.
 use crate::appearance::Appearance;
 use serde_json::{Map, Value};
 use std::{fs, io, path::Path};
 
 const FILE: &str = "preferences.json";
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct WindowPreferences {
     pub sidebar_width: Option<f32>,
     pub sidebar_compact: bool,
     pub appearance: Appearance,
+    /// macOS: Option sends Meta keys in terminals instead of typing characters.
+    pub terminal_option_as_meta: bool,
+}
+impl Default for WindowPreferences {
+    fn default() -> Self {
+        Self {
+            sidebar_width: None,
+            sidebar_compact: false,
+            appearance: Appearance::default(),
+            terminal_option_as_meta: true,
+        }
+    }
 }
 
 /// Reads the saved preferences. A missing file means defaults; an unreadable
@@ -39,6 +52,10 @@ pub fn load(directory: Option<&Path>) -> (WindowPreferences, Option<String>) {
             .get("appearance")
             .and_then(|value| serde_json::from_value(value.clone()).ok())
             .unwrap_or_default(),
+        terminal_option_as_meta: values
+            .get("terminalOptionAsMeta")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
     };
     (preferences, error)
 }
@@ -91,10 +108,14 @@ mod tests {
         let directory = tempdir();
         assert_eq!(load(Some(directory.path())), Default::default());
         assert_eq!(load(None), Default::default());
+        assert!(
+            load(None).0.terminal_option_as_meta,
+            "Option is Meta by default"
+        );
         fs::write(
             directory.path().join(FILE),
             json!({"sidebarWidth": 240.0, "sidebarCompact": true, "appearance": "dark",
-                "gitClientId": "kept"})
+                "terminalOptionAsMeta": false, "gitClientId": "kept"})
             .to_string(),
         )
         .unwrap();
@@ -103,6 +124,7 @@ mod tests {
         assert_eq!(preferences.sidebar_width, Some(240.0));
         assert!(preferences.sidebar_compact);
         assert_eq!(preferences.appearance, Appearance::Dark);
+        assert!(!preferences.terminal_option_as_meta);
     }
 
     #[test]

@@ -172,7 +172,6 @@ fn history_stays_project_scoped_preserves_choice_and_falls_back_after_expiry(
     assert_eq!(output(&panel, cx), "latest output");
     assert_eq!(panel.read_with(cx, |p, _| p.activity.data.jobs().len()), 2);
     click(cx, "Earlier commands (1)");
-    assert_eq!(element(cx, "Earlier commands (1)").expanded(), Some(true));
     click_history(cx, "older");
     settle(&panel, cx);
     assert_eq!(output(&panel, cx), "older error");

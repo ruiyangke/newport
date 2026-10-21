@@ -58,6 +58,18 @@ impl ForwardedKey {
 struct ForwardedPress {
     logical: String,
     native: Option<NativeKeyIdentity>,
+    /// Releases and repeats encode Option the way the press did.
+    option_as_meta: bool,
+}
+
+/// Whether macOS Option sends Meta keys in terminals. Newport sets it from
+/// preferences; without it, Option is Meta.
+pub(crate) struct OptionAsMeta(pub(crate) bool);
+impl Global for OptionAsMeta {}
+
+pub(crate) fn option_as_meta(cx: &App) -> bool {
+    cx.try_global::<OptionAsMeta>()
+        .is_none_or(|setting| setting.0)
 }
 
 pub struct TerminalView {
@@ -983,7 +995,8 @@ impl TerminalView {
         let identity = ForwardedKey::new(&event.physical_key, &key.key);
         // The logical key can change while held (Shift/layout changes). Repeat
         // and release must refer to the same key the remote application saw.
-        let pressed = self
+        let option_as_meta = option_as_meta(cx);
+        let mut pressed = self
             .forwarded_keys
             .get(&identity)
             .cloned()
@@ -993,7 +1006,13 @@ impl TerminalView {
                     event.physical_key.as_ref(),
                     event.key_metadata.as_ref(),
                 ),
+                option_as_meta,
             });
+        // Only a repeat keeps the press's Option mode; a new press reads the
+        // current setting.
+        if !event.is_held {
+            pressed.option_as_meta = option_as_meta;
+        }
         let result = encode_key(
             &mut self.engine,
             KeyEvent {
@@ -1010,11 +1029,12 @@ impl TerminalView {
                     newport_terminal::KeyAction::Press
                 },
                 composing: false,
+                option_as_meta: pressed.option_as_meta,
             },
         );
         if let Some(Some(bytes)) = self.engine_result(result) {
             if self.send(bytes, cx) {
-                self.forwarded_keys.entry(identity).or_insert(pressed);
+                self.forwarded_keys.insert(identity, pressed);
             }
             window.prevent_default();
             cx.stop_propagation();
@@ -1024,6 +1044,7 @@ impl TerminalView {
         for (_, key) in std::mem::take(&mut self.forwarded_keys) {
             let mut event = KeyEvent::press(&key.logical);
             event.native_identity = key.native;
+            event.option_as_meta = key.option_as_meta;
             // Unsupported backends report no Num Lock state; callers use false
             // there. Supported backends query current state at focus loss.
             event.native_modifiers = Some(current_modifiers(modifiers, caps_lock, num_lock));
@@ -1057,6 +1078,7 @@ impl TerminalView {
                 control: key.modifiers.control,
                 action: newport_terminal::KeyAction::Release,
                 composing: false,
+                option_as_meta: pressed.option_as_meta,
             },
         );
         if let Some(Some(bytes)) = self.engine_result(result) {

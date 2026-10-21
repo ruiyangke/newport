@@ -75,7 +75,6 @@ impl Newport {
         window.open_dialog(cx, move |dialog, window, cx| {
             let title = form.read(cx).title();
             dialog
-                .aria_label(title.clone())
                 .title(
                     div()
                         .text_size(px(17.))

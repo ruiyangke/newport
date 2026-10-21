@@ -43,7 +43,6 @@ impl Newport {
             let pending = form.read(cx).pending;
             let cancel_form = form.clone();
             dialog
-                .aria_label("Delete forward?")
                 .title(crate::controls::dialog_title("Delete forward?"))
                 .w(px(480.))
                 .p(px(24.))

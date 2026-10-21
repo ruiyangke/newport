@@ -1935,7 +1935,6 @@ impl Newport {
                             .icon(IconName::ScrollText)
                             .label("Log")
                             .track_focus(&self.git_log.view.trigger(cx))
-                            .expanded(self.git_log.open)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.git_log.open = !this.git_log.open;
                                 if this.git_log.open {

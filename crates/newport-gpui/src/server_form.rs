@@ -237,7 +237,6 @@ impl ServerForm {
             let submit = form.clone();
             let body = form.clone();
             dialog
-                .aria_label(title)
                 .title(
                     div()
                         .flex()

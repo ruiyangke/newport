@@ -451,6 +451,9 @@ impl Newport {
         );
         let appearance = preferences.appearance;
         theme::install(appearance.is_dark(window.appearance()), cx);
+        cx.set_global(terminal_view::OptionAsMeta(
+            preferences.terminal_option_as_meta,
+        ));
         cx.observe_window_appearance(window, |this, window, cx| {
             theme::install(this.appearance.is_dark(window.appearance()), cx);
             cx.notify();

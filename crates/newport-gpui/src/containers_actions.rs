@@ -439,7 +439,6 @@ impl ContainersPanel {
             let close = owner.clone();
             let confirm = owner.clone();
             dialog
-                .aria_label(title.clone())
                 .title(crate::controls::dialog_title(title))
                 .w(px(480.))
                 .max_w((window.viewport_size().width - px(32.)).max(px(240.)))

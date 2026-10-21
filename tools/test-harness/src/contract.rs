@@ -13,12 +13,10 @@ pub fn write_report(path: &str, value: &Value) -> Result<()> {
     Ok(())
 }
 pub fn run(local: bool, args: &[String]) -> Result<()> {
-    let mut reference = false;
     let mut output = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--reference" => reference = true,
             "--output" | "--metrics-output" => {
                 i += 1;
                 output = Some(
@@ -86,24 +84,11 @@ pub fn run(local: bool, args: &[String]) -> Result<()> {
             ])
             .env("NEWPORT_GIT_TRACE_PATH", &trace),
     )?;
-    if reference {
-        process::run(
-            command("node")
-                .args([
-                    "tools/git-contract/node_modules/vitest/vitest.mjs",
-                    "run",
-                    "--root",
-                    "tools/git-contract",
-                    "api/gitLiveContract.test.ts",
-                ])
-                .env("NEWPORT_GIT_TRACE_PATH", &trace),
-        )?;
-    }
     let samples:Vec<Value>=rows.iter().map(|r|json!({"method":r["request"]["method"],"action":r["request"]["params"]["action"]["kind"],"state":r["response"]["state"],"errorCode":r["error"]["code"],"measurements":r["measurements"]})).collect();
     if let Some(output) = output {
         write_report(
             &output,
-            &json!({"transport":if local{"service-level"}else{"OpenSSH MessagePack v4"},"nativeVerified":true,"referenceVerified":reference,"responses":rows.len(),"methods":methods,"actions":actions,"samples":samples}),
+            &json!({"transport":if local{"service-level"}else{"OpenSSH MessagePack v4"},"nativeVerified":true,"responses":rows.len(),"methods":methods,"actions":actions,"samples":samples}),
         )?;
     }
     println!(

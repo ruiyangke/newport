@@ -16,15 +16,14 @@ Ghostty toolchains; the npm commands supply the Ghostty wrapper where needed.
 | `npm run check:agent` | Linux agent formatting, Clippy, and tests |
 | `npm run check:harness` | Native/remote harness checks |
 | `npm run test:tooling` | Release scripts, resources, installers, and manifests |
-| `npm run check:contracts` | Independent Git protocol oracle; first run `npm ci --prefix tools/git-contract` |
 | `npm run test:ssh` | Disposable SSH fixture, terminal, file, and RPC operations |
 | `npm run test:remote` | Docker/Testcontainers with real OpenSSH and remote services |
-| `npm run test:git-contract` | Git protocol against the independent reference |
-| `npm run test:git-cli-contract` | Git behavior against the reference CLI |
+| `npm run test:git-contract` | Real agent Git responses through the native validators |
+| `npm run test:git-cli-contract` | Agent Git CLI responses through the native validators |
 | `npm run test:native` | Profile/preferences/metrics, resource staging, and native lifecycle |
 | `npm run test:native -- --headless` | Lifecycle checks without a GUI session |
 
-`npm run check` combines static checks and unit/tooling/contract suites. Remote
+`npm run check` combines static checks and unit and tooling suites. Remote
 checks use OrbStack by default; set `NEWPORT_TEST_DOCKER_CONTEXT=default` for the
 standard Docker context. These fixtures mutate disposable test servers, not saved
 production servers.

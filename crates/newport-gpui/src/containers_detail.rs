@@ -582,7 +582,6 @@ impl ContainersPanel {
         crate::controls::tabs("container-detail-tabs")
             .underline()
             .label_size(px(crate::ui::FONT_SIZE))
-            .accessibility_label("Container details")
             .selected_index(selected)
             .children(
                 choices

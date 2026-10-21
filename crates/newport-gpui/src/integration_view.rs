@@ -204,7 +204,6 @@ impl Newport {
                             .checked(checked)
                             .disabled(feature_disabled)
                             .accessibility_label(title)
-                            .accessibility_description(description)
                             .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                                 this.integration_scoped_command(
                                     &id,

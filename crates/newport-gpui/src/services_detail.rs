@@ -617,7 +617,6 @@ impl ServicesPanel {
             let close = owner.clone();
             let confirm = owner.clone();
             dialog
-                .aria_label(title.clone())
                 .title(crate::controls::dialog_title(title))
                 .w(px(480.))
                 .max_w((window.viewport_size().width - px(32.)).max(px(240.)))
@@ -900,7 +899,6 @@ impl ServicesPanel {
                     .when(!stacked, |v| v.border_b_1().border_color(cx.theme().border))
                     .child(
                         crate::controls::tabs("service-detail-tabs")
-                            .accessibility_label("Details")
                             .underline()
                             .when(stacked, |v| v.w_full())
                             .selected_index(if has_logs { active } else { 0 })

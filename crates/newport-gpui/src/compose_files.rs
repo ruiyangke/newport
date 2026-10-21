@@ -313,7 +313,6 @@ impl Files {
                 crate::controls::tabs("compose-file-tabs")
                     .underline()
                     .menu(true)
-                    .accessibility_label("Compose files")
                     .track_scroll(&self.tab_scroll)
                     .max_width(px(220.))
                     .selected_index(

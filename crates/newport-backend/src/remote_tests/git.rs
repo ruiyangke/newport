@@ -7,7 +7,7 @@ use crate::ssh::ExecSession;
 use uuid::Uuid;
 
 /// Optional test-only wire capture that feeds real agent responses to the
-/// protocol oracle in `tools/git-contract`. This wrapper is never part of production RPC traffic.
+/// native contract replay. This wrapper is never part of production RPC traffic.
 #[path = "git_metrics.rs"]
 mod metrics;
 struct Client<S> {

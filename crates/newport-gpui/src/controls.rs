@@ -372,7 +372,6 @@ pub fn group_heading(
         )
         .label(name.to_owned())
         .child(tag(count.to_string(), cx))
-        .expanded(open)
         .accessibility_label(format!("{name}, {count}"))
 }
 

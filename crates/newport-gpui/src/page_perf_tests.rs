@@ -367,19 +367,32 @@ fn server_dropdown_actions_preserve_edit_and_delete_guards(cx: &mut TestAppConte
         cx.simulate_click(at, Default::default());
         frame(cx);
     };
+    let open_picker = |cx: &mut VisualTestContext| {
+        frame(cx);
+        let at = cx.update(|window, _| {
+            gpui::base::test_support::snapshots(window)
+                .iter()
+                .find(|e| e.role() == Some(gpui::Role::ComboBox))
+                .expect("server picker")
+                .bounds()
+                .center()
+        });
+        cx.simulate_click(at, Default::default());
+        frame(cx);
+    };
     let controls = visual.update(|window, _| gpui::base::test_support::snapshots(window));
     assert!(
         !controls
             .iter()
             .any(|e| matches!(e.label(), Some("Edit server" | "Server actions")))
     );
-    click(visual, "Choose server");
+    open_picker(visual);
     click(visual, "Edit server");
     assert!(workspace.read_with(visual, |v, _| v.server_form.is_some()));
     click(visual, "Cancel");
     assert!(workspace.read_with(visual, |v, _| v.server_form.is_none()));
     // Delete lives in the server's edit dialog, not in the switcher.
-    click(visual, "Choose server");
+    open_picker(visual);
     let controls = visual.update(|window, _| gpui::base::test_support::snapshots(window));
     assert!(!controls.iter().any(|e| e.label() == Some("Delete server")));
     click(visual, "Edit server");
@@ -398,7 +411,7 @@ fn server_dropdown_actions_preserve_edit_and_delete_guards(cx: &mut TestAppConte
     }));
     click(visual, "Cancel");
     assert!(workspace.read_with(visual, |v, _| v.selected_server().is_some()));
-    click(visual, "Choose server");
+    open_picker(visual);
     click(visual, "Add server…");
     assert!(workspace.read_with(visual, |v, _| v.server_form.is_some()));
     click(visual, "Cancel");
@@ -2024,16 +2037,13 @@ fn connections_virtualizes_single_projects_and_tables_and_preserves_focus(cx: &m
 #[gpui::test]
 fn connections_collapse_search_and_refresh_update_virtual_ranges(cx: &mut TestAppContext) {
     let (view, visual) = connections_fixture(cx, false);
-    // Project headings are shared group headings: "name, count", expanded or not.
-    let click = |name: &str, expanded: bool, visual: &mut VisualTestContext| {
+    // Project headings are shared group headings: "name, count".
+    let click = |name: &str, visual: &mut VisualTestContext| {
         let prefix = format!("{name}, ");
         let point = visual.update(|window, _| {
             gpui_kit::base::test_support::snapshots(window)
                 .into_iter()
-                .find(|node| {
-                    node.label().is_some_and(|label| label.starts_with(&prefix))
-                        && node.expanded() == Some(expanded)
-                })
+                .find(|node| node.label().is_some_and(|label| label.starts_with(&prefix)))
                 .unwrap_or_else(|| panic!("missing {name} heading"))
                 .bounds()
                 .center()
@@ -2041,7 +2051,7 @@ fn connections_collapse_search_and_refresh_update_virtual_ranges(cx: &mut TestAp
         visual.simulate_click(point, Default::default());
         frame(visual);
     };
-    click("project-0", true, visual);
+    click("project-0", visual);
     assert!(view.read_with(visual, |view, _| {
         view.connections_state["fixture"]
             .collapsed
@@ -2056,7 +2066,7 @@ fn connections_collapse_search_and_refresh_update_virtual_ranges(cx: &mut TestAp
             .item_count()),
         1
     );
-    click("project-0", false, visual);
+    click("project-0", visual);
     assert!(visual.debug_bounds(row_selector(0)).is_some());
     let input = view.read_with(visual, |view, _| {
         view.connections_state["fixture"].input.clone().unwrap()
@@ -2092,7 +2102,7 @@ fn connections_worktree_disclosure_survives_refresh_and_search(cx: &mut TestAppC
     let point = visual.update(|window, _| {
         gpui_kit::base::test_support::snapshots(window)
             .into_iter()
-            .find(|node| node.label() == Some("feature-a, 60") && node.expanded() == Some(true))
+            .find(|node| node.label() == Some("feature-a, 60"))
             .unwrap()
             .bounds()
             .center()
@@ -2138,7 +2148,7 @@ fn connections_worktree_disclosure_survives_refresh_and_search(cx: &mut TestAppC
     let point = visual.update(|window, _| {
         gpui_kit::base::test_support::snapshots(window)
             .into_iter()
-            .find(|node| node.label() == Some("renamed-a, 60") && node.expanded() == Some(false))
+            .find(|node| node.label() == Some("renamed-a, 60"))
             .unwrap()
             .bounds()
             .center()

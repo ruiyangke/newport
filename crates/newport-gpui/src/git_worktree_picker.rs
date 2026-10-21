@@ -21,11 +21,6 @@ impl ListDelegate for Delegate {
     fn items_count(&self, _: usize, _: &App) -> usize {
         self.entries.len()
     }
-    fn item_accessibility_label(&self, ix: IndexPath, _: &App) -> Option<SharedString> {
-        self.entries
-            .get(ix.row)
-            .map(|branch| choice_label(branch, self.purpose).into())
-    }
     fn render_item(
         &mut self,
         ix: IndexPath,

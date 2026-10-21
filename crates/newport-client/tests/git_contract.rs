@@ -1,5 +1,4 @@
 //! Replay captured agent responses through the validators used by GPUI.
-//! The separate TypeScript oracle checks remaining field-level wire contracts.
 use newport_client::{git_blob, git_diff_page, git_operation::Operation, git_page};
 use serde_json::Value;
 use std::collections::BTreeSet;

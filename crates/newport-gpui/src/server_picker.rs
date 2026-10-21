@@ -266,7 +266,6 @@ impl Newport {
             .w(px(width))
             .child(
                 Combobox::new(&self.server_picker)
-                    .accessibility_label("Choose server")
                     .placeholder("Choose a server")
                     .search_placeholder("Find a server")
                     .menu_width(px(300.))

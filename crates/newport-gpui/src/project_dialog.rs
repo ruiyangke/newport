@@ -369,19 +369,17 @@ impl Newport {
                 window.open_dialog(cx, move |dialog, window, cx| {
                     let cancel = owner.clone();
                     let close = owner.clone();
-                    let (busy, folder, library_form, title) = owner
+                    let (busy, folder, library_form) = owner
                         .update(cx, |this, _| {
                             let folder = this.project_dialog_kind() == Some(Kind::Folder);
                             (
                                 this.project_dialog_busy(),
                                 folder,
                                 this.project_dialog_kind().is_some_and(Kind::library_form),
-                                this.project_dialog_title(),
                             )
                         })
-                        .unwrap_or((false, false, false, "Project operation".into()));
+                        .unwrap_or((false, false, false));
                     dialog
-                        .aria_label(title)
                         .w(px(if folder {
                             680.
                         } else if library_form {

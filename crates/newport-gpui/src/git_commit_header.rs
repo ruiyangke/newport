@@ -257,7 +257,6 @@ impl Newport {
                                         view.child(
                                             crate::controls::compact_button("git-commit-expand")
                                                 .link()
-                                                .expanded(self.git.history.header.expanded)
                                                 .self_start()
                                                 .text_color(cx.theme().primary)
                                                 .px_0()
