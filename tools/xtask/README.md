@@ -52,7 +52,7 @@ so changing a patch rebuilds the terminal engine.
 | Command | Does |
 | --- | --- |
 | `cargo xtask package [--debug] [--skip-build] [--target <triple>] [--nsis] [--remote-apps]` | Stages the app and verifies it. macOS: `Newport.app` plus a zip. Windows: a zip, and with `--nsis` the installer. `--remote-apps` (macOS) compiles Remote apps in. |
-| `cargo xtask release verify [--ci]` | Checks the tag against every version and, with `--ci`, whether an existing CI run can be reused: it must have passed and kept its `linux-agents` and `remote-agent-*` artifacts. |
+| `cargo xtask release verify` | Checks the tag against every version and the checkout. A release builds everything it ships from the tagged commit, without depending on a CI run. |
 | `cargo xtask release setup-signing` | CI: writes the certificate and profile and creates a temporary keychain. |
 | `cargo xtask release macos [--skip-build] [--remote-apps]` | Developer ID signing, notarization, stapling, and the signed update tarball and manifest fragment. |
 | `cargo xtask release windows-update <installer> --arch <arch> --app-executable <exe> --output <dir>` | Signed Windows update payload and manifest fragment. |
@@ -105,11 +105,11 @@ CI and releases build the newport-remote commit in
 `.github/newport-remote-revision`; a local build says when its checkout is at
 another one. After changing newport-remote, push it and put its commit there.
 CI checks it out with the `NEWPORT_REMOTE_DEPLOY_KEY` secret, a read-only deploy
-key of that repository. The `remote-agents` jobs build each architecture's
-archive natively and once, and the `remote-apps` job runs `test remote-apps`
-and packages the app from them; a release embeds the same archives, so every
-build of a commit carries the same agent release. Pull requests from forks get
-no key and skip these jobs; main fails without them.
+key of that repository. In CI, the "Remote apps: agent" jobs build each
+architecture's archive natively, and "Remote apps: app" runs `test remote-apps`
+and packages the app from them. The release workflow builds its own archives
+the same way from the tagged commit, so it never depends on a CI run. Pull
+requests from forks get no key and skip these jobs; main fails without them.
 
 ## Not in xtask
 

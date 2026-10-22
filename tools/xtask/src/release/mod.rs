@@ -13,11 +13,8 @@ use std::{
 
 #[derive(Subcommand, Debug)]
 pub enum Action {
-    /// Check the tag against every version; with --ci, decide whether a CI run can be reused.
-    Verify {
-        #[arg(long)]
-        ci: bool,
-    },
+    /// Check the tag against every version and the checkout.
+    Verify,
     /// CI: certificate, provisioning profile and temporary keychain.
     SetupSigning,
     /// Developer ID signing, notarization, stapling and the macOS update payload.
@@ -54,7 +51,7 @@ pub enum Action {
 
 pub fn run(action: Action) -> Result<()> {
     match action {
-        Action::Verify { ci } => verify::run(ci),
+        Action::Verify => verify::run(),
         Action::SetupSigning => crate::signing::setup_ci(),
         Action::Macos {
             skip_build,

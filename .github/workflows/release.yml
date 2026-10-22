@@ -3,31 +3,23 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag (for example v0.3.0)
+        description: Existing version tag (for example v0.5.0)
         required: true
-        type: string
-      ci_commit:
-        description: Optional passing CI commit for release-tooling-only changes (full SHA)
-        required: false
         type: string
 permissions:
   contents: read
-  actions: read
 concurrency:
   group: desktop-release
   cancel-in-progress: false
-# Jobs are named "Area: what (platform)", as in checks.yml.
+# Jobs are named "Area: what (platform)", as in checks.yml. A release needs
+# only its tag: everything it ships is built here, from the tagged commit.
 jobs:
   resolve:
-    name: "Release: verify tag and CI run"
+    name: "Release: verify tag"
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       commit: ${{ steps.version.outputs.commit }}
-      ci_commit: ${{ steps.version.outputs.ci_commit }}
-      ci_run_id: ${{ steps.version.outputs.ci_run_id }}
-      agents_artifact_id: ${{ steps.version.outputs.agents_artifact_id }}
-      remote_agents_artifact_ids: ${{ steps.version.outputs.remote_agents_artifact_ids }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -38,38 +30,60 @@ jobs:
       - id: version
         env:
           RELEASE_TAG: ${{ inputs.tag }}
-          RELEASE_CI_COMMIT: ${{ inputs.ci_commit }}
-          GH_TOKEN: ${{ github.token }}
-        run: cargo xtask release verify --ci
+        run: cargo xtask release verify
+
+  # As in checks.yml: each architecture on a runner of that architecture.
+  needle-build:
+    name: "Needle: build (${{ matrix.arch }})"
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        with:
+          cache-key: needle-build-${{ matrix.arch }}
+          workspaces: tools/xtask
+      - run: cargo xtask agents --arch ${{ matrix.arch }}
+      - run: cargo xtask test runtime --arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: needle-${{ matrix.arch }}
+          path: resources/agents/newport-agent-${{ matrix.arch }}
+          if-no-files-found: error
 
   needle-release:
     name: "Needle: sign"
-    needs: resolve
+    needs: [resolve, needle-build]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve.outputs.commit }}
-          fetch-depth: 0
           persist-credentials: false
-      - run: rustup show
+      - uses: ./.github/actions/rust
+        with:
+          cache-key: needle-release
+          workspaces: tools/xtask
       - uses: actions/download-artifact@v8
         with:
-          artifact-ids: ${{ needs.resolve.outputs.agents_artifact_id }}
-          run-id: ${{ needs.resolve.outputs.ci_run_id }}
-          github-token: ${{ github.token }}
+          pattern: needle-*
           path: resources/agents
           merge-multiple: true
-      - name: Verify CI artifact and bind unchanged Needle source to release
-        env:
-          CI_COMMIT: ${{ needs.resolve.outputs.ci_commit }}
-          RELEASE_COMMIT: ${{ needs.resolve.outputs.commit }}
-        run: |
-          git checkout --detach "$CI_COMMIT"
-          cargo xtask artifact verify resources/agents
-          git checkout --detach "$RELEASE_COMMIT"
-          cargo xtask artifact record resources/agents
+      - run: chmod +x resources/agents/newport-agent-*
+      - run: cargo xtask artifact record resources/agents
       # Compile release tooling before any step receives signing secrets.
       - run: cargo build --locked --manifest-path tools/xtask/Cargo.toml
       - name: Sign exact Needle release payloads
@@ -84,13 +98,62 @@ jobs:
           path: resources/agents
           if-no-files-found: error
 
+  # The Remote apps agent the macOS app embeds, as in checks.yml.
+  remote-apps-agent:
+    name: "Remote apps: agent (${{ matrix.arch }})"
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      NEWPORT_REMOTE_DIR: ${{ github.workspace }}/newport-remote
+    defaults:
+      run:
+        working-directory: newport
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          path: newport
+          persist-credentials: false
+      - id: revision
+        run: echo "commit=$(cat .github/newport-remote-revision)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: ruiyangke/newport-remote
+          ref: ${{ steps.revision.outputs.commit }}
+          path: newport-remote
+          ssh-key: ${{ secrets.NEWPORT_REMOTE_DEPLOY_KEY }}
+          persist-credentials: false
+      - uses: ./newport/.github/actions/rust
+        with:
+          working-directory: newport
+          cache-key: remote-apps-agent-${{ matrix.arch }}
+          workspaces: |
+            newport/tools/xtask
+            newport-remote
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libopus-dev libclang-dev nasm
+      - run: cargo xtask remote-agents --arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: remote-agent-${{ matrix.arch }}
+          path: newport/target/remote-agent/${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
   macos:
     name: "Desktop: macOS (signed, notarized, Remote apps)"
-    needs: [resolve, needle-release]
+    needs: [resolve, needle-release, remote-apps-agent]
     env:
       CARGO_INCREMENTAL: "0"
       NEWPORT_REQUIRE_NEEDLE_RELEASE: "1"
-      # Remote apps: the private crates beside Newport, and CI's agent archives.
+      # Remote apps: the private crates beside Newport, and this run's agent archives.
       NEWPORT_REMOTE_DIR: ${{ github.workspace }}/newport-remote
       NEWPORT_PREBUILT: "1"
     runs-on: macos-15
@@ -127,9 +190,7 @@ jobs:
           path: newport/resources/agents
       - uses: actions/download-artifact@v8
         with:
-          artifact-ids: ${{ needs.resolve.outputs.remote_agents_artifact_ids }}
-          run-id: ${{ needs.resolve.outputs.ci_run_id }}
-          github-token: ${{ github.token }}
+          pattern: remote-agent-*
           path: newport/target/remote-agent
           merge-multiple: true
       - run: xcrun --sdk macosx metal --version || { xcodebuild -downloadComponent MetalToolchain && xcrun --sdk macosx metal --version; }
