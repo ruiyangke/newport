@@ -333,9 +333,11 @@ mod tests {
     #[test]
     fn build_prerequisites_stay_outside_the_pruned_target_directory() {
         assert!(!cache().starts_with(root().join("target")));
+        // A path inside: `/.cache/newport/` matches only an existing folder,
+        // and a fresh checkout has none.
         let ignored = command("git")
-            .args(["check-ignore", "--quiet"])
-            .arg(root().join(".cache").join("newport"))
+            .args(["check-ignore", "--quiet", "--no-index"])
+            .arg(root().join(".cache/newport/zig"))
             .status()
             .unwrap();
         assert!(
