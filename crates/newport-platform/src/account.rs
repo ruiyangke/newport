@@ -357,6 +357,13 @@ mod tests {
                 request.extend_from_slice(&chunk[..count]);
             }
             stream.write_all(response.as_bytes()).unwrap();
+            // Keep this end open until the client has read the reply and
+            // closed: on macOS the client can't set a socket timeout once
+            // the server has closed (EINVAL).
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            while matches!(stream.read(&mut chunk), Ok(count) if count > 0) {}
             String::from_utf8_lossy(&request).into_owned()
         });
         (url, handle)
