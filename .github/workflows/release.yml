@@ -1,4 +1,4 @@
-name: Native desktop release
+name: Release
 on:
   workflow_dispatch:
     inputs:
