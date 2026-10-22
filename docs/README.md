@@ -16,3 +16,4 @@
 - [Platform adapters](../crates/newport-platform/README.md): OS services and IPC.
 - [Needle](../tools/agent/README.md): remote services, sessions, and deployment.
 - [Testing](testing.md): automated suites and release acceptance.
+- [Roadmap](roadmap.md): planned work for upcoming releases.
