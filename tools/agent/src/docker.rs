@@ -174,7 +174,12 @@ pub fn request(
         if left.is_zero() {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "timed out"));
         }
-        stream.set_read_timeout(Some(left))?;
+        match stream.set_read_timeout(Some(left)) {
+            // macOS refuses socket options once the engine has closed its
+            // end; the rest of the reply is buffered, so reading still ends.
+            Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {}
+            other => other?,
+        }
         let read = match stream.read(&mut buffer) {
             Ok(read) => read,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -524,6 +529,33 @@ pub fn demux(body: &[u8], frames: bool) -> Vec<Line> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An engine may send a reply bigger than the socket buffer and close
+    /// at once; the reads after that must still finish the reply.
+    #[test]
+    fn a_reply_the_engine_closed_after_sending_is_read_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("docker.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let body = "x".repeat(MAX_BODY.min(1 << 20));
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let engine = std::thread::spawn(move || {
+            for _ in 0..20 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 1024];
+                let _ = stream.read(&mut request);
+                stream.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        for _ in 0..20 {
+            let response = request(&socket, "GET", "/big", Duration::from_secs(10)).unwrap();
+            assert_eq!(response.body.len(), body.len());
+        }
+        engine.join().unwrap();
+    }
 
     #[test]
     fn responses_with_length_chunks_or_neither() {
