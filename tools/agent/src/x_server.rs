@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     io::{self, Write},
     net::Shutdown,
-    os::unix::net::UnixStream,
+    os::unix::{io::AsRawFd, net::UnixStream},
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -80,6 +80,7 @@ impl Server {
                         drop(guard);
                         let clients = clients.clone();
                         let shared = shared.clone();
+                        let cookie = (!same_account(&stream)).then_some(cookie);
                         thread::spawn(move || {
                             let _ = x_protocol::serve(stream, shared, cookie, id << 20);
                             clients.lock().unwrap().remove(&id);
@@ -103,6 +104,41 @@ impl Server {
         self.authority.path()
     }
 }
+/// Whether the client runs as this account. Only it can reach the socket
+/// (mode 600), and it can read the cookie anyway, so the cookie proves nothing
+/// more for it. Admitting it without one keeps the clipboard working for
+/// programs started under an earlier session, whose XAUTHORITY names a file
+/// that went with it; they keep their environment for as long as they run.
+fn same_account(stream: &UnixStream) -> bool {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    peer_uid(stream).is_some_and(|uid| uid == unsafe { libc::geteuid() })
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &UnixStream) -> Option<u32> {
+    let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: the buffer and its length describe a valid ucred for this call.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut credentials as *mut libc::ucred).cast(),
+            &mut length,
+        )
+    };
+    (result == 0).then_some(credentials.uid)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn peer_uid(stream: &UnixStream) -> Option<u32> {
+    let (mut uid, mut gid) = (0, 0);
+    // SAFETY: both out-pointers are valid for the call.
+    let result = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    (result == 0).then_some(uid)
+}
+
 impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);

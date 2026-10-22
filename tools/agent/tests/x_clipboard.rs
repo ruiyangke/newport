@@ -166,15 +166,9 @@ fn reads_formats_and_large_image_across_connections() {
 }
 
 #[test]
-fn rejects_unauthenticated_clients_and_clipboard_writes() {
+fn rejects_clipboard_writes() {
     let dir = tempfile::tempdir().unwrap();
     let server = Server::start(&dir.path().join("missing"), None).unwrap();
-    let socket = UnixStream::connect(format!("/tmp/.X11-unix/X{}", &server.display[1..])).unwrap();
-    assert!(RustConnection::connect_to_stream(
-        DefaultStream::from_unix_stream(socket).unwrap().0,
-        0
-    )
-    .is_err());
     let c = connect(&server);
     let w = window(&c);
     assert!(c
@@ -258,6 +252,30 @@ fn property_type_mismatch_does_not_delete_data() {
     );
 }
 
+/// A program started under an earlier session keeps that session's XAUTHORITY,
+/// a file that's gone; this account still connects, with no or a wrong cookie.
+#[test]
+fn this_account_connects_without_the_cookie() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("snapshot.tar");
+    snapshot(&path, &[("text/plain", b"stale shell")]);
+    let server = Server::start(&path, None).unwrap();
+    let socket =
+        || UnixStream::connect(format!("/tmp/.X11-unix/X{}", &server.display[1..])).unwrap();
+    let stream = DefaultStream::from_unix_stream(socket()).unwrap().0;
+    let connection = RustConnection::connect_to_stream_with_auth_info(stream, 0, vec![], vec![])
+        .expect("no cookie");
+    assert!(!connection.setup().roots.is_empty());
+    let stream = DefaultStream::from_unix_stream(socket()).unwrap().0;
+    RustConnection::connect_to_stream_with_auth_info(
+        stream,
+        0,
+        b"MIT-MAGIC-COOKIE-1".to_vec(),
+        vec![0; 16],
+    )
+    .expect("another session's cookie");
+}
+
 // Runs against the actual arboard Linux backend on Linux; macOS uses NSPasteboard.
 #[cfg(target_os = "linux")]
 #[test]
@@ -298,6 +316,11 @@ fn unmodified_arboard_reads_text_and_png() {
     let image = clipboard.get_image().unwrap();
     assert_eq!((image.width, image.height), (256, 256));
     assert_eq!(image.bytes.as_ref(), pixels);
+    // As Codex in a shell from an earlier session: its XAUTHORITY is gone.
+    std::env::set_var("XAUTHORITY", dir.path().join("deleted-session/Xauthority"));
+    snapshot(&path, &[("text/plain", b"stale environment")]);
+    let mut clipboard = arboard::Clipboard::new().unwrap();
+    assert_eq!(clipboard.get_text().unwrap(), "stale environment");
     snapshot(&path, &[("text/plain", b"changed")]);
     assert_eq!(clipboard.get_text().unwrap(), "changed");
     fs::remove_file(path).unwrap();

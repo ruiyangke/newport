@@ -165,10 +165,12 @@ fn setup(o: Order, base: u32) -> Vec<u8> {
     b
 }
 
+/// Serve one client. With a `cookie`, the client must present it; without,
+/// the listener already knows the client (see `x_server`).
 pub fn serve(
     mut socket: UnixStream,
     shared: Arc<Shared>,
-    cookie: [u8; 16],
+    cookie: Option<[u8; 16]>,
     base: u32,
 ) -> io::Result<()> {
     socket.set_nonblocking(false)?;
@@ -188,10 +190,11 @@ pub fn serve(
     }
     let mut auth = vec![0; padded(name) + padded(data)];
     socket.read_exact(&mut auth)?;
-    if &auth[..name] != b"MIT-MAGIC-COOKIE-1"
-        || data != 16
-        || auth[padded(name)..padded(name) + data] != cookie
-    {
+    if cookie.is_some_and(|cookie| {
+        &auth[..name] != b"MIT-MAGIC-COOKIE-1"
+            || data != 16
+            || auth[padded(name)..padded(name) + data] != cookie
+    }) {
         let reason = b"Authentication required";
         let mut b = vec![0; 8 + padded(reason.len())];
         b[1] = reason.len() as u8;
@@ -665,6 +668,41 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Another account (anyone the listener doesn't recognise) needs the cookie.
+    #[test]
+    fn a_client_without_the_cookie_is_refused_when_one_is_required() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snapshot.tar");
+        let shared = || {
+            Arc::new(Shared {
+                atoms: Mutex::new(Atoms::default()),
+                snapshot: path.clone(),
+                source: crate::clipboard_source::Source::new(&path),
+            })
+        };
+        let cookie = [7; 16];
+        let setup = |auth: &[u8]| {
+            let mut b = vec![b'l', 0, 11, 0, 0, 0];
+            b.extend_from_slice(&18u16.to_le_bytes());
+            b.extend_from_slice(&16u16.to_le_bytes());
+            b.extend_from_slice(&[0, 0]);
+            b.extend_from_slice(b"MIT-MAGIC-COOKIE-1\0\0");
+            b.extend_from_slice(auth);
+            b
+        };
+        for (auth, admitted) in [([0; 16], false), (cookie, true)] {
+            let (server, mut client) = UnixStream::pair().unwrap();
+            client.write_all(&setup(&auth)).unwrap();
+            let shared = shared();
+            let serving = std::thread::spawn(move || serve(server, shared, Some(cookie), 0));
+            let mut status = [0];
+            client.read_exact(&mut status).unwrap();
+            assert_eq!(status[0] == 1, admitted);
+            drop(client);
+            let _ = serving.join();
+        }
+    }
 
     #[test]
     fn incr_next_chunk_is_announced_before_get_property_reply() {
