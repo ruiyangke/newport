@@ -246,7 +246,16 @@ pub fn prepare() -> Result<Prepared> {
         );
     }
     check_interrupted()?;
-    let mut env = vec![("NEWPORT_REMOTE_APPS".to_owned(), PathBuf::from("1"))];
+    let mut env = vec![
+        ("NEWPORT_REMOTE_APPS".to_owned(), PathBuf::from("1")),
+        // The client's Opus (audiopus_sys) builds its bundled copy with CMake
+        // where no system Opus is found, as on CI; its CMakeLists predates
+        // CMake 3.5, which CMake 4 refuses without this.
+        (
+            "CMAKE_POLICY_VERSION_MINIMUM".to_owned(),
+            PathBuf::from("3.5"),
+        ),
+    ];
     env.extend(archives);
     Ok(Prepared {
         _guard: guard,
