@@ -23,7 +23,7 @@ Every command is described in [tools/xtask](../tools/xtask/README.md).
 | `cargo xtask test git-cli-contract` | Agent Git CLI responses through the app's validators |
 | `cargo xtask test desktop` | Profile/preferences/metrics, resource staging, and the desktop app's lifecycle |
 | `cargo xtask test desktop --headless` | Lifecycle checks without a GUI session |
-| `cargo xtask test remote-apps` | newport-gpui's tests with Remote apps compiled in, from the private newport-remote checkout |
+| `cargo xtask test remote-apps` | newport-gpui's tests with Remote apps compiled in, from the private newport-remote checkout (CI's `remote-apps` job) |
 
 `cargo xtask check` runs all three checks. Remote
 checks use OrbStack by default; set `NEWPORT_TEST_DOCKER_CONTEXT=default` for the

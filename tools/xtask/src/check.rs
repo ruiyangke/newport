@@ -169,7 +169,7 @@ pub fn dev(args: &[OsString], remote_apps: bool) -> Result<()> {
 
 /// A Remote apps build that was killed outright leaves the private crates in
 /// the manifests; every build takes them out first.
-fn clean_leftover() -> Result<()> {
+pub(crate) fn clean_leftover() -> Result<()> {
     if crate::remote_apps::leftover()? {
         eprintln!("Taking the private crates a killed Remote apps build left out of the manifests");
         crate::remote_apps::clean()?;

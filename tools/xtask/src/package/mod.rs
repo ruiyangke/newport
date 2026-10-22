@@ -27,6 +27,10 @@ pub struct Options {
     /// Windows: also build the NSIS installer.
     #[arg(long)]
     pub nsis: bool,
+    /// macOS: compile Remote apps in, from the private newport-remote
+    /// checkout (NEWPORT_REMOTE_DIR).
+    #[arg(long)]
+    pub remote_apps: bool,
 }
 
 /// What a package run produced.
@@ -65,10 +69,24 @@ fn platform(target: Option<&str>, host: Platform) -> Result<Platform> {
 }
 
 /// `cargo build --locked [--release] -p newport-app [--target <triple>]` in the Ghostty
-/// environment, without release secrets.
-fn cargo_build(release: bool, target: Option<&str>, env: &ghostty::BuildEnv) -> Command {
+/// environment, without release secrets. With Remote apps the private crates
+/// change the lockfile for the build, so it isn't locked.
+fn cargo_build(
+    release: bool,
+    target: Option<&str>,
+    env: &ghostty::BuildEnv,
+    remote_apps: Option<&crate::remote_apps::Prepared>,
+) -> Command {
     let mut c = command("cargo");
-    c.args(["build", "--locked"]);
+    c.arg("build");
+    match remote_apps {
+        Some(prepared) => {
+            prepared.apply(&mut c);
+        }
+        None => {
+            c.arg("--locked");
+        }
+    }
     if release {
         c.arg("--release");
     }
@@ -80,13 +98,16 @@ fn cargo_build(release: bool, target: Option<&str>, env: &ghostty::BuildEnv) -> 
     c
 }
 
-/// Prepare Ghostty, build the grammars, then build the app; nothing with `skip_build`.
+/// Prepare Ghostty, build the grammars, add Remote apps when asked, then build
+/// the app; nothing with `skip_build`. The private crates leave the manifests
+/// when this returns.
 fn build(
     skip_build: bool,
     release: bool,
     target: Option<&str>,
     prepare: impl FnOnce() -> Result<ghostty::BuildEnv>,
     grammars: impl FnOnce() -> Result<()>,
+    remote_apps: impl FnOnce() -> Result<Option<crate::remote_apps::Prepared>>,
     run: impl FnOnce(&mut Command) -> Result<()>,
 ) -> Result<()> {
     if skip_build {
@@ -95,7 +116,13 @@ fn build(
     // Pinned compiler and source exist before Cargo invokes Ghostty's build script.
     let env = prepare()?;
     grammars()?;
-    run(&mut cargo_build(release, target, &env))
+    let remote_apps = remote_apps()?;
+    run(&mut cargo_build(
+        release,
+        target,
+        &env,
+        remote_apps.as_ref(),
+    ))
 }
 
 /// The root workspace's target directory and the `newport-app` version.
@@ -247,6 +274,11 @@ pub fn run(options: &Options) -> Result<Package> {
         !options.nsis || platform.os == Os::Windows,
         "Build the Windows installer on Windows"
     );
+    // Remote app sessions need Newport's Unix socket streams.
+    ensure!(
+        !options.remote_apps || platform.os == Os::Macos,
+        "Remote apps are packaged for macOS only"
+    );
     let product = util::app()?;
     build(
         options.skip_build,
@@ -254,6 +286,13 @@ pub fn run(options: &Options) -> Result<Package> {
         target,
         ghostty::prepare,
         || grammars::build(release, target).map(drop),
+        || {
+            if !options.remote_apps {
+                return Ok(None);
+            }
+            crate::check::clean_leftover()?;
+            crate::remote_apps::prepare().map(Some)
+        },
         util::run,
     )?;
     let (target_directory, version) = metadata()?;
@@ -384,6 +423,7 @@ mod tests {
                 steps.borrow_mut().push("grammars".to_owned());
                 Ok(())
             },
+            || Ok(None),
             |c| {
                 steps.borrow_mut().push("cargo".to_owned());
                 assert_eq!(c.get_program(), "cargo");
@@ -407,7 +447,7 @@ mod tests {
         .unwrap();
         assert_eq!(*steps.borrow(), ["bootstrap", "grammars", "cargo"]);
 
-        let c = cargo_build(true, Some("aarch64-apple-darwin"), &ghostty_env());
+        let c = cargo_build(true, Some("aarch64-apple-darwin"), &ghostty_env(), None);
         let args: Vec<_> = c.get_args().collect();
         assert_eq!(
             args,
@@ -431,6 +471,7 @@ mod tests {
             None,
             || panic!("must not bootstrap"),
             || panic!("must not build grammars"),
+            || panic!("must not add Remote apps"),
             |_| panic!("must not build"),
         )
         .unwrap();

@@ -26,7 +26,7 @@ fn clean(program: impl AsRef<std::ffi::OsStr>) -> Command {
     c
 }
 
-pub fn run(skip_build: bool) -> Result<()> {
+pub fn run(skip_build: bool, remote_apps: bool) -> Result<()> {
     ensure!(
         cfg!(target_os = "macos"),
         "macOS distributions must be built on macOS"
@@ -54,6 +54,7 @@ pub fn run(skip_build: bool) -> Result<()> {
     let package = package::run(&package::Options {
         target: Some(TARGET.into()),
         skip_build,
+        remote_apps,
         ..Default::default()
     })?;
     let app = &package.app;

@@ -24,6 +24,9 @@ pub enum Action {
     Macos {
         #[arg(long)]
         skip_build: bool,
+        /// Compile Remote apps in, from the private newport-remote checkout.
+        #[arg(long)]
+        remote_apps: bool,
     },
     /// Signed Windows update payload and manifest fragment.
     WindowsUpdate {
@@ -53,7 +56,10 @@ pub fn run(action: Action) -> Result<()> {
     match action {
         Action::Verify { ci } => verify::run(ci),
         Action::SetupSigning => crate::signing::setup_ci(),
-        Action::Macos { skip_build } => macos::run(skip_build),
+        Action::Macos {
+            skip_build,
+            remote_apps,
+        } => macos::run(skip_build, remote_apps),
         Action::WindowsUpdate {
             installer,
             arch,

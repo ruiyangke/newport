@@ -21,6 +21,7 @@ crates may build for another target.
 | `cargo xtask grammars [--release] [--target <triple>]` | Builds every tree-sitter grammar library and stages it in `<target>/<profile>/grammars`. `dev` and `build` do this when the staged libraries are missing or older than `crates/newport-grammars`, `Cargo.lock` or the language list. |
 | `cargo xtask pdfium [--release] [--target <triple>]` | Downloads, verifies and stages PDFium for Windows. |
 | `cargo xtask agents [--if-changed]` | Builds the Linux agent binaries in Docker; `--if-changed` only when they are missing or older than `tools/agent`'s sources (as `dev` and `build` do). With `NEWPORT_PREBUILT=1` it verifies downloaded ones instead. |
+| `cargo xtask remote-agents [--arch x86_64\|aarch64]…` | Builds the Remote apps agent archives in `target/remote-agent` (see [Remote apps](#remote-apps)). |
 | `cargo xtask artifact record\|verify <dir>` | Records or checks `newport-build.json`: per-file SHA-256 and the commit. |
 | `cargo xtask dev-run <binary> [<args>…]` | macOS cargo runner. Bundles, signs and launches `newport` through LaunchServices; other binaries run directly. |
 
@@ -50,10 +51,10 @@ so changing a patch rebuilds the terminal engine.
 
 | Command | Does |
 | --- | --- |
-| `cargo xtask package [--debug] [--skip-build] [--target <triple>] [--nsis]` | Stages the app and verifies it. macOS: `Newport.app` plus a zip. Windows: a zip, and with `--nsis` the installer. |
-| `cargo xtask release verify [--ci]` | Checks the tag against every version and, with `--ci`, whether an existing CI run can be reused. |
+| `cargo xtask package [--debug] [--skip-build] [--target <triple>] [--nsis] [--remote-apps]` | Stages the app and verifies it. macOS: `Newport.app` plus a zip. Windows: a zip, and with `--nsis` the installer. `--remote-apps` (macOS) compiles Remote apps in. |
+| `cargo xtask release verify [--ci]` | Checks the tag against every version and, with `--ci`, whether an existing CI run can be reused: it must have passed and kept its `linux-agents` and `remote-agent-*` artifacts. |
 | `cargo xtask release setup-signing` | CI: writes the certificate and profile and creates a temporary keychain. |
-| `cargo xtask release macos [--skip-build]` | Developer ID signing, notarization, stapling, and the signed update tarball and manifest fragment. |
+| `cargo xtask release macos [--skip-build] [--remote-apps]` | Developer ID signing, notarization, stapling, and the signed update tarball and manifest fragment. |
 | `cargo xtask release windows-update <installer> --arch <arch> --app-executable <exe> --output <dir>` | Signed Windows update payload and manifest fragment. |
 | `cargo xtask release merge <latest.json> <fragment>… --version <v> --output <path>` | Merges the fragments, verifies every signature, and writes `SHA256SUMS`. |
 | `cargo xtask release sign-needle` | Verifies `resources/agents` and signs the agent release. |
@@ -94,6 +95,21 @@ crates out of `Cargo.toml` and `Cargo.lock` again when the build ends, fails or
 is interrupted with Ctrl-C; a build that was killed outright is cleaned up by
 the next `dev`, `build` or `test`. The checkout never keeps a reference to the
 private crates.
+
+`package --remote-apps` and `release macos --remote-apps` do the same for
+distributions; Windows has no Remote apps yet. `cargo xtask remote-agents`
+makes only the agent archives. With `NEWPORT_PREBUILT=1`, builds use the
+archives already in `target/remote-agent` as they are.
+
+CI and releases build the newport-remote commit in
+`.github/newport-remote-revision`; a local build says when its checkout is at
+another one. After changing newport-remote, push it and put its commit there.
+CI checks it out with the `NEWPORT_REMOTE_DEPLOY_KEY` secret, a read-only deploy
+key of that repository. The `remote-agents` jobs build each architecture's
+archive natively and once, and the `remote-apps` job runs `test remote-apps`
+and packages the app from them; a release embeds the same archives, so every
+build of a commit carries the same agent release. Pull requests from forks get
+no key and skip these jobs; main fails without them.
 
 ## Not in xtask
 

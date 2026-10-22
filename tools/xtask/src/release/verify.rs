@@ -14,12 +14,17 @@ const RELEASE_ONLY_DIRECTORIES: &[&str] = &["tools/xtask/src/release/"];
 const CHECKS_WORKFLOW: &str = ".github/workflows/checks.yml";
 const ALL_CHECKS_JOB: &str = "checks / All checks passed";
 const AGENTS_ARTIFACT: &str = "linux-agents";
+/// The Remote apps agent archives the macOS release embeds, one per server
+/// architecture, packed once in CI.
+const REMOTE_AGENT_ARTIFACTS: [&str; 2] = ["remote-agent-x86_64", "remote-agent-aarch64"];
 
-/// The CI run a release consumes and its Linux agent artifact.
+/// The CI run a release consumes, its Linux agent artifact and its Remote
+/// apps agent artifacts.
 #[derive(Debug, PartialEq, Eq)]
 pub struct CiBuild {
     pub run_id: u64,
     pub artifact_id: u64,
+    pub remote_agent_artifact_ids: Vec<u64>,
 }
 
 pub fn run(ci: bool) -> Result<()> {
@@ -48,6 +53,15 @@ pub fn run(ci: bool) -> Result<()> {
             ("ci_commit", ci_commit),
             ("ci_run_id", build.run_id.to_string()),
             ("agents_artifact_id", build.artifact_id.to_string()),
+            (
+                "remote_agents_artifact_ids",
+                build
+                    .remote_agent_artifact_ids
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
         ]);
     }
     if env::var_os("GITHUB_OUTPUT").is_some() {
@@ -251,8 +265,9 @@ fn is_repository(value: &str) -> bool {
 }
 
 /// The newest main CI run for `commit`, required to have passed with its
-/// all-checks gate and exactly one live `linux-agents` artifact. An older
-/// success never masks a newer failed or pending run of the same commit.
+/// all-checks gate and exactly one live `linux-agents` artifact and one of
+/// each Remote apps agent. An older success never masks a newer failed or
+/// pending run of the same commit.
 pub fn verified_ci_build(
     repository: &str,
     commit: &str,
@@ -313,29 +328,37 @@ pub fn verified_ci_build(
         &api,
         &format!("{base}/runs/{}/artifacts?per_page=100", run.id),
     )?;
-    let artifacts: Vec<_> = artifacts
-        .artifacts
-        .into_iter()
-        .filter(|a| a.name == AGENTS_ARTIFACT)
-        .collect();
-    match artifacts.as_slice() {
-        [artifact]
-            if !artifact.expired
-                && artifact.size_in_bytes > 0
-                && artifact.workflow_run.as_ref().is_some_and(|w| {
-                    w.id == Some(run.id) && w.head_sha.as_deref() == Some(commit)
-                }) =>
-        {
-            Ok(CiBuild {
-                run_id: run.id,
-                artifact_id: artifact.id,
-            })
+    // Exactly one live artifact of this name, from this run of this commit.
+    let find = |name: &str| -> Result<u64> {
+        let named: Vec<_> = artifacts
+            .artifacts
+            .iter()
+            .filter(|a| a.name == name)
+            .collect();
+        match named.as_slice() {
+            [artifact]
+                if !artifact.expired
+                    && artifact.size_in_bytes > 0
+                    && artifact.workflow_run.as_ref().is_some_and(|w| {
+                        w.id == Some(run.id) && w.head_sha.as_deref() == Some(commit)
+                    }) =>
+            {
+                Ok(artifact.id)
+            }
+            _ => anyhow::bail!(
+                "CI {} has no valid {name} artifact; rerun CI to regenerate it",
+                run.id
+            ),
         }
-        _ => anyhow::bail!(
-            "CI {} has no valid linux-agents artifact; rerun CI to regenerate it",
-            run.id
-        ),
-    }
+    };
+    Ok(CiBuild {
+        run_id: run.id,
+        artifact_id: find(AGENTS_ARTIFACT)?,
+        remote_agent_artifact_ids: REMOTE_AGENT_ARTIFACTS
+            .iter()
+            .map(|name| find(name))
+            .collect::<Result<_>>()?,
+    })
 }
 
 #[cfg(test)]
@@ -547,10 +570,18 @@ mod tests {
             jobs: vec![
                 json!({"name": ALL_CHECKS_JOB, "status": "completed", "conclusion": "success"}),
             ],
-            artifacts: vec![json!({
-                "id": 20, "name": "linux-agents", "expired": false, "size_in_bytes": 100,
-                "workflow_run": {"id": 10, "head_sha": COMMIT},
-            })],
+            artifacts: [
+                (20, "linux-agents"),
+                (30, "remote-agent-x86_64"),
+                (31, "remote-agent-aarch64"),
+            ]
+            .map(|(id, name)| {
+                json!({
+                    "id": id, "name": name, "expired": false, "size_in_bytes": 100,
+                    "workflow_run": {"id": 10, "head_sha": COMMIT},
+                })
+            })
+            .to_vec(),
         }
     }
 
@@ -589,6 +620,7 @@ mod tests {
         let expected = CiBuild {
             run_id: 10,
             artifact_id: 20,
+            remote_agent_artifact_ids: vec![30, 31],
         };
         assert_eq!(ci().check().unwrap(), expected);
         let dispatch = ci().both(|r| r["event"] = json!("workflow_dispatch"));
@@ -707,6 +739,22 @@ mod tests {
                     c
                 },
                 "no valid linux-agents",
+            ),
+            (
+                "CI without Remote apps",
+                |mut c| {
+                    c.artifacts.retain(|a| a["name"] != "remote-agent-aarch64");
+                    c
+                },
+                "no valid remote-agent-aarch64",
+            ),
+            (
+                "Remote apps agent from another run",
+                |mut c| {
+                    c.artifacts[1]["workflow_run"]["id"] = json!(9);
+                    c
+                },
+                "no valid remote-agent-x86_64",
             ),
         ];
         for (name, change, pattern) in cases {

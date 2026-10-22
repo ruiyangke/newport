@@ -6,6 +6,10 @@ on:
         description: Exact commit to validate and build
         required: true
         type: string
+    secrets:
+      NEWPORT_REMOTE_DEPLOY_KEY:
+        description: Read-only deploy key for the private newport-remote repository (Remote apps)
+        required: false
 permissions:
   contents: read
 env:
@@ -321,16 +325,145 @@ jobs:
           nix develop .#remote --command docker info
           nix develop .#remote --command docker ps -a
 
+  # Remote apps need the private newport-remote crates and agent. Pull
+  # requests from forks get no key and skip them; main must build them.
+  remote-apps-access:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      available: ${{ steps.key.outputs.available }}
+    steps:
+      - id: key
+        env:
+          KEY: ${{ secrets.NEWPORT_REMOTE_DEPLOY_KEY }}
+        run: if [ -n "$KEY" ]; then echo available=true; else echo available=false; fi >> "$GITHUB_OUTPUT"
+
+  # Each archive is packed once, natively, and every later build of this
+  # commit (the Remote apps check, the release) embeds these exact bytes.
+  remote-agents:
+    name: Remote apps agent (${{ matrix.arch }})
+    needs: remote-apps-access
+    if: needs.remote-apps-access.outputs.available == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      NEWPORT_REMOTE_DIR: ${{ github.workspace }}/newport-remote
+    defaults:
+      run:
+        working-directory: newport
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          path: newport
+          persist-credentials: false
+      - id: revision
+        run: echo "commit=$(cat .github/newport-remote-revision)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ruiyangke/newport-remote
+          ref: ${{ steps.revision.outputs.commit }}
+          path: newport-remote
+          ssh-key: ${{ secrets.NEWPORT_REMOTE_DEPLOY_KEY }}
+          persist-credentials: false
+      - run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            newport/tools/xtask
+            newport-remote
+          key: remote-agent-${{ matrix.arch }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - run: cargo xtask remote-agents --arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: remote-agent-${{ matrix.arch }}
+          path: newport/target/remote-agent/${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  remote-apps:
+    name: Remote apps (macos-arm64)
+    needs: [agents, remote-agents]
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      NEWPORT_PREBUILT: "1"
+      NEWPORT_REMOTE_DIR: ${{ github.workspace }}/newport-remote
+    defaults:
+      run:
+        working-directory: newport
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          path: newport
+          persist-credentials: false
+      - id: revision
+        run: echo "commit=$(cat .github/newport-remote-revision)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ruiyangke/newport-remote
+          ref: ${{ steps.revision.outputs.commit }}
+          path: newport-remote
+          ssh-key: ${{ secrets.NEWPORT_REMOTE_DEPLOY_KEY }}
+          persist-credentials: false
+      - run: rustup show
+      - name: Install Metal shader compiler
+        run: xcrun --sdk macosx metal --version || { xcodebuild -downloadComponent MetalToolchain && xcrun --sdk macosx metal --version; }
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            newport
+            newport/tools/xtask
+          key: remote-apps
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: linux-agents
+          path: newport/resources/agents
+      - run: cargo xtask artifact verify resources/agents
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: remote-agent-*
+          path: newport/target/remote-agent
+          merge-multiple: true
+      - run: cargo xtask grammars
+      - name: Prepare pinned Ghostty build dependencies
+        run: cargo xtask env --github
+      - run: cargo xtask test remote-apps
+      - name: Package the app with Remote apps
+        run: cargo xtask package --debug --remote-apps
+
   passed:
     name: All checks passed
     if: always()
-    needs: [tooling, native-core, native-ui, agent-tests, agents, remote]
+    needs: [tooling, native-core, native-ui, agent-tests, agents, remote, remote-apps-access, remote-agents, remote-apps]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every check
         env:
           RESULTS: ${{ toJSON(needs) }}
+          REMOTE_APPS: ${{ needs.remote-apps-access.outputs.available }}
+          EVENT: ${{ github.event_name }}
         run: |
-          failed=$(jq -r 'to_entries | map(select(.value.result != "success") | .key) | join(", ")' <<< "$RESULTS")
+          # Only a pull request without the key may skip Remote apps.
+          optional='[]'
+          if [ "$REMOTE_APPS" != true ]; then
+            if [ "$EVENT" != pull_request ]; then
+              echo "Remote apps weren't built: set the NEWPORT_REMOTE_DEPLOY_KEY secret" >&2
+              exit 1
+            fi
+            optional='["remote-agents", "remote-apps"]'
+          fi
+          failed=$(jq -r --argjson optional "$optional" 'to_entries | map(select(.value.result != "success" and ((.value.result == "skipped" and (.key as $k | $optional | index($k))) | not)) | .key) | join(", ")' <<< "$RESULTS")
           if [ -n "$failed" ]; then echo "Checks did not pass: $failed" >&2; exit 1; fi

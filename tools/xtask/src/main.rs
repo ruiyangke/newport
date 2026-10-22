@@ -99,6 +99,13 @@ enum Task {
         #[arg(long)]
         if_changed: bool,
     },
+    /// Build the Remote apps agent archives in target/remote-agent, from the
+    /// private newport-remote checkout (NEWPORT_REMOTE_DIR).
+    RemoteAgents {
+        /// Only these architectures (x86_64, aarch64); default both.
+        #[arg(long = "arch")]
+        architectures: Vec<String>,
+    },
     /// Record or verify an artifact manifest (newport-build.json).
     Artifact {
         #[command(subcommand)]
@@ -185,6 +192,7 @@ fn main() -> Result<()> {
         Task::Pdfium(args) => pdfium::stage(args.release, args.target().as_deref()).map(drop),
         Task::Agents { if_changed: false } => remote::build_agents(),
         Task::Agents { if_changed: true } => check::agents_if_changed(),
+        Task::RemoteAgents { architectures } => remote_apps::build_archives(&architectures),
         Task::Artifact { action } => artifact::run(action),
         Task::DevRun { binary, args } => dev_run::run(&binary, &args),
         Task::Check { scope } => check::run(scope),

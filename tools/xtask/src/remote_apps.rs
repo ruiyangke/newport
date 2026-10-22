@@ -14,7 +14,13 @@
 //! Install on the Remote apps page sends a compiled agent to the server; the
 //! build embeds one archive per server architecture, made from newport-remote's
 //! static agents, which are rebuilt in Docker when older than their sources.
-//! Servers never receive source.
+//! Servers never receive source. With `NEWPORT_PREBUILT=1` the archives in
+//! `target/remote-agent` are used as they are: CI packs each one once
+//! (`cargo xtask remote-agents`), so every build of a commit embeds the same
+//! bytes and so the same release.
+//!
+//! CI builds the newport-remote commit named in [`REVISION`]; a local build
+//! uses the checkout as it is and says when it differs.
 //!
 //! Remote app windows run inside Newport's GPUI application, so the streaming
 //! crates must use this GPUI, not a second copy: their crates.io `gpui-pre`
@@ -42,6 +48,10 @@ const CRATES: [&str; 6] = [
     "newport-remote-app",
 ];
 const GPUI_MANIFEST: &str = "crates/newport-gpui/Cargo.toml";
+/// The newport-remote commit CI and releases build with.
+pub const REVISION: &str = ".github/newport-remote-revision";
+/// Server architectures, as Newport names them and as Docker does.
+const ARCHITECTURES: [(&str, &str); 2] = [("x86_64", "amd64"), ("aarch64", "arm64")];
 
 /// The newport-remote checkout.
 fn checkout() -> Result<PathBuf> {
@@ -177,6 +187,7 @@ pub fn prepare() -> Result<Prepared> {
     let newport = root();
     let remote = checkout()?;
     check_install_marker(&newport, &remote)?;
+    check_revision(&newport, &remote)?;
     let (url, rev) = gpui_source(&fs::read_to_string(newport.join("Cargo.lock"))?)?;
     let guard = Added::new()?;
     for name in CRATES {
@@ -191,7 +202,11 @@ pub fn prepare() -> Result<Prepared> {
         util::run(&mut add)?;
     }
     check_interrupted()?;
-    let archives = agent_archives(&newport, &remote)?;
+    let archives = if prebuilt() {
+        prebuilt_archives(&newport)?
+    } else {
+        agent_archives(&newport, &remote, &ARCHITECTURES)?
+    };
     check_interrupted()?;
     let patch: Vec<String> = ["gpui-pre", "gpui-pre-platform"]
         .iter()
@@ -250,21 +265,79 @@ impl Prepared {
     }
 }
 
+/// `cargo xtask remote-agents`: build the agent archives, or only those for
+/// `architectures` (x86_64, aarch64), as Remote apps builds embed them.
+pub fn build_archives(architectures: &[String]) -> Result<()> {
+    let newport = root();
+    let remote = checkout()?;
+    check_install_marker(&newport, &remote)?;
+    check_revision(&newport, &remote)?;
+    let selected: Vec<_> = if architectures.is_empty() {
+        ARCHITECTURES.to_vec()
+    } else {
+        architectures
+            .iter()
+            .map(|name| {
+                ARCHITECTURES
+                    .into_iter()
+                    .find(|(arch, _)| arch == name)
+                    .with_context(|| format!("Unknown architecture {name}; use x86_64 or aarch64"))
+            })
+            .collect::<Result<_>>()?
+    };
+    for (_, archive) in agent_archives(&newport, &remote, &selected)? {
+        println!("{}", archive.display());
+    }
+    Ok(())
+}
+
+fn prebuilt() -> bool {
+    std::env::var("NEWPORT_PREBUILT").as_deref() == Ok("1")
+}
+
+fn archive_path(newport: &Path, arch: &str) -> PathBuf {
+    newport.join(format!("target/remote-agent/{arch}.tar.gz"))
+}
+
+fn archive_variable(arch: &str) -> String {
+    format!("NEWPORT_REMOTE_AGENT_{}", arch.to_uppercase())
+}
+
+/// The archives CI packed, used as they are.
+fn prebuilt_archives(newport: &Path) -> Result<Vec<(String, PathBuf)>> {
+    ARCHITECTURES
+        .iter()
+        .map(|(arch, _)| {
+            let archive = archive_path(newport, arch);
+            ensure!(
+                fs::metadata(&archive).is_ok_and(|m| m.is_file() && m.len() > 0),
+                "NEWPORT_PREBUILT is set, but there is no {}; make it with `cargo xtask remote-agents`",
+                archive.display()
+            );
+            Ok((archive_variable(arch), archive))
+        })
+        .collect()
+}
+
 /// The compiled agent archives Install sends, at stable paths so an
 /// unchanged agent doesn't rebuild Newport. Static agents are rebuilt first
 /// when anything they are built from is newer.
-fn agent_archives(newport: &Path, remote: &Path) -> Result<Vec<(String, PathBuf)>> {
+fn agent_archives(
+    newport: &Path,
+    remote: &Path,
+    architectures: &[(&str, &str)],
+) -> Result<Vec<(String, PathBuf)>> {
     let directory = newport.join("target/remote-agent");
     fs::create_dir_all(&directory)?;
     util::run(
         Command::new("sh")
             .current_dir(remote)
             .arg(remote.join("scripts/ensure-static-agent.sh"))
-            .args(["amd64", "arm64"]),
+            .args(architectures.iter().map(|(_, docker)| docker)),
     )?;
     let mut env = Vec::new();
-    for arch in ["x86_64", "aarch64"] {
-        let archive = directory.join(format!("{arch}.tar.gz"));
+    for (arch, _) in architectures {
+        let archive = archive_path(newport, arch);
         let fresh = directory.join(format!("{arch}.tar.gz.new"));
         util::run(
             command("cargo")
@@ -278,10 +351,7 @@ fn agent_archives(newport: &Path, remote: &Path) -> Result<Vec<(String, PathBuf)
         } else {
             fs::rename(&fresh, &archive)?;
         }
-        env.push((
-            format!("NEWPORT_REMOTE_AGENT_{}", arch.to_uppercase()),
-            archive,
-        ));
+        env.push((archive_variable(arch), archive));
     }
     Ok(env)
 }
@@ -299,6 +369,41 @@ fn check_install_marker(newport: &Path, remote: &Path) -> Result<()> {
         "newport-remote's installer marks agents {installed:?}, but Newport's backend looks for {found:?}. Update crates/newport-backend/src/remote_apps.rs."
     );
     Ok(())
+}
+
+/// CI must build the pinned newport-remote commit; locally a different one is
+/// fine but worth knowing, since CI won't build it until the pin moves.
+fn check_revision(newport: &Path, remote: &Path) -> Result<()> {
+    let pinned = fs::read_to_string(newport.join(REVISION))
+        .with_context(|| format!("Cannot read {REVISION}"))?;
+    let pinned = pinned.trim();
+    ensure!(
+        pinned.len() == 40 && pinned.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{REVISION} must hold one full commit hash"
+    );
+    let head = util::capture(
+        Command::new("git")
+            .arg("-C")
+            .arg(remote)
+            .args(["rev-parse", "HEAD"]),
+    );
+    match head {
+        Ok(head) if head.trim() == pinned => Ok(()),
+        _ if std::env::var_os("CI").is_some() => {
+            bail!("CI must build newport-remote {pinned} ({REVISION})")
+        }
+        Ok(head) => {
+            eprintln!(
+                "newport-remote is at {}; CI builds {pinned} ({REVISION})",
+                head.trim()
+            );
+            Ok(())
+        }
+        Err(_) => {
+            eprintln!("Cannot tell newport-remote's commit; CI builds {pinned} ({REVISION})");
+            Ok(())
+        }
+    }
 }
 
 /// The distinct `.validated-vN` markers a script names.
