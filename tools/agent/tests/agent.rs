@@ -98,10 +98,17 @@ fn archive() -> Vec<u8> {
     }
     tar.into_inner().unwrap()
 }
+/// Run a Needle command as a shell without a desktop would. Tests set
+/// WAYLAND_DISPLAY for the whole process while they run; inheriting it would
+/// make the command hand the request to the system's clipboard instead.
 fn cmd(home: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new(BIN)
         .args(args)
         .env("HOME", home)
+        .env_remove("DISPLAY")
+        .env_remove("XAUTHORITY")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("WAYLAND_SOCKET")
         .output()
         .unwrap()
 }

@@ -382,8 +382,9 @@ jobs:
             newport-remote
           key: remote-agent-${{ matrix.arch }}
           save-if: ${{ github.event_name != 'pull_request' }}
-      # newport-remote's own tooling links its client's audio libraries.
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libopus-dev libclang-dev
+      # newport-remote's own tooling links its client's audio and AV1 libraries;
+      # libaom needs an assembler on x86_64.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libopus-dev libclang-dev nasm
       - run: cargo xtask remote-agents --arch ${{ matrix.arch }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
