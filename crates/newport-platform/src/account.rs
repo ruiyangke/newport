@@ -333,10 +333,31 @@ mod tests {
         .unwrap();
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = vec![0; 8192];
-            let count = stream.read(&mut request).unwrap();
+            // Read the whole request, headers and then the body by its
+            // length, as a server does: closing with part of it unread makes
+            // Windows reset the connection before the client reads the reply.
+            let mut request = Vec::new();
+            let mut chunk = [0; 8192];
+            let header_end = loop {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0, "request ended early");
+                request.extend_from_slice(&chunk[..count]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map_or(0, |value| value.trim().parse::<usize>().unwrap());
+            while request.len() < header_end + length {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0, "body ended early");
+                request.extend_from_slice(&chunk[..count]);
+            }
             stream.write_all(response.as_bytes()).unwrap();
-            String::from_utf8_lossy(&request[..count]).into_owned()
+            String::from_utf8_lossy(&request).into_owned()
         });
         (url, handle)
     }
