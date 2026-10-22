@@ -16,8 +16,10 @@ permissions:
 concurrency:
   group: desktop-release
   cancel-in-progress: false
+# Jobs are named "Area: what (platform)", as in checks.yml.
 jobs:
   resolve:
+    name: "Release: verify tag and CI run"
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -41,6 +43,7 @@ jobs:
         run: cargo xtask release verify --ci
 
   needle-release:
+    name: "Needle: sign"
     needs: resolve
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -82,6 +85,7 @@ jobs:
           if-no-files-found: error
 
   macos:
+    name: "Desktop: macOS (signed, notarized, Remote apps)"
     needs: [resolve, needle-release]
     env:
       CARGO_INCREMENTAL: "0"
@@ -109,13 +113,14 @@ jobs:
           path: newport-remote
           ssh-key: ${{ secrets.NEWPORT_REMOTE_DEPLOY_KEY }}
           persist-credentials: false
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./newport/.github/actions/rust
         with:
+          working-directory: newport
+          target: aarch64-apple-darwin
+          cache-key: release-macos
           workspaces: |
             newport
             newport/tools/xtask
-          key: release-macos
       - uses: actions/download-artifact@v8
         with:
           name: linux-agents-signed
@@ -128,7 +133,6 @@ jobs:
           path: newport/target/remote-agent
           merge-multiple: true
       - run: xcrun --sdk macosx metal --version || { xcodebuild -downloadComponent MetalToolchain && xcrun --sdk macosx metal --version; }
-      - run: rustup target add aarch64-apple-darwin
       - run: cargo xtask artifact verify resources/agents
       - name: Prepare pinned terminal build dependencies
         run: cargo xtask env --github
@@ -164,6 +168,7 @@ jobs:
         run: security delete-keychain "$RUNNER_TEMP/release.keychain-db" || true
 
   windows:
+    name: "Desktop: Windows (${{ matrix.arch }})"
     needs: [resolve, needle-release]
     env:
       CARGO_INCREMENTAL: "0"
@@ -190,13 +195,10 @@ jobs:
         with:
           name: linux-agents-signed
           path: resources/agents
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust
         with:
-          workspaces: |
-            .
-            tools/xtask
-          key: release-windows-${{ matrix.arch }}
+          target: ${{ matrix.target }}
+          cache-key: release-windows-${{ matrix.arch }}
       - uses: ilammy/setup-nasm@v1
         if: matrix.arch == 'x86_64'
       - name: Locate LLVM for ARM64 dependencies
@@ -206,7 +208,6 @@ jobs:
           $llvm = 'C:\Program Files\LLVM\bin'
           if (!(Test-Path "$llvm\clang.exe")) { throw 'LLVM is required for ARM64' }
           $llvm >> $env:GITHUB_PATH
-      - run: rustup target add ${{ matrix.target }}
       - run: cargo xtask artifact verify resources/agents
       - name: Locate native Windows installer compiler
         shell: pwsh
@@ -255,6 +256,7 @@ jobs:
           if-no-files-found: error
 
   draft:
+    name: "Release: draft on GitHub"
     needs: [resolve, macos, windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
