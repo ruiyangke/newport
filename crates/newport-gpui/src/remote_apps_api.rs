@@ -63,6 +63,8 @@ pub enum Fix {
     Refresh,
     /// Replace the server's agent with the one this build carries.
     UpdateAgent,
+    /// An account step: sign in, see plans, or move a Pro seat here.
+    Account(newport_client::account::Action),
 }
 
 /// An installed application on the server.
@@ -133,7 +135,28 @@ pub struct SessionId(pub u64);
 pub enum SessionState {
     Starting,
     Running,
-    Ended { error: Option<String> },
+    /// `None` when it ended cleanly.
+    Ended {
+        ending: Option<Ending>,
+    },
+}
+
+/// How a session ended, when there is something to say about it. Only builds
+/// that stream construct these.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(not(newport_remote_apps), allow(dead_code))]
+pub enum Ending {
+    /// It never opened: the license, the server or the agent refused, with
+    /// the account step that fixes it, if any.
+    Refused {
+        message: String,
+        action: Option<newport_client::account::Action>,
+    },
+    /// It was opening or running and failed.
+    Failed(String),
+    /// The launch went to an instance of the application already running on
+    /// the server, so its window opened there.
+    HandedOff,
 }
 
 #[derive(Clone, Debug, PartialEq)]

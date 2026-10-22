@@ -1,10 +1,7 @@
-//! Managed Needle lifecycle. Feature channels never deploy or upgrade binaries.
-use crate::ssh::ExecSession;
-#[path = "agent_helper_history.rs"]
-pub(crate) mod helpers;
-#[path = "agent_removal.rs"]
-pub(crate) mod removal;
+//! Needle on a server: install (also update) and uninstall. Installing again
+//! converges and uninstalling is final; nothing is journaled in between.
 use crate::agent_payload::payload;
+use crate::ssh::ExecSession;
 use serde::Serialize;
 use std::{
     sync::{Arc, Mutex},
@@ -23,245 +20,136 @@ pub fn payload_size(arch: &str) -> Option<usize> {
 pub fn check_resources() -> Result<(), String> {
     crate::agent_payload::check_resources()
 }
-/// The only operation allowed to copy or replace Needle. Automatic upgrades use
-/// the same verified, journaled deployment as explicit installation actions.
+/// The outcome of installing Needle.
 pub struct Deployment {
     pub output: String,
     pub build_sha256: String,
-    pub already_complete: bool,
+    /// Shell setup the person still has to do by hand.
     pub setup_notice: Option<String>,
 }
+/// Installs or updates Needle on the server: this Newport's build, verified,
+/// then made active; with `integrations`, also the command links and shell
+/// setup.
 pub async fn manage(
     session: &ExecSession,
     progress: &crate::agent_install::Attempt,
-    force: bool,
     integrations: bool,
-    receipts: &crate::lifecycle_receipts::Store,
-    operation_id: uuid::Uuid,
     trigger: Trigger,
 ) -> Result<Deployment, String> {
-    deploy(
-        session,
-        progress,
-        force,
-        integrations,
-        receipts,
-        operation_id,
-        trigger,
-    )
-    .await
-}
-/// Explicit, durable shell setup. Never uploads or replaces the installed binary.
-pub async fn configure_integrations(
-    session: &ExecSession,
-    receipts: &crate::lifecycle_receipts::Store,
-    id: uuid::Uuid,
-) -> Result<String, String> {
-    use crate::lifecycle_receipts::{
-        Phase, Record,
-        protocol::{Intent, Kind, Observation, State},
-    };
-    if id.is_nil() {
-        return Err("Invalid shell setup operation ID".into());
-    }
     if !session.server().agent_install_approved {
-        return Err("Approve Needle setup before configuring shell helpers".into());
+        return Err(
+            "Needle installation requires approval. Open Overview to set up this server.".into(),
+        );
     }
-    let connection = crate::lifecycle_receipts::scope(session.server());
-    let prior = receipts.get(id)?;
-    if let Some(record) = &prior {
-        if record.server_id != session.server().id
-            || record.connection != connection
-            || record.intent.kind != Kind::Helpers
-        {
-            return Err(
-                "Shell setup operation belongs to a different request or connection".into(),
-            );
-        }
-        if record.phase == Phase::Ready {
-            return Ok(record
-                .error
-                .clone()
-                .unwrap_or_else(|| "Shell setup already completed.".into()));
-        }
-        if matches!(record.phase, Phase::RollingBack | Phase::RolledBack) {
-            return Err("This shell setup was restored or is being restored; resolve it before starting again".into());
-        }
+    let platform = session.execute("uname -s; uname -m", None).await?;
+    let mut lines = platform.lines();
+    if lines.next() != Some("Linux") {
+        return Err("The Newport agent requires Linux.".into());
     }
-    let active = "\"$HOME/.local/bin/newport-agent\"";
-    let record = match prior {
-        Some(record) => record,
-        None => {
-            crate::agent::require_installed(session).await?;
-            let hash = check(session)
-                .await?
-                .installed_hash
-                .ok_or("Needle is not installed")?;
-            helper_protocol(session, active, &hash).await?;
-            receipts
-                .begin(Record {
-                    server_id: session.server().id,
-                    connection,
-                    intent: Intent {
-                        kind: Kind::Helpers,
-                        operation_id: id,
-                        candidate: hash.clone(),
-                        previous: hash,
-                        integrations: true,
-                    },
-                    phase: Phase::Preparing,
-                    error: None,
-                })
-                .await?
-        }
-    };
-    let hash = &record.intent.candidate;
-    let pinned = format!("\"$HOME/.local/share/newport/needle/builds/{hash}/newport-agent\"");
-    let retained = session
-        .execute(&format!("if test -x {pinned}; then printf yes; fi"), None)
+    let architecture = lines.next().unwrap_or_default();
+    let binary = payload(architecture)
+        .ok_or("The Newport agent supports x86_64 and ARM64 Linux servers.")?;
+    let hash = binary.sha256.to_owned();
+    let status = check(session).await?;
+    if !trigger.allows(&status) {
+        return Err(
+            "Needle changed since the automatic update check; leaving it unchanged.".into(),
+        );
+    }
+    require_ordered_replacement(&status)?;
+    let candidate = format!("\"$HOME/.local/share/newport/needle/builds/{hash}/newport-agent\"");
+    let staged = session
+        .execute(
+            &format!("if test -x {candidate}; then printf yes; fi"),
+            None,
+        )
         .await?
         == "yes";
-    let command = if retained { pinned.as_str() } else { active };
-    helper_protocol(session, command, hash).await?;
-    let mut observed: Observation = if record.phase == Phase::NeedsResolution {
-        serde_json::from_str(
-            &session
-                .execute(&format!("{command} deployment operation {id}"), None)
-                .await?,
-        )
-        .map_err(|e| format!("Invalid shell setup receipt: {e}"))?
-    } else {
-        receipts.update(id, Some(Phase::Activating), None).await?;
-        serde_json::from_str(
-            &session
-                .execute(
-                    &format!("{command} deployment helpers {hash} --operation {id}"),
+    if !staged {
+        let command = format!(
+            "sh -c '{}' newport-install {hash}",
+            include_str!("agent-install.sh").replace('\'', "'\"'\"'")
+        );
+        progress.update("uploading", 0, binary.size, None);
+        session
+            .upload_resource(&command, binary.stream()?, &|sent| {
+                progress.update(
+                    if sent == binary.size {
+                        "installing"
+                    } else {
+                        "uploading"
+                    },
+                    sent,
+                    binary.size,
                     None,
                 )
-                .await?,
-        )
-        .map_err(|e| format!("Invalid shell setup result: {e}"))?
-    };
-    if observed
-        .receipt
-        .as_ref()
-        .is_some_and(|r| r.intent != record.intent)
-    {
-        return Err("Shell setup receipt does not match the approved request".into());
-    }
-    if observed
-        .receipt
-        .as_ref()
-        .is_some_and(|r| matches!(r.state, State::Prepared | State::Activated))
-    {
-        observed = serde_json::from_str(
-            &session
-                .execute(&format!("{command} deployment reconcile {id}"), None)
-                .await?,
-        )
-        .map_err(|e| format!("Invalid reconciled shell setup receipt: {e}"))?;
-    }
-    let remote = observed
-        .receipt
-        .ok_or("Shell setup receipt is missing; review the operation before proceeding")?;
-    if remote.intent != record.intent {
-        return Err("Shell setup receipt does not match the approved request".into());
-    }
-    if remote.state != State::Succeeded {
-        let error = remote.error.unwrap_or_else(|| {
-            "Shell setup needs review; its helper changes are not confirmed".into()
-        });
-        receipts
-            .update(
-                id,
-                Some(if remote.state == State::RolledBack {
-                    Phase::RolledBack
-                } else {
-                    Phase::NeedsResolution
-                }),
-                Some(error.clone()),
-            )
+            })
             .await?;
-        return Err(error);
     }
-    let notice = remote.error;
-    receipts
-        .update(id, Some(Phase::Ready), notice.clone())
+    progress.update("verifying", 0, 0, None);
+    crate::agent_runtime::verify_candidate(session, &hash).await?;
+    if !BUNDLED_RELEASE.is_empty() {
+        record_release(
+            session,
+            &hash,
+            architecture,
+            BUNDLED_RELEASE,
+            newport_release::needle::verify_production,
+        )
         .await?;
-    Ok(notice.unwrap_or_else(|| "Shell setup completed.".into()))
-}
-async fn helper_protocol(
-    session: &ExecSession,
-    command: &str,
-    hash: &str,
-) -> Result<serde_json::Value, String> {
-    let output = session.execute(&format!("{command} deployment protocol"), None).await
-        .map_err(|_| "This Needle build cannot manage shell setup safely. Update Needle explicitly, then retry.".to_owned())?;
-    let value: serde_json::Value = serde_json::from_str(&output).map_err(|_| {
-        "Needle returned an unsupported lifecycle protocol; update Needle explicitly".to_owned()
-    })?;
-    if value["version"] != 2 || value["helperOperations"] != true || value["buildSha256"] != hash {
-        return Err("Needle lifecycle compatibility or executable identity changed; inspect or update Needle before retrying".into());
     }
-    Ok(value)
+    progress.update("activating", 0, 0, None);
+    #[derive(serde::Deserialize)]
+    struct Installed {
+        build: String,
+        notice: Option<String>,
+    }
+    let installed: Installed = serde_json::from_str(
+        &session
+            .execute(
+                &format!(
+                    "{candidate} deployment install {hash}{}",
+                    if integrations { " --integrations" } else { "" }
+                ),
+                None,
+            )
+            .await?,
+    )
+    .map_err(|e| format!("Invalid Needle install result: {e}"))?;
+    if installed.build != hash {
+        return Err("Needle didn't confirm the installed build".into());
+    }
+    Ok(Deployment {
+        output: "Needle installed and verified.".into(),
+        build_sha256: hash,
+        setup_notice: installed.notice,
+    })
 }
 
-pub(crate) async fn review_helpers(
-    session: &ExecSession,
-    receipts: &crate::lifecycle_receipts::Store,
-    id: uuid::Uuid,
-    keep: Option<(usize, &str)>,
-) -> Result<crate::lifecycle_receipts::protocol::HelperReview, String> {
-    use crate::lifecycle_receipts::{
-        Phase,
-        protocol::{HelperReview, Observation},
-    };
-    let Some(record) = receipts.get(id)? else {
-        if receipts.helper_recovery(session.server(), id)?.is_some() {
-            return helpers::recovery::review(session, receipts, id, keep).await;
-        }
-        return removal::review(session, receipts, id, keep).await;
-    };
-    if record.server_id != session.server().id
-        || record.connection != crate::lifecycle_receipts::scope(session.server())
-        || record.phase != Phase::RollingBack
-    {
-        return Err("Only this connection's pending restore can be reviewed".into());
+/// The shell setup left to do by hand, from an install's outcome.
+pub(crate) fn setup_notice(outcome: &str) -> Option<String> {
+    outcome
+        .find("Manual shell setup needed")
+        .map(|start| outcome[start..].to_owned())
+}
+
+/// Uninstalls Needle: stops it, takes out its command links and shell setup,
+/// and deletes everything it keeps. Final; running it again finishes an
+/// interrupted run. Needs no Needle executable on the server.
+pub(crate) async fn uninstall(session: &ExecSession) -> Result<(), String> {
+    let output = session
+        .execute(
+            &format!(
+                "sh -c {}",
+                crate::ssh::shell_quote(include_str!("agent-uninstall.sh"))
+            ),
+            None,
+        )
+        .await?;
+    if output.trim() != "uninstalled" {
+        return Err("Needle didn't confirm it was uninstalled".into());
     }
-    if let Some((index, fingerprint)) = keep
-        && (index >= 32 || !crate::agent_runtime::protocol::valid_build(fingerprint))
-    {
-        return Err("Invalid file review decision".into());
-    }
-    let hash = &record.intent.candidate;
-    let command = format!("\"$HOME/.local/share/newport/needle/builds/{hash}/newport-agent\"");
-    let protocol = helper_protocol(session, &command, hash).await?;
-    if protocol["helperReview"] != true {
-        return Err("This recorded Needle build does not support file review. Its recovery evidence has been preserved.".into());
-    }
-    let observed: Observation = serde_json::from_str(
-        &session
-            .execute(&format!("{command} deployment operation {id}"), None)
-            .await?,
-    )
-    .map_err(|e| e.to_string())?;
-    if observed.receipt.is_none_or(|r| r.intent != record.intent) {
-        return Err("Remote operation does not match this restore".into());
-    }
-    let args = match keep {
-        None => format!("review {id}"),
-        Some((index, fingerprint)) => format!("keep {id} {index} {fingerprint}"),
-    };
-    let report: HelperReview = serde_json::from_str(
-        &session
-            .execute(&format!("{command} deployment {args}"), None)
-            .await?,
-    )
-    .map_err(|e| e.to_string())?;
-    if report.operation_id != id || report.files.len() > 32 {
-        return Err("Invalid helper review response".into());
-    }
-    Ok(report)
+    Ok(())
 }
 /// Different remains unordered unless both identities have trusted release metadata.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -291,23 +179,17 @@ pub struct Status {
     pub error: Option<String>,
 }
 impl Status {
+    /// Needle follows this Newport: an installed Needle that isn't the
+    /// bundled build is replaced, without asking, wherever installing was
+    /// approved. Only a release known to be newer stays, as replacing it would
+    /// go back; Newport is the one to update then.
     pub(crate) fn automatic_update_available(&self) -> bool {
         self.installed == Some(true)
-            && self.update_available == Some(true)
-            && self.build_relation == BuildRelation::Older
             && self.error.is_none()
-    }
-    /// The installed Needle lacks something this desktop needs. It may be
-    /// replaced wherever a manual install could: an older release, or a build
-    /// without release metadata. Never a newer or unordered signed release.
-    pub(crate) fn required_update_available(&self) -> bool {
-        self.installed == Some(true)
-            && self.error.is_none()
-            && match self.build_relation {
-                BuildRelation::Older => true,
-                BuildRelation::Different => self.installed_version.is_none(),
-                _ => false,
-            }
+            && matches!(
+                self.build_relation,
+                BuildRelation::Older | BuildRelation::Different | BuildRelation::SameRelease
+            )
     }
 }
 
@@ -326,7 +208,7 @@ impl Trigger {
         match self {
             Self::Manual => true,
             Self::Automatic => status.automatic_update_available(),
-            Self::Required => status.required_update_available(),
+            Self::Required => status.automatic_update_available(),
         }
     }
 }
@@ -347,21 +229,13 @@ struct Observation {
 #[derive(Default)]
 pub struct State {
     pub(crate) tasks: crate::lifecycle_task::Slot,
-    pub receipts: Arc<crate::lifecycle_receipts::Store>,
     pub(crate) operation: tokio::sync::Mutex<()>,
     pub progress: Arc<crate::agent_install::State>,
-    pub(crate) helper_history: helpers::State,
     observation: Mutex<Observation>,
     automatic_attempt: Mutex<Option<Instant>>,
     required: Mutex<Option<RequiredUpdate>>,
 }
 impl State {
-    pub fn new(receipts: Arc<crate::lifecycle_receipts::Store>) -> Self {
-        Self {
-            receipts,
-            ..Self::default()
-        }
-    }
     pub fn snapshot(&self) -> Status {
         self.observation.lock().unwrap().status.clone()
     }
@@ -369,23 +243,32 @@ impl State {
         let observation = self.observation.lock().unwrap();
         observation.probe.is_none_or(|(seen, at)| {
             seen != generation || now.saturating_duration_since(at) >= Duration::from_secs(3600)
-        }) || (observation.status.installed_hash.is_some() && self.helper_history.needs_check())
+        })
     }
     pub(crate) fn record(&self, generation: u64, result: &Result<Status, String>) {
         let mut observation = self.observation.lock().unwrap();
         observation.probe = Some((generation, Instant::now()));
         match result {
-            Ok(status) => {
-                if observation.status.installed_hash != status.installed_hash {
-                    self.helper_history.invalidate();
-                }
-                observation.status = status.clone();
-            }
+            Ok(status) => observation.status = status.clone(),
             // Preserve last verified evidence; an unreachable server is not missing.
             Err(error) => observation.status.error = Some(error.clone()),
         }
     }
-    /// A reconnect or helper-history retry must not repeatedly start upgrades.
+    /// A feature found Needle missing: every page hears it now, not at the
+    /// next check.
+    pub(crate) fn found_missing(&self, generation: u64) {
+        let mut observation = self.observation.lock().unwrap();
+        observation.probe = Some((generation, Instant::now()));
+        observation.status = Status {
+            installed: Some(false),
+            update_available: Some(false),
+            build_relation: BuildRelation::Missing,
+            bundled_version: observation.status.bundled_version.take(),
+            checked_at: crate::metrics_db::now_ms() as u64,
+            ..Status::default()
+        };
+    }
+    /// A reconnect must not repeatedly start upgrades.
     pub(crate) fn claim_automatic_update(&self, now: Instant) -> bool {
         let mut previous = self.automatic_attempt.lock().unwrap();
         if previous.is_some_and(|at| now.saturating_duration_since(at) < Duration::from_secs(3600))
@@ -421,33 +304,8 @@ impl State {
                 at: Instant::now(),
             });
     }
-    pub(crate) fn automatic_update_unblocked(
-        &self,
-        server: &crate::model::Server,
-    ) -> Result<bool, String> {
-        if !server.agent_install_approved || self.tasks.active().is_some() {
-            return Ok(false);
-        }
-        self.automatic_update_journal_clear(server)
-    }
-    pub(crate) fn automatic_update_journal_clear(
-        &self,
-        server: &crate::model::Server,
-    ) -> Result<bool, String> {
-        use crate::lifecycle_receipts::{HelperRecoveryPhase, RemovalPhase};
-        if self.receipts.require_agent_available(server).is_err() {
-            return Ok(false);
-        }
-        let records = self.receipts.operations_snapshot(server)?;
-        Ok(records.operations.iter().all(|r| r.phase.terminal())
-            && records
-                .removals
-                .iter()
-                .all(|r| r.phase == RemovalPhase::Restored)
-            && records
-                .helper_recoveries
-                .iter()
-                .all(|r| r.phase == HelperRecoveryPhase::Restored))
+    pub(crate) fn automatic_update_unblocked(&self, server: &crate::model::Server) -> bool {
+        server.agent_install_approved && self.tasks.active().is_none()
     }
 }
 fn parse_check(output: &str) -> Result<Status, String> {
@@ -603,22 +461,14 @@ pub async fn run(state: crate::manager::Shared) {
 #[cfg(test)]
 pub(crate) async fn manage_test(
     session: &ExecSession,
-    force: bool,
+    _force: bool,
     integrations: bool,
 ) -> Result<String, String> {
     let state = State::default();
     let progress = state.progress.attempt();
-    let result = manage(
-        session,
-        &progress,
-        force,
-        integrations,
-        &state.receipts,
-        uuid::Uuid::new_v4(),
-        Trigger::Manual,
-    )
-    .await
-    .map(|d| d.output);
+    let result = manage(session, &progress, integrations, Trigger::Manual)
+        .await
+        .map(|d| d.output);
     progress.finish(&result);
     result
 }
@@ -629,7 +479,6 @@ pub(crate) async fn activate_variant_test(session: &ExecSession) -> String {
     session
         .execute(
             r#"set -e
-old=$(sha256sum "$HOME/.local/bin/newport-agent"); old=${old%% *}
 t=$(mktemp)
 cat "$HOME/.local/bin/newport-agent" > "$t"
 printf '\000fixture-older-build' >> "$t"
@@ -638,7 +487,7 @@ d="$HOME/.local/share/newport/needle/builds/$h"
 mkdir -m 700 -p "$d"
 mv "$t" "$d/newport-agent"
 chmod 500 "$d/newport-agent"
-"$d/newport-agent" deployment activate "$h" "$old" >/dev/null
+"$d/newport-agent" deployment install "$h" >/dev/null
 printf '%s' "$h"
 "#,
             None,
@@ -646,269 +495,11 @@ printf '%s' "$h"
         .await
         .unwrap()
 }
-async fn deploy(
-    session: &ExecSession,
-    progress: &crate::agent_install::Attempt,
-    force: bool,
-    integrate: bool,
-    receipts: &crate::lifecycle_receipts::Store,
-    operation_id: uuid::Uuid,
-    trigger: Trigger,
-) -> Result<Deployment, String> {
-    if !session.server().agent_install_approved {
-        return Err(
-            "Needle installation requires approval. Open Overview to set up this server.".into(),
-        );
-    }
-    deploy_inner(
-        session,
-        force,
-        integrate,
-        progress,
-        receipts,
-        operation_id,
-        trigger,
-    )
-    .await
-}
-async fn deploy_inner(
-    session: &ExecSession,
-    _force: bool,
-    integrate: bool,
-    progress: &crate::agent_install::Attempt,
-    receipts: &crate::lifecycle_receipts::Store,
-    operation_id: uuid::Uuid,
-    trigger: Trigger,
-) -> Result<Deployment, String> {
-    use crate::lifecycle_receipts::{
-        Phase, Record,
-        protocol::{Intent, Observation, State as RemoteState},
-    };
-    if operation_id.is_nil() {
-        return Err("Invalid Needle operation ID".into());
-    }
-    let server = session.server();
-    let connection = crate::lifecycle_receipts::scope(server);
-    let prior = receipts.get(operation_id)?;
-    if let Some(record) = &prior {
-        if record.server_id != server.id
-            || record.connection != connection
-            || !record.intent.kind.is_deployment()
-            || record.intent.integrations != integrate
-        {
-            return Err("Needle operation ID belongs to a different request or connection".into());
-        }
-        if matches!(record.phase, Phase::RollingBack | Phase::RolledBack) {
-            return Err("This Needle operation is being restored or was rolled back; finish recovery before a new installation".into());
-        }
-        if record.phase == Phase::Ready {
-            return Ok(Deployment {
-                output: "Needle operation already completed.".into(),
-                build_sha256: record.intent.candidate.clone(),
-                already_complete: true,
-                setup_notice: record.error.clone(),
-            });
-        }
-    }
-    let platform = session.execute("uname -s; uname -m", None).await?;
-    let mut lines = platform.lines();
-    if lines.next() != Some("Linux") {
-        return Err("The Newport agent requires Linux.".into());
-    }
-    let architecture = lines.next().unwrap_or_default();
-    let binary = payload(architecture)
-        .ok_or("The Newport agent supports x86_64 and ARM64 Linux servers.")?;
-    let bundled = binary.sha256.to_owned();
-    let record = if let Some(record) = prior {
-        record
-    } else {
-        let status = check(session).await?;
-        if !trigger.allows(&status) {
-            return Err(
-                "Needle changed since the automatic update check; leaving it unchanged.".into(),
-            );
-        }
-        require_ordered_replacement(&status)?;
-        let previous = status.installed_hash.unwrap_or_else(|| "missing".into());
-        receipts
-            .begin(Record {
-                server_id: server.id,
-                connection,
-                intent: Intent {
-                    kind: crate::lifecycle_receipts::protocol::Kind::Deployment,
-                    operation_id,
-                    candidate: bundled.clone(),
-                    previous,
-                    integrations: integrate,
-                },
-                phase: Phase::Preparing,
-                error: None,
-            })
-            .await?
-    };
-    let hash = &record.intent.candidate;
-    let candidate = format!("\"$HOME/.local/share/newport/needle/builds/{hash}/newport-agent\"");
-    let staged = session
-        .execute(
-            &format!("if test -x {candidate}; then printf yes; fi"),
-            None,
-        )
-        .await?
-        == "yes";
-    if !staged {
-        if record.phase != Phase::Preparing && record.phase != Phase::Uploading {
-            return Err(
-                "Recorded Needle candidate is missing; inspect this operation before proceeding"
-                    .into(),
-            );
-        }
-        if *hash != bundled {
-            return Err("The recorded Needle build is no longer bundled; resolve this operation before installing a different build".into());
-        }
-        receipts
-            .update(operation_id, Some(Phase::Uploading), None)
-            .await?;
-        let command = format!(
-            "sh -c '{}' newport-install {hash}",
-            include_str!("agent-install.sh").replace('\'', "'\"'\"'")
-        );
-        progress.update("uploading", 0, binary.size, None);
-        session
-            .upload_resource(&command, binary.stream()?, &|sent| {
-                progress.update(
-                    if sent == binary.size {
-                        "installing"
-                    } else {
-                        "uploading"
-                    },
-                    sent,
-                    binary.size,
-                    None,
-                )
-            })
-            .await?;
-    }
-    progress.update("verifying", 0, 0, None);
-    crate::agent_runtime::verify_candidate(session, hash).await?;
-    if *hash == bundled && !BUNDLED_RELEASE.is_empty() {
-        record_release(
-            session,
-            hash,
-            architecture,
-            BUNDLED_RELEASE,
-            newport_release::needle::verify_production,
-        )
-        .await?;
-    }
-    let observed: Observation = serde_json::from_str(
-        &session
-            .execute(
-                &format!("{candidate} deployment operation {operation_id}"),
-                None,
-            )
-            .await?,
-    )
-    .map_err(|e| format!("Invalid Needle operation receipt: {e}"))?;
-    let observed: Observation = if let Some(receipt) = observed.receipt.as_ref() {
-        if receipt.intent != record.intent {
-            return Err("Needle operation receipt does not match the approved request".into());
-        }
-        if matches!(
-            receipt.state,
-            RemoteState::Prepared | RemoteState::Activated
-        ) {
-            // Explicit retry reconciles the saved operation. No upload, helper
-            // execution, or entry-point switch is repeated here.
-            serde_json::from_str(
-                &session
-                    .execute(
-                        &format!("{candidate} deployment reconcile {operation_id}"),
-                        None,
-                    )
-                    .await?,
-            )
-            .map_err(|e| format!("Invalid reconciled Needle receipt: {e}"))?
-        } else {
-            observed
-        }
-    } else {
-        if record.phase == Phase::Handoff || record.phase == Phase::NeedsResolution {
-            return Err(
-                "Needle activation receipt is missing; refusing to repeat an uncertain operation"
-                    .into(),
-            );
-        }
-        // A resumed operation may refer to a build from an older desktop.
-        // Compare that actual candidate, not the desktop's current payload.
-        let candidate_metadata = if *hash == bundled {
-            BUNDLED_RELEASE.to_vec()
-        } else {
-            read_release(session, hash).await?.into_bytes()
-        };
-        require_ordered_replacement(&parse_candidate_check(
-            &session.execute(CHECK, None).await?,
-            &candidate_metadata,
-            Some(hash),
-            newport_release::needle::verify_production,
-        )?)?;
-        receipts
-            .update(operation_id, Some(Phase::Activating), None)
-            .await?;
-        progress.update("activating", 0, 0, None);
-        serde_json::from_str(
-            &session
-                .execute(
-                    &format!(
-                        "{candidate} deployment activate {hash} {} --operation {operation_id}{}",
-                        record.intent.previous,
-                        if integrate { " --integrations" } else { "" }
-                    ),
-                    None,
-                )
-                .await?,
-        )
-        .map_err(|e| format!("Invalid Needle activation receipt: {e}"))?
-    };
-    let remote = observed.receipt.ok_or("Needle activation has no receipt")?;
-    if remote.intent != record.intent {
-        return Err("Needle activation receipt does not match the approved request".into());
-    }
-    if remote.state != RemoteState::Succeeded || observed.active_build != *hash {
-        let error = remote.error.unwrap_or_else(|| {
-            "Needle activation requires review; the recorded build is not confirmed active".into()
-        });
-        receipts
-            .update(
-                operation_id,
-                Some(if remote.state == RemoteState::RolledBack {
-                    Phase::RolledBack
-                } else {
-                    Phase::NeedsResolution
-                }),
-                Some(error.clone()),
-            )
-            .await?;
-        return Err(error);
-    }
-    receipts
-        .update(operation_id, Some(Phase::Handoff), remote.error.clone())
-        .await?;
-    Ok(Deployment {
-        output: "Needle installed and verified.".into(),
-        build_sha256: hash.clone(),
-        already_complete: false,
-        setup_notice: remote.error,
-    })
-}
-
 fn require_ordered_replacement(status: &Status) -> Result<(), String> {
     if status.build_relation == BuildRelation::Newer {
         return Err(
             "A newer Needle release is installed. Update Newport before replacing it.".into(),
         );
-    }
-    if status.build_relation == BuildRelation::Different && status.installed_version.is_some() {
-        return Err("This Newport build has no verified release order. It cannot replace a signed Needle release.".into());
     }
     Ok(())
 }
@@ -949,98 +540,33 @@ async fn read_release(session: &ExecSession, hash: &str) -> Result<String, Strin
 }
 
 /// Explicit rollback of one unfinished, connection-scoped deployment. No upload or install.
-pub(crate) async fn recover(
-    session: &ExecSession,
-    receipts: &crate::lifecycle_receipts::Store,
-    id: uuid::Uuid,
-) -> Result<Option<String>, String> {
-    use crate::lifecycle_receipts::{
-        Phase,
-        protocol::{Observation, State},
-    };
-    let record = receipts.get(id)?.ok_or("Needle operation not found")?;
-    if record.server_id != session.server().id
-        || record.connection != crate::lifecycle_receipts::scope(session.server())
-    {
-        return Err("Needle operation belongs to a different server connection".into());
-    }
-    if record.phase == Phase::Ready {
-        return Err(
-            "This installation is already complete; it is not an interrupted operation".into(),
-        );
-    }
-    if record.phase == Phase::RolledBack {
-        return Ok(None);
-    }
-    let hash = &record.intent.candidate;
-    let candidate = format!("\"$HOME/.local/share/newport/needle/builds/{hash}/newport-agent\"");
-    // These phases are persisted before upload, and cannot have dispatched activation.
-    if matches!(record.phase, Phase::Preparing | Phase::Uploading) {
-        receipts.update(id, Some(Phase::RolledBack), None).await?;
-        return Ok(None);
-    }
-    crate::agent_runtime::verify_candidate(session, hash).await?;
-    let observed: Observation = serde_json::from_str(
-        &session
-            .execute(&format!("{candidate} deployment operation {id}"), None)
-            .await?,
-    )
-    .map_err(|e| format!("Invalid Needle recovery receipt: {e}"))?;
-    let remote = observed
-        .receipt
-        .ok_or("Needle activation receipt is missing; manual review is required")?;
-    if remote.intent != record.intent {
-        return Err("Needle recovery receipt does not match the original operation".into());
-    }
-    receipts.update(id, Some(Phase::RollingBack), None).await?;
-    let result: Observation = serde_json::from_str(
-        &session
-            .execute(&format!("{candidate} deployment recover {id}"), None)
-            .await?,
-    )
-    .map_err(|e| format!("Invalid Needle recovery result: {e}"))?;
-    let remote = result.receipt.ok_or("Needle recovery has no receipt")?;
-    if remote.intent != record.intent {
-        return Err("Needle recovery returned a different operation".into());
-    }
-    if remote.state != State::RolledBack {
-        return Err(remote.error.unwrap_or_else(|| {
-            "Needle recovery needs review; changed files were preserved".into()
-        }));
-    }
-    // A repeated completed recovery must never adopt an older build over a later activation.
-    if !record.intent.kind.is_deployment() || result.active_build != record.intent.previous {
-        receipts.update(id, Some(Phase::RolledBack), None).await?;
-        return Ok(None);
-    }
-    Ok(Some(record.intent.previous))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn required_updates_replace_only_what_a_manual_install_may() {
+    fn needle_is_replaced_automatically_unless_a_newer_release_is_installed() {
         let status = |relation, version: Option<&str>| Status {
             installed: Some(true),
             build_relation: relation,
             installed_version: version.map(str::to_owned),
             ..Status::default()
         };
-        // An older release, or a build without release metadata (development).
-        assert!(Trigger::Required.allows(&status(BuildRelation::Older, Some("1.0.0"))));
-        assert!(Trigger::Required.allows(&status(BuildRelation::Different, None)));
-        // Never a newer or unordered signed release, nor the bundled build.
-        assert!(!Trigger::Required.allows(&status(BuildRelation::Newer, Some("9.0.0"))));
-        assert!(!Trigger::Required.allows(&status(BuildRelation::Different, Some("1.0.0"))));
-        assert!(!Trigger::Required.allows(&status(BuildRelation::Bundled, None)));
-        assert!(!Trigger::Required.allows(&Status {
-            installed: Some(false),
-            ..status(BuildRelation::Missing, None)
-        }));
-        // Automatic updates still need a signed, ordered release.
-        assert!(!Trigger::Automatic.allows(&status(BuildRelation::Different, None)));
+        for trigger in [Trigger::Automatic, Trigger::Required] {
+            // An older release, another build of this release, a build without
+            // release order (development, or this Newport has none).
+            assert!(trigger.allows(&status(BuildRelation::Older, Some("1.0.0"))));
+            assert!(trigger.allows(&status(BuildRelation::SameRelease, Some("1.0.0"))));
+            assert!(trigger.allows(&status(BuildRelation::Different, None)));
+            assert!(trigger.allows(&status(BuildRelation::Different, Some("1.0.0"))));
+            // Never a newer release, the bundled build, or an uninstalled one.
+            assert!(!trigger.allows(&status(BuildRelation::Newer, Some("9.0.0"))));
+            assert!(!trigger.allows(&status(BuildRelation::Bundled, None)));
+            assert!(!trigger.allows(&Status {
+                installed: Some(false),
+                ..status(BuildRelation::Missing, None)
+            }));
+        }
     }
 
     #[test]
@@ -1065,643 +591,45 @@ mod tests {
         assert_eq!(state.required_update(), None);
     }
     #[tokio::test]
-    #[ignore = "Requires disposable Linux OpenSSH fixture"]
-    async fn conflict_review_keeps_only_the_confirmed_file_and_scope() {
-        use crate::lifecycle_receipts::{
-            Phase, Record,
-            protocol::{Intent, Kind},
-        };
+    #[ignore = "Requires the disposable Linux OpenSSH fixture"]
+    async fn a_different_needle_is_replaced_with_newports_own_without_asking() {
         let server: crate::model::Server = serde_json::from_value(serde_json::json!({
-            "id": uuid::Uuid::new_v4(), "name": "Conflict review fixture", "sshUser": "fixture",
+            "id": uuid::Uuid::new_v4(), "name": "Automatic update fixture", "sshUser": "fixture",
             "sshHost": "127.0.0.1", "sshPort": std::env::var("NEWPORT_TEST_SSH_PORT").unwrap().parse::<u16>().unwrap(),
             "identityFile": std::env::var("NEWPORT_TEST_IDENTITY").unwrap(), "agentInstallApproved": true
         })).unwrap();
-        let setup = ExecSession::connect(&server).await.unwrap();
-        manage_test(&setup, false, false).await.unwrap();
         let registry = crate::server_session::Registry::default();
         let owner = registry.session(&server, 0);
         let lease = owner.acquire(&server).await.unwrap();
-        let (_worker, _) = lease.launch(crate::agent::Service::Monitor).await.unwrap();
-        let runtime = owner.agent_runtime.snapshot().hello.unwrap().instance_id;
-        let hash = check(&setup).await.unwrap().installed_hash.unwrap();
-        let id = uuid::Uuid::new_v4();
-        owner
-            .lifecycle
-            .receipts
-            .begin(Record {
-                server_id: server.id,
-                connection: crate::lifecycle_receipts::scope(&server),
-                intent: Intent {
-                    kind: Kind::Helpers,
-                    operation_id: id,
-                    candidate: hash.clone(),
-                    previous: hash.clone(),
-                    integrations: true,
-                },
-                phase: Phase::Activating,
-                error: None,
-            })
+        lease.install(false).await.unwrap();
+        let bundled = lease
+            .check_installation()
             .await
+            .unwrap()
+            .installed_hash
             .unwrap();
-        setup
-            .execute(
-                &format!(
-                    "\"$HOME/.local/bin/newport-agent\" deployment helpers {hash} --operation {id}"
-                ),
-                None,
-            )
-            .await
-            .unwrap();
-        setup.execute("sed 's/ env / customized /' \"$HOME/.bashrc\" > \"$HOME/edited\"; cat \"$HOME/edited\" > \"$HOME/.bashrc\"", None).await.unwrap();
-        assert!(
-            lease
-                .recover_installation(id)
-                .await
-                .unwrap_err()
-                .contains("edited")
-        );
-        let report = lease.review_helpers(id).await.unwrap();
-        let file = report
-            .files
-            .iter()
-            .find(|f| f.path.ends_with("/.bashrc"))
-            .unwrap();
-        let old = file.fingerprint.clone().unwrap();
-        let index = file.index;
-        setup
-            .execute("printf '\n# later edit\n' >> \"$HOME/.bashrc\"", None)
-            .await
-            .unwrap();
-        assert!(
-            lease
-                .keep_helper(id, index, old)
-                .await
-                .unwrap_err()
-                .contains("changed since review")
-        );
-        let mut other = server.clone();
-        other.id = uuid::Uuid::new_v4();
-        let other_owner = registry.session(&other, 0);
-        let other_lease = other_owner.acquire(&other).await.unwrap();
-        assert!(
-            other_lease
-                .review_helpers(id)
-                .await
-                .unwrap_err()
-                .contains("connection")
-        );
-        let fresh = lease.review_helpers(id).await.unwrap();
-        let fingerprint = fresh.files[index].fingerprint.clone().unwrap();
-        let kept = lease
-            .keep_helper(id, index, fingerprint.clone())
-            .await
-            .unwrap();
-        assert_eq!(kept.files[index].status, "kept");
-        lease.keep_helper(id, index, fingerprint).await.unwrap();
-        lease.recover_installation(id).await.unwrap();
-        assert_eq!(
-            owner.lifecycle.receipts.get(id).unwrap().unwrap().phase,
-            Phase::RolledBack
-        );
-        let content = setup.execute("cat \"$HOME/.bashrc\"", None).await.unwrap();
-        assert!(content.contains("customized") && content.contains("# later edit"));
-        assert_eq!(
-            owner.agent_runtime.snapshot().hello.unwrap().instance_id,
-            runtime
-        );
-        assert_eq!(check(&setup).await.unwrap().installed_hash.unwrap(), hash);
-        registry.shutdown().await;
-        setup.close().await;
-    }
-    #[tokio::test]
-    #[ignore = "Requires disposable Linux OpenSSH fixture"]
-    async fn owned_lifecycle_survives_callers_and_stops_on_retirement() {
-        use crate::{lifecycle_receipts::Phase, lifecycle_task::Action};
-        use uuid::Uuid;
-        let server: crate::model::Server = serde_json::from_value(serde_json::json!({
-            "id": Uuid::new_v4(), "name": "Owned lifecycle fixture", "sshUser": "fixture",
-            "sshHost": "127.0.0.1", "sshPort": std::env::var("NEWPORT_TEST_SSH_PORT").unwrap().parse::<u16>().unwrap(),
-            "identityFile": std::env::var("NEWPORT_TEST_IDENTITY").unwrap(), "agentInstallApproved": true
-        })).unwrap();
-        let setup = ExecSession::connect(&server).await.unwrap();
-        let registry = crate::server_session::Registry::default();
-        let owner = registry.session(&server, 0);
-        let deployment = Uuid::new_v4();
-        let helpers = Uuid::new_v4();
-        for (id, action, terminal) in [
-            (
-                deployment,
-                Action::Install {
-                    integrations: false,
-                },
-                Some(Phase::Ready),
-            ),
-            (helpers, Action::Helpers, None),
-            (helpers, Action::Recover, Some(Phase::RolledBack)),
-        ] {
-            if action == Action::Helpers {
-                setup
-                    .execute(
-                        "printf unrelated > \"$HOME/.local/bin/newport-browser\"",
-                        None,
-                    )
-                    .await
-                    .unwrap();
-            }
-            // Hold the lifecycle gate until the request is admitted, then remove
-            // its only waiter. No later caller may drive the operation to completion.
-            let gate = owner.lifecycle.operation.lock().await;
-            let waiter = tokio::spawn({
-                let lease = owner.acquire(&server).await.unwrap();
-                async move {
-                    match action {
-                        Action::Install { integrations } => {
-                            lease.install_operation(false, integrations, id).await
-                        }
-                        Action::Helpers => lease.configure_integrations_operation(id).await,
-                        Action::Recover => lease.recover_installation(id).await,
-                        Action::AutoUpdate
-                        | Action::RequiredUpdate
-                        | Action::Keep { .. }
-                        | Action::Remove { .. }
-                        | Action::RestoreRemoval
-                        | Action::RestoreHelpers { .. } => {
-                            unreachable!()
-                        }
-                    }
-                }
-            });
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while owner
-                    .lifecycle
-                    .tasks
-                    .active()
-                    .is_none_or(|r| r.id != id || r.action != action)
-                {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
-            waiter.abort();
-            assert!(waiter.await.unwrap_err().is_cancelled());
-            assert_eq!(
-                owner.transport_snapshot().demand,
-                1,
-                "only the lifecycle task retains demand"
-            );
-            drop(gate);
-            tokio::time::timeout(Duration::from_secs(30), async {
-                loop {
-                    if owner.lifecycle.tasks.active().is_none() {
-                        let receipt = owner
-                            .lifecycle
-                            .receipts
-                            .get(id)
-                            .unwrap()
-                            .expect("owned task persisted its intent");
-                        if let Some(phase) = terminal {
-                            assert_eq!(receipt.phase, phase, "{:?}", receipt.error);
-                        } else {
-                            assert_eq!(receipt.phase, Phase::RolledBack);
-                            assert!(receipt.error.unwrap().contains("unrelated"));
-                        }
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
-        }
-        assert!(check(&setup).await.unwrap().installed.unwrap());
-        // Delay the remote helper transaction at the actual activation lock,
-        // after desktop intent is durable and the SSH command was dispatched.
-        setup
-            .execute("rm \"$HOME/.local/bin/newport-browser\"", None)
-            .await
-            .unwrap();
-        let held = tokio::spawn({
-            let setup = setup.with_server(server.clone());
-            async move {
-                setup.execute(r#"flock "$HOME/.local/share/newport/needle/activation.lock" sh -c 'touch "$HOME/helper-lock-held"; while ! test -e "$HOME/helper-lock-release"; do sleep 0.01; done'"#, None).await
-            }
-        });
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while setup
-                .execute(
-                    "if test -e \"$HOME/helper-lock-held\"; then printf yes; fi",
-                    None,
-                )
-                .await
-                .unwrap()
-                != "yes"
-            {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        let dispatched = Uuid::new_v4();
-        let waiter = tokio::spawn({
-            let lease = owner.acquire(&server).await.unwrap();
-            async move { lease.configure_integrations_operation(dispatched).await }
-        });
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while owner
-                .lifecycle
-                .receipts
-                .get(dispatched)
-                .unwrap()
-                .is_none_or(|r| r.phase != Phase::Activating)
-            {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let processes = setup.execute("ps -eo comm=,args=", None).await.unwrap();
-                if processes.lines().any(|line| {
-                    line.trim_start().starts_with("newport-agent ")
-                        && line.contains(&dispatched.to_string())
-                }) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        waiter.abort();
-        assert!(waiter.await.unwrap_err().is_cancelled());
-        assert!(
-            owner
-                .lifecycle
-                .tasks
-                .active()
-                .is_some_and(|r| r.id == dispatched)
-        );
-        setup
-            .execute("touch \"$HOME/helper-lock-release\"", None)
-            .await
-            .unwrap();
-        held.await.unwrap().unwrap();
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while owner.lifecycle.tasks.active().is_some() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        let receipt = owner.lifecycle.receipts.get(dispatched).unwrap().unwrap();
-        assert_eq!(receipt.phase, Phase::Ready, "{:?}", receipt.error);
-        // Retirement must cancel admitted work before it can acquire the gate.
-        let gate = owner.lifecycle.operation.lock().await;
-        let retired_id = Uuid::new_v4();
-        let waiter = tokio::spawn({
-            let lease = owner.acquire(&server).await.unwrap();
-            async move { lease.configure_integrations_operation(retired_id).await }
-        });
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while owner.lifecycle.tasks.active().is_none() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        registry.invalidate(server.id);
-        let replacement = registry.session(&server, 1);
-        assert!(waiter.await.unwrap().is_err());
-        drop(gate);
-        assert!(owner.lifecycle.receipts.get(retired_id).unwrap().is_none());
-        assert!(replacement.lifecycle.progress.snapshot().is_none());
-        assert!(replacement.lifecycle.tasks.active().is_none());
-        registry.shutdown().await;
-        setup.close().await;
-    }
-    #[tokio::test]
-    #[ignore = "Requires disposable Linux OpenSSH fixture"]
-    async fn helper_operation_resumes_and_recovers_without_replacing_runtime() {
-        use crate::lifecycle_receipts::{
-            Phase, Record,
-            protocol::{Intent, Kind},
-        };
-        let server: crate::model::Server = serde_json::from_value(serde_json::json!({
-            "id": uuid::Uuid::new_v4(), "name": "Helper lifecycle fixture", "sshUser": "fixture",
-            "sshHost": "127.0.0.1", "sshPort": std::env::var("NEWPORT_TEST_SSH_PORT").unwrap().parse::<u16>().unwrap(),
-            "identityFile": std::env::var("NEWPORT_TEST_IDENTITY").unwrap(), "agentInstallApproved": true
-        })).unwrap();
-        let setup = ExecSession::connect(&server).await.unwrap();
-        manage_test(&setup, false, false).await.unwrap();
-        let registry = crate::server_session::Registry::default();
-        let owner = registry.session(&server, 0);
-        let lease = owner.acquire(&server).await.unwrap();
-        let (_worker, _) = lease.launch(crate::agent::Service::Monitor).await.unwrap();
-        let runtime = owner.agent_runtime.snapshot().hello.unwrap().instance_id;
-        let hash = check(&setup).await.unwrap().installed_hash.unwrap();
-        let inode = setup
-            .execute("stat -c %i \"$HOME/.local/bin/newport-agent\"", None)
-            .await
-            .unwrap();
-        setup
-            .execute(
-                "printf unrelated > \"$HOME/.local/bin/newport-browser\"",
-                None,
-            )
-            .await
-            .unwrap();
-        let failed = uuid::Uuid::new_v4();
-        assert!(
-            lease
-                .configure_integrations_operation(failed)
-                .await
-                .unwrap_err()
-                .contains("unrelated")
-        );
-        assert_eq!(
-            owner
-                .lifecycle
-                .receipts
-                .get(failed)
-                .unwrap()
-                .unwrap()
-                .intent
-                .kind,
-            Kind::Helpers
-        );
-        lease.recover_installation(failed).await.unwrap();
-        assert_eq!(
-            owner.agent_runtime.snapshot().hello.unwrap().instance_id,
-            runtime
-        );
-        assert_eq!(
-            check(&setup).await.unwrap().installed_hash.as_deref(),
-            Some(hash.as_str())
-        );
-        setup
-            .execute("rm \"$HOME/.local/bin/newport-browser\"", None)
-            .await
-            .unwrap();
-        let resumed = uuid::Uuid::new_v4();
-        owner
-            .lifecycle
-            .receipts
-            .begin(Record {
-                server_id: server.id,
-                connection: crate::lifecycle_receipts::scope(&server),
-                intent: Intent {
-                    kind: Kind::Helpers,
-                    operation_id: resumed,
-                    candidate: hash.clone(),
-                    previous: hash.clone(),
-                    integrations: true,
-                },
-                phase: Phase::Activating,
-                error: None,
-            })
-            .await
-            .unwrap();
-        // The remote side completed, but its reply never reached the desktop.
-        setup.execute(&format!("\"$HOME/.local/bin/newport-agent\" deployment helpers {hash} --operation {resumed}"), None).await.unwrap();
-        let journal = setup
-            .execute(
-                "sha256sum \"$HOME/.local/share/newport/needle/helpers/journal.json\"",
-                None,
-            )
-            .await
-            .unwrap();
-        setup
-            .execute("printf '\n# later edit\n' >> \"$HOME/.bashrc\"", None)
-            .await
-            .unwrap();
-        lease.resume_installation(resumed).await.unwrap();
-        assert_eq!(
-            owner
-                .lifecycle
-                .receipts
-                .get(resumed)
-                .unwrap()
-                .unwrap()
-                .phase,
-            Phase::Ready
-        );
+        // Another build at the entry point, as an earlier Newport or another
+        // developer's left it: Needle's own bytes plus one, so it still runs.
         lease
-            .configure_integrations_operation(resumed)
-            .await
-            .unwrap();
-        assert_eq!(
-            setup
-                .execute(
-                    "sha256sum \"$HOME/.local/share/newport/needle/helpers/journal.json\"",
-                    None
-                )
-                .await
-                .unwrap(),
-            journal
-        );
-        assert!(
-            setup
-                .execute("tail -1 \"$HOME/.bashrc\"", None)
-                .await
-                .unwrap()
-                .contains("later edit")
-        );
-        assert_eq!(
-            setup
-                .execute("stat -c %i \"$HOME/.local/bin/newport-agent\"", None)
-                .await
-                .unwrap(),
-            inode
-        );
-        assert_eq!(
-            owner.agent_runtime.snapshot().hello.unwrap().instance_id,
-            runtime
-        );
-        assert!(
-            lease
-                .install_operation(false, true, resumed)
-                .await
-                .unwrap_err()
-                .contains("different request")
-        );
-    }
-    #[tokio::test]
-    #[ignore = "Requires disposable Linux OpenSSH fixture"]
-    async fn cancelled_helper_plan_is_settled_and_preserves_newer_runtime() {
-        use crate::lifecycle_receipts::Phase;
-        let server: crate::model::Server = serde_json::from_value(serde_json::json!({
-            "id": uuid::Uuid::new_v4(), "name": "Recovery fixture", "sshUser": "fixture",
-            "sshHost": "127.0.0.1", "sshPort": std::env::var("NEWPORT_TEST_SSH_PORT").unwrap().parse::<u16>().unwrap(),
-            "identityFile": std::env::var("NEWPORT_TEST_IDENTITY").unwrap(), "agentInstallApproved": true
-        })).unwrap();
-        let setup = ExecSession::connect(&server).await.unwrap();
-        manage_test(&setup, false, false).await.unwrap();
-        let previous = activate_variant_test(&setup).await;
-        setup
             .execute(
-                "printf unrelated > \"$HOME/.local/bin/newport-browser\"",
+                "set -e; d=\"$HOME/.local/share/newport/needle/builds\"; t=$(mktemp); cat \"$(readlink -f \"$HOME/.local/bin/newport-agent\")\" > \"$t\"; printf x >> \"$t\"; h=$(sha256sum \"$t\" | cut -d' ' -f1); mkdir -m 700 \"$d/$h\"; mv \"$t\" \"$d/$h/newport-agent\"; chmod 500 \"$d/$h/newport-agent\"; ln -sfn \"$d/$h/newport-agent\" \"$HOME/.local/bin/newport-agent\"",
                 None,
             )
             .await
             .unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let registry = crate::server_session::Registry::new(directory.path());
-        let owner = registry.session(&server, 0);
-        let lease = owner.acquire(&server).await.unwrap();
-        let id = uuid::Uuid::new_v4();
+        let other = lease.check_installation().await.unwrap();
+        assert_ne!(other.installed_hash.as_deref(), Some(bundled.as_str()));
         assert!(
-            lease
-                .install_operation(true, true, id)
-                .await
-                .unwrap_err()
-                .contains("unrelated")
+            other.automatic_update_available(),
+            "{:?}",
+            other.build_relation
         );
+        lease.automatically_update_needle(&other).await.unwrap();
         assert_eq!(
-            owner.lifecycle.receipts.get(id).unwrap().unwrap().phase,
-            Phase::RolledBack
+            lease.check_installation().await.unwrap().installed_hash,
+            Some(bundled)
         );
-        assert_eq!(
-            check(&setup).await.unwrap().installed_hash.as_deref(),
-            Some(previous.as_str())
-        );
-        lease.recover_installation(id).await.unwrap();
-        assert_eq!(
-            owner.lifecycle.receipts.get(id).unwrap().unwrap().phase,
-            Phase::RolledBack
-        );
-        assert_eq!(
-            setup
-                .execute("cat \"$HOME/.local/bin/newport-browser\"", None)
-                .await
-                .unwrap(),
-            "unrelated"
-        );
-        let next = uuid::Uuid::new_v4();
-        lease.install_operation(false, false, next).await.unwrap();
-        let current = owner.agent_runtime.snapshot().hello.map(|h| h.instance_id);
-        lease.recover_installation(id).await.unwrap();
-        assert_eq!(
-            owner.agent_runtime.snapshot().hello.map(|h| h.instance_id),
-            current
-        );
-        assert!(
-            lease
-                .recover_installation(next)
-                .await
-                .unwrap_err()
-                .contains("already complete")
-        );
-        assert_eq!(
-            owner.lifecycle.receipts.get(next).unwrap().unwrap().phase,
-            Phase::Ready
-        );
-    }
-    #[tokio::test]
-    #[ignore = "Requires disposable Linux OpenSSH fixture"]
-    async fn durable_operation_resumes_handoff_after_restart_without_second_activation() {
-        use crate::lifecycle_receipts::Phase;
-        let server: crate::model::Server = serde_json::from_value(serde_json::json!({
-            "id": uuid::Uuid::new_v4(), "name": "Durable lifecycle fixture", "sshUser": "fixture",
-            "sshHost": "127.0.0.1", "sshPort": std::env::var("NEWPORT_TEST_SSH_PORT").unwrap().parse::<u16>().unwrap(),
-            "identityFile": std::env::var("NEWPORT_TEST_IDENTITY").unwrap(), "agentInstallApproved": true
-        })).unwrap();
-        let setup = ExecSession::connect(&server).await.unwrap();
-        manage_test(&setup, false, false).await.unwrap();
-        let old_hash = activate_variant_test(&setup).await;
-        let directory = tempfile::tempdir().unwrap();
-        let registry = crate::server_session::Registry::new(directory.path());
-        let owner = registry.session(&server, 0);
-        let mut held = Vec::new();
-        for _ in 0..5 {
-            let lease = owner.acquire(&server).await.unwrap();
-            let (channel, _) = lease.launch(crate::agent::Service::Git).await.unwrap();
-            let (client, _) = crate::git::client::Client::start(channel).await.unwrap();
-            // Retain each runtime owner, but release the SSH worker channel so
-            // the fixture's OpenSSH MaxSessions does not mask runtime capacity.
-            drop(client);
-            held.push(lease);
-            owner.agent_runtime.exhaust_registration_budget_for_test();
-        }
-        let id = uuid::Uuid::new_v4();
-        let install = owner.acquire(&server).await.unwrap();
-        assert_eq!(
-            install
-                .install_operation(true, false, id)
-                .await
-                .unwrap_err(),
-            crate::agent_runtime::BUSY
-        );
-        assert_eq!(
-            owner.lifecycle.receipts.get(id).unwrap().unwrap().phase,
-            Phase::Handoff
-        );
-        assert_eq!(
-            owner.agent_runtime.snapshot().hello.unwrap().build_sha256,
-            old_hash
-        );
-        let stamp = setup
-            .execute(
-                "stat -c '%y' \"$HOME/.local/share/newport/needle/operations.json\"",
-                None,
-            )
-            .await
-            .unwrap();
-        let remote = setup
-            .execute(
-                &format!("\"$HOME/.local/bin/newport-agent\" deployment operation {id}"),
-                None,
-            )
-            .await
-            .unwrap();
-        let observed: crate::lifecycle_receipts::protocol::Observation =
-            serde_json::from_str(&remote).unwrap();
-        assert_eq!(
-            observed.receipt.unwrap().state,
-            crate::lifecycle_receipts::protocol::State::Succeeded
-        );
-        drop(held);
-        drop(install);
         registry.shutdown().await;
-        drop(owner);
-        drop(registry);
-        let restarted = crate::server_session::Registry::new(directory.path());
-        let owner = restarted.session(&server, 0);
-        let lease = owner.acquire(&server).await.unwrap();
-        lease.install_operation(true, false, id).await.unwrap();
-        assert_eq!(
-            owner.lifecycle.receipts.get(id).unwrap().unwrap().phase,
-            Phase::Ready
-        );
-        assert_eq!(
-            setup
-                .execute(
-                    "stat -c '%y' \"$HOME/.local/share/newport/needle/operations.json\"",
-                    None
-                )
-                .await
-                .unwrap(),
-            stamp
-        );
-        let instance = owner.agent_runtime.snapshot().hello.unwrap().instance_id;
-        lease.install_operation(true, false, id).await.unwrap();
-        assert_eq!(
-            owner.agent_runtime.snapshot().hello.unwrap().instance_id,
-            instance
-        );
-        assert_eq!(
-            setup
-                .execute(
-                    "stat -c '%y' \"$HOME/.local/share/newport/needle/operations.json\"",
-                    None
-                )
-                .await
-                .unwrap(),
-            stamp
-        );
-        restarted.shutdown().await;
-        setup.close().await;
     }
     #[tokio::test]
     #[ignore = "Requires the disposable Linux OpenSSH fixture"]
@@ -1715,7 +643,7 @@ mod tests {
         let registry = crate::server_session::Registry::default();
         let owner = registry.session(&server, 0);
         let lease = owner.acquire(&server).await.unwrap();
-        lease.install(false, false).await.unwrap();
+        lease.install(false).await.unwrap();
         let status = lease.check_installation().await.unwrap();
         assert_eq!(status.build_relation, BuildRelation::Bundled);
         let hash = status.installed_hash.unwrap();
@@ -1730,7 +658,7 @@ mod tests {
         let worker = owner.acquire(&server).await.unwrap();
         let (stream, _) = worker.launch(crate::agent::Service::Git).await.unwrap();
         let runtime = owner.agent_runtime.snapshot().hello.unwrap().instance_id;
-        lease.install(true, false).await.unwrap();
+        lease.install(false).await.unwrap();
         assert!(
             !worker.is_closed(),
             "explicit activation must not cancel admitted Git work"
@@ -1770,18 +698,20 @@ mod tests {
             check(&connection).await.unwrap().installed_hash.as_deref(),
             Some(hash.as_str())
         );
-        // A shell-helper collision causes activation to roll back while the same
-        // remote lock is held; it cannot undo another desktop's later activation.
-        // Point the entry point at another build so it differs from the build
-        // the live runtime runs.
+        // An occupied `newport-browser` fails the install after Needle itself
+        // is in place; someone else's file is never touched. Point the entry
+        // point at another build first, so the switch is visible.
         lease.execute("printf 'unrelated' > \"$HOME/.local/bin/newport-browser\"; builds=\"$HOME/.local/share/newport/needle/builds\"; stub=$(mktemp); printf '#!/bin/sh\\necho newport-agent\\n' > \"$stub\"; other=\"$builds/$(sha256sum \"$stub\" | cut -d' ' -f1)\"; mkdir -m 700 \"$other\"; mv \"$stub\" \"$other/newport-agent\"; chmod 700 \"$other/newport-agent\"; ln -sfn \"$other/newport-agent\" \"$HOME/.local/bin/newport-agent\"", None).await.unwrap();
         let other = check(&connection).await.unwrap().installed_hash.unwrap();
         assert_ne!(other, hash);
-        let error = lease.install(true, true).await.unwrap_err();
-        assert!(error.contains("no helper changes remain"), "{error}");
+        let error = lease.install(true).await.unwrap_err();
+        assert!(
+            error.contains("occupied by an unrelated command"),
+            "{error}"
+        );
         assert_eq!(
             check(&connection).await.unwrap().installed_hash.as_deref(),
-            Some(other.as_str())
+            Some(hash.as_str())
         );
         assert_eq!(
             lease
@@ -1791,8 +721,7 @@ mod tests {
             "unrelated"
         );
         assert!(!worker.is_closed());
-        // The entry point is the restored other build. New work on the
-        // surviving runtime must launch its retained build, not that entry point.
+        // New work on the surviving runtime launches its own build.
         let monitor = owner.acquire(&server).await.unwrap();
         let (mut channel, _) = monitor
             .launch(crate::agent::Service::Monitor)
@@ -1851,43 +780,18 @@ mod tests {
         assert_eq!(retained.build_relation, BuildRelation::Different);
     }
     #[test]
-    fn helper_discovery_refreshes_after_build_changes_without_retrying_errors_in_a_loop() {
+    fn a_feature_finding_needle_missing_tells_every_page_at_once() {
         let state = State::default();
-        let now = Instant::now();
-        state.record(1, &parse_check("Linux\nx86_64\nmissing\n"));
-        assert!(!state.due(1, now));
-        let installed = parse_check(&format!("Linux\nx86_64\n{}  agent", "a".repeat(64)));
-        state.record(1, &installed);
+        let known = parse_check(&format!("Linux\nx86_64\n{}  agent", "0".repeat(64))).unwrap();
+        state.record(1, &Ok(known));
+        state.found_missing(1);
+        let missing = state.snapshot();
+        assert_eq!(missing.installed, Some(false));
+        assert_eq!(missing.build_relation, BuildRelation::Missing);
+        assert_eq!(missing.installed_hash, None);
         assert!(
-            state.due(1, now),
-            "new installation needs its first helper observation"
+            !state.due(1, Instant::now()),
+            "no check is needed to know it"
         );
-        state
-            .helper_history
-            .record(Err("temporary history failure".into()));
-        assert!(
-            !state.due(1, now),
-            "history failure follows the periodic retry schedule"
-        );
-        state.record(1, &installed);
-        assert!(
-            !state.due(1, now),
-            "unchanged build does not invalidate history"
-        );
-        state.record(
-            1,
-            &parse_check(&format!("Linux\nx86_64\n{}  agent", "b".repeat(64))),
-        );
-        assert!(
-            state.due(1, now),
-            "a different build needs fresh helper evidence"
-        );
-        state.helper_history.record(Ok(None));
-        assert!(
-            !state.due(1, now),
-            "unsupported history does not cause a retry loop"
-        );
-        assert!(state.due(2, now));
-        assert!(state.due(1, now + Duration::from_secs(3601)));
     }
 }

@@ -59,40 +59,10 @@ fn merge(original: &str, block: &str) -> io::Result<String> {
     }
 }
 
-/// Undo only the recorded managed block, preserving current surrounding text.
-/// Recognizing the original block also makes partial rollback crash-safe.
-pub(crate) fn restore_block(before: &str, after: &str, current: &str) -> io::Result<String> {
-    let after_range =
-        block_range(after)?.ok_or_else(|| io::Error::other("Recorded shell block is missing"))?;
-    let installed = &after[after_range];
-    if merge(before, installed)? != after {
-        return Err(io::Error::other(
-            "Shell record changes content outside its managed block",
-        ));
-    }
-    let original = block_range(before)?.map(|range| &before[range]);
-    let current_range = block_range(current)?;
-    let present = current_range.clone().map(|range| &current[range]);
-    if present == original {
-        return Ok(current.to_owned());
-    }
-    if present != Some(installed) {
-        return Err(io::Error::other(
-            "Newport shell block was edited; preserving it for review",
-        ));
-    }
-    let range = current_range.unwrap();
-    Ok(format!(
-        "{}{}{}",
-        &current[..range.start],
-        original.unwrap_or(""),
-        &current[range.end..]
-    ))
-}
-
-pub(crate) fn plan(
-    transaction: &mut crate::helper_transaction::Transaction,
-) -> io::Result<Vec<String>> {
+/// Adds or refreshes Newport's block in the shell's startup files. Files
+/// managed through links (dotfile managers) and read-only ones are left alone,
+/// with a notice. Returns the notices.
+pub(crate) fn apply() -> io::Result<Vec<String>> {
     let home =
         PathBuf::from(env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is required"))?);
     let shell = env::var("SHELL").unwrap_or_default();
@@ -129,113 +99,65 @@ pub(crate) fn plan(
     };
     let mut notices = Vec::new();
     for path in paths {
-        // Never follow a dotfile manager's link. Check effective permissions
-        // and the directory needed for atomic replacement before planning.
-        let check = match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!("{} is a symlink", path.display()),
+        match write_block(&path, shell == "fish") {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => notices.push(format!(
+                "{} was left unchanged: {error}. Configure this file through its owner or dotfile manager.",
+                path.display()
             )),
-            Ok(_) => crate::helper_transaction::check_write_permission(&path),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                crate::helper_transaction::check_write_permission(&path)
-            }
-            Err(error) => Err(error),
-        };
-        if let Err(error) = check {
-            if error.kind() != io::ErrorKind::PermissionDenied {
-                return Err(error);
-            }
-            notices.push(format!("{} was left unchanged: {error}. Configure this file through its owner or dotfile manager.", path.display()));
-            continue;
+            Err(error) => return Err(error),
         }
-        plan_path(transaction, &path, shell == "fish")?;
     }
     Ok(notices)
 }
 
-fn plan_path(
-    transaction: &mut crate::helper_transaction::Transaction,
-    path: &Path,
-    fish: bool,
-) -> io::Result<()> {
-    use crate::helper_transaction::Snapshot;
-    let before = transaction.read(path)?;
-    let (original, mode) = match &before {
-        Snapshot::Missing => (String::new(), 0o600),
-        Snapshot::File { mode, .. } => {
+/// Writes the block into one file, atomically and with its permissions.
+fn write_block(path: &Path, fish: bool) -> io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let (original, mode) = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{} is a symlink", path.display()),
+            ))
+        }
+        Ok(metadata) => {
+            let mode = metadata.permissions().mode() & 0o7777;
             if mode & 0o200 == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
-                    format!("{} is read-only; leaving it unchanged", path.display()),
+                    format!("{} is read-only", path.display()),
                 ));
             }
-            (
-                String::from_utf8(transaction.bytes(&before)?).map_err(io::Error::other)?,
-                *mode,
-            )
+            (fs::read_to_string(path)?, mode)
         }
-        Snapshot::Link(_) => {
-            return Err(io::Error::other(
-                "Shell configuration is a symlink; leaving it unchanged",
-            ))
-        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (String::new(), 0o600),
+        Err(error) => return Err(error),
     };
     let updated = merge(&original, &block(fish))?;
-    let after = transaction.file(updated.as_bytes(), mode)?;
-    transaction.plan_shell(path, before, after)?;
+    if updated == original {
+        return Ok(());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("Shell configuration has no folder"))?;
+    fs::create_dir_all(parent)?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    staged.write_all(updated.as_bytes())?;
+    staged
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(mode))?;
+    staged.as_file().sync_all()?;
+    staged.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn block_recovery_preserves_surroundings_and_restores_previous_content() {
-        for before in [
-            "# original\n",
-            "# original without newline",
-            "",
-            "# prefix\n# >>> Newport >>>\nold command\n# <<< Newport <<<\n# suffix\n",
-        ] {
-            let after = merge(before, &block(false)).unwrap();
-            let current = format!("# new prefix\n{after}# new suffix\n");
-            let restored = restore_block(before, &after, &current).unwrap();
-            assert!(restored.starts_with("# new prefix\n"));
-            assert!(restored.ends_with("# new suffix\n"));
-            assert_eq!(restored.contains(START), before.contains(START));
-            assert_eq!(
-                restored.contains("old command"),
-                before.contains("old command")
-            );
-            assert_eq!(restore_block(before, &after, &restored).unwrap(), restored);
-        }
-    }
-    #[test]
-    fn block_recovery_refuses_changed_blocks_and_invalid_ownership() {
-        let before = "# original\n";
-        let after = merge(before, &block(false)).unwrap();
-        for current in [
-            after.replace(" env ", " changed "),
-            after.replace(END, "# removed end"),
-            format!("{after}{}", block(false)),
-        ] {
-            assert!(restore_block(before, &after, &current).is_err());
-        }
-        assert!(restore_block(before, &format!("# unowned change\n{after}"), &after).is_err());
-        // A manually removed block is already restored; surrounding edits survive.
-        assert_eq!(
-            restore_block(before, &after, "# only user content\n").unwrap(),
-            "# only user content\n"
-        );
-    }
     fn patch(path: &Path, fish: bool) -> io::Result<()> {
-        let mut transaction = crate::helper_transaction::Transaction::open(
-            path.parent().unwrap(),
-            uuid::Uuid::new_v4(),
-        )?;
-        plan_path(&mut transaction, path, fish)?;
-        transaction.apply()
+        write_block(path, fish)
     }
     #[test]
     fn preserves_content_and_installs_once() {
@@ -250,7 +172,7 @@ mod tests {
         assert!(merge(&format!("{}{}", block(false), block(false)), &block(false)).is_err());
     }
     #[test]
-    fn atomic_edit_preserves_permissions_and_backup() {
+    fn atomic_edit_preserves_permissions_and_refuses_links() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join(".bashrc");
         fs::write(&p, "# mine\n").unwrap();
@@ -258,19 +180,15 @@ mod tests {
         patch(&p, false).unwrap();
         patch(&p, false).unwrap();
         assert_eq!(fs::metadata(&p).unwrap().mode() & 0o777, 0o640);
-        let objects = dir
-            .path()
-            .join(".local/share/newport/needle/helpers/objects");
-        assert!(fs::read_dir(objects)
-            .unwrap()
-            .flatten()
-            .any(|e| fs::read(e.path()).unwrap() == b"# mine\n"));
+        let text = fs::read_to_string(&p).unwrap();
+        assert!(text.starts_with("# mine\n"));
+        assert_eq!(text.matches(START).count(), 1);
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&p, &link).unwrap();
         assert!(patch(&link, false).is_err());
     }
     #[test]
-    fn read_only_shell_files_are_never_replaced_or_backed_up() {
+    fn read_only_shell_files_are_never_replaced() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".zshrc");
         for content in ["# user settings\n".to_owned(), block(false)] {
@@ -285,10 +203,6 @@ mod tests {
             let after = fs::metadata(&path).unwrap();
             assert_eq!(before.ino(), after.ino());
             assert_eq!(after.mode() & 0o777, 0o444);
-            assert!(!dir
-                .path()
-                .join(".local/share/newport/needle/helpers/journal.json")
-                .exists());
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         }
     }

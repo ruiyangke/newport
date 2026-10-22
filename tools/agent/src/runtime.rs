@@ -167,6 +167,11 @@ pub fn serve() -> io::Result<()> {
     // Clipboard. Live displays retain their directory lease and are untouched.
     crate::x_endpoint::sweep();
     crate::owned_directory::sweep(&crate::paths::runtime()?, "wl-");
+    // Builds a finished update replaced while they still ran go now, in the
+    // background so the handshake isn't delayed.
+    if let Some(home) = std::env::var_os("HOME") {
+        std::thread::spawn(move || crate::deployment::prune_retained(std::path::Path::new(&home)));
+    }
     let mut hello = describe()?;
     let broker = crate::worker_session::Broker::new(&hello.instance_id, &hello.build_sha256)?;
     hello.worker_socket = broker

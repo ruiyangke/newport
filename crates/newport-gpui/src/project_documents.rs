@@ -489,7 +489,7 @@ impl project_editor::CodeWorkspace {
             .when(index == 0, |view| {
                 view.when_some(self.navigator.filter.as_ref(), |view, input| {
                     view.child(
-                        div().p_2().child(
+                        div().px_3().py_2().child(
                             crate::controls::search_input(input, cx).aria_label("Find a changed file"),
                         ),
                     )

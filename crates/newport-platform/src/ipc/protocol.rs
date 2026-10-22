@@ -2,7 +2,7 @@
 //! A frame is a big-endian u32 byte length followed by one MessagePack value.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 1;
 pub const DEFAULT_MAX_REQUEST: usize = 1024 * 1024;
 // Whole-document saves need room for 16 MiB of UTF-8 plus the request envelope.
 // All other methods use the default admission limit on both ends.

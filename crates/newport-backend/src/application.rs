@@ -66,6 +66,9 @@ impl Application {
         else {
             return Ok(None);
         };
+        // Owning the profile now, nothing else writes here: remove what
+        // interrupted saves and earlier builds left behind.
+        crate::profile::leftovers::sweep(&store.directory);
         Ok(Some(Reservation { store, instance }))
     }
     /// Returns `None` for an already-owned profile. All startup failures preserve
@@ -119,7 +122,7 @@ impl Application {
             Ok(listener) => listener,
             Err(error) => {
                 state.metrics.close().await;
-                return Err(format!("Cannot listen for native clients: {error}"));
+                return Err(format!("Cannot open the backend socket: {error}"));
             }
         };
         let events = listener.events();

@@ -1,7 +1,7 @@
 # Newport platform adapters
 
-This crate owns OS-specific primitives shared by the native client and
-standalone backend. It has no GPUI dependency.
+This crate owns OS-specific primitives shared by the UI and the backend. It
+has no GPUI dependency.
 
 `ipc::{Stream, Listener}` provides blocking byte streams for client worker
 threads and local contract fixtures. macOS retains standard Unix sockets.

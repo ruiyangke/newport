@@ -5,7 +5,7 @@
 - [Getting started](../README.md): installation and major features.
 - [Clipboard and browser sharing](clipboard.md): terminal setup and troubleshooting.
 - [Remote files](files.md): browsing, previews, and transfers.
-- [Storage and recovery](storage.md): profiles, credentials, backups, and migrations.
+- [Storage and recovery](storage.md): profiles, credentials, backups, and recovery.
 - [Security](security.md): trust boundaries and accepted dependency risks.
 
 ## Development

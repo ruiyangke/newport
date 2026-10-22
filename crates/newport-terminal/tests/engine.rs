@@ -53,12 +53,27 @@ fn titles_bell_replies_and_clipboard_isolation() {
     assert_eq!(effects.title, Some(Some("hello".into())));
     assert!(effects.bell);
     assert_eq!(effects.replies.concat(), b"\x1b[1;1R");
+    // A program may copy text out (tmux, editors), but never read the host
+    // clipboard: the query gets no answer.
     let effects = engine
         .advance(b"\x1b]52;c;?\x07\x1b]52;c;aGVsbG8=\x07")
         .unwrap();
-    // No host clipboard callback is registered, so no local data can appear.
     assert!(effects.replies.is_empty());
     assert!(effects.title.is_none());
+    assert_eq!(effects.copy.as_deref(), Some("hello"));
+    // Split across reads, as SSH delivers it; the latest copy wins.
+    let mut copied = None;
+    for chunk in b"\x1b]52;c;b25l\x07\x1b]52;c;dHdv\x07".chunks(3) {
+        copied = engine.advance(chunk).unwrap().copy.or(copied);
+    }
+    assert_eq!(copied.as_deref(), Some("two"));
+    // tmux leaves the destination empty, which means the clipboard.
+    let effects = engine.advance(b"\x1b]52;;dG11eA==\x07").unwrap();
+    assert_eq!(effects.copy.as_deref(), Some("tmux"));
+    // Not the primary selection, not a request to clear the clipboard.
+    for refused in [&b"\x1b]52;p;aGVsbG8=\x07"[..], b"\x1b]52;c;\x07"] {
+        assert!(engine.advance(refused).unwrap().copy.is_none());
+    }
 }
 
 #[test]

@@ -175,6 +175,77 @@ pub fn alert(
         .child(message)
 }
 
+/// A warning that part of a page can't work yet, and why: a warning-tinted
+/// row with an accent edge, the warning icon, a title and an explanation.
+/// Callers add the way forward as children, after the text, and place it.
+pub fn warning_banner(
+    id: impl Into<ElementId>,
+    title: impl Into<SharedString>,
+    message: impl Into<SharedString>,
+    cx: &App,
+) -> gpui_kit::Stateful<Div> {
+    use gpui_kit::{InteractiveElement as _, TestSupportExt as _, component::Icon, prelude::*};
+    let (title, message) = (title.into(), message.into());
+    let color = crate::theme::warning(cx.theme().is_dark());
+    div()
+        .id(id)
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x(px(16.))
+        .gap_y(px(10.))
+        .w_full()
+        .px(px(14.))
+        .py(px(10.))
+        .border_l(px(3.))
+        .border_color(color)
+        .bg(color.opacity(0.1))
+        .child(
+            div()
+                .flex()
+                .flex_1()
+                .min_w(px(220.))
+                .gap(px(10.))
+                .child(
+                    Icon::new(gpui_kit::assets::IconName::TriangleAlert)
+                        .size(px(ICON_SIZE))
+                        .flex_shrink_0()
+                        .mt(px(2.))
+                        .text_color(color),
+                )
+                .child(
+                    div()
+                        .id("warning-text")
+                        .role(gpui_kit::accesskit::Role::Status)
+                        .aria_label(format!("{title}. {message}"))
+                        .test_support()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .min_w_0()
+                        .text_size(px(FONT_SIZE))
+                        .line_height(px(20.))
+                        .child(
+                            div()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .text_color(cx.theme().foreground)
+                                .child(title),
+                        )
+                        .child(div().text_color(cx.theme().muted_foreground).child(message)),
+                ),
+        )
+}
+
+/// Every code view's editor state. Scrolling follows the finger with no
+/// elastic edge, as in Zed's editor: a stretched edge takes a while to settle,
+/// and a drag that starts before it has does not move the text at all.
+pub fn code_editor(
+    window: &mut Window,
+    cx: &mut gpui_kit::Context<gpui_kit::component::input::EditorState>,
+) -> gpui_kit::component::input::EditorState {
+    gpui_kit::component::input::EditorState::new(window, cx).scroll_bounce(false)
+}
+
 /// A 7px status dot. `None` draws the hollow "inactive" ring.
 pub fn status_dot(color: Option<gpui_kit::Hsla>, cx: &App) -> Div {
     let dot = div()
@@ -199,6 +270,16 @@ pub fn inset_focus_ring(style: gpui_kit::StyleRefinement, cx: &App) -> gpui_kit:
         spread_radius: px(2.),
         inset: true,
     }])
+}
+
+/// A page toolbar's search: the shared search field at the same width on
+/// every page, giving way to the toolbar's other controls when narrow.
+pub fn page_search(state: &Entity<InputState>, label: impl Into<SharedString>, cx: &App) -> Div {
+    div()
+        .w(px(SEARCH_WIDTH))
+        .min_w(px(120.))
+        .flex_shrink(1.)
+        .child(search_input(state, cx).aria_label(label))
 }
 
 /// A search field: the shared input with a muted 14px search icon and a

@@ -110,6 +110,7 @@ impl Newport {
         }
         if self.page != Page::Ports
             || !self.configuration_available()
+            || self.needle_missing()
             || !self
                 .resources
                 .take_poll("page", now, Duration::from_secs(1), self.window_visible)

@@ -120,9 +120,13 @@ pub(crate) async fn is_installed(session: &ExecSession) -> Result<bool, String> 
     Ok(present.trim() == "installed")
 }
 
+/// What a feature that needs Needle answers on a server without it.
+pub(crate) const NOT_INSTALLED: &str =
+    "Needle is not installed. Open Overview to set up this server.";
+
 pub(crate) async fn require_installed(session: &ExecSession) -> Result<(), String> {
     if !is_installed(session).await? {
-        return Err("Needle is not installed. Open Overview to set up this server.".into());
+        return Err(NOT_INSTALLED.into());
     }
     Ok(())
 }

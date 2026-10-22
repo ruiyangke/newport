@@ -20,6 +20,9 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
+      # The pre-commit hook's check, for commits made without the hooks.
+      - name: No private crates in Cargo files
+        run: sh .githooks/pre-commit
       - run: rustup show
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:

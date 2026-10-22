@@ -277,14 +277,14 @@ impl Newport {
                 _ => "Repository",
             });
         }
+        // One 12px inset for the title or tabs, and for the panel below.
         crate::ui::header()
             .gap_1()
+            .pl_3()
             .pr_1()
             .child(crate::ui::header_rule(cx))
             .when(files, |header| {
-                header
-                    .pl_3()
-                    .child(div().flex_1().min_w_0().truncate().child("Explorer"))
+                header.child(div().flex_1().min_w_0().truncate().child("Explorer"))
             })
             .when(!files, |header| {
                 header.child(

@@ -7,8 +7,9 @@
 //! dates and a 24-hour clock until a native locale adapter is available.
 
 const MISSING: &str = "—";
-// Match JavaScript Date's TimeClip range. In particular, never send an arbitrary
-// i64 from a remote journal to Foundation as a valid NSDate.
+// Bound times to ±8.64e15 ms (ECMAScript's TimeClip range, well inside what
+// Foundation handles). Never send an arbitrary i64 from a remote journal to
+// Foundation as a valid NSDate.
 const MAX_DATE_MILLIS: i64 = 8_640_000_000_000_000;
 
 #[derive(Clone, Copy)]

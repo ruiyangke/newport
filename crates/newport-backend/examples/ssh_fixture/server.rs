@@ -297,11 +297,14 @@ impl server::Handler for Client {
         command: &[u8],
         session: &mut Session,
     ) -> anyhow::Result<()> {
+        // Exactly the command a Newport terminal sends, for some selector.
         if let Some(selector) = std::str::from_utf8(command)
             .ok()
-            .and_then(|s| s.strip_prefix("exec env NEWPORT_SESSION='"))
-            .and_then(|s| s.strip_suffix("' \"$SHELL\" -l"))
+            .and_then(|s| s.split_once("NEWPORT_SESSION=")?.1.get(..36))
             .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .filter(|selector| {
+                command == newport_backend::ssh::terminal_command(*selector).as_bytes()
+            })
             && let Some(pty) = self.ptys.get_mut(&id)
         {
             session.data(id, b"early shell output\r\n".to_vec())?;

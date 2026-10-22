@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [features]
-# Deterministic isolated Stores for native lifecycle and integration tests.
+# Deterministic isolated Stores for desktop lifecycle and integration tests.
 test-support = []
 
 [dependencies]

@@ -19,10 +19,21 @@ type Slot<Q> = Arc<OnceLock<Owner<Q>>>;
 pub(super) trait Queue: Default + Send {
     fn open(path: PathBuf) -> Self;
     fn validate(bytes: &[u8], server: Uuid) -> Result<()>;
+    /// Finishes the `unassigned` folder the removed pre-native migration left
+    /// in this queue's storage. Only downloads ever had one.
+    fn retire_unassigned(_: &Path) {}
+    /// For a deleted server: cleans up what can still be cleaned up here.
+    /// Returns whether nothing is left to recover.
+    fn retire(&mut self) -> bool;
 }
 impl Queue for UploadCleanup {
     fn open(path: PathBuf) -> Self {
         Self::open(path)
+    }
+    /// Upload staging lives on the deleted server, which Newport no longer
+    /// reaches: there is nothing left to do here.
+    fn retire(&mut self) -> bool {
+        true
     }
     fn validate(bytes: &[u8], server: Uuid) -> Result<()> {
         Self::validate(bytes, Some(server))
@@ -34,6 +45,24 @@ impl Queue for DownloadCleanup {
     }
     fn validate(bytes: &[u8], _: Uuid) -> Result<()> {
         Self::validate(bytes)
+    }
+    /// Download staging is on this computer: remove the partial files.
+    fn retire(&mut self) -> bool {
+        self.remove_all_staging();
+        self.finished()
+    }
+    /// Old downloads didn't record a server. Opening their journal removes
+    /// their partial files, as for any download at startup; once none is left
+    /// the folder goes.
+    fn retire_unassigned(folder: &Path) {
+        if check_directory(folder).is_err() {
+            return;
+        }
+        if Self::open(folder.join("journal.json")).finished()
+            && let Err(error) = fs::remove_dir_all(folder)
+        {
+            log::warn!("Could not remove old download recovery: {error}");
+        }
     }
 }
 
@@ -61,7 +90,23 @@ impl<Q: Queue> Owners<Q> {
         let loaded = (|| -> Result<()> {
             initialise(&path)?;
             for item in fs::read_dir(&directory)?.collect::<std::io::Result<Vec<_>>>()? {
-                let server = file_server(&item.file_name())?;
+                // Left by the removed pre-native migration: the original
+                // journal it kept for going back to that app (no longer
+                // possible), and old downloads that recorded no server.
+                let name = item.file_name();
+                if name == "source.json" {
+                    if let Err(error) = fs::remove_file(item.path()) {
+                        log::warn!(
+                            "Could not remove the pre-native file recovery journal: {error}"
+                        );
+                    }
+                    continue;
+                }
+                if name == "unassigned" {
+                    Q::retire_unassigned(&item.path());
+                    continue;
+                }
+                let server = file_server(&name)?;
                 // Preload before any live transfer, because download open()
                 // recovers abandoned files. A bad shard affects only its owner.
                 let _ = owners.get(server);
@@ -72,6 +117,26 @@ impl<Q: Queue> Owners<Q> {
             owners.error = Some(format!("Cannot load file recovery storage: {error:#}"));
         }
         owners
+    }
+
+    /// For a deleted server: cleans up its recovery and removes its folder.
+    /// Call on a blocking worker. A queue that can't finish keeps its folder.
+    pub fn forget(&self, server: Uuid) -> Result<()> {
+        let Some(root) = &self.directory else {
+            return Ok(());
+        };
+        if self.error.is_some() || !root.join(server.to_string()).exists() {
+            return Ok(());
+        }
+        let queue = self.get(server)?;
+        if !queue.lock().unwrap().retire() {
+            bail!(
+                "Some downloads from this server couldn't be cleaned up; their recovery was kept"
+            );
+        }
+        self.owners.lock().unwrap().remove(&server);
+        fs::remove_dir_all(root.join(server.to_string()))?;
+        sync_directory(root)
     }
 
     /// Call on a blocking worker. The lookup is memory-only; initialization

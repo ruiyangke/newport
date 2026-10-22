@@ -497,7 +497,7 @@ fn new_editor(
     cx: &mut Context<ContainersPanel>,
 ) -> Entity<EditorState> {
     cx.new(|cx| {
-        EditorState::new(window, cx)
+        crate::controls::code_editor(window, cx)
             .line_number(true)
             .searchable(true)
             .replaceable(false)

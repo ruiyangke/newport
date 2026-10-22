@@ -1,8 +1,7 @@
 //! Newport backend services, independent of the desktop UI framework.
-//! The native application owns service lifetime and supplies platform adapters.
+//! The application owns service lifetime and supplies platform adapters.
 pub mod account;
 pub mod agent_approval;
-pub mod agent_relay;
 pub mod application;
 pub mod metrics_db;
 pub mod preferences;
@@ -37,7 +36,6 @@ pub mod desktop_integration;
 pub mod files;
 pub mod git;
 mod integration_service;
-pub mod lifecycle_receipts;
 mod lifecycle_task;
 pub mod manager;
 pub mod metrics_sampler;

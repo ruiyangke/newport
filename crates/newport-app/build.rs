@@ -16,7 +16,7 @@ fn main() {
     assert_eq!(
         product["version"].as_str(),
         Some(version.as_str()),
-        "Native and product versions differ"
+        "Application and product versions differ"
     );
     assert_eq!(product["productName"], "Newport");
     assert_eq!(product["identifier"], "app.newport");

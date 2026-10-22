@@ -133,9 +133,6 @@ impl Source {
                 .agent_permissions
                 .insert(id, owner.permissions.snapshot());
             runtime.agent_status.insert(id, owner.lifecycle.snapshot());
-            runtime
-                .agent_operations
-                .insert(id, owner.lifecycle_operations());
             if let Some(progress) = owner.lifecycle.progress.snapshot() {
                 runtime.agent_installation.insert(id, progress);
             }
@@ -255,7 +252,6 @@ mod tests {
         assert!(source.finish(&published, current.revision, stale).is_none());
         assert!(current.config.servers.is_empty());
         assert!(!current.runtime.agent_transport.contains_key(&server.id));
-        assert!(!current.runtime.agent_operations.contains_key(&server.id));
         assert!(
             !current
                 .runtime

@@ -10,7 +10,7 @@ use crate::remote_apps_install as install;
 use crate::remote_apps_sessions::{Launch, Sessions};
 use gpui_kit::component::{button::ButtonGroup, input::InputEvent};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     rc::Rc,
     sync::Arc,
@@ -150,6 +150,12 @@ struct State {
     sessions: Rc<Sessions>,
     /// Servers that allow clipboard sharing, from the accepted snapshot.
     clipboard: RefCell<HashSet<String>>,
+    /// The account as running sessions last saw it: its license revision, and
+    /// whether this computer held Pro.
+    account: Cell<(u64, Option<bool>)>,
+    /// The end of access already warned about while sessions were open, so a
+    /// Pro plan set to end is announced once.
+    warned_end: RefCell<Option<String>>,
 }
 impl Global for State {}
 
@@ -183,9 +189,209 @@ pub(crate) fn shutdown(cx: &mut App) {
     }
 }
 
+/// Follows the account for running sessions: a new license token renews them,
+/// and Pro ending here says when they close. Returns that warning, once.
+pub(crate) fn follow_account(
+    status: &newport_client::account::Status,
+    cx: &mut App,
+) -> Option<String> {
+    use newport_client::account::Phase;
+    let state = cx.try_global::<State>()?;
+    let (revision, held) = state.account.get();
+    if status.phase == Phase::Loading {
+        return None;
+    }
+    let holds = match status.phase {
+        Phase::SignedIn => status.license.as_ref().map(|license| license.holds_pro()),
+        _ => None,
+    };
+    // The backend counts from 1 again after a restart, so any change is new.
+    state.account.set((status.license_revision, holds));
+    // Signed out, here or on the account site: a signed-out computer runs
+    // nothing on the account.
+    if held.is_some() && status.phase == Phase::SignedOut {
+        stop_all(cx);
+        return None;
+    }
+    if status.license_revision != revision || renewal_due(cx) {
+        renew(cx);
+    }
+    let open = active_sessions(cx) > 0;
+    let license = status.license.as_ref();
+    if held == Some(true) && holds == Some(false) && open {
+        let field = |key: &str| {
+            license.and_then(|license| match key {
+                "state" => Some(license.state.as_str()),
+                _ => license.seat.as_deref(),
+            })
+        };
+        // Refunded, or this computer's seat moved to another one: what the
+        // account site and its portal promise is that Remote stops here now.
+        let stopped_now = match (field("state"), field("seat")) {
+            (Some("revoked"), _) => Some("Newport Pro was refunded, so open remote apps closed."),
+            (Some("active" | "grace"), Some("free")) => Some(
+                "This computer’s Pro seat moved to another computer, so its open remote apps closed.",
+            ),
+            _ => None,
+        };
+        if let Some(message) = stopped_now {
+            stop_all(cx);
+            return Some(message.to_owned());
+        }
+        return Some(
+            match lease_end(cx).and_then(|end| chrono::DateTime::from_timestamp(end, 0)) {
+                Some(end) => format!(
+                    "Newport Pro has ended. Remote apps close on {}.",
+                    end.with_timezone(&chrono::Local).format("%-d %b")
+                ),
+                None => "Newport Pro has ended. Open remote apps close when this computer’s license runs out."
+                    .to_owned(),
+            },
+        );
+    }
+    // Pro is set to end (cancelled, no renewal): say when, once, while
+    // remote apps are open, before they close.
+    let ending = license
+        .filter(|license| license.holds_pro() && license.renews_at.is_none())
+        .and_then(|license| license.ends_at.clone());
+    let state = cx.try_global::<State>()?;
+    let mut warned = state.warned_end.borrow_mut();
+    match ending {
+        Some(ends) if open && warned.as_deref() != Some(ends.as_str()) => {
+            *warned = Some(ends.clone());
+            let date = chrono::DateTime::parse_from_rfc3339(&ends).ok()?;
+            Some(format!(
+                "Newport Pro ends on {}. Open remote apps close then.",
+                date.with_timezone(&chrono::Local).format("%-d %b")
+            ))
+        }
+        Some(_) => None,
+        None => {
+            *warned = None;
+            None
+        }
+    }
+}
+
+/// Stop every session, before signing out.
+pub(crate) fn stop_all(cx: &App) {
+    if let Some(sessions) = sessions(cx) {
+        sessions.stop_all();
+    }
+}
+
+/// A new license token was saved: renew the running sessions with it.
+pub(crate) fn renew(cx: &mut App) {
+    if let Some(sessions) = sessions(cx) {
+        sessions.renew(cx);
+    }
+}
+
+/// A renewal failed or was overtaken by a newer token and should run again.
+fn renewal_due(cx: &App) -> bool {
+    sessions(cx).is_some_and(|sessions| sessions.renewal_due())
+}
+
+/// When open sessions close unless the license is renewed, as UTC Unix seconds.
+pub(crate) fn lease_end(cx: &App) -> Option<i64> {
+    sessions(cx).and_then(|sessions| sessions.lease_end())
+}
+
 /// Remote apps whose windows are open or opening.
 pub(crate) fn active_sessions(cx: &App) -> usize {
     sessions(cx).map_or(0, |sessions| sessions.active())
+}
+
+/// The agent to launch from a status reading: the release this build carries
+/// for the server's architecture. Builds without a bundled release (no
+/// Remote apps, tests) use the installed agent.
+fn launch_agent(status: &Value) -> Result<String, String> {
+    let installed = status["agent"].as_str().filter(|agent| !agent.is_empty());
+    let Some(bundled) = status["architecture"].as_str().and_then(install::revision) else {
+        return installed
+            .map(str::to_owned)
+            .ok_or_else(|| "Install Newport Remote on this server first.".to_owned());
+    };
+    if let Some(agent) = status["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|release| release["revision"] == bundled)
+        .and_then(|release| release["agent"].as_str())
+    {
+        return Ok(agent.to_owned());
+    }
+    // Older backends report only the newest release.
+    if status["revision"] == bundled
+        && let Some(agent) = installed
+    {
+        return Ok(agent.to_owned());
+    }
+    Err(match installed {
+        Some(_) => "This server has a different version of Newport Remote. Update it to open apps.",
+        None => "Install Newport Remote on this server first.",
+    }
+    .to_owned())
+}
+
+/// How the release Update installs compares with what the server has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Update {
+    Newer,
+    Older,
+    /// Releases installed before agents recorded their build time.
+    Unordered,
+}
+
+impl Update {
+    /// Whether Newport installs its own release without asking, as it does
+    /// Needle: unless the server's is known to be newer, which a newer
+    /// Newport put there. Updating Newport is the fix for that.
+    fn automatic(self) -> bool {
+        self != Update::Older
+    }
+}
+
+/// Whether this build's release (`bundled`, built at `bundled_built`) is
+/// missing from a server that has others, and how it compares with the newest
+/// of them. Nothing to offer when it is installed: launches use it even when
+/// another Newport installed something later.
+fn update_offer(
+    status: &Value,
+    bundled: &str,
+    bundled_built: Option<u64>,
+) -> Option<(String, Update)> {
+    let installed = status["revision"].as_str()?;
+    let releases = status["agents"].as_array();
+    let present = match releases {
+        Some(releases) => releases
+            .iter()
+            .any(|release| release["revision"] == bundled),
+        // Older backends report only the newest release.
+        None => installed == bundled,
+    };
+    if present {
+        return None;
+    }
+    let newest = releases.and_then(|releases| {
+        releases
+            .iter()
+            .map(|release| release["builtAt"].as_u64())
+            .collect::<Option<Vec<u64>>>()?
+            .into_iter()
+            .max()
+    });
+    let update = match (bundled_built, newest) {
+        (Some(ours), Some(theirs)) if ours > theirs => Update::Newer,
+        (Some(ours), Some(theirs)) if ours < theirs => Update::Older,
+        _ => Update::Unordered,
+    };
+    Some((installed.to_owned(), update))
+}
+
+/// Running Remote apps that failed since last asked, worded for a toast.
+pub(crate) fn take_notices(cx: &App) -> Vec<String> {
+    sessions(cx).map_or_else(Vec::new, |sessions| sessions.take_notices())
 }
 
 /// True once after session state changed.
@@ -291,6 +497,8 @@ impl State {
         Self {
             sessions: Rc::new(sessions),
             clipboard: Default::default(),
+            account: Default::default(),
+            warned_end: Default::default(),
         }
     }
 }
@@ -396,6 +604,9 @@ struct Runner {
 pub(crate) enum LaunchpadEvent {
     /// Read the server's queries again, bypassing their freshness.
     Refresh,
+    /// One of the upsell's buttons: sign in, start the trial, open Billing or
+    /// the account page.
+    Account(newport_client::account::Action),
     /// Read only the server's status again, bypassing its freshness. With
     /// `replace`, a read already in flight gives way to this one.
     Recheck {
@@ -412,6 +623,59 @@ pub(crate) enum LaunchpadEvent {
         server: String,
         id: String,
     },
+}
+
+/// What this computer may do with Remote apps, decided from the account
+/// status, offline too: the saved license holds until the next refresh.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Entitlement {
+    /// The account status hasn't loaded: show no upsell yet, so the page never
+    /// flashes the wrong one.
+    #[default]
+    Unknown,
+    SignedOut,
+    /// Sign-in waits for the browser; its page can be opened again.
+    Waiting,
+    /// A free account that can still start its trial here.
+    TrialAvailable,
+    /// This computer already used a free trial, under any account.
+    TrialUsedHere,
+    /// The trial was used, or Pro ended.
+    Ended {
+        trial_used: bool,
+    },
+    /// A Pro account whose Pro seats are on other computers.
+    FreeSeat,
+    /// The account's trial holds its seat on another computer.
+    TrialElsewhere,
+    Pro,
+}
+
+impl Entitlement {
+    pub(crate) fn of(status: &newport_client::account::Status) -> Self {
+        use newport_client::account::Phase;
+        match status.phase {
+            Phase::Loading => Self::Unknown,
+            Phase::SignedOut => Self::SignedOut,
+            Phase::Waiting => Self::Waiting,
+            Phase::SignedIn => {
+                let Some(license) = &status.license else {
+                    return Self::Unknown;
+                };
+                let free_seat = license.seat.as_deref() == Some("free");
+                match license.state.as_str() {
+                    _ if license.holds_pro() => Self::Pro,
+                    "trial" if free_seat => Self::TrialElsewhere,
+                    "active" | "grace" if free_seat => Self::FreeSeat,
+                    "none" if license.trial_used_here && !license.trial_used => Self::TrialUsedHere,
+                    "none" if !license.trial_used => Self::TrialAvailable,
+                    _ => Self::Ended {
+                        trial_used: license.trial_used,
+                    },
+                }
+            }
+        }
+    }
 }
 
 /// A preference change waiting to be sent, under the key it updates.
@@ -578,6 +842,9 @@ pub(crate) struct Launchpad {
     installs: HashMap<String, Install>,
     /// Servers whose install finished while another one was shown.
     installed: HashSet<String>,
+    /// Servers this Newport updated without asking in this run. A failed
+    /// update isn't repeated unasked; Update tries again.
+    updated: HashSet<String>,
     /// The floating terminal installing a missing program, if open.
     terminal: Option<InstallTerminal>,
     /// Numbers each shell opened.
@@ -599,11 +866,17 @@ pub(crate) struct Launchpad {
     /// Whether the current scroll gesture may still turn a page.
     armed: bool,
     scrolled_at: Option<Instant>,
+    /// Whether this computer holds Newport Pro, from the account status.
+    entitlement: Entitlement,
+    /// An account step the upsell started is still running.
+    account_busy: bool,
+    /// Why this computer is on a free seat, from the account site.
+    seat_message: Option<String>,
 }
 
 impl Launchpad {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search apps"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find an app"));
         let subscription = cx.subscribe(&search, |this, _, event, cx| match event {
             InputEvent::Change => {
                 this.page = 0;
@@ -630,6 +903,7 @@ impl Launchpad {
             visit: 0,
             installs: HashMap::new(),
             installed: HashSet::new(),
+            updated: HashSet::new(),
             terminal: None,
             terminals_opened: 0,
             status: QueryRead::default(),
@@ -644,6 +918,9 @@ impl Launchpad {
             swipe: 0.,
             armed: true,
             scrolled_at: None,
+            entitlement: Entitlement::Unknown,
+            account_busy: false,
+            seat_message: None,
         }
     }
 
@@ -758,6 +1035,108 @@ impl Launchpad {
                         cx.listener(move |this, _, _, cx| this.turn(this.page + 1, pages, cx)),
                     ),
             )
+    }
+
+    /// What the account status says this computer may do, and whether an
+    /// account step from the upsell is still running.
+    /// `seat_message` is the account site's reason this computer is on a
+    /// free seat, when it gave one.
+    pub(crate) fn set_account(
+        &mut self,
+        entitlement: Entitlement,
+        seat_message: Option<String>,
+        busy: bool,
+    ) {
+        self.entitlement = entitlement;
+        self.seat_message = seat_message;
+        self.account_busy = busy;
+    }
+
+    /// Without Newport Pro on this computer the page is the welcome wall with
+    /// one sentence and one button for the situation. `None` with Pro.
+    fn upsell(&self, cx: &mut Context<Self>) -> Option<Div> {
+        use newport_client::account::Action;
+        const PRO: &str = "Remote apps are part of Newport Pro.";
+        const UPGRADE: (&str, Action) = ("Upgrade to Pro", Action::OpenBilling);
+        let (sentence, (label, action)): (String, (&str, Action)) = match self.entitlement {
+            Entitlement::Pro => return None,
+            Entitlement::Unknown => {
+                return Some(self.welcome(
+                    0,
+                    "Each app opens in its own window, right next to your Mac apps.",
+                    cx,
+                ));
+            }
+            Entitlement::SignedOut => (
+                format!("{PRO} Sign in to try them free for 14 days."),
+                ("Sign in", Action::SignIn),
+            ),
+            Entitlement::Waiting => (
+                "Finish signing in in your browser. If you closed that page, open it again.".into(),
+                ("Open sign-in page", Action::SignIn),
+            ),
+            Entitlement::TrialUsedHere => (
+                format!("{PRO} This computer has already used a free trial."),
+                UPGRADE,
+            ),
+            Entitlement::TrialAvailable => (
+                format!("{PRO} Try it free for 14 days on this computer, no card needed."),
+                ("Start free trial", Action::StartTrial),
+            ),
+            Entitlement::Ended { trial_used: true } => {
+                (format!("{PRO} Your free trial has ended."), UPGRADE)
+            }
+            Entitlement::Ended { trial_used: false } => (PRO.to_owned(), UPGRADE),
+            Entitlement::FreeSeat => (
+                // The account site knows why: seats open but not chosen here,
+                // or all in use.
+                self.seat_message.clone().unwrap_or_else(|| {
+                    "Newport Pro is in use on your other computers. Move a Pro seat here to open remote apps on this one."
+                        .to_owned()
+                }),
+                ("Use Pro on this computer", Action::OpenPortal),
+            ),
+            Entitlement::TrialElsewhere => (
+                "Your free trial runs on the computer that started it.".to_owned(),
+                UPGRADE,
+            ),
+        };
+        let trial = self.entitlement == Entitlement::TrialAvailable;
+        Some(
+            self.welcome(0, sentence, cx).child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .debug_selector(move || format!("remote-apps-upsell: {label}"))
+                            .child(
+                                crate::controls::button("remote-apps-upsell")
+                                    .primary()
+                                    .label(label)
+                                    .loading(self.account_busy)
+                                    .disabled(self.account_busy)
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(LaunchpadEvent::Account(action))
+                                    })),
+                            ),
+                    )
+                    .when(trial, |column| {
+                        column.child(
+                            div().debug_selector(|| "remote-apps-upgrade".into()).child(
+                                crate::controls::compact_button("remote-apps-upgrade")
+                                    .ghost()
+                                    .label(UPGRADE.0)
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(LaunchpadEvent::Account(UPGRADE.1))
+                                    })),
+                            ),
+                        )
+                    }),
+            ),
+        )
     }
 
     /// Show a server. A new server or a return to the page starts the view
@@ -1206,11 +1585,38 @@ impl Launchpad {
 
     /// The installed agent's release and the one this build carries for the
     /// server, when they differ.
-    fn outdated(&self) -> Option<(&str, &'static str)> {
+    /// What Update would install on this server, when anything.
+    fn outdated(&self) -> Option<(String, &'static str, Update)> {
         let value = &self.status.value;
-        let installed = value["revision"].as_str()?;
-        let bundled = value["architecture"].as_str().and_then(install::revision)?;
-        (bundled != installed).then_some((installed, bundled))
+        let architecture = value["architecture"].as_str()?;
+        let bundled = install::revision(architecture)?;
+        let (installed, update) = update_offer(value, bundled, install::built_at(architecture))?;
+        Some((installed, bundled, update))
+    }
+
+    /// Replace the server's agent with this Newport's own once a settled
+    /// check shows it's missing, unless Update must ask first.
+    fn update_automatically(&mut self, cx: &mut Context<Self>) {
+        let read = &self.status;
+        if !read.loaded
+            || read.pending
+            || read.error.is_some()
+            || self.installs.contains_key(&self.server)
+            || self.updated.contains(&self.server)
+            || !matches!(
+                self.status(),
+                api::ServerStatus::Ready | api::ServerStatus::MissingPackages(_)
+            )
+        {
+            return;
+        }
+        if self
+            .outdated()
+            .is_some_and(|(_, _, update)| update.automatic())
+        {
+            self.updated.insert(self.server.clone());
+            self.install(cx);
+        }
     }
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -1281,8 +1687,12 @@ impl Launchpad {
     }
 
     /// The installed agent the server query found.
-    fn agent(&self) -> Option<String> {
-        self.status.value["agent"].as_str().map(str::to_owned)
+    /// The agent to launch: the release this build carries, even when
+    /// another Newport installed a different one more recently. Another
+    /// release alone isn't used: its license and protocol handling may not
+    /// match this build, so the page asks to update instead.
+    fn launch_agent(&self) -> Result<String, String> {
+        launch_agent(&self.status.value)
     }
 
     fn os(&self) -> Option<api::ServerOs> {
@@ -1370,9 +1780,10 @@ impl Launchpad {
             name,
             action,
         };
-        let agent = self.agent().unwrap_or_default();
-        let launch = self.launch_options(&agent, cx);
-        self.error = sessions.launch(launch, request, cx).err();
+        self.error = self
+            .launch_agent()
+            .and_then(|agent| sessions.launch(self.launch_options(&agent, cx), request, cx))
+            .err();
         cx.notify();
     }
 
@@ -1405,21 +1816,12 @@ impl Launchpad {
             1 => "1 app".into(),
             n => format!("{n} apps"),
         };
-        div()
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap(px(12.))
-            .px(px(crate::controls::PAGE_PADDING))
-            .py(px(10.))
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(
-                div().w(px(280.)).min_w(px(160.)).child(
-                    crate::controls::input(&self.search)
-                        .prefix(Icon::new(IconName::Search).size(px(14.))),
-                ),
-            )
+        crate::controls::page_toolbar(cx)
+            .child(crate::controls::page_search(
+                &self.search,
+                "Find an app",
+                cx,
+            ))
             .child(div().flex_1())
             .child(
                 div()
@@ -2055,9 +2457,10 @@ impl Launchpad {
             let Some(sessions) = sessions(cx) else {
                 return;
             };
-            let agent = self.agent().unwrap_or_default();
-            let launch = self.launch_options(&agent, cx);
-            if let Err(error) = sessions.run(launch, request, cx) {
+            let started = self
+                .launch_agent()
+                .and_then(|agent| sessions.run(self.launch_options(&agent, cx), request, cx));
+            if let Err(error) = started {
                 if let Some(runner) = &mut self.runner {
                     runner.error = Some(error);
                 }
@@ -2079,9 +2482,10 @@ impl Launchpad {
         let Some(sessions) = sessions(cx) else {
             return;
         };
-        let agent = self.agent().unwrap_or_default();
-        self.error = parse_command(&saved.command)
-            .and_then(|(env, argv)| {
+        self.error = self
+            .launch_agent()
+            .and_then(|agent| parse_command(&saved.command).map(|parsed| (agent, parsed)))
+            .and_then(|(agent, (env, argv))| {
                 let request = api::CommandRequest {
                     id: command_app_id(&saved.id),
                     name: saved.name.clone(),
@@ -2384,17 +2788,33 @@ impl Launchpad {
                 if matches!(
                     status,
                     api::ServerStatus::Ready | api::ServerStatus::MissingPackages(_)
-                ) && let Some((installed, bundled)) = self.outdated()
+                ) && let Some((installed, bundled, update)) = self.outdated()
                 {
+                    let (title, detail) = match update {
+                        Update::Newer => (
+                            "A newer version of Newport Remote is available".to_owned(),
+                            format!(
+                                "Update installs it on {server}. Apps that are open keep running."
+                            ),
+                        ),
+                        Update::Older => (
+                            format!("{server} has a newer Newport Remote than this Newport"),
+                            "This Newport opens apps with its own, older version. Update replaces the newer one with it; apps that are open keep running. Updating Newport avoids this.".to_owned(),
+                        ),
+                        Update::Unordered => (
+                            "Another version of Newport Remote is available".to_owned(),
+                            format!(
+                                "Update installs this Newport’s version on {server}. Apps that are open keep running."
+                            ),
+                        ),
+                    };
                     alerts.push((
                         api::Alert {
                             // A later build's agent asks again.
                             id: format!("update:{installed}:{bundled}"),
                             severity: api::Severity::Warning,
-                            title: "Another version of Newport Remote is available".into(),
-                            detail: format!(
-                                "Update installs this build’s version on {server}. Apps that are open keep running."
-                            ),
+                            title,
+                            detail,
                             fix: Some(api::Fix::UpdateAgent),
                         },
                         true,
@@ -2415,32 +2835,49 @@ impl Launchpad {
             ));
         }
         for session in sessions {
-            if let api::SessionState::Ended { error: Some(error) } = &session.state {
+            let api::SessionState::Ended {
+                ending: Some(ending),
+            } = &session.state
+            else {
+                continue;
+            };
+            let id = format!("session:{}", session.id.0);
+            let alert = match ending {
                 // Tray apps and daemons start fine but never show a window.
-                let windowless = error.contains("did not open a window");
-                alerts.push((
+                api::Ending::Failed(error) | api::Ending::Refused { message: error, .. }
+                    if error.contains("did not open a window") =>
+                {
                     api::Alert {
-                        id: format!("session:{}", session.id.0),
-                        severity: if windowless {
-                            api::Severity::Warning
-                        } else {
-                            api::Severity::Error
-                        },
-                        title: if windowless {
-                            format!("{} didn’t open a window", session.app_name)
-                        } else {
-                            format!("{} closed unexpectedly", session.app_name)
-                        },
-                        detail: if windowless {
-                            "It may run in the background, such as in the system tray, which Remote apps can’t show.".into()
-                        } else {
-                            error.clone()
-                        },
+                        id,
+                        severity: api::Severity::Warning,
+                        title: format!("{} didn’t open a window", session.app_name),
+                        detail: "It may run in the background, such as in the system tray, which Remote apps can’t show.".into(),
                         fix: None,
-                    },
-                    true,
-                ));
-            }
+                    }
+                }
+                api::Ending::Refused { message, action } => api::Alert {
+                    id,
+                    severity: api::Severity::Error,
+                    title: format!("Couldn’t open {}", session.app_name),
+                    detail: message.clone(),
+                    fix: action.map(api::Fix::Account),
+                },
+                api::Ending::Failed(error) => api::Alert {
+                    id,
+                    severity: api::Severity::Error,
+                    title: format!("{} closed unexpectedly", session.app_name),
+                    detail: error.clone(),
+                    fix: None,
+                },
+                api::Ending::HandedOff => api::Alert {
+                    id,
+                    severity: api::Severity::Warning,
+                    title: format!("{} is already running on this server", session.app_name),
+                    detail: "Its window opened there instead of in a new Remote apps window, possibly on the server’s own desktop or in another session.".into(),
+                    fix: None,
+                },
+            };
+            alerts.push((alert, true));
         }
         alerts.retain(|(alert, _)| !self.dismissed.contains(&self.dismissal(&alert.id)));
         alerts.sort_by_key(|(alert, _)| std::cmp::Reverse(alert.severity));
@@ -2516,6 +2953,25 @@ impl Launchpad {
                             crate::controls::compact_button(("remote-apps-alert-update", index))
                                 .label("Update")
                                 .on_click(cx.listener(|this, _, _, cx| this.install(cx))),
+                        ),
+                );
+            }
+            Some(api::Fix::Account(action)) => {
+                use newport_client::account::Action;
+                let label = match action {
+                    Action::SignIn => "Sign in",
+                    Action::OpenPortal => "Use Pro on this computer",
+                    _ => "See plans",
+                };
+                actions = actions.child(
+                    div()
+                        .debug_selector(move || format!("remote-apps-alert-account-{index}"))
+                        .child(
+                            crate::controls::compact_button(("remote-apps-alert-account", index))
+                                .label(label)
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(LaunchpadEvent::Account(action))
+                                })),
                         ),
                 );
             }
@@ -2981,6 +3437,10 @@ impl Render for Launchpad {
         {
             root = root.child(self.alert(index, alert, dismissible, cx));
         }
+        // Remote apps need Newport Pro on this computer before anything else.
+        if let Some(upsell) = self.upsell(cx) {
+            return root.child(upsell).into_any_element();
+        }
         if let Some(hero) = self.status_hero(&status, cx) {
             return self.with_terminal(root.child(hero), cx);
         }
@@ -3126,6 +3586,7 @@ impl Newport {
             None => {
                 let view = cx.new(|cx| Launchpad::new(window, cx));
                 cx.subscribe(&view, |this, _, event, cx| match event {
+                    LaunchpadEvent::Account(action) => this.run_account(*action, cx),
                     LaunchpadEvent::Recheck { replace } => {
                         this.remote_apps_recheck = Some(*replace);
                         this.poll_remote_apps(cx);
@@ -3167,9 +3628,28 @@ impl Newport {
         }
         let visit = self.remote_apps_visit;
         let resources = &self.resources;
+        let entitlement = Entitlement::of(self.account.status());
+        let seat_message = self
+            .account
+            .status()
+            .license
+            .as_ref()
+            .and_then(|license| license.message.clone())
+            .filter(|message| !message.trim().is_empty());
+        // While sign-in waits for the browser the button stays usable: it
+        // opens the same page again.
+        let busy = matches!(
+            self.account.pending(),
+            Some(
+                newport_client::account::Action::SignIn
+                    | newport_client::account::Action::StartTrial
+            )
+        );
         view.update(cx, |view, cx| {
+            view.set_account(entitlement, seat_message, busy);
             view.show(&id, &name, visit, window, cx);
             view.observe(resources);
+            view.update_automatically(cx);
         });
         view.into_any_element()
     }
@@ -3370,8 +3850,95 @@ mod tests {
     use crate::remote_apps_api as api;
     use gpui_kit::{self as gpui, AppContext, Modifiers, TestAppContext, VisualTestContext};
     use serde_json::{Value, json};
+    use std::{cell::RefCell, rc::Rc};
 
     const AGENT: &str = "/home/u/.cache/newport-remote/releases/system/a1b2/current/run-agent";
+
+    #[test]
+    fn launches_use_the_agent_this_build_carries() {
+        use super::{install, launch_agent};
+        // No bundled release for this architecture: the installed agent.
+        let plain =
+            json!({"agent": "/c/releases/system/a/current/run-agent", "architecture": "riscv64"});
+        assert_eq!(
+            launch_agent(&plain).unwrap(),
+            "/c/releases/system/a/current/run-agent"
+        );
+        assert!(launch_agent(&json!({"architecture": "riscv64"})).is_err());
+        // With a bundled release (Remote apps builds): it wins over a newer
+        // install, and another release alone is refused with an update.
+        if let Some(bundled) = install::revision("x86_64") {
+            let ours = format!("/c/releases/system/{bundled}/current/run-agent");
+            let status = json!({
+                "agent": "/c/releases/system/newer/current/run-agent",
+                "revision": "newer",
+                "architecture": "x86_64",
+                "agents": [
+                    {"revision": "newer", "agent": "/c/releases/system/newer/current/run-agent"},
+                    {"revision": bundled, "agent": ours},
+                ],
+            });
+            assert_eq!(launch_agent(&status).unwrap(), ours);
+            let other = json!({
+                "agent": "/c/releases/system/newer/current/run-agent",
+                "revision": "newer",
+                "architecture": "x86_64",
+                "agents": [{"revision": "newer", "agent": "/c/releases/system/newer/current/run-agent"}],
+            });
+            assert!(launch_agent(&other).unwrap_err().contains("Update"));
+        }
+    }
+
+    #[test]
+    fn newport_installs_its_own_release_unless_the_servers_is_newer() {
+        use super::Update;
+        assert!(Update::Newer.automatic());
+        assert!(Update::Unordered.automatic());
+        // A newer Newport put it there; Update asks before replacing it.
+        assert!(!Update::Older.automatic());
+    }
+
+    #[test]
+    fn update_is_offered_only_when_this_builds_release_is_missing() {
+        use super::{Update, update_offer};
+        let release = |revision: &str, built: Option<u64>| json!({"revision": revision, "agent": format!("/c/releases/system/{revision}/current/run-agent"), "builtAt": built});
+        let status = |agents: Vec<Value>| json!({"revision": "theirs", "agents": agents});
+        // Installed, even if not the newest: launches use it, nothing to offer.
+        let both = status(vec![release("theirs", Some(20)), release("ours", Some(10))]);
+        assert_eq!(update_offer(&both, "ours", Some(10)), None);
+        // Missing: newer, older, or unordered by build time.
+        let theirs = status(vec![release("theirs", Some(20))]);
+        assert_eq!(
+            update_offer(&theirs, "ours", Some(30)),
+            Some(("theirs".into(), Update::Newer))
+        );
+        assert_eq!(
+            update_offer(&theirs, "ours", Some(10)),
+            Some(("theirs".into(), Update::Older))
+        );
+        assert_eq!(
+            update_offer(&theirs, "ours", None).unwrap().1,
+            Update::Unordered
+        );
+        let unstamped = status(vec![release("theirs", None)]);
+        assert_eq!(
+            update_offer(&unstamped, "ours", Some(30)).unwrap().1,
+            Update::Unordered
+        );
+        // Nothing installed is the install flow, not an update.
+        assert_eq!(update_offer(&json!({}), "ours", Some(30)), None);
+        // Older backends report only the newest release.
+        assert_eq!(
+            update_offer(&json!({"revision": "ours"}), "ours", None),
+            None
+        );
+        assert_eq!(
+            update_offer(&json!({"revision": "theirs"}), "ours", None)
+                .unwrap()
+                .1,
+            Update::Unordered
+        );
+    }
 
     /// A server with the agent installed, as the backend's status query reports it.
     fn ready() -> Value {
@@ -3455,8 +4022,56 @@ mod tests {
         frame(visual);
     }
 
-    /// The Remote apps page with scripted sessions, at an optional size.
+    /// An account whose backend answers every request with `status`, and
+    /// records what was asked.
+    fn account(
+        status: serde_json::Value,
+    ) -> (
+        newport_client::account::Account,
+        Rc<RefCell<Vec<&'static str>>>,
+    ) {
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let record = asked.clone();
+        let account = newport_client::account::Account::with_replies(move |method| {
+            record.borrow_mut().push(method);
+            Ok(status.clone())
+        });
+        (account, asked)
+    }
+
+    /// The account status of a computer that holds Newport Pro, or not.
+    fn signed_in(license: serde_json::Value) -> serde_json::Value {
+        json!({"status":"signedIn","email":"ada@example.com","license":license})
+    }
+
+    /// Put `account` in the app and let it read its first status.
+    fn use_account(
+        view: &gpui::Entity<crate::Newport>,
+        visual: &mut VisualTestContext,
+        mut account: newport_client::account::Account,
+    ) {
+        account.poll();
+        account.poll();
+        view.update(visual, |v, _| v.account = account);
+        frame(visual);
+    }
+
+    /// The Remote apps page with scripted sessions, at an optional size, on a
+    /// computer that holds Newport Pro.
     fn page(
+        cx: &mut TestAppContext,
+        size: Option<(f32, f32)>,
+    ) -> (gpui::Entity<crate::Newport>, &mut VisualTestContext) {
+        let (view, visual) = page_without_pro(cx, size);
+        let (pro, _) = account(signed_in(
+            json!({"state":"active","plan":"pro","seat":"pro"}),
+        ));
+        use_account(&view, visual, pro);
+        (view, visual)
+    }
+
+    /// The page before the account status says anything about Pro.
+    fn page_without_pro(
         cx: &mut TestAppContext,
         size: Option<(f32, f32)>,
     ) -> (gpui::Entity<crate::Newport>, &mut VisualTestContext) {
@@ -3592,10 +4207,12 @@ mod tests {
                 .debug_bounds("remote-apps-install-progress")
                 .is_none()
         );
+        // The release installed is this build's (when it carries one).
+        let new = super::install::revision("aarch64").unwrap_or("new");
         feed(
             &view,
             visual,
-            json!({"agent": "/c/releases/system/new/current/run-agent", "revision": "new",
+            json!({"agent": format!("/c/releases/system/{new}/current/run-agent"), "revision": new,
                 "system": "Linux", "architecture": "aarch64", "osRelease": "ID=debian"}),
             Some(catalogue()),
         );
@@ -4045,6 +4662,80 @@ mod tests {
             assert_eq!(v.navigation_focus.len(), before + 1);
         });
         frame(visual);
+    }
+
+    /// The upsell button's label, when the page shows one.
+    fn upsell_label(visual: &mut VisualTestContext) -> Option<&'static str> {
+        frame(visual);
+        [
+            ("remote-apps-upsell: Sign in", "Sign in"),
+            ("remote-apps-upsell: Start free trial", "Start free trial"),
+            ("remote-apps-upsell: Upgrade to Pro", "Upgrade to Pro"),
+            (
+                "remote-apps-upsell: Use Pro on this computer",
+                "Use Pro on this computer",
+            ),
+        ]
+        .into_iter()
+        .find(|(selector, _)| visual.debug_bounds(selector).is_some())
+        .map(|(_, label)| label)
+    }
+
+    #[gpui::test]
+    fn without_pro_the_page_offers_the_next_step(cx: &mut TestAppContext) {
+        let (view, visual) = page_without_pro(cx, None);
+        // Until the account status loads: the wall, and no upsell to flash.
+        assert_eq!(upsell_label(visual), None);
+        assert!(visual.debug_bounds("remote-apps-wall").is_some());
+        for (status, label) in [
+            (json!({"status":"signedOut"}), "Sign in"),
+            (
+                signed_in(json!({"state":"none","trialUsed":false})),
+                "Start free trial",
+            ),
+            (
+                signed_in(json!({"state":"expired","trialUsed":true})),
+                "Upgrade to Pro",
+            ),
+            (
+                signed_in(json!({"state":"active","plan":"pro","seat":"free"})),
+                "Use Pro on this computer",
+            ),
+            (
+                signed_in(json!({"state":"trial","plan":"trial","seat":"free"})),
+                "Upgrade to Pro",
+            ),
+        ] {
+            let (account, _) = account(status.clone());
+            use_account(&view, visual, account);
+            assert_eq!(upsell_label(visual), Some(label), "{status}");
+            assert!(
+                visual.debug_bounds("remote-apps-get-started").is_none(),
+                "nothing reaches the server without Pro"
+            );
+        }
+        // With Pro the page goes on to the server.
+        let (pro, _) = account(signed_in(
+            json!({"state":"trial","plan":"trial","seat":"trial"}),
+        ));
+        use_account(&view, visual, pro);
+        assert_eq!(upsell_label(visual), None);
+    }
+
+    #[gpui::test]
+    fn start_free_trial_asks_the_backend(cx: &mut TestAppContext) {
+        let (view, visual) = page_without_pro(cx, None);
+        let (free, asked) = account(signed_in(json!({"state":"none","trialUsed":false})));
+        use_account(&view, visual, free);
+        assert!(visual.debug_bounds("remote-apps-upgrade").is_some());
+        click(visual, "remote-apps-upsell: Start free trial");
+        assert_eq!(asked.borrow().last(), Some(&"account_start_trial"));
+        // The trial's answer arrives before the next step.
+        view.update(visual, |v, _| {
+            v.account.poll();
+        });
+        click(visual, "remote-apps-upgrade");
+        assert_eq!(asked.borrow().last(), Some(&"account_open_billing"));
     }
 
     /// Answer a key as the backend would after a successful save.

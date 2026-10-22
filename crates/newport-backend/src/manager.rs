@@ -19,7 +19,6 @@ pub struct Runtime {
     pub agent_permissions: HashMap<Uuid, crate::integration_permissions::Snapshot>,
     pub agent_status: HashMap<Uuid, crate::agent_lifecycle::Status>,
     pub agent_installation: HashMap<Uuid, crate::agent_install::Progress>,
-    pub agent_operations: HashMap<Uuid, serde_json::Value>,
     pub tunnels: HashMap<Uuid, ConnectionState>,
     pub tunnel_health: HashMap<Uuid, Vec<DestinationHealth>>,
     pub clipboard: HashMap<Uuid, ConnectionState>,

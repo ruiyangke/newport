@@ -66,7 +66,7 @@ pub fn parse_overview(output: &str) -> Result<Overview, String> {
 mod tests {
     use super::*;
     #[test]
-    fn metrics_round_trip_preserves_the_frontend_contract() {
+    fn metrics_round_trip_preserves_the_ui_contract() {
         let input = include_str!("../tests/fixtures/overview.json");
         let expected: serde_json::Value = serde_json::from_str(input).unwrap();
         let actual = serde_json::to_value(parse_overview(input).unwrap()).unwrap();

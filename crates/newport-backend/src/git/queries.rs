@@ -83,10 +83,6 @@ pub(super) async fn read(
     pending: &pending::PendingOperations,
     request: Request,
 ) -> Result<Value, Error> {
-    session
-        .connection
-        .require_agent_available()
-        .map_err(Error::transport)?;
     let key = serde_json::to_string(&request).map_err(|e| Error::invalid(e.to_string()))?;
     let weak = Arc::downgrade(session);
     let observed_request = request.clone();

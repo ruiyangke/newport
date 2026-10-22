@@ -351,12 +351,14 @@ mod remote_tests {
         assert!(status.to_string().contains("sample.txt"), "{status}");
 
         let session = Uuid::new_v4();
-        call(
-            &endpoint,
-            "terminal_open",
-            json!({"id":id,"session":session,"cols":80,"rows":24}),
-        )
+        // Held for the rest of the test, as the app holds its terminals.
+        let lease_endpoint = endpoint.to_owned();
+        let _lease = tokio::task::spawn_blocking(move || {
+            newport_client::backend::Backend::at_path(lease_endpoint)
+                .open_terminal_lease(json!({"id":id,"session":session,"cols":80,"rows":24}))
+        })
         .await
+        .unwrap()
         .unwrap();
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {

@@ -11,6 +11,7 @@ pub struct Services<'a> {
     pub metrics: &'a MetricsDb,
     pub files: &'a crate::files::Operations,
     pub terminals: &'a crate::terminal::Sessions,
+    pub preferences: &'a crate::preferences::Preferences,
     pub desktop: Desktop,
 }
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -32,14 +33,8 @@ pub enum Command {
     TestConnection,
     ConnectionsQuery,
     ReinstallAgent,
-    RecoverAgent,
-    RemoveAgent,
-    RestoreRemovedAgent,
-    RestoreStandaloneHelpers,
+    UninstallAgent,
     InspectAgent,
-    ResumeAgent,
-    ReviewAgent,
-    KeepAgentFile,
     OpenTunnel,
     OpenTerminalLink,
 }
@@ -59,10 +54,9 @@ impl Command {
                 .map_err(error)?,
             ),
             Self::SetupInstall => encode(
-                crate::server_setup::install_with_id(
+                crate::server_setup::install(
                     services.manager,
                     argument(args, "expectedConnection")?,
-                    argument(args, "operationId")?,
                 )
                 .await
                 .map_err(error)?,
@@ -74,7 +68,6 @@ impl Command {
                     argument(args, "expectedConnection")?,
                     argument(args, "browser")?,
                     argument(args, "clipboard")?,
-                    argument(args, "helperOperationId")?,
                 )
                 .await
                 .map_err(error)?,
@@ -98,6 +91,7 @@ impl Command {
                     services.terminals,
                     services.manager,
                     services.metrics,
+                    services.preferences,
                     argument(args, "id")?,
                 )
                 .await
@@ -191,59 +185,10 @@ impl Command {
                 .await
                 .map_err(error)?,
             ),
-            Self::ResumeAgent => encode(
-                crate::commands::resume_agent(
-                    services.manager,
-                    argument(args, "id")?,
-                    argument(args, "operationId")?,
-                )
-                .await
-                .map_err(error)?,
-            ),
-            Self::RecoverAgent => encode(
-                crate::commands::recover_agent(
-                    services.manager,
-                    argument(args, "id")?,
-                    argument(args, "operationId")?,
-                )
-                .await
-                .map_err(error)?,
-            ),
-            Self::RemoveAgent | Self::RestoreRemovedAgent => encode(
-                crate::commands::manage_agent_removal(
+            Self::UninstallAgent => encode(
+                crate::commands::uninstall_agent(
                     services.manager,
                     argument(args, "expectedConnection")?,
-                    argument(args, "operationId")?,
-                    if matches!(self, Self::RemoveAgent) {
-                        Some(argument(args, "build")?)
-                    } else {
-                        None
-                    },
-                )
-                .await
-                .map_err(error)?,
-            ),
-            Self::ReviewAgent | Self::KeepAgentFile => encode(
-                crate::commands::review_agent(
-                    services.manager,
-                    argument(args, "id")?,
-                    argument(args, "operationId")?,
-                    if matches!(self, Self::KeepAgentFile) {
-                        Some((argument(args, "index")?, argument(args, "fingerprint")?))
-                    } else {
-                        None
-                    },
-                )
-                .await
-                .map_err(error)?,
-            ),
-            Self::RestoreStandaloneHelpers => encode(
-                crate::commands::restore_standalone_helpers(
-                    services.manager,
-                    argument(args, "expectedConnection")?,
-                    argument(args, "operationId")?,
-                    argument(args, "build")?,
-                    argument(args, "fingerprint")?,
                 )
                 .await
                 .map_err(error)?,
@@ -257,11 +202,10 @@ impl Command {
                 .map_err(error)?,
             ),
             Self::ReinstallAgent => encode(
-                crate::commands::reinstall_agent_with_id(
+                crate::commands::reinstall_agent(
                     services.manager,
                     services.desktop.clone(),
                     argument(args, "id")?,
-                    argument(args, "operationId")?,
                 )
                 .await
                 .map_err(error)?,

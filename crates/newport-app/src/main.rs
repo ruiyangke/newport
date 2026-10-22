@@ -1,4 +1,5 @@
-//! Standalone application composition. The UI crate owns no backend runtime.
+//! Application composition: the backend and the UI in one process. The UI
+//! crate owns no backend runtime.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod desktop;
 mod health;
@@ -7,6 +8,8 @@ mod startup;
 #[cfg(any(target_os = "macos", windows))]
 mod tray;
 mod updates;
+#[cfg(target_os = "macos")]
+mod webview_leftovers;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -20,7 +23,7 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    // Preview must branch before profile access, backend startup, or SSH agent relay.
+    // Preview must branch before profile access or backend startup.
     if std::env::args().any(|arg| arg == "--setup-preview") {
         return newport_gpui::run_setup_preview();
     }
@@ -90,6 +93,12 @@ fn run() -> Result<(), String> {
         return newport_client::backend::Backend::at_path(endpoint).activate_window()
             .map_err(|error| format!("Another Newport process owns this profile, but its window could not be activated: {error}"));
     };
+    // Owning the profile: also clear what the replaced Tauri app's web view
+    // left outside it (only the macOS build ever had one).
+    #[cfg(target_os = "macos")]
+    if launch.check.is_none() {
+        webview_leftovers::remove();
+    }
     #[cfg(target_os = "macos")]
     let recovery = match startup_guard.and_then(|guard| guard.into_transaction()) {
         Some(transaction) => match updates::recovery::resolve(transaction, &profile_directory)? {

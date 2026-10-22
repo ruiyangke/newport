@@ -4,7 +4,6 @@
 //! pipes, with an explicit logon-session ACL, same-user server verification,
 //! deadlines and cancellation. Neither implementation retries request bytes.
 //! Call these blocking APIs on worker threads, not inside an async executor.
-pub mod agent_relay;
 pub mod asynchronous;
 pub mod protocol;
 #[cfg(unix)]

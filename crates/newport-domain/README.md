@@ -10,6 +10,5 @@ and the policy for accepting remote links.
 
 Keep feature-specific code with its owning feature until it needs to be shared.
 Do not put UI state, IO, persistence, SSH execution, runtime ownership, generic
-utilities, or transport contracts here. Desktop framing and SSH-agent relay
-contracts live in `newport-platform::ipc::{protocol, agent_relay}` alongside the
-local transport implementation.
+utilities, or transport contracts here. Desktop framing lives in
+`newport-platform::ipc::protocol` alongside the local transport implementation.

@@ -2,7 +2,7 @@
 //! builds add. Those builds set NEWPORT_REMOTE_APPS=1 to compile it in, and
 //! name the compiled agent archives that Install sends to servers:
 //! NEWPORT_REMOTE_AGENT_X86_64 and NEWPORT_REMOTE_AGENT_AARCH64
-//! (`scripts/build-remote-apps.sh` makes them).
+//! (`cargo xtask dev --remote-apps` and `build --remote-apps` make them).
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(newport_remote_apps)");
     println!("cargo::rerun-if-env-changed=NEWPORT_REMOTE_APPS");
@@ -17,7 +17,7 @@ fn main() {
         let path = std::env::var(variable).unwrap_or_default();
         if !std::path::Path::new(&path).is_file() {
             panic!(
-                "{variable} must name a compiled agent archive; build with scripts/build-remote-apps.sh"
+                "{variable} must name a compiled agent archive; build with cargo xtask build --remote-apps"
             );
         }
         println!("cargo::rerun-if-changed={path}");

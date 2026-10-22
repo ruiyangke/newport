@@ -9,7 +9,6 @@ use std::{
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Progress {
-    pub operation_id: Option<uuid::Uuid>,
     pub stage: &'static str,
     pub sent: usize,
     pub total: usize,
@@ -57,20 +56,15 @@ impl State {
         })
     }
     pub fn attempt(self: &Arc<Self>) -> Attempt {
-        self.attempt_for(None)
-    }
-    pub fn attempt_for(self: &Arc<Self>, operation_id: Option<uuid::Uuid>) -> Attempt {
         let attempt = Attempt {
             state: self.clone(),
             finished: false,
-            operation_id,
         };
         attempt.update("preparing", 0, 0, None);
         attempt
     }
 }
 pub struct Attempt {
-    operation_id: Option<uuid::Uuid>,
     state: Arc<State>,
     finished: bool,
 }
@@ -86,7 +80,6 @@ impl Attempt {
             rate.observe(Instant::now(), sent);
         }
         *current = Some(Progress {
-            operation_id: self.operation_id,
             stage,
             sent,
             total,

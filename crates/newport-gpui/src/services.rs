@@ -575,16 +575,11 @@ impl ServicesPanel {
         crate::controls::page_toolbar(cx)
             .id("services-toolbar")
             .debug_selector(|| "services-toolbar".into())
-            .child(
-                div()
-                    .w(px(crate::controls::SEARCH_WIDTH))
-                    .min_w(px(120.))
-                    .flex_shrink(1.)
-                    .child(
-                        crate::controls::search_input(&self.search, cx)
-                            .aria_label("Find a service"),
-                    ),
-            )
+            .child(crate::controls::page_search(
+                &self.search,
+                "Find a service",
+                cx,
+            ))
             .child(Selector::new(
                 "services-filter",
                 "Show",

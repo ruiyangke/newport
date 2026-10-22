@@ -29,7 +29,7 @@ fn clean(program: impl AsRef<std::ffi::OsStr>) -> Command {
 pub fn run(skip_build: bool) -> Result<()> {
     ensure!(
         cfg!(target_os = "macos"),
-        "Native macOS distributions must be built on macOS"
+        "macOS distributions must be built on macOS"
     );
     let var = |name: &str| env::var(name).ok().filter(|v| !v.is_empty());
     let required = |name: &str| var(name).with_context(|| format!("{name} is required"));
@@ -99,7 +99,7 @@ pub fn run(skip_build: bool) -> Result<()> {
     // Revalidates notarization, Gatekeeper and architecture before signing the update.
     let update = distribution.join("update");
     package_update(app, &update, &public_key, &key)?;
-    println!("Signed native candidate: {}", update.display());
+    println!("Signed update candidate: {}", update.display());
     Ok(())
 }
 
@@ -140,14 +140,14 @@ fn submit_notarization(archive: &Path, auth: &[String]) -> Result<()> {
         .output();
     let output = match output {
         Ok(output) if output.status.success() => output.stdout,
-        _ => bail!("Native notarization submission failed"),
+        _ => bail!("Notarization submission failed"),
     };
     let result: Submission =
         serde_json::from_slice(&output).context("notarytool printed invalid JSON")?;
     let status = result.status.as_deref().unwrap_or("unknown");
     ensure!(
         status == "Accepted",
-        "Native notarization was not accepted ({status}); see `xcrun notarytool log {}`",
+        "Notarization was not accepted ({status}); see `xcrun notarytool log {}`",
         result.id.as_deref().unwrap_or("<id>")
     );
     Ok(())

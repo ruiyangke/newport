@@ -11,6 +11,24 @@ use std::{
 };
 
 const BACKUPS: &str = "upgrade-backups";
+/// Snapshots kept: the one for this version and the one before.
+const KEEP: usize = 2;
+/// Left out of snapshots: the backups themselves, the live socket and lock,
+/// and the account sign-in, so a device credential never outlives signing out
+/// in an old snapshot. Restoring one means signing in again.
+const NOT_SNAPSHOTTED: [&str; 5] = [
+    BACKUPS,
+    "native-client",
+    super::instance::LOCK_FILES[0],
+    super::instance::LOCK_FILES[1],
+    super::account::FILE,
+];
+
+/// Temporary files and folders an interrupted write left behind.
+fn leftover(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.starts_with(".tmp") || name.starts_with(".pending-"))
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
@@ -110,7 +128,47 @@ fn preserve_inner(directory: &Path, version: &str) -> Result<(), String> {
     filesystem::publish_directory(staging.path(), &destination).map_err(|e| e.to_string())?;
     filesystem::sync_directory(&root).map_err(|e| e.to_string())?;
     filesystem::sync_directory(directory).map_err(|e| e.to_string())?;
+    prune(&root, &destination);
     Ok(())
+}
+
+/// Keeps the new snapshot and the one made before it; older ones and staging
+/// folders a crash left behind go. This runs while the profile is reserved,
+/// so no other preserve is writing here. A snapshot that can't be removed
+/// stays; it only costs space.
+fn prune(root: &Path, newest: &Path) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let mut snapshots = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let directory = entry.file_type().is_ok_and(|kind| kind.is_dir());
+        if !directory {
+            continue;
+        }
+        if name
+            .to_str()
+            .is_some_and(|name| name.starts_with(".pending-"))
+        {
+            let _ = fs::remove_dir_all(&path);
+        } else if name
+            .to_str()
+            .is_some_and(|name| name.starts_with("native-"))
+            && path != newest
+        {
+            let made = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            snapshots.push((made, path));
+        }
+    }
+    snapshots.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.0));
+    for (_, old) in snapshots.into_iter().skip(KEEP - 1) {
+        let _ = fs::remove_dir_all(old);
+    }
 }
 
 fn regular_directory(path: &Path) -> Result<(), String> {
@@ -155,9 +213,7 @@ fn inventory(
         let name = entry.file_name();
         if profile
             && relative.as_os_str().is_empty()
-            && [BACKUPS, "native-client", super::instance::LOCK_FILE]
-                .iter()
-                .any(|s| name == *s)
+            && (NOT_SNAPSHOTTED.iter().any(|s| name == *s) || leftover(&name))
         {
             continue;
         }
@@ -282,7 +338,7 @@ mod tests {
         .unwrap();
         fs::create_dir(root.join("native-client")).unwrap();
         fs::write(root.join("native-client/transient"), "socket fixture").unwrap();
-        fs::write(root.join(super::super::instance::LOCK_FILE), "locked").unwrap();
+        fs::write(root.join(super::super::instance::LOCK_FILES[0]), "locked").unwrap();
         preserve(root, "0.3.1").unwrap();
         let saved = root.join("upgrade-backups/native-0.3.1/data");
         assert!(!saved.join("native-client").exists());
@@ -311,6 +367,38 @@ mod tests {
             fs::read(root.join("preferences.json")).unwrap(),
             b"new preferences"
         );
+    }
+
+    #[test]
+    fn snapshots_leave_out_leftovers_and_the_sign_in_and_only_two_are_kept() {
+        let profile = tempfile::tempdir().unwrap();
+        let root = profile.path();
+        fs::write(root.join("preferences.json"), "{}").unwrap();
+        fs::write(root.join("account.stronghold"), "credential").unwrap();
+        fs::write(
+            root.join("gpui-workspace-state.1234.tmp"),
+            "kept: not a leftover name",
+        )
+        .unwrap();
+        fs::create_dir(root.join(".tmpAbC123")).unwrap();
+        fs::write(root.join(".tmpAbC123/account.stronghold"), "half-written").unwrap();
+        preserve(root, "0.4.0").unwrap();
+        let saved = root.join("upgrade-backups/native-0.4.0/data");
+        assert!(saved.join("preferences.json").exists());
+        assert!(!saved.join("account.stronghold").exists());
+        assert!(!saved.join(".tmpAbC123").exists());
+        // A staging folder from a crashed attempt goes with the next snapshot.
+        fs::create_dir(root.join("upgrade-backups/.pending-stale")).unwrap();
+        for version in ["0.4.1", "0.4.2"] {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            preserve(root, version).unwrap();
+        }
+        let mut kept: Vec<_> = fs::read_dir(root.join("upgrade-backups"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        kept.sort();
+        assert_eq!(kept, ["native-0.4.1", "native-0.4.2"]);
     }
 
     #[cfg(unix)]

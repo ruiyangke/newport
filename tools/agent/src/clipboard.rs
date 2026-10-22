@@ -1,7 +1,24 @@
-//! Read-only xclip and wl-paste command compatibility.
-use std::io::{self, Write};
+//! `xclip` and `wl-paste` as Needle's commands. Like `xdg-open`, they serve
+//! what Newport provides, reading the desktop's clipboard through whichever
+//! session is live when they run, and hand everything else to the server's
+//! own command: writes, other selections, and a desktop of the server's own.
+use std::{
+    io::{self, Write},
+    os::unix::process::CommandExt,
+    process::Command,
+};
+
 pub fn read(args: &[String]) -> io::Result<()> {
-    let mut target = "text/plain";
+    serve("xclip", args, xclip_request(args))
+}
+
+pub fn wl_paste(args: &[String]) -> io::Result<()> {
+    serve("wl-paste", args, wl_paste_request(args))
+}
+
+/// The format an `xclip` read asks for, or why Newport doesn't serve it.
+fn xclip_request(args: &[String]) -> io::Result<String> {
+    let mut target = "text/plain".to_owned();
     let mut read = false;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -18,6 +35,7 @@ pub fn read(args: &[String]) -> io::Result<()> {
                 target = args
                     .next()
                     .ok_or_else(|| io::Error::other("missing target"))?
+                    .clone()
             }
             "-quiet" | "-silent" | "-verbose" => (),
             _ => {
@@ -30,9 +48,39 @@ pub fn read(args: &[String]) -> io::Result<()> {
     if !read {
         return Err(io::Error::other("clipboard is read-only; use -o"));
     }
-    let path = crate::routing::select(Some("clipboard"))?
-        .root
-        .join("snapshot.tar");
+    Ok(target)
+}
+
+/// The format a `wl-paste` read asks for, or why Newport doesn't serve it.
+fn wl_paste_request(args: &[String]) -> io::Result<String> {
+    let mut target = "text/plain".to_owned();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-n" | "--no-newline" => (),
+            "-l" | "--list-types" => target = "TARGETS".into(),
+            "-t" | "--type" => {
+                target = args
+                    .next()
+                    .ok_or_else(|| io::Error::other("missing type"))?
+                    .clone()
+            }
+            _ => return Err(io::Error::other("unsupported wl-paste option")),
+        }
+    }
+    Ok(target)
+}
+
+fn serve(name: &str, args: &[String], request: io::Result<String>) -> io::Result<()> {
+    let selection = crate::routing::select(Some("clipboard"));
+    let root = selection.as_ref().ok().map(|s| s.root.as_path());
+    if request.is_err() || crate::native::real_desktop(root) {
+        if let Some(native) = crate::native::find(name) {
+            return Err(Command::new(native).args(args).exec());
+        }
+    }
+    let mut target = request?;
+    let path = selection?.root.join("snapshot.tar");
     let (revision, formats) = crate::clipboard_source::offer(&path)?;
     if target == "TARGETS" {
         for key in formats.keys() {
@@ -44,28 +92,10 @@ pub fn read(args: &[String]) -> io::Result<()> {
         return Ok(());
     }
     if matches!(
-        target,
+        target.as_str(),
         "UTF8_STRING" | "STRING" | "TEXT" | "text/plain;charset=utf-8"
     ) {
-        target = "text/plain";
+        target = "text/plain".into();
     }
-    io::stdout().write_all(&crate::clipboard_source::get(&path, revision, target)?)
-}
-pub fn wl_paste(args: &[String]) -> io::Result<()> {
-    let mut xargs = vec!["-o".into()];
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-n" | "--no-newline" => (),
-            "-l" | "--list-types" => xargs.extend(["-t".into(), "TARGETS".into()]),
-            "-t" | "--type" => xargs.extend([
-                "-t".into(),
-                args.next()
-                    .ok_or_else(|| io::Error::other("missing type"))?
-                    .clone(),
-            ]),
-            _ => return Err(io::Error::other("unsupported wl-paste option")),
-        }
-    }
-    read(&xargs)
+    io::stdout().write_all(&crate::clipboard_source::get(&path, revision, &target)?)
 }

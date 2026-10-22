@@ -562,13 +562,13 @@ fn upload_installer_verifies_hash_and_preserves_unrelated_binary() {
         "upload only stages; it must not activate"
     );
     assert_eq!(fs::read(&candidate).unwrap(), fs::read(BIN).unwrap());
-    let activate = |expected: &str| cmd(home.path(), &["deployment", "activate", &hash, expected]);
-    assert!(activate("missing").status.success());
+    let activate = || cmd(home.path(), &["deployment", "install", &hash]);
+    assert!(activate().status.success());
     assert_eq!(fs::read_link(&agent_path).unwrap(), candidate);
     use std::os::unix::fs::MetadataExt;
     let before = fs::metadata(&agent_path).unwrap().ino();
     assert!(install(&hash));
-    assert!(activate(&hash).status.success());
+    assert!(activate().status.success());
     assert_eq!(
         fs::metadata(&agent_path).unwrap().ino(),
         before,
@@ -578,7 +578,7 @@ fn upload_installer_verifies_hash_and_preserves_unrelated_binary() {
     assert_eq!(fs::read(&agent_path).unwrap(), fs::read(BIN).unwrap());
     fs::remove_file(&agent_path).unwrap();
     fs::write(&agent_path, b"unrelated command").unwrap();
-    assert!(!activate(&hash).status.success());
+    assert!(!activate().status.success());
     assert_eq!(fs::read(&agent_path).unwrap(), b"unrelated command");
 }
 

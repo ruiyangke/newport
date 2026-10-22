@@ -1,2 +1,2 @@
-//! Framework-independent request state shared by native clients.
+//! Framework-independent request state for the UI.
 pub use newport_client::resources::*;

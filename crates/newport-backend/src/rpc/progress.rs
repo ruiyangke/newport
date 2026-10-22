@@ -87,7 +87,7 @@ pub(super) async fn with_progress<W: AsyncRead + AsyncWrite + Unpin>(
         tokio::select! {
             result = &mut operation => return Ok(result),
             _ = reader.read_u8(), if cancel_on_disconnect => {
-                anyhow::bail!("Native request disconnected");
+                anyhow::bail!("Request disconnected");
             },
             _ = approvals.changed() => {},
             _ = heartbeat.tick(), if awaiting => {
@@ -200,7 +200,6 @@ mod tests {
             "container_action",
             "git_request",
             "service_action",
-            "terminal_open",
             "unknown",
         ] {
             assert!(!cancel_on_disconnect(method));

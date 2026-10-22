@@ -2,14 +2,37 @@
 use super::*;
 use newport_client::resources::ResourceGroup;
 
+/// An open checkout set aside while another page shows: its workspace,
+/// selection and settled reads, its repository still open, so returning
+/// draws it at once and then refreshes it. Dropping it releases the
+/// repository.
+pub(super) struct Checkout {
+    selection: Value,
+    git: git::Workspace,
+    reads: Vec<ResourceGroup>,
+}
+impl Drop for Checkout {
+    fn drop(&mut self) {
+        self.git.release();
+    }
+}
+
 #[derive(Default)]
 pub(super) struct State {
     connection: Value,
     reads: Option<(ResourceGroup, ResourceGroup)>,
+    checkout: Option<Checkout>,
     reload: bool,
     pub(super) input: Option<Entity<InputState>>,
     subscription: Option<Subscription>,
     pub(super) list: project_library_rows::LibraryList,
+}
+
+impl State {
+    /// Forgets the checkout set aside, releasing its repository.
+    pub(super) fn drop_checkout(&mut self) {
+        self.checkout = None;
+    }
 }
 
 impl Newport {
@@ -84,6 +107,7 @@ impl Newport {
             if state.connection != connection {
                 state.connection = connection;
                 state.reads = None;
+                state.checkout = None;
                 state.reload = false;
                 state.list = Default::default();
             }
@@ -104,6 +128,41 @@ impl Newport {
         let statuses = self.resources.take_cached_prefix("project-status:");
         self.project_library_state().reads = Some((reads, statuses));
         self.project_checks = None;
+    }
+
+    /// Sets the open checkout aside when leaving Projects.
+    pub(super) fn suspend_checkout(&mut self) {
+        if self.page != Page::Projects || self.selection.is_none() || !self.git.settled() {
+            return;
+        }
+        let checkout = Checkout {
+            selection: self.selection.take().unwrap_or_default(),
+            git: std::mem::take(&mut self.git),
+            reads: vec![
+                self.resources.take_cached(&["repository"]),
+                self.resources.take_cached_prefix("git-"),
+            ],
+        };
+        self.project_library_state().checkout = Some(checkout);
+    }
+
+    /// Puts the checkout set aside back, if this server has one. Its reads
+    /// refresh in place afterwards; nothing waits on the server first.
+    pub(super) fn resume_checkout(&mut self) -> bool {
+        if self.page != Page::Projects || !self.configuration_available() {
+            return false;
+        }
+        self.restore_project_library();
+        let Some(mut checkout) = self.project_library_state().checkout.take() else {
+            return false;
+        };
+        self.selection = Some(std::mem::take(&mut checkout.selection));
+        self.git = std::mem::take(&mut checkout.git);
+        for reads in std::mem::take(&mut checkout.reads) {
+            self.resources.restore(reads);
+        }
+        self.restore_git = None;
+        true
     }
 
     pub(super) fn restore_project_library(&mut self) {
@@ -154,6 +213,7 @@ impl Newport {
         if self.page == Page::Projects
             && self.selection.is_none()
             && self.configuration_available()
+            && !self.needle_missing()
             && self.resources.take_poll(
                 "page",
                 Instant::now(),
@@ -200,6 +260,57 @@ mod tests {
             "id":format!("{server}-{id}"), "serverId":server, "name":format!("Project {id:03}"),
             "path":{"display":format!("/work/{id}"),"bytesB64":format!("{server}-{id}")}
         })).collect::<Vec<_>>())
+    }
+
+    #[gpui_kit::test]
+    fn returning_to_an_open_checkout_draws_it_at_once_then_refreshes_it(cx: &mut TestAppContext) {
+        use gpui_kit::AppContext;
+        cx.update(|cx| {
+            gpui_kit::component::init(cx);
+            crate::theme::install(false, cx);
+        });
+        let mut owner = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| crate::page_perf_tests::owner(window, cx));
+            owner = Some(view.clone());
+            crate::page_perf_tests::PageHost(view)
+        });
+        let view = owner.unwrap();
+        view.update(visual, |o, cx| {
+            let (work, requests) = std::sync::mpsc::sync_channel(64);
+            o.work = work.into();
+            o.page = Page::Projects;
+            let project = json!({"id":"p","serverId":"fixture","name":"Repo",
+                "path":{"display":"/repo","bytesB64":"L3JlcG8="}});
+            let repo = json!({"repoId":"open","root":{"bytesB64":"L3JlcG8=","display":"/repo"},"bare":false});
+            o.selection = Some(project.clone());
+            o.git.repo = repo.clone();
+            for (key, value) in [("repository", repo), ("git-list", json!({"snapshot":"seen"}))] {
+                let generation = o.resources.begin(key).unwrap();
+                o.resources.complete(key, generation, Ok(value));
+            }
+            requests.try_iter().for_each(drop);
+
+            o.navigate(Page::Terminal, cx);
+            assert!(o.selection.is_none() && o.resources.get("git-list").is_none());
+            o.navigate(Page::Projects, cx);
+            // Everything is there before any reply: no skeleton, no reopening.
+            assert_eq!(o.selection, Some(project));
+            assert_eq!(o.git.repo["repoId"], "open");
+            assert!(o.resources.get("repository").is_some_and(|r| !r.pending));
+            assert_eq!(o.value("git-list")["snapshot"], "seen");
+            let sent: Vec<_> = requests.try_iter().collect();
+            assert!(sent.iter().any(|r| r.method == "git_refresh_repository"), "refreshed");
+            assert!(
+                !sent.iter().any(|r| r.args["request"]["method"] == "repo.open"),
+                "not reopened"
+            );
+            // A changed connection forgets what was set aside.
+            o.navigate(Page::Terminal, cx);
+            o.snapshot["config"]["servers"][0]["sshPort"] = json!(2222);
+            o.navigate(Page::Projects, cx);
+            assert!(o.selection.is_none());
+        });
     }
 
     #[gpui_kit::test]

@@ -66,6 +66,18 @@ impl Api {
         credential: Option<&str>,
         body: &Value,
     ) -> Result<Value, Failure> {
+        self.post_dated(path, credential, body)
+            .map(|(value, _)| value)
+    }
+
+    /// As [`Api::post`], with the response's `Date` header: the account site's
+    /// own clock, which the license's clock guard trusts over this computer's.
+    pub fn post_dated(
+        &self,
+        path: &str,
+        credential: Option<&str>,
+        body: &Value,
+    ) -> Result<(Value, Option<String>), Failure> {
         let url = self.url(path)?;
         let mut request = self
             .agent
@@ -81,7 +93,12 @@ impl Api {
         let response = request
             .send(&body[..])
             .map_err(|error| Failure::Unavailable(error.to_string()))?;
-        read(response)
+        let date = response
+            .headers()
+            .get("date")
+            .and_then(|date| date.to_str().ok())
+            .map(str::to_owned);
+        Ok((read(response)?, date))
     }
 
     pub fn delete(&self, path: &str, credential: &str) -> Result<(), Failure> {

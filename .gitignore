@@ -1,18 +1,10 @@
 .DS_Store
 /target/
 /.cache/newport/
-/crates/*/target/
-node_modules/
-dist/
 tools/agent/target/
 resources/agents/
 *.log
 .impeccable/
-test-results/
-playwright-report/
-
-.venv/
-__pycache__/
 
 # Machine-specific development signing
 .cargo/signing.toml

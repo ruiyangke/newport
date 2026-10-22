@@ -56,6 +56,13 @@ impl Drop for Guard<'_> {
     }
 }
 impl Operations {
+    /// For a deleted server: removes its partial downloads on this computer
+    /// and its transfer recovery records. Call on a blocking worker.
+    pub(crate) fn forget_server(&self, server: Uuid) -> Result<(), String> {
+        let uploads = self.uploads.forget(server);
+        let downloads = self.downloads.forget(server);
+        uploads.and(downloads).map_err(|error| format!("{error:#}"))
+    }
     pub async fn run<T, F>(
         &self,
         state: &Shared,

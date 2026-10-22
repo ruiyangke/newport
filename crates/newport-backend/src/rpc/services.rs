@@ -1,4 +1,4 @@
-//! One shared native command router for standalone and transitional hosts.
+//! The command router: each RPC method goes to the module that owns it.
 use super::{account, control, features, git, preferences};
 use serde_json::Value;
 
@@ -36,6 +36,7 @@ impl Services<'_> {
                             metrics: self.features.metrics,
                             files: self.features.files,
                             terminals: self.features.terminals,
+                            preferences: self.preferences,
                             desktop: self.desktop.clone(),
                         },
                         args,

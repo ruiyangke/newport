@@ -8,6 +8,29 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+/// Whether this shell is on a desktop of the server's own, not one Newport
+/// provides: a display from a Newport session, this one or an earlier one,
+/// doesn't count. Newport's commands defer to the server's own there.
+pub(crate) fn real_desktop(selection: Option<&std::path::Path>) -> bool {
+    let wayland = env::var("WAYLAND_DISPLAY").unwrap_or_default();
+    let authority = env::var("XAUTHORITY").unwrap_or_default();
+    let fake_wayland = selection
+        .is_some_and(|root| wayland == root.join("wayland.sock").to_string_lossy())
+        || wayland.starts_with("/tmp/newport-runtime-")
+        || crate::paths::integration_display_path(&wayland);
+    let fake_x = authority.starts_with("/tmp/newport-runtime-")
+        || crate::x_endpoint::is_authority_path(&authority)
+        || crate::paths::integration_display_path(&authority)
+        || selection.is_some_and(|root| {
+            fs::read_to_string(root.join("display"))
+                .ok()
+                .is_some_and(|v| env::var("DISPLAY").ok().as_deref() == Some(v.trim()))
+        });
+    (env::var("DISPLAY").is_ok_and(|v| !v.is_empty()) && !fake_x)
+        || (!wayland.is_empty() && !fake_wayland)
+        || env::var_os("WAYLAND_SOCKET").is_some()
+}
+
 pub fn find(name: &str) -> Option<PathBuf> {
     let ours = env::current_exe().ok()?.canonicalize().ok()?;
     env::split_paths(&env::var_os("PATH").unwrap_or_default())

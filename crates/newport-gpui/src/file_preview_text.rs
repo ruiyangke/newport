@@ -54,7 +54,7 @@ impl PreviewText {
         let mut preview = Self::new(window, cx);
         if let Some(language) = crate::git_diff_syntax::language(path) {
             preview.code = Some(cx.new(|cx| {
-                EditorState::new(window, cx)
+                crate::controls::code_editor(window, cx)
                     .language(language)
                     .line_number(true)
                     .folding(false)

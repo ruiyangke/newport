@@ -259,7 +259,7 @@ fn standalone_gui_activation_and_graceful_shutdown() {
         assert!(child.wait().success(), "Graceful shutdown failed");
         assert!(Instance::acquire(&fixture.profile).unwrap().is_some());
         assert_eq!(fixture.vault(), before);
-        assert!(fixture.profile.join("gpui-window-state.json").is_file());
+        assert!(fixture.profile.join("ui-state.json").is_file());
         fixture.health();
     }
 }

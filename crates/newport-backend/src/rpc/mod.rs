@@ -1,4 +1,4 @@
-//! Bounded local RPC transport shared by both application hosts. This module
+//! Bounded local RPC transport between the UI and the backend. This module
 //! owns framing, consent progress and connection-held resources, never UI state.
 pub mod account;
 mod arguments;
@@ -38,8 +38,8 @@ pub struct TerminalOpen {
     pub rows: u32,
 }
 
-/// A host supplies explicit services while extraction is in progress. Returning
-/// the terminal guard transfers ownership atomically after a successful open.
+/// The application supplies the services. Returning the terminal guard
+/// transfers ownership atomically after a successful open.
 pub trait Host: Send + Sync + 'static {
     fn dispatch(
         &self,
@@ -180,7 +180,7 @@ impl Server {
                 if let Err(error) =
                     serve(stream, host, events, commands, revocations, large_payloads).await
                 {
-                    log::debug!("Native client disconnected: {error}");
+                    log::debug!("Client disconnected: {error}");
                 }
             });
         };
@@ -200,10 +200,7 @@ async fn serve<H: Host>(
     let mut _large_permit = None;
     let request = tokio::time::timeout(Duration::from_secs(10), async {
         let len = stream.read_u32().await? as usize;
-        anyhow::ensure!(
-            (1..=MAX_REQUEST).contains(&len),
-            "Invalid native request size"
-        );
+        anyhow::ensure!((1..=MAX_REQUEST).contains(&len), "Invalid request size");
         if len > protocol::DEFAULT_MAX_REQUEST {
             _large_permit = Some(large_payloads.clone().try_acquire_owned()?);
         }
@@ -212,21 +209,12 @@ async fn serve<H: Host>(
         let request: Request = rmp_serde::from_slice(&data)?;
         anyhow::ensure!(
             len <= protocol::request_limit(&request.method),
-            "Native request exceeds method size limit"
+            "Request exceeds method size limit"
         );
-        anyhow::ensure!(
-            request.version == VERSION,
-            "Unsupported native protocol version"
-        );
+        anyhow::ensure!(request.version == VERSION, "Unsupported protocol version");
         Ok::<_, anyhow::Error>(request)
     })
     .await??;
-    if matches!(
-        request.method.as_str(),
-        newport_platform::ipc::agent_relay::REGISTER | newport_platform::ipc::agent_relay::ATTACH
-    ) {
-        return crate::agent_relay::serve(stream, &request.method, request.args).await;
-    }
     if request.method == protocol::TERMINAL_OPEN_LEASE {
         return terminal_lease::serve(stream, host.as_ref(), request.args).await;
     }
@@ -245,7 +233,7 @@ async fn serve<H: Host>(
     };
     let _command = admission
         .try_acquire_owned()
-        .map_err(|_| anyhow::anyhow!("Native backend is busy"))?;
+        .map_err(|_| anyhow::anyhow!("The backend is busy"))?;
     let result = if request.method == "$events" {
         Ok(events.after(request.args["after"].as_u64().unwrap_or(0)))
     } else {
@@ -272,7 +260,7 @@ async fn serve<H: Host>(
     let mut bytes = rmp_serde::to_vec_named(&response)?;
     if bytes.len() > MAX_RESPONSE {
         log::warn!(
-            "Native response for {} exceeds transport limit ({} bytes)",
+            "Response for {} exceeds transport limit ({} bytes)",
             request.method,
             bytes.len()
         );

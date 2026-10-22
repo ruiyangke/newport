@@ -1,7 +1,7 @@
 # Testing
 
 Newport uses Rust unit tests, real SSH integration tests, protocol contracts,
-packaging checks, and native desktop lifecycle tests. Each exercises a different
+packaging checks, and desktop lifecycle tests. Each exercises a different
 boundary. A passing headless suite does not prove GUI behavior, production
 credential access, or a successful signed upgrade.
 
@@ -19,10 +19,11 @@ Every command is described in [tools/xtask](../tools/xtask/README.md).
 | `cargo xtask test ssh` | Disposable SSH fixture, terminal, file, and RPC operations |
 | `cargo xtask test remote` | Docker/Testcontainers with real OpenSSH and remote services |
 | `cargo xtask test https` | Agent Git over HTTPS against a local `git http-backend` |
-| `cargo xtask test git-contract` | Real agent Git responses through the native validators |
-| `cargo xtask test git-cli-contract` | Agent Git CLI responses through the native validators |
-| `cargo xtask test native` | Profile/preferences/metrics, resource staging, and native lifecycle |
-| `cargo xtask test native --headless` | Lifecycle checks without a GUI session |
+| `cargo xtask test git-contract` | Real agent Git responses through the app's validators |
+| `cargo xtask test git-cli-contract` | Agent Git CLI responses through the app's validators |
+| `cargo xtask test desktop` | Profile/preferences/metrics, resource staging, and the desktop app's lifecycle |
+| `cargo xtask test desktop --headless` | Lifecycle checks without a GUI session |
+| `cargo xtask test remote-apps` | newport-gpui's tests with Remote apps compiled in, from the private newport-remote checkout |
 
 `cargo xtask check` runs all three checks. Remote
 checks use OrbStack by default; set `NEWPORT_TEST_DOCKER_CONTEXT=default` for the
@@ -66,9 +67,18 @@ It checks protected credential persistence and isolation using uniquely named
 test accounts, then removes them. It does not establish access to a real user's
 vault or certify an upgrade. Never log credentials or private key contents.
 
-Packaging and release tooling tests are the `tools/xtask` unit tests. The opt-in `newport-release` integration
-test `native_package_runtime` exercises staged packages on the matching host;
-read its required environment before running it. Confirm native Windows x64 and
+Packaging and release tooling tests are the `tools/xtask` unit tests. The opt-in, Windows-only `newport-release`
+integration test `native_package_runtime` exercises an NSIS candidate named by
+`NEWPORT_TEST_INSTALLER`; read its required environment before running it.
+
+The `newport-client` integration tests `terminal_lifecycle`, `tunnel_edit`,
+`history_replay`, `partial_index`, `worktree_lifecycle` and
+`remote_refs_readonly` are opt-in (`--ignored`) and no `xtask` suite runs them
+yet. They talk to a running Newport backend found through `NEWPORT_DATA_DIR`
+and need a disposable loopback SSH server, for most a Docker one: set
+`NEWPORT_TEST_SSH_PORT` (and, for the lifecycle test, `NEWPORT_TEST_LEASE_*`;
+for `remote_refs_readonly`, `NEWPORT_TEST_READONLY_HOST`). Each test's
+`#[ignore]` reason names what it needs. Confirm native Windows x64 and
 ARM64 separately. Emulation is useful evidence but not a replacement for native
 installer acceptance.
 

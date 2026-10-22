@@ -262,3 +262,53 @@ fn interrupted_server_write_does_not_poison_other_servers_or_delete_evidence() {
         }
     }
 }
+
+#[test]
+fn leftovers_of_the_pre_native_migration_are_finished_not_fatal() {
+    let profile = tempfile::tempdir().unwrap();
+    for name in ["download-recovery.json", "upload-recovery.json"] {
+        let path = profile.path().join(name);
+        drop(Owners::<DownloadCleanup>::open(path.clone()));
+        let folder = directory(&path);
+        fs::write(folder.join("source.json"), b"{\"version\":1}").unwrap();
+        fs::create_dir(folder.join("unassigned")).unwrap();
+        fs::write(
+            folder.join("unassigned/journal.json"),
+            b"{\"version\":1,\"entries\":{}}",
+        )
+        .unwrap();
+    }
+    let downloads = profile.path().join("download-recovery.json");
+    let owners = Owners::<DownloadCleanup>::open(downloads.clone());
+    assert!(owners.get(Uuid::new_v4()).is_ok(), "recovery still works");
+    assert!(!directory(&downloads).join("source.json").exists());
+    assert!(!directory(&downloads).join("unassigned").exists());
+    // Uploads never had an unassigned folder; one there is left alone.
+    let uploads = profile.path().join("upload-recovery.json");
+    let owners = Owners::<UploadCleanup>::open(uploads.clone());
+    assert!(owners.get(Uuid::new_v4()).is_ok());
+    assert!(!directory(&uploads).join("source.json").exists());
+}
+
+#[test]
+fn a_deleted_server_loses_its_partial_downloads_and_recovery() {
+    let profile = tempfile::tempdir().unwrap();
+    let downloads = profile.path().join("download-recovery.json");
+    let target = tempfile::tempdir().unwrap();
+    let server = Uuid::new_v4();
+    let owners = Owners::<DownloadCleanup>::open(downloads.clone());
+    let (_, staging) = owners
+        .get(server)
+        .unwrap()
+        .lock()
+        .unwrap()
+        .create(target.path())
+        .unwrap();
+    let (_, partial) = staging.keep().unwrap();
+    assert!(partial.exists());
+    owners.forget(server).unwrap();
+    assert!(!partial.exists(), "the partial download is removed");
+    assert!(!directory(&downloads).join(server.to_string()).exists());
+    // Another server is unaffected and the storage still works.
+    assert!(owners.get(Uuid::new_v4()).is_ok());
+}

@@ -3,16 +3,18 @@ use fs2::FileExt;
 use std::{
     fs::{File, OpenOptions},
     io,
-    path::{Path, PathBuf},
+    path::Path,
     sync::Mutex,
 };
 
-/// The per-profile lock file. It stays on disk: removing it could allow two
-/// processes to lock different inodes.
-pub(super) const LOCK_FILE: &str = "newport.lock";
+/// The per-profile lock files. They stay on disk: removing one could allow
+/// two processes to lock different inodes. Released builds up to 0.4.0 lock
+/// only `porthop.lock`; taking it too keeps such a build, still installed or
+/// started at login, from running on the same profile.
+pub(super) const LOCK_FILES: [&str; 2] = ["newport.lock", "porthop.lock"];
 
 /// Keep this guard alive until all services have stopped.
-pub struct Instance(File, Mutex<bool>);
+pub struct Instance(Vec<File>, Mutex<bool>);
 
 impl Drop for Instance {
     fn drop(&mut self) {
@@ -29,19 +31,26 @@ impl Instance {
     /// `None` means another application owns this profile. Other failures are
     /// errors, so a permissions or filesystem failure cannot start a second host.
     pub fn acquire(directory: &Path) -> io::Result<Option<Self>> {
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(lock_path(directory))?;
-        match file.try_lock_exclusive() {
-            Ok(()) => Ok(Some(Self(file, Mutex::new(true)))),
-            Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
-                Ok(None)
+        let mut files = Vec::new();
+        for name in LOCK_FILES {
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(directory.join(name))?;
+            match file.try_lock_exclusive() {
+                Ok(()) => files.push(file),
+                // Locks taken so far are released as `files` drops.
+                Err(error)
+                    if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => Err(error),
         }
+        Ok(Some(Self(files, Mutex::new(true))))
     }
 
     /// Release only after draining services, immediately before handing off to
@@ -49,15 +58,13 @@ impl Instance {
     pub fn release_for_restart(&self) -> io::Result<()> {
         let mut held = self.1.lock().unwrap_or_else(|error| error.into_inner());
         if *held {
-            FileExt::unlock(&self.0)?;
+            for file in &self.0 {
+                FileExt::unlock(file)?;
+            }
             *held = false;
         }
         Ok(())
     }
-}
-
-fn lock_path(directory: &Path) -> PathBuf {
-    directory.join(LOCK_FILE)
 }
 
 #[cfg(test)]
@@ -73,6 +80,24 @@ mod tests {
         let second = Instance::acquire(directory.path()).unwrap().unwrap();
         assert!(directory.path().join("newport.lock").exists());
         drop(second);
+    }
+
+    #[test]
+    fn a_released_build_holding_the_old_lock_keeps_the_profile() {
+        // What 0.4.0 and earlier take, and nothing else.
+        let directory = tempfile::tempdir().unwrap();
+        let released = File::create(directory.path().join("porthop.lock")).unwrap();
+        released.try_lock_exclusive().unwrap();
+        assert!(Instance::acquire(directory.path()).unwrap().is_none());
+        // Nothing stays locked behind the refusal.
+        let current = File::open(directory.path().join("newport.lock")).unwrap();
+        current.try_lock_exclusive().unwrap();
+        FileExt::unlock(&current).unwrap();
+        FileExt::unlock(&released).unwrap();
+        // And a running current build keeps a released one out.
+        let owner = Instance::acquire(directory.path()).unwrap().unwrap();
+        assert!(released.try_lock_exclusive().is_err());
+        drop(owner);
     }
 
     #[test]
@@ -93,7 +118,11 @@ mod tests {
         let owner = Instance::acquire(directory.path()).unwrap().unwrap();
         // A duplicate models a child between fork and exec. Closing only the
         // parent's descriptor leaves its flock held by that duplicate on Unix.
-        let _inherited = owner.0.try_clone().unwrap();
+        let _inherited: Vec<File> = owner
+            .0
+            .iter()
+            .map(|file| file.try_clone().unwrap())
+            .collect();
         drop(owner);
         assert!(Instance::acquire(directory.path()).unwrap().is_some());
     }

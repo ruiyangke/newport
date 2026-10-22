@@ -8,10 +8,12 @@ included. Browser sharing lets processes under the server account request tabs.
 
 ## Terminal setup
 
-Needle installs owned aliases in `~/.local/bin` and a managed shell configuration
-block. Existing unrelated commands and files are preserved. Use the terminal
-setup shown on the Integrations page, then open a new shell. For an existing
-Bash/Zsh shell:
+Newport's own terminals start the login shell with Needle's exports, so
+sharing works there with no setup. Needle also installs owned aliases in
+`~/.local/bin` and a managed shell configuration block, for terminals Newport
+didn't open (plain `ssh`, tmux started elsewhere) and for PATH where a system
+profile resets it in login shells (Debian, Ubuntu, NixOS). Existing unrelated
+commands and files are preserved. For an existing Bash/Zsh shell:
 
 ```sh
 if [ -x "$HOME/.local/bin/newport-agent" ]; then
@@ -24,8 +26,21 @@ fi
 
 Fish uses `newport-agent env --shell fish`. The command supplies PATH, BROWSER,
 and the selected session's clipboard display environment as appropriate. It
-preserves an existing graphical desktop environment. Already-running programs
-retain their old environment; start a new process or tmux pane after refreshing.
+preserves an existing graphical desktop environment. Every value stays valid
+for as long as a shell runs, so tmux panes that live for weeks keep working:
+PATH and BROWSER name commands that find the live session when they run, the
+session ID is the same each time this computer connects, and display paths go
+through one name per computer that Needle moves to each new session. Without a
+usable session, it still puts Needle's commands on PATH.
+
+## Copy from the server
+
+In Newport's terminal, programs can copy text to your computer's clipboard the
+way terminals allow (OSC 52): copying in tmux (mouse selection or copy mode, with
+its default `set-clipboard external`), in Vim or Neovim with an OSC 52 clipboard,
+and similar. Only writing plain text to the standard clipboard is accepted, up
+to 8 MiB; nothing in the terminal can read or clear your clipboard. To select
+the screen's text directly while a program uses the mouse, hold Shift.
 
 ## Read the clipboard
 
@@ -35,9 +50,11 @@ xclip -selection clipboard -o -t image/png > image.png
 xclip -o -t TARGETS
 ```
 
-The `xclip` and `wl-paste` aliases support reads, not writes or primary selection.
-If a real command was preserved, use `~/.local/bin/newport-agent clipboard -o`
-directly. Content is fetched on demand and cached in memory until the clipboard
+Like `xdg-open`, the `xclip` and `wl-paste` aliases serve what Newport provides,
+reading your computer's clipboard, and hand everything else to the server's
+own command when it has one: writes, the primary selection, other options, and
+a graphical desktop of the server's own. If a real command was preserved ahead
+of them on PATH, use `~/.local/bin/newport-agent clipboard -o` directly. Content is fetched on demand and cached in memory until the clipboard
 changes or sharing disconnects. Newport must remain connected.
 
 For applications that read X11 or Wayland directly, the environment command
@@ -83,12 +100,15 @@ newport-agent sessions
 Known previous session identities reconcile to the same client's new connection.
 An ambiguous destination or disabled integration is not silently bypassed. Select
 an intended active session from the list when necessary, then rerun the
-environment command. Reopen applications that retained an old display environment.
+environment command.
 
-Use the Integrations page to inspect connection or setup errors and review
-recovery actions. Reinstallation is an explicit operation; do not remove helper
-journals or backups manually. See [Needle deployment](../tools/agent/README.md#deployment-and-recovery)
-and [storage and recovery](storage.md).
+A shell from an older Needle may hold an earlier session's display paths;
+running `eval "$(newport-agent env)"` in it moves it to the live session.
+Programs it already started need restarting once.
+
+Use the Integrations page to inspect connection or setup errors, and to
+install, update or uninstall Needle. See
+[Needle install and uninstall](../tools/agent/README.md#install-and-uninstall).
 
 On macOS, desktop diagnostics are in
 `~/Library/Logs/app.newport/newport.log`. Remote diagnostics accompany the selected

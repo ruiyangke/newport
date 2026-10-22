@@ -122,6 +122,9 @@ pub fn run(binary: &Path, args: &[OsString]) -> Result<()> {
     };
     let bundle = assemble(binary, &signing)?;
     let launch = development_launch(&bundle, args, |name| env::var_os(name))?;
+    if launch.log.is_some() {
+        stop_running(&std::path::absolute(&bundle)?.join("Contents/MacOS/newport"))?;
+    }
     let mut command = Command::new(&launch.program);
     util::without_release_secrets(command.args(&launch.args));
     match &launch.log {
@@ -131,6 +134,45 @@ pub fn run(binary: &Path, args: &[OsString]) -> Result<()> {
         }
         None => replace(&mut command),
     }
+}
+
+/// Quits a development Newport still running from this bundle and waits for it
+/// to exit. Otherwise LaunchServices only brings the old window forward, or
+/// refuses to start the new one while the old one is still shutting down.
+fn stop_running(executable: &Path) -> Result<()> {
+    let pattern = format!("^{}( |$)", regex_escape(&executable.to_string_lossy()));
+    let running = |signal: Option<&str>| -> bool {
+        let mut pgrep = Command::new(if signal.is_some() { "pkill" } else { "pgrep" });
+        if let Some(signal) = signal {
+            pgrep.arg(signal);
+        }
+        pgrep
+            .args(["-f", &pattern])
+            .stdout(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    if !running(None) {
+        return Ok(());
+    }
+    eprintln!("Quitting the development Newport that is running");
+    running(Some("-TERM"));
+    for _ in 0..600 {
+        if !running(None) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    anyhow::bail!("The running development Newport did not quit within a minute")
+}
+
+fn regex_escape(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            let special = "\\.+*?()|[]{}^$".contains(c);
+            special.then_some('\\').into_iter().chain([c])
+        })
+        .collect()
 }
 
 /// Run `open -W` and copy the application log to `out` as it grows, so the

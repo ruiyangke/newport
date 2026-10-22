@@ -406,7 +406,7 @@ mod tests {
         repo.write("tools/xtask/src/release/mod.rs", "original");
         repo.write(CHECKS_WORKFLOW, "run: tests\n    retention-days: 7\n");
         repo.write("tools/agent/src/main.rs", "original");
-        repo.write("tools/xtask/src/native.rs", "original");
+        repo.write("tools/xtask/src/desktop.rs", "original");
         let baseline = repo.commit();
         repo.write("tools/xtask/src/release/mod.rs", "fixed release step");
         repo.write(".github/workflows/release.yml", "on: workflow_dispatch\n");
@@ -434,12 +434,12 @@ mod tests {
         repo.git(&["checkout", &baseline, "--", "tools/agent/src/main.rs"])
             .unwrap();
 
-        repo.write("tools/xtask/src/native.rs", "changed");
+        repo.write("tools/xtask/src/desktop.rs", "changed");
         rejects(
             verify_release_only_changes(&baseline, &repo.commit(), git),
-            "native.rs changed",
+            "desktop.rs changed",
         );
-        repo.git(&["checkout", &baseline, "--", "tools/xtask/src/native.rs"])
+        repo.git(&["checkout", &baseline, "--", "tools/xtask/src/desktop.rs"])
             .unwrap();
 
         repo.write(

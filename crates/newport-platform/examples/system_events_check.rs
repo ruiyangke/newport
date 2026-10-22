@@ -40,7 +40,7 @@ fn main() -> anyhow::Result<()> {
         "Wake callback was not delivered exactly once"
     );
     println!(
-        "Native observers installed; process-local sleep/wake callbacks delivered; worker-thread install rejected."
+        "Observers installed; process-local sleep/wake callbacks delivered; worker-thread install rejected."
     );
     Ok(())
 }

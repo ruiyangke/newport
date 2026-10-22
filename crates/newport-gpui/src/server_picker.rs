@@ -81,8 +81,8 @@ impl SearchableListItem for ServerItem {
 }
 pub(super) type Picker = ComboboxState<SearchableVec<ServerItem>>;
 
-/// Match src/types.ts displayName: only an empty name falls back; whitespace
-/// is an explicit name, and the fallback includes the SSH user.
+/// Only an empty name falls back; whitespace is an explicit name, and the
+/// fallback includes the SSH user.
 pub(super) fn display_name(server: &Value) -> String {
     let name = text(server, "name");
     if name.is_empty() {

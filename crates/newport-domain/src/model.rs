@@ -50,7 +50,7 @@ pub struct Tunnel {
     pub auto_reconnect: bool,
     #[serde(default)]
     pub direction: Direction,
-    /// The project this forward was saved under; the frontend owns its meaning.
+    /// The project this forward was saved under; the UI owns its meaning.
     #[serde(default)]
     pub project: Option<String>,
 }

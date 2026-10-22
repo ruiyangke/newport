@@ -2,6 +2,7 @@
 pub mod account;
 pub mod credentials;
 mod instance;
+pub(crate) mod leftovers;
 #[cfg(test)]
 mod manager_tests;
 mod snapshot;

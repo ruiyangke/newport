@@ -11,7 +11,7 @@ use std::sync::Arc;
 const FIND_AGENT: &str = r#"cache="${NEWPORT_REMOTE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/newport-remote}"
 set --
 for release in "$cache"/releases/system/* "$cache"/releases/nix/*; do
-    if [ -x "$release/current/run-agent" ] && [ -f "$release/current/.validated-v6" ]; then
+    if [ -x "$release/current/run-agent" ] && [ -f "$release/current/.validated-v1" ]; then
         set -- "$@" "$release/current/run-agent"
     fi
 done
@@ -24,14 +24,24 @@ if [ "$#" -gt 0 ]; then agent=$(ls -t "$@" | head -n 1); fi
 /// distribution, in one round trip. Agents built on the server with Nix carry
 /// their own programs.
 const REPORT: &str = r#"printf 'agent=%s\n' "$agent"
+for release in "$@"; do
+    printf 'release=%s\n' "$release"
+    built=$(head -c 32 "${release%/run-agent}/built-at" 2>/dev/null) && printf 'built=%s %s\n' "$release" "$built"
+done
 printf 'system=%s\n' "$(uname -s)"
 printf 'architecture=%s\n' "$(uname -m)"
 case "$agent" in
 */releases/nix/*) ;;
 *)
+    for program in tar gzip; do command -v "$program" >/dev/null 2>&1 || echo "missing=$program"; done
     command -v Xvfb >/dev/null 2>&1 || echo 'missing=xvfb'
     command -v dbus-daemon >/dev/null 2>&1 && command -v dbus-run-session >/dev/null 2>&1 || echo 'missing=dbus'
     command -v pw-record >/dev/null 2>&1 || command -v parec >/dev/null 2>&1 || echo 'missing=audio'
+    # Apps draw text through fontconfig; with no font at all they can't open
+    # a window. Without fontconfig there is nothing that uses it yet.
+    if command -v fc-list >/dev/null 2>&1 && [ -z "$(fc-list : family | head -n 1)" ]; then
+        echo 'missing=fonts'
+    fi
     ;;
 esac
 echo '--os-release--'
@@ -72,13 +82,62 @@ fn parse_status(output: &str) -> Value {
     };
     let agent = field("agent");
     // `<cache>/releases/<runtime>/<revision>/...`: the archive's digest.
-    let revision = agent
-        .and_then(|agent| agent.rsplit_once("/releases/"))
-        .and_then(|(_, rest)| rest.split('/').nth(1));
+    let revision_of = |agent: &str| {
+        agent
+            .rsplit_once("/releases/")
+            .and_then(|(_, rest)| rest.split('/').nth(1))
+            .map(str::to_owned)
+    };
+    let revision = agent.and_then(revision_of);
+    let zypper_dbus = zypper_dbus(release);
+    // Every installed release, so Newport can launch the one it carries even
+    // when another Newport installed a different one more recently.
+    // When each release's agent was built, for ordering them; releases
+    // installed before agents said so have none.
+    let built: std::collections::HashMap<&str, u64> = head
+        .lines()
+        .filter_map(|line| line.strip_prefix("built="))
+        .filter_map(|line| {
+            let (path, seconds) = line.trim().rsplit_once(' ')?;
+            Some((path, seconds.trim().parse().ok()?))
+        })
+        .collect();
+    let agents: Vec<Value> = head
+        .lines()
+        .filter_map(|line| line.strip_prefix("release="))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .filter_map(|path| {
+            Some(json!({
+                "revision": revision_of(path)?,
+                "agent": path,
+                "builtAt": built.get(path),
+            }))
+        })
+        .collect();
     let missing: Vec<Value> = head
         .lines()
         .filter_map(|line| line.strip_prefix("missing="))
         .filter_map(|program| match program.trim() {
+            // The installer unpacks the agent with these; minimal images
+            // leave them out. Its other programs come with every base system.
+            program @ ("tar" | "gzip") => Some(json!({
+                "id": program,
+                "name": program,
+                "purpose": "Installing Newport Remote",
+                "required": true,
+                "neededToInstall": true,
+                "packages": {
+                    "apt": program,
+                    "dnf": program,
+                    "zypper": program,
+                    "pacman": program,
+                    "apk": program,
+                    "xbps": program,
+                    "emerge": if program == "tar" { "app-arch/tar" } else { "app-arch/gzip" },
+                    "nix": if program == "tar" { "gnutar" } else { "gzip" },
+                },
+            })),
             "xvfb" => Some(json!({
                 "id": "xvfb",
                 "name": "Xvfb",
@@ -104,12 +163,30 @@ fn parse_status(output: &str) -> Value {
                 "packages": {
                     "apt": "dbus",
                     "dnf": "dbus-daemon",
-                    "zypper": "dbus-1",
+                    "zypper": zypper_dbus,
                     "pacman": "dbus",
                     "apk": "dbus",
                     "xbps": "dbus",
                     "emerge": "sys-apps/dbus",
                     "nix": "dbus",
+                },
+            })),
+            "fonts" => Some(json!({
+                "id": "fonts",
+                // Every command below installs this face; with no font at
+                // all it is the one apps fall back to.
+                "name": "DejaVu Sans Mono",
+                "purpose": "Text in apps",
+                "required": true,
+                "packages": {
+                    "apt": "fonts-dejavu-core",
+                    "dnf": "dejavu-sans-mono-fonts",
+                    "zypper": "dejavu-fonts",
+                    "pacman": "ttf-dejavu",
+                    "apk": "font-dejavu",
+                    "xbps": "dejavu-fonts-ttf",
+                    "emerge": "media-fonts/dejavu",
+                    "nix": "dejavu_fonts",
                 },
             })),
             "audio" => Some(json!({
@@ -121,7 +198,7 @@ fn parse_status(output: &str) -> Value {
                     "apt": "pipewire-bin",
                     "dnf": "pipewire-utils",
                     "zypper": "pipewire-tools",
-                    "pacman": "pipewire",
+                    "pacman": "pipewire-audio",
                     "apk": "pipewire-tools",
                     "xbps": "pipewire",
                     "emerge": "media-video/pipewire",
@@ -134,11 +211,32 @@ fn parse_status(output: &str) -> Value {
     json!({
         "agent": agent,
         "revision": revision,
+        "agents": agents,
         "system": field("system"),
         "architecture": field("architecture"),
         "missing": missing,
         "osRelease": release.trim(),
     })
+}
+
+/// openSUSE moved `dbus-daemon` and `dbus-run-session` from `dbus-1` into
+/// `dbus-1-daemon` in Tumbleweed and Leap 16 (SUSE Linux 16); Leap and SLES
+/// 15 still ship them in `dbus-1`.
+fn zypper_dbus(os_release: &str) -> &'static str {
+    let field = |name: &str| {
+        os_release.lines().find_map(|line| {
+            let value = line.strip_prefix(name)?.strip_prefix('=')?;
+            Some(value.trim().trim_matches('"'))
+        })
+    };
+    let major =
+        field("VERSION_ID").and_then(|version| version.split('.').next()?.parse::<u32>().ok());
+    match (field("ID"), major) {
+        (Some("opensuse-leap" | "sles" | "sled" | "sle-micro"), Some(major)) if major < 16 => {
+            "dbus-1"
+        }
+        _ => "dbus-1-daemon",
+    }
 }
 
 /// The agent's catalogue as it prints it: `{"apps": [...]}` with PNG icons.
@@ -267,5 +365,52 @@ mod tests {
         assert_eq!(missing["missing"][0]["name"], "Xvfb");
         assert_eq!(missing["missing"][0]["required"], true);
         assert_eq!(missing["missing"][1]["packages"]["apt"], "pipewire-bin");
+    }
+
+    #[test]
+    fn package_names_follow_the_distribution_release() {
+        let dbus = |release: &str| {
+            super::parse_status(&format!("agent=\nmissing=dbus\n--os-release--\n{release}"))
+                ["missing"][0]["packages"]["zypper"]
+                .clone()
+        };
+        assert_eq!(
+            dbus("ID=\"opensuse-tumbleweed\"\nVERSION_ID=\"20261018\""),
+            "dbus-1-daemon"
+        );
+        assert_eq!(
+            dbus("ID=\"opensuse-leap\"\nVERSION_ID=\"16.0\""),
+            "dbus-1-daemon"
+        );
+        assert_eq!(dbus("ID=\"opensuse-leap\"\nVERSION_ID=\"15.6\""), "dbus-1");
+        assert_eq!(dbus("ID=\"sles\"\nVERSION_ID=\"15.7\""), "dbus-1");
+        let unpack = super::parse_status("agent=\nmissing=tar\nmissing=gzip\n--os-release--\n");
+        assert_eq!(unpack["missing"][0]["name"], "tar");
+        assert_eq!(unpack["missing"][1]["packages"]["zypper"], "gzip");
+        assert_eq!(unpack["missing"][1]["neededToInstall"], true);
+        let fonts = super::parse_status("agent=\nmissing=fonts\n--os-release--\n");
+        assert_eq!(fonts["missing"][0]["packages"]["zypper"], "dejavu-fonts");
+        assert_eq!(fonts["missing"][0]["required"], true);
+        let audio = super::parse_status("agent=\nmissing=audio\n--os-release--\nID=arch\n");
+        assert_eq!(audio["missing"][0]["packages"]["pacman"], "pipewire-audio");
+    }
+
+    #[test]
+    fn status_lists_every_installed_release() {
+        let parsed = super::parse_status(
+            "agent=/c/releases/system/new/current/run-agent\nrelease=/c/releases/system/old/current/run-agent\nrelease=/c/releases/system/new/current/run-agent\n--os-release--\n",
+        );
+        assert_eq!(parsed["revision"], "new");
+        assert_eq!(parsed["agents"][0]["revision"], "old");
+        assert_eq!(
+            parsed["agents"][0]["agent"],
+            "/c/releases/system/old/current/run-agent"
+        );
+        assert_eq!(parsed["agents"][1]["revision"], "new");
+        assert!(parsed["agents"][0]["builtAt"].is_null());
+        let built = super::parse_status(
+            "agent=/c/releases/system/new/current/run-agent\nrelease=/c/releases/system/new/current/run-agent\nbuilt=/c/releases/system/new/current/run-agent 1792000000\n--os-release--\n",
+        );
+        assert_eq!(built["agents"][0]["builtAt"], 1_792_000_000);
     }
 }

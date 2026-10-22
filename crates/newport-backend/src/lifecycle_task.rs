@@ -1,10 +1,11 @@
-//! Session-owned lifecycle execution. Callers subscribe to an operation; they
-//! cannot cancel its writes by dropping the subscription.
+//! Session-owned lifecycle execution: one install or uninstall at a time per
+//! server. Callers wait for it; dropping the wait doesn't stop its writes, and
+//! asking again for the same action waits for the running one.
 use std::{future::Future, sync::Mutex};
 use tokio::{sync::watch, task::JoinHandle};
-use uuid::Uuid;
 
-pub(crate) const INTERRUPTED: &str = "Needle operation interrupted because the server session ended. Resume to reconcile its outcome.";
+pub(crate) const INTERRUPTED: &str =
+    "The Needle operation stopped because the server session ended. Run it again.";
 type Outcome = Result<String, String>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15,24 +16,10 @@ pub(crate) enum Action {
     Install {
         integrations: bool,
     },
-    Helpers,
-    Recover,
-    Remove {
-        build: [u8; 64],
-    },
-    RestoreRemoval,
-    RestoreHelpers {
-        build: [u8; 64],
-        ownership: [u8; 64],
-    },
-    Keep {
-        index: usize,
-        fingerprint: [u8; 64],
-    },
+    Uninstall,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Request {
-    pub id: Uuid,
     pub generation: u64,
     pub action: Action,
 }
@@ -70,9 +57,6 @@ impl Slot {
     ) -> Outcome {
         let mut result = {
             let mut active = self.0.lock().unwrap();
-            if request.id.is_nil() {
-                return Err("Invalid Needle operation ID".into());
-            }
             if *retired.borrow() {
                 return Err(INTERRUPTED.into());
             }
@@ -111,9 +95,10 @@ impl Slot {
             if let Some(outcome) = result.borrow_and_update().clone() {
                 return outcome;
             }
-            result.changed().await.map_err(|_| {
-                "Needle operation stopped unexpectedly. Resume to reconcile its outcome.".to_owned()
-            })?;
+            result
+                .changed()
+                .await
+                .map_err(|_| "Needle operation stopped unexpectedly. Run it again.".to_owned())?;
         }
     }
 
@@ -137,9 +122,8 @@ mod tests {
 
     fn request() -> Request {
         Request {
-            id: Uuid::new_v4(),
             generation: 1,
-            action: Action::Helpers,
+            action: Action::Install { integrations: true },
         }
     }
     struct Active(Arc<AtomicUsize>);
@@ -181,11 +165,7 @@ mod tests {
         );
         for other in [
             Request {
-                id: Uuid::new_v4(),
-                ..req
-            },
-            Request {
-                action: Action::Recover,
+                action: Action::Uninstall,
                 ..req
             },
             Request {
@@ -260,12 +240,12 @@ mod tests {
         ready.await.unwrap();
         slot.stop().await;
         assert_eq!(active.load(Ordering::SeqCst), 0);
-        assert!(waiter.await.unwrap().unwrap_err().contains("reconcile"));
+        assert!(waiter.await.unwrap().unwrap_err().contains("Run it again"));
         slot.stop().await;
     }
 
     #[tokio::test]
-    async fn executor_panic_wakes_waiters_and_allows_reconciliation() {
+    async fn executor_panic_wakes_waiters_and_allows_running_again() {
         let slot = Slot::default();
         let (_retire, retired) = watch::channel(false);
         let req = request();
@@ -275,13 +255,13 @@ mod tests {
             })
             .await
             .unwrap_err()
-            .contains("reconcile")
+            .contains("Run it again")
         );
         assert_eq!(
-            slot.run(req, retired, async { Ok("reconciled".into()) })
+            slot.run(req, retired, async { Ok("installed".into()) })
                 .await
                 .unwrap(),
-            "reconciled"
+            "installed"
         );
         slot.stop().await;
     }

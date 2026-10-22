@@ -223,9 +223,17 @@ async fn deleting_a_server_during_editor_preparation_does_not_resurrect_it() {
     )
     .await
     .unwrap();
-    crate::commands::delete_server(&Default::default(), &Default::default(), &state, &db, id)
-        .await
-        .unwrap();
+    let preferences = crate::preferences::Preferences::open(_directory.path()).unwrap();
+    crate::commands::delete_server(
+        &Default::default(),
+        &Default::default(),
+        &state,
+        &db,
+        &preferences,
+        id,
+    )
+    .await
+    .unwrap();
     assert!(!task.is_finished());
     release.release();
     assert!(

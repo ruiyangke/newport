@@ -1,0 +1,21 @@
+#!/bin/sh
+# Keep Newport's private crates out of everything Cargo reads: manifests,
+# lockfiles and Cargo configuration. Public source may name them; only
+# `cargo xtask dev|build|test --remote-apps` adds them, and takes them out
+# again. Checks the files as they would be committed (the index), so a file
+# that is only partly staged cannot slip through. CI runs this too.
+pattern='newport[-_]remote'
+status=0
+for path in $(git ls-files -- '*Cargo.toml' '*Cargo.lock' '*.cargo/config' '*.cargo/config.toml'); do
+  found=$(git show ":$path" | grep -n -i -E "$pattern")
+  if [ -n "$found" ]; then
+    echo "$path names a private newport-remote crate:" >&2
+    printf '%s\n' "$found" | head -5 | sed 's/^/  /' >&2
+    status=1
+  fi
+done
+if [ "$status" -ne 0 ]; then
+  echo "A killed --remote-apps build leaves them in: the next 'cargo xtask dev'," >&2
+  echo "'build' or 'test remote-apps' takes them out. Then stage the files again." >&2
+fi
+exit "$status"

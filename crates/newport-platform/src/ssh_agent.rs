@@ -1,6 +1,23 @@
 //! Agent locations only; selection, consent and retries belong to the backend.
-use crate::ipc::agent_relay::Source;
+use serde::{Deserialize, Serialize};
 use std::{io, path::PathBuf};
+
+/// Which SSH agent a server's sign-in uses.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Source {
+    System,
+    OnePassword,
+}
+impl Source {
+    pub fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value.unwrap_or("system") {
+            "system" => Ok(Self::System),
+            "onePassword" => Ok(Self::OnePassword),
+            _ => Err("Unknown SSH agent".into()),
+        }
+    }
+}
 
 #[cfg(unix)]
 pub fn source_path(source: Source) -> io::Result<PathBuf> {

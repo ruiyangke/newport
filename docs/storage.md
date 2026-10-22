@@ -35,15 +35,20 @@ Before Newport opens credentials, opens metric history, or starts
 workers, it reserves profile ownership and preserves a recovery copy under
 `upgrade-backups/native-<version>/data`. It copies existing profile files,
 including the encrypted vault, preferences, pending-operation records, unknown
-files, and SQLite database/WAL files. Runtime sockets, lock files, and older
-backup directories are excluded. Symlinks and special files are rejected rather
-than followed. The copy has private permissions and a SHA-256 manifest; it is
+files, and SQLite database/WAL files. Runtime sockets, lock files, older
+backup directories, temporary files an interrupted save left behind, and the
+Newport account sign-in (`account.stronghold`) are excluded: a device
+credential never outlives signing out in an old snapshot, and restoring one
+means signing in again. Symlinks and special files are rejected rather than
+followed. The copy has private permissions and a SHA-256 manifest; it is
 published only after verification and filesystem synchronization.
 
 A failed or damaged backup blocks startup before the profile is opened. Retrying does not
 overwrite an existing recovery snapshot. New installations may have an empty
-pre-startup snapshot. These copies are retained locally and require disk space;
-they are not portable exports and do not contain keys from OS credential storage.
+pre-startup snapshot. The snapshot for the running version and the one before
+it are kept; older ones, and staging folders a crash left behind, are removed
+after a new snapshot is published. They are not portable exports and do not
+contain keys from OS credential storage.
 
 Newport never automatically restores an older profile during application
 rollback: that could discard edits made after upgrading or rewind pending remote

@@ -262,7 +262,7 @@ mod tests {
     }
     impl Rpc for Fake {
         fn open(&self, args: Value) -> Result<Box<dyn Send>, String> {
-            self.call("terminal_open", args)?;
+            self.call(newport_platform::ipc::protocol::TERMINAL_OPEN_LEASE, args)?;
             struct Lease(SyncSender<()>);
             impl Drop for Lease {
                 fn drop(&mut self) {
@@ -364,7 +364,10 @@ mod tests {
         assert_eq!(rpc.writes.lock().unwrap().len(), 2);
         drop(session);
         closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(rpc.calls.lock().unwrap().first().unwrap(), "terminal_open");
+        assert_eq!(
+            rpc.calls.lock().unwrap().first().unwrap(),
+            newport_platform::ipc::protocol::TERMINAL_OPEN_LEASE
+        );
     }
 
     struct FailedSession {

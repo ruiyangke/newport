@@ -47,18 +47,37 @@ use gpui_kit::base::{Tab, Tabs};
 #[derive(Action, Clone, PartialEq, serde::Deserialize)]
 #[action(namespace = newport, no_json)]
 pub(super) struct OpenView {
+    pub page: Page,
+}
+
+/// Selects a tab of the current page by number: terminal tabs, or the
+/// project editor's.
+#[derive(Action, Clone, PartialEq, serde::Deserialize)]
+#[action(namespace = newport, no_json)]
+pub(super) struct SelectTab {
     pub number: usize,
 }
 
-// Match the desktop.rs accelerators; Terminal is primary+5 and Files primary+6.
-pub(super) fn shortcut_page(number: usize) -> Option<Page> {
+/// Views by shortcut number, in sidebar order. Numbers never shift: Remote
+/// apps keeps 8 in builds without it, so Integrations is always 9.
+const SHORTCUT_VIEWS: [Page; 9] = [
+    Page::Overview,
+    Page::Ports,
+    Page::Services,
+    Page::Containers,
+    Page::Terminal,
+    Page::Files,
+    Page::Projects,
+    Page::RemoteApps,
+    Page::Integration,
+];
+
+/// Tab `number` among `count`: 1–8 by position, 9 the last, as browsers and
+/// terminals number tabs.
+pub(super) fn tab_index(number: usize, count: usize) -> Option<usize> {
     match number {
-        1 => Some(Page::Overview),
-        2 => Some(Page::Ports),
-        3 => Some(Page::Services),
-        4 => Some(Page::Containers),
-        5 => Some(Page::Terminal),
-        6 => Some(Page::Files),
+        9 if count > 0 => Some(count - 1),
+        1..=8 if number <= count => Some(number - 1),
         _ => None,
     }
 }
@@ -88,10 +107,8 @@ pub(super) fn install_desktop_commands(cx: &mut App) {
     #[cfg(not(target_os = "macos"))]
     cx.bind_keys([KeyBinding::new("f11", ToggleFullScreen, None)]);
     let mut items = Vec::new();
-    for number in [1, 2, 3, 4, 5, 6] {
-        let page = shortcut_page(number).expect("supported desktop view");
-        let action = OpenView { number };
-        items.push(MenuItem::action(page.title(), action));
+    for (page, _) in views(cx) {
+        items.push(MenuItem::action(page.title(), OpenView { page }));
     }
     items.push(MenuItem::separator());
     items.push(MenuItem::action("Show/hide sidebar", ToggleSidebar));
@@ -228,10 +245,24 @@ pub(super) fn install_workspace_shortcuts(cx: &mut App) {
         KeyBinding::new("cmd-alt-left", SidebarNarrower, None),
         KeyBinding::new("cmd-alt-0", ResetSidebar, None),
     ]);
-    for number in 1..=6 {
+    // Numbers select tabs, as in terminals and browsers; with Control as
+    // well they open views. Windows keeps Ctrl+Alt free: it is AltGr there.
+    let views = if cfg!(target_os = "macos") {
+        "ctrl-cmd"
+    } else {
+        "ctrl-shift"
+    };
+    for number in 1..=9 {
         cx.bind_keys([KeyBinding::new(
             &format!("{primary}-{number}"),
-            OpenView { number },
+            SelectTab { number },
+            None,
+        )]);
+    }
+    for (index, page) in SHORTCUT_VIEWS.into_iter().enumerate() {
+        cx.bind_keys([KeyBinding::new(
+            &format!("{views}-{}", index + 1),
+            OpenView { page },
             None,
         )]);
     }
@@ -257,6 +288,31 @@ pub(super) fn views(cx: &App) -> Vec<(Page, IconName)> {
     views
 }
 impl Newport {
+    /// Tab `number` of the current page, if it has tabs: the terminal's, or
+    /// the open project's editor. Other pages have none and ignore it.
+    pub(super) fn select_tab(
+        &mut self,
+        number: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.has_active_dialog(cx) || self.server_form.is_some() {
+            return;
+        }
+        match self.page {
+            Page::Terminal => {
+                if let Some(workspace) = self.terminals.get(&self.server).cloned() {
+                    workspace.update(cx, |workspace, cx| workspace.select_tab(number, window, cx));
+                }
+            }
+            Page::Projects => {
+                if let Some(editor) = self.code_workspace() {
+                    editor.update(cx, |editor, cx| editor.select_tab(number, window, cx));
+                }
+            }
+            _ => {}
+        }
+    }
     /// One focus handle per sidebar view, including views that become
     /// available after the window opens, such as Remote apps.
     pub(super) fn sync_navigation_focus(&mut self, cx: &mut Context<Self>) {

@@ -287,9 +287,8 @@ Section "Newport"
   ClearErrors
   WriteRegStr HKCU "${PRODUCT_KEY}" "" "$INSTDIR"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "Newport"
-  WriteRegStr HKCU "${UNINSTALL_KEY}" "Publisher" "newport"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "Publisher" "Newport"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
-  WriteRegStr HKCU "${UNINSTALL_KEY}" "MainBinaryName" "newport.exe"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon" '"$INSTDIR\newport.exe"'
   WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation" '"$INSTDIR"'
   WriteRegStr HKCU "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'

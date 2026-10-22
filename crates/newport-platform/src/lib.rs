@@ -1,4 +1,4 @@
-//! Operating-system adapters shared by the native client and backend.
+//! Operating-system adapters shared by the UI and the backend.
 #[cfg(feature = "account")]
 pub mod account;
 pub mod clipboard;

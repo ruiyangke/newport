@@ -407,8 +407,9 @@ impl Newport {
             .is_some_and(|hosted| hosted.panel.read(cx).has_review_dialog());
         let visible_server = (self.window_visible
             && (!self.modal_open || own_dialog)
-            && self.page == Page::Containers)
-            .then_some(self.server.as_str());
+            && self.page == Page::Containers
+            && !self.needle_missing())
+        .then_some(self.server.as_str());
         poll_containers(
             &mut self.containers_panels,
             &mut self.retired_containers,

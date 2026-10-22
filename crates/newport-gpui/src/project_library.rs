@@ -362,13 +362,7 @@ impl Newport {
         let toolbar = crate::controls::page_toolbar(cx)
             .id("projects-toolbar")
             .debug_selector(|| "projects-toolbar".into())
-            .child(
-                div()
-                    .w(px(crate::controls::SEARCH_WIDTH))
-                    .min_w(px(120.))
-                    .flex_shrink(1.)
-                    .child(crate::controls::search_input(&filter, cx).aria_label("Find a project")),
-            )
+            .child(crate::controls::page_search(&filter, "Find a project", cx))
             .child(crate::connections_selector::Selector::new(
                 "project-library-filter",
                 "Show",

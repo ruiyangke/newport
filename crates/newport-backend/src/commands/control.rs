@@ -1,4 +1,4 @@
-//! Server lifecycle, forwarding and integration commands shared by application hosts.
+//! Server lifecycle, forwarding and integration commands.
 use crate::{
     manager::Shared,
     model::{Server, Tunnel},
@@ -109,15 +109,18 @@ pub async fn save_server(
 }
 
 pub async fn delete_server(
-    _files: &crate::files::Operations,
+    files: &crate::files::Operations,
     terminals: &crate::terminal::Sessions,
     state: &Shared,
     db: &crate::metrics_db::MetricsDb,
+    preferences: &crate::preferences::Preferences,
     id: Uuid,
 ) -> Result<(), String> {
     let history = crate::manager::server_history_guard(state, id).await;
     let db = db.clone();
     let terminals = terminals.clone();
+    let files = files.clone();
+    let preferences = preferences.clone();
     let cleanup = state
         .edit_configuration_with_commit(
             None,
@@ -143,6 +146,7 @@ pub async fn delete_server(
                     .collect();
                 // Register cleanup in the commit worker, before a cancelled response can
                 // release the server's history barrier or abandon its local-data removal.
+                let directory = manager.store.directory.clone();
                 manager.track_profile_cleanup(async move {
                     let result = db.delete_server(id).await.map_err(|error| {
                         format!("Server removed, but local data cleanup failed: {error}")
@@ -151,6 +155,28 @@ pub async fn delete_server(
                     terminals.wait().await;
                     for tunnel in tunnels {
                         tunnel.wait().await;
+                    }
+                    // Nothing else needs the server's state once it is gone. A
+                    // part that can't be removed now only costs space, so it is
+                    // logged rather than failing a removal that already happened.
+                    let forgotten = tokio::task::spawn_blocking(move || {
+                        let mut problems = Vec::new();
+                        if let Err(error) = files.forget_server(id) {
+                            problems.push(error);
+                        }
+                        let clipboard = directory.join(format!("clipboard-client-{id}"));
+                        if let Err(error) = std::fs::remove_file(&clipboard)
+                            && error.kind() != std::io::ErrorKind::NotFound
+                        {
+                            problems.push(error.to_string());
+                        }
+                        problems
+                    })
+                    .await
+                    .unwrap_or_else(|error| vec![error.to_string()]);
+                    let preferences = crate::preferences::forget_server(&preferences, id).await;
+                    for problem in forgotten.into_iter().chain(preferences.err()) {
+                        log::warn!("Removed server {id}: some of its local data stayed: {problem}");
                     }
                     result
                 })
@@ -486,14 +512,6 @@ pub async fn reinstall_agent(
     desktop: crate::desktop_integration::Desktop,
     id: Uuid,
 ) -> Result<(), String> {
-    reinstall_agent_with_id(state, desktop, id, None).await
-}
-pub async fn reinstall_agent_with_id(
-    state: &Shared,
-    desktop: crate::desktop_integration::Desktop,
-    id: Uuid,
-    operation_id: Option<Uuid>,
-) -> Result<(), String> {
     let (server, owner) = state.current(id)?;
     owner.retry_transport();
     // Healthy integrations keep their pinned runtime throughout staging and
@@ -501,12 +519,7 @@ pub async fn reinstall_agent_with_id(
     let installed = async {
         let session = owner.acquire(&server).await?;
         // Updating the shared agent must not rewrite optional shell configuration.
-        // Existing combined operations are resumed only through resume_agent.
-        match operation_id {
-            Some(id) => session.install_operation(true, false, id).await,
-            None => session.install(true, false).await,
-        }
-        .map(|_| ())
+        session.install(false).await.map(|_| ())
     }
     .await;
     let resumed = if !owner.is_revoked() {
@@ -522,97 +535,15 @@ pub async fn reinstall_agent_with_id(
     installed.and(resumed)
 }
 
-pub async fn resume_agent(state: &Shared, id: Uuid, operation_id: Uuid) -> Result<String, String> {
-    let (server, _) = state.current(id)?;
-    let session = crate::server_session::acquire(state, &server).await?;
-    session.resume_installation(operation_id).await
-}
-
-pub async fn recover_agent(state: &Shared, id: Uuid, operation_id: Uuid) -> Result<String, String> {
-    let (server, _) = state.current(id)?;
-    let session = crate::server_session::acquire(state, &server).await?;
-    session.recover_installation(operation_id).await
-}
-
-pub async fn manage_agent_removal(
-    state: &Shared,
-    expected: Server,
-    operation_id: Uuid,
-    build: Option<String>,
-) -> Result<String, String> {
-    if operation_id.is_nil()
-        || build
-            .as_deref()
-            .is_some_and(|b| !crate::agent_runtime::protocol::valid_build(b))
-    {
-        return Err("Invalid Needle removal request".into());
+/// Uninstalls Needle from the server: final, nothing of it stays.
+pub async fn uninstall_agent(state: &Shared, expected: Server) -> Result<String, String> {
+    let (server, owner) = state.current(expected.id)?;
+    if !server.same_connection(&expected) {
+        return Err("Server connection changed. Review uninstalling Needle again.".into());
     }
-    let (server, owner) = {
-        let (server, owner) = state.current(expected.id)?;
-        if !server.same_connection(&expected) {
-            return Err("Server connection changed. Review Needle removal again.".into());
-        }
-        if build.is_none() {
-            owner
-                .lifecycle
-                .receipts
-                .removal(&server, operation_id)?
-                .ok_or("Needle removal not found")?;
-        }
-        (server, owner)
-    };
     owner.retry_transport();
     let session = owner.acquire(&server).await?;
-    match build {
-        Some(build) => session.remove_agent(operation_id, &build).await,
-        None => session.restore_removed_agent(operation_id).await,
-    }
-}
-pub async fn review_agent(
-    state: &Shared,
-    id: Uuid,
-    operation_id: Uuid,
-    keep: Option<(usize, String)>,
-) -> Result<crate::lifecycle_receipts::protocol::HelperReview, String> {
-    let (server, _) = state.current(id)?;
-    let session = crate::server_session::acquire(state, &server).await?;
-    match keep {
-        None => session.review_helpers(operation_id).await,
-        Some((index, fingerprint)) => session.keep_helper(operation_id, index, fingerprint).await,
-    }
-}
-
-pub async fn restore_standalone_helpers(
-    state: &Shared,
-    expected: Server,
-    operation_id: Uuid,
-    build: String,
-    fingerprint: String,
-) -> Result<String, String> {
-    let valid = crate::agent_runtime::protocol::valid_build;
-    if operation_id.is_nil() || !valid(&build) || !valid(&fingerprint) {
-        return Err("Invalid standalone helper restoration request".into());
-    }
-    let (server, owner) = {
-        let (server, owner) = state.current(expected.id)?;
-        if !server.same_connection(&expected) {
-            return Err("Server connection changed. Review its helper history again.".into());
-        }
-        if let Some(record) = owner
-            .lifecycle
-            .receipts
-            .helper_recovery(&server, operation_id)?
-            && (record.build != build || record.fingerprint != fingerprint)
-        {
-            return Err("Helper restoration identity changed".into());
-        }
-        (server, owner)
-    };
-    owner.retry_transport();
-    let lease = owner.acquire(&server).await?;
-    lease
-        .restore_standalone_helpers(operation_id, &build, &fingerprint)
-        .await
+    session.uninstall().await
 }
 
 pub async fn inspect_agent(

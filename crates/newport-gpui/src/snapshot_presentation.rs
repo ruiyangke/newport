@@ -10,7 +10,6 @@ const SERVER_FIELDS: &[&str] = &[
     "agentPermissions",
     "agentStatus",
     "agentInstallation",
-    "agentOperations",
     "clipboard",
     "clipboardMessages",
     "clipboardPathNeeded",

@@ -151,6 +151,11 @@ impl PendingOperations {
             );
         }
         if rows.len() >= MAX_RECORDS {
+            // A rejected command never ran, so its receipt holds nothing to
+            // recover; make room with those before refusing.
+            rows.retain(|row| row.state != ReceiptState::Rejected);
+        }
+        if rows.len() >= MAX_RECORDS {
             return Err("Review saved Git outcomes before starting more operations.".into());
         }
         rows.push(Receipt {
@@ -215,7 +220,7 @@ impl PendingOperations {
         Ok(())
     }
     /// Persist an operator acknowledgement only after remote journal confirmation.
-    /// The boolean is supplied by the native lookup flow, never by the frontend.
+    /// The boolean comes from the backend's own lookup, never from the UI.
     fn review(
         &self,
         server_id: Uuid,
@@ -584,6 +589,49 @@ mod tests {
                 .is_err()
         );
         assert_eq!(fs::read(path).unwrap(), b"broken");
+    }
+    #[test]
+    fn rejected_receipts_never_block_new_operations() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = PendingOperations::new(temp.path().join("operations.json"));
+        let server = Uuid::new_v4();
+        let unknown = Uuid::new_v4();
+        let mut rows = vec![Receipt {
+            operation_id: unknown,
+            server_id: server,
+            action: "push".into(),
+            state: ReceiptState::OutcomeUnknown,
+        }];
+        rows.extend((1..MAX_RECORDS).map(|_| Receipt {
+            operation_id: Uuid::new_v4(),
+            server_id: server,
+            action: "commit".into(),
+            state: ReceiptState::Rejected,
+        }));
+        store.save(&rows).unwrap();
+        let next = Uuid::new_v4();
+        store.begin(server, next, "commit".into()).unwrap();
+        let rows = store.read().unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.operation_id).collect::<Vec<_>>(),
+            [unknown, next],
+            "receipts that still need an outcome are kept"
+        );
+        // Receipts awaiting an outcome still fill the log and stop new writes.
+        let full: Vec<_> = (0..MAX_RECORDS)
+            .map(|_| Receipt {
+                operation_id: Uuid::new_v4(),
+                server_id: server,
+                action: "push".into(),
+                state: ReceiptState::OutcomeUnknown,
+            })
+            .collect();
+        store.save(&full).unwrap();
+        assert!(
+            store
+                .begin(server, Uuid::new_v4(), "commit".into())
+                .is_err()
+        );
     }
     #[test]
     fn concurrent_writers_preserve_each_receipt() {

@@ -55,7 +55,6 @@ impl Drop for Running {
 pub(crate) struct Slot {
     running: tokio::sync::Mutex<Option<Running>>,
     state: Arc<Mutex<Option<Snapshot>>>,
-    resume: Mutex<Option<(Server, uuid::Uuid, Desktop)>>,
 }
 impl Slot {
     pub fn snapshot(&self) -> Option<Snapshot> {
@@ -79,10 +78,6 @@ impl Slot {
         if owner.is_revoked() {
             return Err("Server session changed. Reconnect before retrying.".into());
         }
-        // Retain intended demand even when a durable removal temporarily blocks
-        // startup, so explicit restoration can resume it inside its owned task.
-        *self.resume.lock().unwrap() = Some((server.clone(), client, app.clone()));
-        owner.require_agent_available()?;
         if running.as_ref().is_some_and(|r| !r.task.is_finished()) {
             // An explicit start may find the enabled service suspended on an
             // authentication failure. Wake the shared transport, not a second
@@ -157,23 +152,7 @@ impl Slot {
         Ok(())
     }
     pub async fn stop(&self) {
-        self.stop_inner(false).await;
-    }
-    pub async fn pause(&self) {
-        self.stop_inner(true).await;
-    }
-    pub async fn resume(&self, owner: Arc<ServerSession>) -> Result<(), String> {
-        let demand = self.resume.lock().unwrap().clone();
-        if let Some((server, client, app)) = demand {
-            self.start(owner, server, client, app).await?;
-        }
-        Ok(())
-    }
-    async fn stop_inner(&self, preserve_demand: bool) {
         let mut running = self.running.lock().await;
-        if !preserve_demand {
-            self.resume.lock().unwrap().take();
-        }
         if let Some(mut active) = running.take() {
             active.cancel.send_replace(true);
             if tokio::time::timeout(Duration::from_secs(3), &mut active.task)
@@ -272,7 +251,6 @@ mod tests {
         assert!(!owner.permissions.browser_enabled());
         assert!(!owner.permissions.clipboard_enabled());
         assert_eq!(owner.transport_snapshot().demand, 0);
-        assert!(owner.integration.resume.lock().unwrap().is_none());
         assert!(state.lock().await.config.integration_servers().is_empty());
     }
 

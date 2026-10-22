@@ -15,7 +15,7 @@ mod codec_fields;
 #[path = "msgpack.rs"]
 mod msgpack;
 /// Version 4 uses MessagePack for every frame, including the handshake.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 1;
 pub fn encode_value(value: &Value) -> io::Result<Vec<u8>> {
     msgpack::encode_value(value)
 }

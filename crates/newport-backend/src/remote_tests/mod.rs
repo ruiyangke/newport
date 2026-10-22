@@ -1,4 +1,4 @@
-//! Real Linux feature checks, owned by the standalone backend.
+//! Real Linux feature checks for the backend.
 //! Run serially with `cargo xtask test remote`; the Rust harness owns the fixtures.
 use crate::{
     agent::wire,
@@ -223,7 +223,7 @@ async fn deploy_reinstall_and_agent_protocol() {
         .await
         .unwrap()
     }
-    assert_eq!(event(&mut stream, b'R').await, b"newport-agent/6");
+    assert_eq!(event(&mut stream, b'R').await, b"newport-agent/1");
     let mut archive = tar::Builder::new(Vec::new());
     for (name, data) in [
         ("text/plain", "container clipboard 世界\n"),
@@ -291,7 +291,7 @@ async fn interactive_shell_resize_and_exit() {
         input.send(Input::Resize(100, 40)).await.unwrap();
         input
             .send(Input::Data(
-                b"stty size; printf 'pty-%s\\n' roundtrip; exit 0\n".to_vec(),
+                b"stty size; printf 'pty-%s\\n' roundtrip; printf 'session=%s\\n' \"$NEWPORT_SESSION\"; exit 0\n".to_vec(),
             ))
             .await
             .unwrap();
@@ -316,6 +316,14 @@ async fn interactive_shell_resize_and_exit() {
             text.contains("pty-roundtrip"),
             "Shell output missing: {text}"
         );
+        // Without any shell setup, the terminal starts with Needle's exports.
+        // A system profile may reset PATH in login shells (this image's does);
+        // the session, BROWSER and display paths carry sharing regardless.
+        let session = text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("session="))
+            .unwrap_or_else(|| panic!("exports missing: {text}"));
+        assert!(Uuid::parse_str(session).is_ok(), "{text}");
     })
     .await
     .unwrap();
@@ -412,7 +420,7 @@ async fn demand_clipboard_compression_freshness_and_failed_transfer_recovery() {
         ))
         .await
         .unwrap();
-    assert_eq!(receive(&mut stream, b'R').await, b"newport-agent/6");
+    assert_eq!(receive(&mut stream, b'R').await, b"newport-agent/1");
     // A new offer invalidates the old cache. A failed transfer of that revision
     // must be retryable without another clipboard change.
     for (revision, corrupt) in [(100i64, false), (101, true), (101, false)] {

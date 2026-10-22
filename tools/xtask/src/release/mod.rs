@@ -157,7 +157,11 @@ mod tests {
             Some(app.version.as_str())
         );
         let updater: Value = serde_json::from_str(&read("resources/updater.json")).unwrap();
-        assert_eq!(updater["requireSignedVersion"], Value::Bool(true));
+        // Update signatures are always verified; the app reads only these two.
+        assert_eq!(
+            updater.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["endpoints", "pubkey"]
+        );
         assert_eq!(
             updater["endpoints"],
             serde_json::json!([

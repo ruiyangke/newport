@@ -829,9 +829,7 @@ async fn start(
         .await
         .map_err(StartupFailure::temporary)?
     {
-        return Err(StartupFailure::permanent(
-            "Needle is not installed. Open Overview to set up this server.",
-        ));
+        return Err(StartupFailure::permanent(crate::agent::NOT_INSTALLED));
     }
     start_at(
         connection,

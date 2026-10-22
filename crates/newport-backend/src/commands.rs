@@ -1,4 +1,4 @@
-//! Shared command handlers. Desktop adapters supply explicit backend services.
+//! Command handlers behind the RPC routes; callers pass the services they use.
 mod control;
 mod terminal_links;
 use crate::manager::{Shared, Snapshot};

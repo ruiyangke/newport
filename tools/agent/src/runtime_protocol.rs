@@ -6,7 +6,7 @@ use std::{
 };
 
 pub const PROTOCOL: &str = "newport.runtime";
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 1;
 #[path = "integration_control.rs"]
 pub mod integration;
 pub const MAX_WORKERS: usize = 16;

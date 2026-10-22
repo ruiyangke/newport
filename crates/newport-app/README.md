@@ -105,7 +105,7 @@ Development, checks, packaging and release run through `cargo xtask`; see
 | Run / build the desktop | `cargo xtask dev` / `cargo xtask build` |
 | Format / validate the workspace | `cargo fmt --all` / `cargo xtask check` |
 | Build Linux agents | `cargo xtask agents` |
-| Native / SSH / container tests | `cargo xtask test native` / `cargo xtask test ssh` / `cargo xtask test remote` |
+| Desktop / SSH / container tests | `cargo xtask test desktop` / `cargo xtask test ssh` / `cargo xtask test remote` |
 | Grammar / PDFium resources | `cargo xtask grammars` / `cargo xtask pdfium` |
 | Development packages | `cargo xtask package` |
 | macOS distribution | `cargo xtask release macos` |
@@ -113,8 +113,10 @@ Development, checks, packaging and release run through `cargo xtask`; see
 | Needle release identity | `cargo xtask release sign-needle` |
 | Verify and combine updater manifests | `cargo xtask release merge` |
 
-On macOS, `cargo run -p newport-app` goes through the committed Cargo runner,
-`tools/xtask/runner.sh`, which runs `cargo xtask dev-run`. It bundles and signs
+Run the app with `cargo xtask dev`, which prepares the build environment (a
+plain `cargo run` stops at the Ghostty build script). On macOS it then goes
+through the committed Cargo runner, `tools/xtask/runner.sh`, which runs
+`cargo xtask dev-run`. It bundles and signs
 a provisioned development app with the settings described in
 [local signing](../../tools/xtask/README.md#local-signing); it is not a
 production signing shortcut. Protected-Keychain acceptance uses

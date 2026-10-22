@@ -413,3 +413,55 @@ async fn window_preferences_merge_validate_and_keep_other_keys() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_deleted_servers_entries_go_and_other_servers_keep_theirs() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = Preferences::open(directory.path()).unwrap();
+    let (gone, kept) = (Uuid::new_v4(), Uuid::new_v4());
+    for server in [gone, kept] {
+        let project: Project = serde_json::from_value(json!({
+            "id": Uuid::new_v4(),
+            "serverId": server,
+            "name": "Example",
+            "path": {"display": "/home/user/project", "bytesB64": "L2hvbWUvdXNlci9wcm9qZWN0"},
+        }))
+        .unwrap();
+        git_projects_save(&state, project).await.unwrap();
+        remote_apps::remote_apps_installed_save(&state, server, true)
+            .await
+            .unwrap();
+        remote_apps::remote_apps_command_save(
+            &state,
+            remote_apps::Command {
+                id: Uuid::new_v4(),
+                server_id: server,
+                name: "Top".into(),
+                command: "top".into(),
+                display: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    forget_server(&state, gone).await.unwrap();
+    assert!(git_projects_list(&state, gone).await.unwrap().is_empty());
+    assert_eq!(git_projects_list(&state, kept).await.unwrap().len(), 1);
+    assert_eq!(
+        remote_apps::remote_apps_installed(&state).await.unwrap(),
+        [kept]
+    );
+    assert!(
+        remote_apps::remote_apps_commands(&state, gone)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        remote_apps::remote_apps_commands(&state, kept)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}

@@ -968,15 +968,11 @@ impl Newport {
             } else {
                 self.files_breadcrumb(browser, path, cx).into_any_element()
             })
-            .child(
-                div()
-                    .w(px(220_f32.min(self.content_width * 0.28)))
-                    .min_w(px(120.))
-                    .child(
-                        crate::controls::search_input(&browser.filter, cx)
-                            .aria_label("Filter files"),
-                    ),
-            )
+            .child(crate::controls::page_search(
+                &browser.filter,
+                "Find a file in this folder",
+                cx,
+            ))
             .child(
                 toggle(
                     "files-hidden",

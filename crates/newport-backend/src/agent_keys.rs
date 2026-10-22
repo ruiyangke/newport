@@ -5,10 +5,7 @@ use newport_platform::ipc::asynchronous::{self, Stream};
 use russh::keys::agent::client::AgentClient;
 
 pub async fn connect(source: Option<&str>) -> Result<AgentClient<Stream>, String> {
-    let selected = newport_platform::ipc::agent_relay::Source::parse(source)?;
-    if let Some(result) = crate::agent_relay::connect(selected).await {
-        return result.map(AgentClient::connect);
-    }
+    let selected = newport_platform::ssh_agent::Source::parse(source)?;
     let path = newport_platform::ssh_agent::source_path(selected).map_err(|e| e.to_string())?;
     asynchronous::connect_agent(path)
         .await

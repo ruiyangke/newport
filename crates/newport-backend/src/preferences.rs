@@ -94,6 +94,20 @@ impl Preferences {
 /// and whether Option is Meta in terminals. The window reads them from the
 /// file at startup and saves them here, so this process stays the file's only
 /// writer. Absent keys are unchanged.
+/// For a deleted server: drops its entries (projects, saved commands, the
+/// installed-agent record), so they don't outlive it.
+pub async fn forget_server(state: &Preferences, server_id: uuid::Uuid) -> Result<(), String> {
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        state.update(|values| {
+            projects::forget_server(values, server_id)?;
+            remote_apps::forget_server(values, server_id)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 pub async fn set_window_preferences(state: &Preferences, values: Value) -> Result<(), String> {
     let values = values
         .as_object()

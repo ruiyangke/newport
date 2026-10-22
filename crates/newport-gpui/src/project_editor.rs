@@ -1403,11 +1403,39 @@ impl CodeWorkspace {
             None if forward => 0,
             None => count - 1,
         };
-        if next < reviews {
-            self.review_document(self.navigator.documents.reviews[next].clone(), cx);
+        self.show_strip_tab(next, window, cx);
+    }
+    /// Tab `number` of the visible strip (1–8), or its last tab for 9.
+    pub(super) fn select_tab(
+        &mut self,
+        number: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        if let Some(terminal) = self
+            .terminal
+            .clone()
+            .filter(|t| self.terminal_visible && t.read(cx).contains_focus(window, cx))
+        {
+            terminal.update(cx, |t, cx| t.select_tab(number, window, cx));
+            return;
+        }
+        let count = self.navigator.documents.reviews.len() + self.buffers.len();
+        if let Some(index) = crate::navigation::tab_index(number, count) {
+            self.show_strip_tab(index, window, cx);
+        }
+    }
+    /// The strip lists kept/preview reviews, then source buffers.
+    fn show_strip_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let reviews = self.navigator.documents.reviews.len();
+        if index < reviews {
+            self.review_document(self.navigator.documents.reviews[index].clone(), cx);
             self.focus.focus(window, cx);
         } else {
-            self.open(self.buffers[next - reviews].path.clone(), window, cx);
+            self.open(self.buffers[index - reviews].path.clone(), window, cx);
         }
     }
     pub(super) fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2934,6 +2962,92 @@ mod interaction_tests {
             && v.navigator.documents.reviews.is_empty()));
     }
     #[gpui::test]
+    fn trackpad_scrolling_follows_the_finger_even_right_after_an_end(cx: &mut TestAppContext) {
+        let (view, cx, _) = fixture(cx);
+        let source: String = (0..5000)
+            .map(|i| format!("fn function_{i}(value: usize) -> usize {{ value * {i} }}\n"))
+            .collect();
+        view.update(cx, |v, _| {
+            v.test_rpc = Some(Arc::new(move |method, args| match method {
+                "files_read_text" => {
+                    Ok(json!({"path":args["path"],"content":source.clone(),"revision":"r"}))
+                }
+                _ => Ok(json!({"path":args["path"],"entries":[]})),
+            }));
+        });
+        cx.simulate_resize(gpui::size(px(1100.), px(800.)));
+        open(&view, cx, "/repo/big.rs");
+        // As in the app: motion on, where an elastic edge would stretch.
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        let editor = view.read_with(cx, |v, _| v.buffers[0].editor.clone());
+        let size = cx.update(|window, _| window.viewport_size());
+        let at = gpui::point(size.width * 0.6, size.height * 0.5);
+        let offset =
+            |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.scroll_offset().y.as_f32());
+        // What a trackpad sends: a phased drag, then phaseless momentum.
+        let gesture = |cx: &mut VisualTestContext, dy: f32, moves: usize, momentum: usize| {
+            let mut send = |dy: f32, touch_phase| {
+                cx.simulate_event(gpui::ScrollWheelEvent {
+                    position: at,
+                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(dy))),
+                    touch_phase,
+                    ..Default::default()
+                });
+                draw(cx);
+            };
+            send(0., gpui::TouchPhase::Started);
+            (0..moves).for_each(|_| send(dy, gpui::TouchPhase::Moved));
+            send(0., gpui::TouchPhase::Ended);
+            (0..momentum).for_each(|_| send(dy, gpui::TouchPhase::Moved));
+        };
+        let start = offset(cx);
+        gesture(cx, -15., 40, 40);
+        assert_eq!(
+            start - offset(cx),
+            1200.,
+            "drag and momentum move the text 1:1"
+        );
+        // A fling back into the top, and at once a drag down: the text moves
+        // the whole way, with no stretched edge to ease back first.
+        gesture(cx, 150., 10, 20);
+        assert_eq!(offset(cx), 0.);
+        gesture(cx, -15., 20, 0);
+        assert_eq!(offset(cx), -300.);
+    }
+    #[gpui::test]
+    fn numbered_tabs_follow_the_strip_and_nine_is_the_last(cx: &mut TestAppContext) {
+        let (view, cx, _) = fixture(cx);
+        for name in ["one", "two", "three"] {
+            open(&view, cx, &format!("/repo/{name}.rs"));
+        }
+        view.update(cx, |v, _| {
+            v.navigator
+                .documents
+                .open(project_documents::ReviewDocument {
+                    key: project_documents::ReviewKey::Commit("123456789".into()),
+                    entry: json!({"oid":{"hex":"123456789"}}),
+                    status: Value::Null.into(),
+                    preview: false,
+                });
+        });
+        let select = |cx: &mut gpui::VisualTestContext, number| {
+            view.update_in(cx, |v, window, cx| v.select_tab(number, window, cx));
+            draw(cx);
+        };
+        // The strip shows the review first, then the sources.
+        select(cx, 1);
+        assert!(view.read_with(cx, |v, _| v.reviewing));
+        select(cx, 3);
+        assert!(view.read_with(cx, |v, _| !v.reviewing && v.active == Some(1)));
+        select(cx, 9);
+        assert!(view.read_with(cx, |v, _| v.active == Some(2)));
+        select(cx, 7);
+        assert!(
+            view.read_with(cx, |v, _| v.active == Some(2)),
+            "no seventh tab"
+        );
+    }
+    #[gpui::test]
     fn typing_during_save_or_reload_never_replaces_newer_edits(cx: &mut TestAppContext) {
         let (view, cx, _) = fixture(cx);
         open(&view, cx, "/repo/main.rs");
@@ -3147,6 +3261,19 @@ mod interaction_tests {
         click(cx, "main.rs •");
         click(cx, "Changes");
         assert!(view.read_with(cx, |v, cx| !v.reviewing && v.dirty(cx)));
+        // The tabs and the panel beneath them share one left edge.
+        let (tab, search) = cx.update(|window, _| {
+            let nodes = gpui::base::test_support::snapshots(window);
+            let find = |label: &str| {
+                nodes
+                    .iter()
+                    .find(|e| e.label() == Some(label))
+                    .unwrap_or_else(|| panic!("missing {label}"))
+                    .bounds()
+            };
+            (find("Changes"), find("Find a changed file"))
+        });
+        assert_eq!(tab.left(), search.left(), "{tab:?} {search:?}");
         assert_eq!(
             editor.read_with(cx, |e, _| e.value().to_string()),
             "unsaved source"

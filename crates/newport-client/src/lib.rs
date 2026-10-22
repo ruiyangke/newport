@@ -1,7 +1,6 @@
 //! Desktop backend client, independent of any UI framework.
 //! Owns IPC, operation dispatch, and terminal session transport.
 pub mod account;
-pub mod agent_relay;
 pub mod appearance;
 pub mod backend;
 pub mod compose_activity;

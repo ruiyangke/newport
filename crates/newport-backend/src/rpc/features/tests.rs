@@ -12,7 +12,7 @@ struct FeatureHost {
 impl rpc::Host for FeatureHost {
     async fn dispatch(&self, method: &str, args: Value) -> Result<Value, Value> {
         Command::parse(method)
-            .ok_or_else(|| json!("Unknown native command"))?
+            .ok_or_else(|| json!("Unknown command"))?
             .dispatch(
                 &Services {
                     manager: &self.manager,
@@ -24,8 +24,18 @@ impl rpc::Host for FeatureHost {
             )
             .await
     }
-    async fn open_terminal(&self, _: rpc::TerminalOpen) -> Result<Box<dyn Send>, String> {
-        Err("Terminal leases have their own fixtures".into())
+    /// Validation only: these fixtures open no SSH session.
+    async fn open_terminal(&self, request: rpc::TerminalOpen) -> Result<Box<dyn Send>, String> {
+        crate::commands::terminal_open(
+            &self.manager,
+            &self.terminals,
+            request.id,
+            request.session,
+            request.cols,
+            request.rows,
+        )
+        .await?;
+        Ok(Box::new(()))
     }
 }
 
@@ -228,11 +238,6 @@ async fn native_feature_routes_preserve_validation_before_any_remote_action() {
             "Not a valid Compose command",
         ),
         (
-            "terminal_open",
-            json!({"id":id,"session":session,"cols":0,"rows":24}),
-            "Invalid terminal dimensions",
-        ),
-        (
             "terminal_resize",
             json!({"session":session,"cols":80,"rows":301}),
             "Invalid terminal dimensions",
@@ -242,11 +247,22 @@ async fn native_feature_routes_preserve_validation_before_any_remote_action() {
             json!({"session":session,"data":vec![0;65537]}),
             "Terminal input is too large",
         ),
-        ("fixture.unknown", json!({}), "Unknown native command"),
+        ("fixture.unknown", json!({}), "Unknown command"),
     ] {
         let error = fixture.call(method, args).await.unwrap_err();
         assert!(error.contains(expected), "{method}: {error}");
     }
+    // Terminals open through a lease; an invalid size is refused there.
+    let endpoint = fixture.endpoint.clone();
+    let refused = tokio::task::spawn_blocking(move || {
+        newport_client::backend::Backend::at_path(endpoint)
+            .open_terminal_lease(json!({"id":id,"session":session,"cols":0,"rows":24}))
+            .map(drop)
+    })
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(refused.contains("Invalid terminal dimensions"), "{refused}");
     // Rejected terminal opens did not insert a session or start SSH.
     let error = fixture
         .call("terminal_read", json!({"session":session}))

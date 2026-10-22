@@ -480,11 +480,14 @@ async fn server_deletion_keeps_history_exclusive_without_blocking_snapshots() {
         let state = state.clone();
         let metrics = metrics.clone();
         async move {
+            let directory = tempfile::tempdir().unwrap();
+            let preferences = crate::preferences::Preferences::open(directory.path()).unwrap();
             commands::delete_server(
                 &crate::files::Operations::default(),
                 &crate::terminal::Sessions::default(),
                 &state,
                 &metrics,
+                &preferences,
                 tunnel.server_id,
             )
             .await

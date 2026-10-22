@@ -72,7 +72,7 @@ async fn agent(session: &ExecSession) -> Stream {
         ))
         .await
         .unwrap();
-    assert_eq!(receive(&mut agent, b'R').await, b"newport-agent/6");
+    assert_eq!(receive(&mut agent, b'R').await, b"newport-agent/1");
     agent
 }
 async fn stop(agent: &mut Stream) {

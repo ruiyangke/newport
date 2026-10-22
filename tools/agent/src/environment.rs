@@ -1,4 +1,8 @@
-//! Shell exports for the currently enabled integrations.
+//! Shell exports for the currently enabled integrations. A shell may keep
+//! them for months (tmux), so every value stays valid across sessions:
+//! commands that resolve the live session when they run, the session ID the
+//! desktop derives from its profile and the server, and display paths
+//! through the desktop's alias.
 use std::{
     env, fs,
     io::{self, Write},
@@ -20,9 +24,17 @@ pub fn print(args: &[String]) -> io::Result<()> {
             ))
         }
     };
-    let selection = crate::routing::select(None)?;
-    let root = selection.root;
     let home = env::var("HOME").map_err(io::Error::other)?;
+    let selection = match crate::routing::select(None) {
+        Ok(selection) => selection,
+        // Needle's commands still go on PATH: they find a session when run.
+        Err(error) => {
+            eprintln!("newport-agent: {error}");
+            let output = render(&home, Path::new(""), "", None, false, fish);
+            return io::stdout().lock().write_all(output.as_bytes());
+        }
+    };
+    let root = selection.root;
     let features = match fs::read_to_string(root.join("features")) {
         Ok(value) => value,
         Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
@@ -33,8 +45,21 @@ pub fn print(args: &[String]) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
     };
+    // Display paths through the desktop's alias outlive this session.
+    let shown = fs::read_to_string(root.join("agent-client"))
+        .ok()
+        .and_then(|client| crate::paths::client_alias(&root, client.trim()))
+        .filter(|alias| fs::canonicalize(alias).ok() == fs::canonicalize(&root).ok())
+        .unwrap_or_else(|| root.clone());
+    // A shell still holding another Newport session's display takes this one.
+    let stale = ["XAUTHORITY", "WAYLAND_DISPLAY"].iter().any(|name| {
+        env::var(name).is_ok_and(|value| {
+            value.starts_with("/tmp/newport-runtime-")
+                || crate::paths::integration_display_path(&value)
+        })
+    });
     // Generate everything before writing: callers must never evaluate partial output.
-    let mut output = render(&home, &root, &features, display.as_deref(), fish);
+    let mut output = render(&home, &shown, &features, display.as_deref(), stale, fish);
     if let Some(id) = selection.session {
         output.push_str(&if fish {
             format!("set -gx NEWPORT_SESSION '{id}'\n")
@@ -45,7 +70,14 @@ pub fn print(args: &[String]) -> io::Result<()> {
     io::stdout().lock().write_all(output.as_bytes())
 }
 
-fn render(home: &str, root: &Path, features: &str, display: Option<&str>, fish: bool) -> String {
+fn render(
+    home: &str,
+    root: &Path,
+    features: &str,
+    display: Option<&str>,
+    stale: bool,
+    fish: bool,
+) -> String {
     let quote = |s: &str| {
         if fish {
             format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
@@ -78,7 +110,9 @@ fn render(home: &str, root: &Path, features: &str, display: Option<&str>, fish: 
         let authority = root.join("Xauthority").to_string_lossy().into_owned();
         // Do not redirect applications in an existing graphical desktop session.
         // Existing Newport shells may refresh their display after reconnection.
-        output.push_str(&if fish {
+        output.push_str(&if stale {
+            if fish { "if true\n" } else { "if true; then\n" }.to_owned()
+        } else if fish {
             format!("if begin; not set -q DISPLAY[1]; and not set -q WAYLAND_DISPLAY[1]; end; or test \"$XAUTHORITY\" = {}; or test \"$WAYLAND_DISPLAY\" = {}\n", quote(&authority), quote(&socket))
         } else {
             format!("if {{ [ -z \"${{DISPLAY-}}\" ] && [ -z \"${{WAYLAND_DISPLAY-}}\" ]; }} || [ \"${{XAUTHORITY-}}\" = {} ] || [ \"${{WAYLAND_DISPLAY-}}\" = {} ]; then\n", quote(&authority), quote(&socket))
@@ -108,6 +142,7 @@ mod tests {
             Path::new("/tmp/clip"),
             "browser clipboard",
             Some(":99"),
+            false,
             false,
         );
         let result = std::process::Command::new("bash")

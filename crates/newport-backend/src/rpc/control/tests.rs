@@ -120,9 +120,9 @@ async fn connections_query_returns_immediately_and_shares_backend_owned_refresh(
 }
 
 #[tokio::test]
-async fn removal_routes_require_reviewed_connection_build_and_existing_restore_intent() {
+async fn uninstall_requires_the_reviewed_connection_and_never_connects_when_stale() {
     let fixture = Fixture::start().await;
-    let server: Server = serde_json::from_value(json!({"id":Uuid::new_v4(),"name":"Removal scope", "sshHost":"127.0.0.1", "sshPort":9,"sshUser":"fixture"})).unwrap();
+    let server: Server = serde_json::from_value(json!({"id":Uuid::new_v4(),"name":"Uninstall scope", "sshHost":"127.0.0.1", "sshPort":9,"sshUser":"fixture"})).unwrap();
     fixture
         .manager
         .lock()
@@ -130,9 +130,7 @@ async fn removal_routes_require_reviewed_connection_build_and_existing_restore_i
         .config
         .servers
         .push(server.clone());
-    let id = Uuid::new_v4();
-    let args = json!({"expectedConnection":server,"operationId":id,"build":"a".repeat(64)});
-    let mut stale = args.clone();
+    let mut stale = json!({"expectedConnection":server});
     stale["expectedConnection"]["sshPort"] = 10.into();
     assert!(
         fixture
@@ -144,30 +142,12 @@ async fn removal_routes_require_reviewed_connection_build_and_existing_restore_i
     assert!(fixture.call("inspect_agent", json!({})).await.is_err());
     assert!(
         fixture
-            .call("remove_agent", stale)
+            .call("uninstall_agent", stale)
             .await
             .unwrap_err()
             .contains("connection changed")
     );
-    let mut invalid = args.clone();
-    invalid["build"] = "invalid".into();
-    assert!(
-        fixture
-            .call("remove_agent", invalid)
-            .await
-            .unwrap_err()
-            .contains("Invalid")
-    );
-    let mut absent = args.clone();
-    absent.as_object_mut().unwrap().remove("build");
-    assert!(fixture.call("remove_agent", absent.clone()).await.is_err());
-    assert!(
-        fixture
-            .call("restore_removed_agent", absent)
-            .await
-            .unwrap_err()
-            .contains("not found")
-    );
+    assert!(fixture.call("uninstall_agent", json!({})).await.is_err());
     let owner = fixture
         .manager
         .lock()
@@ -177,62 +157,9 @@ async fn removal_routes_require_reviewed_connection_build_and_existing_restore_i
         .unwrap();
     assert!(
         owner.connected_lease().await.is_none(),
-        "invalid removal requests must not connect"
+        "invalid uninstall requests must not connect"
     );
 }
-#[tokio::test]
-async fn standalone_helper_restore_requires_current_connection_and_valid_ownership_before_connecting()
- {
-    let fixture = Fixture::start().await;
-    let server: Server = serde_json::from_value(json!({"id":Uuid::new_v4(),"name":"Helper scope", "sshHost":"127.0.0.1", "sshPort":9,"sshUser":"fixture"})).unwrap();
-    fixture
-        .manager
-        .lock()
-        .await
-        .config
-        .servers
-        .push(server.clone());
-    let id = Uuid::new_v4();
-    let args = json!({"expectedConnection":server,"operationId":id,"build":"a".repeat(64),"fingerprint":"b".repeat(64)});
-    let mut stale = args.clone();
-    stale["expectedConnection"]["sshPort"] = 10.into();
-    assert!(
-        fixture
-            .call("restore_standalone_helpers", stale)
-            .await
-            .unwrap_err()
-            .contains("connection changed")
-    );
-    for field in ["build", "fingerprint", "operationId"] {
-        let mut invalid = args.clone();
-        invalid[field] = "invalid".into();
-        assert!(
-            fixture
-                .call("restore_standalone_helpers", invalid)
-                .await
-                .is_err()
-        );
-    }
-    let owner = fixture.manager.lock().await.sessions.session(&server, 0);
-    owner
-        .lifecycle
-        .receipts
-        .begin_helper_recovery(&server, id, &"a".repeat(64), &"c".repeat(64))
-        .await
-        .unwrap();
-    assert!(
-        fixture
-            .call("restore_standalone_helpers", args)
-            .await
-            .unwrap_err()
-            .contains("identity changed")
-    );
-    assert!(
-        owner.connected_lease().await.is_none(),
-        "invalid requests must not connect"
-    );
-}
-
 impl DesktopIntegration for DesktopProbe {
     fn on_main_thread(&self, action: Box<dyn FnOnce() + Send>) -> Result<(), String> {
         action();
@@ -263,6 +190,7 @@ struct ControlHost {
     metrics: MetricsDb,
     files: Arc<crate::files::Operations>,
     terminals: crate::terminal::Sessions,
+    preferences: crate::preferences::Preferences,
     desktop: Arc<DesktopProbe>,
 }
 impl rpc::Host for ControlHost {
@@ -276,6 +204,7 @@ impl rpc::Host for ControlHost {
                     metrics: &self.metrics,
                     files: &self.files,
                     terminals: &self.terminals,
+                    preferences: &self.preferences,
                     desktop: self.desktop.clone(),
                 },
                 &args,
@@ -316,6 +245,7 @@ impl Fixture {
             metrics: metrics.clone(),
             files: files.clone(),
             terminals: Default::default(),
+            preferences: crate::preferences::Preferences::open(directory.path()).unwrap(),
             desktop: desktop.clone(),
         }));
         Self {

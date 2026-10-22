@@ -121,6 +121,11 @@ impl DownloadCleanup {
         queue
     }
 
+    /// Loaded, with nothing left to clean up.
+    pub(super) fn finished(&self) -> bool {
+        self.load_error.is_none() && self.entries.is_empty()
+    }
+
     fn persist(&self) -> Result<()> {
         if let Some(error) = &self.load_error {
             bail!("{error}");
@@ -173,6 +178,16 @@ impl DownloadCleanup {
         {
             self.entries.insert(id, entry);
             log::warn!("Could not retire download recovery record: {error}");
+        }
+    }
+
+    /// Removes every partial file this journal records, as for a server that
+    /// was deleted.
+    pub(super) fn remove_all_staging(&mut self) {
+        for id in self.entries.keys().copied().collect::<Vec<_>>() {
+            if let Err(error) = self.remove_staging(id) {
+                log::warn!("Could not remove download staging: {error}");
+            }
         }
     }
 

@@ -1,15 +1,11 @@
 //! Window placement belongs to the isolated native client, never the backend.
+//! It is saved with the workspace in `ui-state.json` (see `ui_state`).
 use gpui_kit::{App, Bounds, Window, WindowBounds, point, px, size};
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    io::{self, Write},
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-struct Placement {
+pub(super) struct Placement {
     x: f32,
     y: f32,
     width: f32,
@@ -20,6 +16,23 @@ struct Placement {
 }
 
 impl Placement {
+    #[cfg(test)]
+    pub(super) fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+            maximized: false,
+            display_uuid: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn width(self) -> f32 {
+        self.width
+    }
+
     fn from_bounds(bounds: Bounds<gpui_kit::Pixels>) -> Self {
         Self {
             x: bounds.origin.x.into(),
@@ -65,32 +78,26 @@ impl Placement {
 }
 
 pub struct WindowState {
-    path: Option<PathBuf>,
     placement: Placement,
     display_id: Option<gpui_kit::DisplayId>,
     pending: Option<(Placement, Instant)>,
+    /// The settled placement changed since it was last taken for saving.
+    changed: bool,
 }
 
 impl WindowState {
-    pub fn load(cx: &App) -> Self {
-        let path = newport_client::profile::directory().map(|p| p.join("gpui-window-state.json"));
+    /// The window's placement from the saved state, fitted to a display that
+    /// is still there, or a centered default.
+    pub fn load(saved: Option<Placement>, cx: &App) -> Self {
         let fallback =
             Placement::from_bounds(Bounds::centered(None, size(px(1074.), px(726.)), cx));
-        let mut placement = path
-            .as_ref()
-            .and_then(|path| match fs::read(path) {
-                Ok(bytes) => match serde_json::from_slice::<Placement>(&bytes) {
-                    Ok(value) if value.valid() => Some(value),
-                    _ => {
-                        eprintln!("Invalid native window state; using default placement");
-                        None
-                    }
-                },
-                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-                Err(error) => {
-                    eprintln!("Could not load native window state: {error}");
-                    None
+        let mut placement = saved
+            .filter(|placement| {
+                let valid = placement.valid();
+                if !valid {
+                    eprintln!("Invalid native window state; using default placement");
                 }
+                valid
             })
             .unwrap_or(fallback);
         // macOS GPUI bounds are display-local. Stable UUIDs survive display-ID changes.
@@ -107,10 +114,10 @@ impl WindowState {
             placement.display_uuid = display.uuid().ok().map(|id| *id.as_bytes());
         }
         Self {
-            path,
             placement,
             display_id: display.map(|d| d.id()),
             pending: None,
+            changed: false,
         }
     }
 
@@ -162,6 +169,7 @@ impl WindowState {
                 let display_uuid = self.placement.display_uuid;
                 self.placement = Placement::from_bounds(bounds);
                 self.placement.display_uuid = display_uuid;
+                self.changed = true;
             }
             self.pending = None;
             return;
@@ -170,6 +178,7 @@ impl WindowState {
             self.pending = None;
             self.placement.maximized = true;
             self.placement.display_uuid = display_uuid;
+            self.changed = true;
         } else {
             let mut placement = Placement::from_bounds(bounds.get_bounds());
             placement.display_uuid = display_uuid;
@@ -178,40 +187,24 @@ impl WindowState {
     }
 
     /// Zoom emits normal-sized intermediate frames. Commit only after settling,
-    /// so they cannot replace the last normal restore bounds.
-    pub fn settle(&mut self) {
+    /// so they cannot replace the last normal restore bounds. Returns the
+    /// placement to save when the settled placement changed.
+    pub fn settle(&mut self) -> Option<Placement> {
         if self
             .pending
             .as_ref()
             .is_some_and(|(_, at)| at.elapsed() >= Duration::from_millis(500))
         {
             self.placement = self.pending.take().unwrap().0;
+            self.changed = true;
         }
+        std::mem::take(&mut self.changed).then_some(self.placement)
     }
 
-    pub fn save(&self) -> io::Result<()> {
-        let Some(path) = &self.path else {
-            return Ok(());
-        };
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-        let result = (|| {
-            let mut file = fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary)?;
-            // Quit may interrupt zoom. Save only settled geometry.
-            file.write_all(&serde_json::to_vec(&self.placement)?)?;
-            file.sync_all()?;
-            drop(file);
-            fs::rename(&temporary, path)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(temporary);
-        }
-        result
+    /// The settled placement. Quit may interrupt zoom, so a pending one is
+    /// never saved.
+    pub fn placement(&self) -> Placement {
+        self.placement
     }
 }
 
@@ -244,59 +237,49 @@ mod tests {
         assert!(!rect(0., 0., -1., 100.).valid());
     }
 
-    #[test]
-    fn atomically_saves_restore_bounds_and_maximized_state() {
-        let directory =
-            std::env::temp_dir().join(format!("newport-window-{}", uuid::Uuid::new_v4()));
-        let path = directory.join("state.json");
-        let mut state = WindowState {
-            path: Some(path.clone()),
-            placement: rect(15., 30., 900., 650.),
+    fn state(placement: Placement) -> WindowState {
+        WindowState {
+            placement,
             display_id: None,
             pending: None,
-        };
+            changed: false,
+        }
+    }
+
+    #[test]
+    fn only_settled_restore_bounds_and_maximized_state_are_saved() {
+        let mut state = state(rect(15., 30., 900., 650.));
         state.placement.maximized = true;
         // An animation interrupted by Quit must not replace the normal bounds.
         state.pending = Some((rect(0., 0., 1700., 1000.), std::time::Instant::now()));
-        state.save().unwrap();
-        let restored: Placement = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert!(restored.maximized);
-        assert_eq!((restored.x, restored.width), (15., 900.));
+        assert!(state.settle().is_none(), "nothing settled yet");
+        let saved = state.placement();
+        assert!(saved.maximized);
+        assert_eq!((saved.x, saved.width), (15., 900.));
         state.pending = Some((
             rect(20., 40., 950., 700.),
             std::time::Instant::now() - std::time::Duration::from_secs(1),
         ));
-        state.settle();
-        state.save().unwrap();
-        let restored: Placement = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert!(!restored.maximized);
-        assert_eq!((restored.x, restored.width), (20., 950.));
-        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
-        std::fs::remove_dir_all(directory).unwrap();
+        let saved = state.settle().expect("a settled resize is saved");
+        assert!(!saved.maximized);
+        assert_eq!((saved.x, saved.width), (20., 950.));
+        assert!(state.settle().is_none(), "saved once");
     }
 
     #[test]
     fn minimized_notifications_preserve_the_saved_restore_mode() {
-        let directory =
-            std::env::temp_dir().join(format!("newport-minimized-{}", uuid::Uuid::new_v4()));
-        let path = directory.join("state.json");
-        let mut state = WindowState {
-            path: Some(path.clone()),
-            placement: rect(15., 30., 900., 650.),
-            display_id: None,
-            pending: None,
-        };
+        let mut state = state(rect(15., 30., 900., 650.));
         let display = Some([1; 16]);
         state.capture_observed(rect(0., 0., 1600., 1000.).bounds(), true, false, display);
+        assert!(state.settle().is_some_and(|saved| saved.maximized));
         // Windows emits a move on minimize, with IsZoomed=false and normal
         // restore bounds even when it will restore the window maximized.
         state.capture_observed(rect(15., 30., 900., 650.).bounds(), false, true, None);
         if let Some((_, at)) = &mut state.pending {
             *at -= std::time::Duration::from_secs(1);
         }
-        state.settle();
-        state.save().unwrap();
-        let saved: Placement = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(state.settle().is_none(), "minimizing changes nothing");
+        let saved = state.placement();
         assert!(
             saved.maximized,
             "Minimize must not discard the restore mode"
@@ -310,11 +293,8 @@ mod tests {
         // An actual unmaximize still updates the saved normal placement.
         state.capture_observed(rect(25., 40., 950., 700.).bounds(), false, false, display);
         state.pending.as_mut().unwrap().1 -= std::time::Duration::from_secs(1);
-        state.settle();
-        state.save().unwrap();
-        let saved: Placement = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let saved = state.settle().unwrap();
         assert!(!saved.maximized);
         assert_eq!((saved.x, saved.width), (25., 950.));
-        std::fs::remove_dir_all(directory).unwrap();
     }
 }

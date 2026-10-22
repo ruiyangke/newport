@@ -18,7 +18,6 @@ const STALE: &str = "Server session changed. Reconnect before retrying.";
 pub struct Registry {
     pub(crate) connections: crate::connection_state::Store,
     routing_namespace: Option<Uuid>,
-    receipts: Arc<crate::lifecycle_receipts::Store>,
     entries: StdMutex<HashMap<Uuid, Published>>,
     pub(crate) connected: Arc<tokio::sync::Notify>,
     stopped: AtomicBool,
@@ -54,9 +53,6 @@ impl Registry {
                 Some(Uuid::new_v4())
             }
         };
-        registry.receipts = Arc::new(crate::lifecycle_receipts::Store::new(
-            directory.join("needle-operations.json"),
-        ));
         registry
     }
     pub(crate) fn get(&self, id: Uuid) -> Option<Arc<ServerSession>> {
@@ -115,12 +111,6 @@ impl Registry {
             .map(|owner| (owner.server.id, owner.agent_runtime.snapshot()))
             .collect()
     }
-    pub fn lifecycle_operations(&self) -> HashMap<Uuid, serde_json::Value> {
-        self.all()
-            .iter()
-            .map(|owner| (owner.server.id, owner.lifecycle_operations()))
-            .collect()
-    }
 
     pub(crate) fn all(&self) -> Vec<Arc<ServerSession>> {
         self.entries
@@ -174,7 +164,6 @@ impl Registry {
                 self.routing_id(server.id),
                 revision,
                 self.connected.clone(),
-                self.receipts.clone(),
                 None,
             ));
             stopped.cancelled.send_replace(true);
@@ -196,7 +185,6 @@ impl Registry {
             self.routing_id(server.id),
             revision,
             self.connected.clone(),
-            self.receipts.clone(),
             Some(self.connections.register(server.id, revision)),
         ));
         if let Some(previous) = entries.insert(
@@ -308,23 +296,6 @@ pub struct ServerSession {
 }
 
 impl ServerSession {
-    pub(crate) fn lifecycle_operations(&self) -> serde_json::Value {
-        match self.lifecycle.receipts.operations_snapshot(&self.server) {
-            Ok(rows) => {
-                let active = self
-                    .lifecycle
-                    .progress
-                    .snapshot()
-                    .filter(|p| p.stage != "ready" && p.stage != "error")
-                    .and_then(|p| p.operation_id);
-                serde_json::json!({"operations": rows.operations, "removals": rows.removals,
-                    "helperRecoveries": rows.helper_recoveries, "activeOperationId": active,
-                    "helperHistory": self.lifecycle.helper_history.snapshot()})
-            }
-            Err(error) => serde_json::json!({"error": error}),
-        }
-    }
-
     pub fn integration_session_id(&self) -> Uuid {
         self.session_id
     }
@@ -333,7 +304,6 @@ impl ServerSession {
         session_id: Uuid,
         revision: u64,
         connected: Arc<tokio::sync::Notify>,
-        receipts: Arc<crate::lifecycle_receipts::Store>,
         publication: Option<crate::connection_state::Publisher>,
     ) -> Self {
         let permissions = Arc::new(crate::integration_permissions::Gate::new(
@@ -355,7 +325,7 @@ impl ServerSession {
             connectivity: StdMutex::default(),
             created_at: std::time::Instant::now(),
             agent_runtime: crate::agent_runtime::Slot::new(permissions.clone()),
-            lifecycle: crate::agent_lifecycle::State::new(receipts),
+            lifecycle: crate::agent_lifecycle::State::default(),
             permissions,
             server,
             revision,
@@ -430,12 +400,6 @@ impl ServerSession {
         }
     }
 
-    pub(crate) fn require_agent_available(&self) -> Result<(), String> {
-        self.lifecycle
-            .receipts
-            .require_agent_available(&self.server)
-    }
-
     async fn close(&self) {
         self.close_queries();
         self.permissions.disconnected(None);
@@ -447,10 +411,10 @@ impl ServerSession {
     }
 
     async fn drain_agent_services(&self) -> Result<(), String> {
-        // Durable removal intent already denies new demand. Do not revoke the
-        // ServerSession or its transport; native SSH features retain ownership.
+        // Don't revoke the ServerSession or its transport; native SSH
+        // features keep ownership.
         self.permissions.disconnected(None);
-        self.integration.pause().await;
+        self.integration.stop().await;
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
             self.git.drain().await;
             self.monitor.drain().await;
@@ -544,10 +508,6 @@ impl Lease {
             Ok(())
         }
     }
-    pub(crate) fn require_agent_available(&self) -> Result<(), String> {
-        self.validate()?;
-        self.owner.upgrade().ok_or(STALE)?.require_agent_available()
-    }
     pub(crate) fn is_draining(&self) -> bool {
         self.runtime
             .lock()
@@ -590,7 +550,6 @@ impl Lease {
     ) -> Result<(crate::agent_runtime::WorkerStream, String), String> {
         self.validate()?;
         let owner = self.owner.upgrade().ok_or(STALE)?;
-        owner.require_agent_available()?;
         let (name, version) = service.capability();
         let worker = owner
             .agent_runtime
@@ -600,14 +559,15 @@ impl Lease {
                 self.generation,
                 name,
                 version,
-                || {
-                    self.validate()?;
-                    owner.require_agent_available()
-                },
+                || self.validate(),
             )
-            .await?;
+            .await
+            .inspect_err(|error| {
+                if error == agent::NOT_INSTALLED {
+                    owner.lifecycle.found_missing(self.generation);
+                }
+            })?;
         self.validate()?;
-        owner.require_agent_available()?;
         *self.runtime.lock().unwrap() = Some(worker.runtime.clone());
         *self.worker_id.lock().unwrap() = Some(worker.id);
         self.validate()?;
@@ -616,7 +576,6 @@ impl Lease {
                 .await
                 .map(|(stream, output)| (worker.stream(stream), output));
         self.validate()?;
-        owner.require_agent_available()?;
         result
     }
     pub async fn apply_permissions(
@@ -670,46 +629,25 @@ impl Lease {
                 .map_err(|_| "Permission state closed")?;
         }
     }
-    pub async fn install(&self, force: bool, integrations: bool) -> Result<String, String> {
-        let owner = self.owner.upgrade().ok_or(STALE)?;
-        let operation = owner
-            .lifecycle
-            .receipts
-            .for_server(self.connection.server())?
-            .into_iter()
-            .find(|r| {
-                !r.phase.terminal()
-                    && r.intent.kind.is_deployment()
-                    && r.intent.integrations == integrations
-            })
-            .map(|r| r.intent.operation_id)
-            .unwrap_or_else(Uuid::new_v4);
-        self.install_operation(force, integrations, operation).await
+    /// Installs or updates Needle, as the person asked.
+    pub async fn install(&self, integrations: bool) -> Result<String, String> {
+        self.run_lifecycle(crate::lifecycle_task::Action::Install { integrations })
+            .await
     }
-    pub async fn install_operation(
-        &self,
-        force: bool,
-        integrations: bool,
-        operation_id: Uuid,
-    ) -> Result<String, String> {
-        self.run_lifecycle(
-            operation_id,
-            crate::lifecycle_task::Action::Install { integrations },
-            force,
-        )
-        .await
+    /// Uninstalls Needle: nothing of it stays on the server. Final.
+    pub async fn uninstall(&self) -> Result<String, String> {
+        self.run_lifecycle(crate::lifecycle_task::Action::Uninstall)
+            .await
     }
-    async fn install_operation_inner(
+    async fn install_inner(
         &self,
-        force: bool,
         integrations: bool,
-        operation_id: Uuid,
         trigger: crate::agent_lifecycle::Trigger,
     ) -> Result<String, String> {
         use crate::agent_lifecycle::Trigger;
         self.validate()?;
         let owner = self.owner.upgrade().ok_or(STALE)?;
-        let operation = owner.lifecycle.operation.lock().await;
+        let _operation = owner.lifecycle.operation.lock().await;
         self.validate()?;
         if trigger != Trigger::Manual {
             // A feature waiting on a required update hears why it did not run.
@@ -717,17 +655,13 @@ impl Lease {
                 Trigger::Required => Err(message.to_owned()),
                 _ => Ok(message.to_owned()),
             };
-            // Recheck under lifecycle exclusion. A manual install, removal, or
-            // another desktop may have changed the target since discovery.
-            if !self.connection.server().agent_install_approved
-                || !owner
-                    .lifecycle
-                    .automatic_update_journal_clear(self.connection.server())?
-            {
+            if !self.connection.server().agent_install_approved {
                 return skip(
-                    "Another Needle operation on this server is unfinished. Finish it in Integrations.",
+                    "Needle installation requires approval. Open Overview to set up this server.",
                 );
             }
+            // Recheck under the lifecycle lock: a manual install, an
+            // uninstall or another desktop may have changed it since.
             let status = crate::agent_lifecycle::check(&self.connection).await;
             self.validate()?;
             owner.lifecycle.record(self.generation, &status);
@@ -735,22 +669,12 @@ impl Lease {
                 return skip("The installed Needle can’t be replaced automatically.");
             }
         }
-        let progress = owner.lifecycle.progress.attempt_for(Some(operation_id));
+        let progress = owner.lifecycle.progress.attempt();
         let result: Result<String, String> = async {
-            let deployment = crate::agent_lifecycle::manage(
-                &self.connection,
-                &progress,
-                force,
-                integrations,
-                &owner.lifecycle.receipts,
-                operation_id,
-                trigger,
-            )
-            .await?;
+            let deployment =
+                crate::agent_lifecycle::manage(&self.connection, &progress, integrations, trigger)
+                    .await?;
             self.validate()?;
-            if deployment.already_complete {
-                return Ok(deployment.output);
-            }
             progress.update("verifying", 0, 0, None);
             owner
                 .agent_runtime
@@ -765,377 +689,37 @@ impl Lease {
             let status = crate::agent_lifecycle::check(&self.connection).await;
             self.validate()?;
             owner.lifecycle.record(self.generation, &status);
-            owner
-                .lifecycle
-                .receipts
-                .update(
-                    operation_id,
-                    Some(crate::lifecycle_receipts::Phase::Ready),
-                    deployment.setup_notice,
-                )
-                .await?;
-            Ok(deployment.output)
+            Ok(match deployment.setup_notice {
+                Some(notice) => format!("{} {notice}", deployment.output),
+                None => deployment.output,
+            })
         }
         .await;
-        if let Err(error) = &result
-            && owner
-                .lifecycle
-                .receipts
-                .get(operation_id)?
-                .is_some_and(|r| {
-                    r.server_id == self.connection.server().id
-                        && r.connection
-                            == crate::lifecycle_receipts::scope(self.connection.server())
-                        && r.intent.kind.is_deployment()
-                        && r.intent.integrations == integrations
-                })
-        {
-            owner
-                .lifecycle
-                .receipts
-                .update(operation_id, None, Some(error.clone()))
-                .await?;
-        }
-        progress.finish(&result);
-        drop(operation);
-        result
-    }
-    pub async fn resume_installation(&self, id: Uuid) -> Result<String, String> {
-        let owner = self.owner.upgrade().ok_or(STALE)?;
-        let record = owner
-            .lifecycle
-            .receipts
-            .get(id)?
-            .ok_or("Needle operation not found")?;
-        if record.intent.kind.is_deployment() {
-            self.install_operation(false, record.intent.integrations, id)
-                .await
-        } else {
-            self.configure_integrations_operation(id).await
-        }
-    }
-    pub async fn recover_installation(&self, id: Uuid) -> Result<String, String> {
-        self.run_lifecycle(id, crate::lifecycle_task::Action::Recover, false)
-            .await
-    }
-    pub async fn remove_agent(&self, id: Uuid, build: &str) -> Result<String, String> {
-        if !crate::agent_runtime::protocol::valid_build(build) {
-            return Err("Invalid Needle removal build".into());
-        }
-        self.run_lifecycle(
-            id,
-            crate::lifecycle_task::Action::Remove {
-                build: build
-                    .as_bytes()
-                    .try_into()
-                    .map_err(|_| "Invalid Needle removal build")?,
-            },
-            false,
-        )
-        .await
-    }
-
-    pub async fn restore_removed_agent(&self, id: Uuid) -> Result<String, String> {
-        self.run_lifecycle(id, crate::lifecycle_task::Action::RestoreRemoval, false)
-            .await
-    }
-
-    pub async fn restore_standalone_helpers(
-        &self,
-        id: Uuid,
-        build: &str,
-        fingerprint: &str,
-    ) -> Result<String, String> {
-        let valid = crate::agent_runtime::protocol::valid_build;
-        if id.is_nil() || !valid(build) || !valid(fingerprint) {
-            return Err("Invalid standalone helper restoration request".into());
-        }
-        self.run_lifecycle(
-            id,
-            crate::lifecycle_task::Action::RestoreHelpers {
-                build: build
-                    .as_bytes()
-                    .try_into()
-                    .map_err(|_| "Invalid helper build")?,
-                ownership: fingerprint
-                    .as_bytes()
-                    .try_into()
-                    .map_err(|_| "Invalid helper ownership")?,
-            },
-            false,
-        )
-        .await
-    }
-
-    async fn restore_standalone_helpers_inner(
-        &self,
-        id: Uuid,
-        build: &str,
-        fingerprint: &str,
-    ) -> Result<String, String> {
-        self.validate()?;
-        let owner = self.owner.upgrade().ok_or(STALE)?;
-        let _guard = owner.lifecycle.operation.lock().await;
-        self.validate()?;
-        let progress = owner.lifecycle.progress.attempt_for(Some(id));
-        progress.update("restoring-helpers", 0, 0, None);
-        let result = crate::agent_lifecycle::helpers::recovery::restore(
-            &self.connection,
-            &owner.lifecycle.receipts,
-            id,
-            build,
-            fingerprint,
-            || self.validate(),
-        )
-        .await;
-        self.validate()?;
-        owner.lifecycle.helper_history.invalidate();
         progress.finish(&result);
         result
     }
-
-    async fn removal_inner(&self, id: Uuid, build: Option<&str>) -> Result<String, String> {
-        use crate::lifecycle_receipts::RemovalPhase;
+    async fn uninstall_inner(&self) -> Result<String, String> {
         self.validate()?;
         let owner = self.owner.upgrade().ok_or(STALE)?;
         let _operation = owner.lifecycle.operation.lock().await;
         self.validate()?;
-        let progress = owner.lifecycle.progress.attempt_for(Some(id));
-        progress.update(
-            if build.is_some() {
-                "removing"
-            } else {
-                "restoring"
-            },
-            0,
-            0,
-            None,
-        );
+        let progress = owner.lifecycle.progress.attempt();
+        progress.update("uninstalling", 0, 0, None);
         let result: Result<String, String> = async {
-            let record = match build {
-                Some(build) => {
-                    crate::agent_lifecycle::removal::prepare(
-                        &self.connection,
-                        &owner.lifecycle.receipts,
-                        id,
-                        build,
-                    )
-                    .await?
-                }
-                None => owner
-                    .lifecycle
-                    .receipts
-                    .removal(self.connection.server(), id)?
-                    .ok_or("Needle removal not found")?,
-            };
-            self.validate()?;
-            if record.phase == RemovalPhase::Restored {
-                if build.is_none() && owner.require_agent_available().is_ok() {
-                    owner.integration.resume(owner.clone()).await?;
-                }
-                return Ok("This Needle removal was already restored or cancelled.".into());
-            }
-            if build.is_some() && record.phase == RemovalPhase::Removed {
-                return Ok("This Needle removal already completed.".into());
-            }
-            if build.is_some() && record.phase == RemovalPhase::Restoring {
-                return Err(
-                    "Continue restoring this removal before starting another operation.".into(),
-                );
-            }
-            // Persist the recovery decision before draining. Restart must not
-            // turn an interrupted restore into a new attempt at removing files.
-            let record = if build.is_none() && record.phase != RemovalPhase::Restoring {
-                owner
-                    .lifecycle
-                    .receipts
-                    .update_removal(
-                        self.connection.server(),
-                        id,
-                        record.phase,
-                        RemovalPhase::Restoring,
-                        None,
-                    )
-                    .await?
-            } else {
-                record
-            };
             owner.drain_agent_services().await?;
             self.validate()?;
-            let message = crate::agent_lifecycle::removal::execute(
-                &self.connection,
-                &owner.lifecycle.receipts,
-                record,
-                build.is_none(),
-            )
-            .await?;
+            crate::agent_lifecycle::uninstall(&self.connection).await?;
             self.validate()?;
             let status = crate::agent_lifecycle::check(&self.connection).await;
             self.validate()?;
             owner.lifecycle.record(self.generation, &status);
-            if owner
-                .lifecycle
-                .receipts
-                .require_agent_available(self.connection.server())
-                .is_ok()
-                && let Err(error) = owner.integration.resume(owner.clone()).await
-            {
-                return Ok(format!(
-                    "{message} Integration reconnection failed: {error}"
-                ));
-            }
-            Ok(message)
+            Ok("Needle uninstalled. SSH terminals and forwarding remain available.".into())
         }
         .await;
-        if let Err(error) = &result
-            && let Some(record) = owner
-                .lifecycle
-                .receipts
-                .removal(self.connection.server(), id)?
-        {
-            owner
-                .lifecycle
-                .receipts
-                .update_removal(
-                    self.connection.server(),
-                    id,
-                    record.phase,
-                    record.phase,
-                    Some(error.clone()),
-                )
-                .await?;
-        }
         progress.finish(&result);
         result
     }
-    async fn recover_installation_inner(&self, id: Uuid) -> Result<String, String> {
-        self.validate()?;
-        let owner = self.owner.upgrade().ok_or(STALE)?;
-        let _operation = owner.lifecycle.operation.lock().await;
-        self.validate()?;
-        let progress = owner.lifecycle.progress.attempt_for(Some(id));
-        progress.update("recovering", 0, 0, None);
-        let result = async {
-            let previous =
-                crate::agent_lifecycle::recover(&self.connection, &owner.lifecycle.receipts, id)
-                    .await?;
-            self.validate()?;
-            let mut message = if owner
-                .lifecycle
-                .receipts
-                .get(id)?
-                .is_some_and(|r| !r.intent.kind.is_deployment())
-            {
-                "Shell setup restored. Needle was left unchanged."
-            } else {
-                "Unfinished Needle installation restored."
-            }
-            .to_owned();
-            if let Some(previous) = previous {
-                if previous == "missing" {
-                    owner.agent_runtime.reset().await;
-                } else {
-                    if let Err(error) = owner
-                        .agent_runtime
-                        .adopt(
-                            &self.connection,
-                            owner.session_id,
-                            self.generation,
-                            &previous,
-                            || self.validate(),
-                        )
-                        .await
-                    {
-                        self.validate()?;
-                        // Restoration is explicit and may return to an older
-                        // build that cannot host the current control protocol.
-                        // Stop this desktop runtime instead of leaving recovery
-                        // permanently unfinished after confirmed remote rollback.
-                        owner.agent_runtime.reset().await;
-                        message = format!(
-                            "Previous installation restored. Agent services stopped: {error}"
-                        );
-                    }
-                }
-            }
-            let status = crate::agent_lifecycle::check(&self.connection).await;
-            self.validate()?;
-            owner.lifecycle.record(self.generation, &status);
-            owner
-                .lifecycle
-                .receipts
-                .update(id, Some(crate::lifecycle_receipts::Phase::RolledBack), None)
-                .await?;
-            Ok::<_, String>(message)
-        }
-        .await;
-        if let Err(error) = &result
-            && owner.lifecycle.receipts.get(id)?.is_some_and(|r| {
-                r.server_id == self.connection.server().id
-                    && r.connection == crate::lifecycle_receipts::scope(self.connection.server())
-            })
-        {
-            owner
-                .lifecycle
-                .receipts
-                .update(id, None, Some(error.clone()))
-                .await?;
-        }
-        progress.finish(&result);
-        result
-    }
-    pub async fn configure_integrations(&self) -> Result<String, String> {
-        let owner = self.owner.upgrade().ok_or(STALE)?;
-        let id = owner
-            .lifecycle
-            .receipts
-            .for_server(self.connection.server())?
-            .into_iter()
-            .find(|r| !r.phase.terminal() && !r.intent.kind.is_deployment())
-            .map(|r| r.intent.operation_id)
-            .unwrap_or_else(Uuid::new_v4);
-        self.configure_integrations_operation(id).await
-    }
-    pub async fn configure_integrations_operation(&self, id: Uuid) -> Result<String, String> {
-        self.run_lifecycle(id, crate::lifecycle_task::Action::Helpers, false)
-            .await
-    }
-    async fn configure_integrations_operation_inner(&self, id: Uuid) -> Result<String, String> {
-        self.validate()?;
-        let owner = self.owner.upgrade().ok_or(STALE)?;
-        let _operation = owner.lifecycle.operation.lock().await;
-        self.validate()?;
-        let progress = owner.lifecycle.progress.attempt_for(Some(id));
-        progress.update("configuring", 0, 0, None);
-        let result = crate::agent_lifecycle::configure_integrations(
-            &self.connection,
-            &owner.lifecycle.receipts,
-            id,
-        )
-        .await;
-        self.validate()?;
-        if let Err(error) = &result
-            && owner.lifecycle.receipts.get(id)?.is_some_and(|r| {
-                r.server_id == self.connection.server().id
-                    && r.connection == crate::lifecycle_receipts::scope(self.connection.server())
-                    && !r.intent.kind.is_deployment()
-            })
-        {
-            owner
-                .lifecycle
-                .receipts
-                .update(id, None, Some(error.clone()))
-                .await?;
-        }
-        progress.finish(&result);
-        result
-    }
-    async fn run_lifecycle(
-        &self,
-        id: Uuid,
-        action: crate::lifecycle_task::Action,
-        force: bool,
-    ) -> Result<String, String> {
+    async fn run_lifecycle(&self, action: crate::lifecycle_task::Action) -> Result<String, String> {
         use crate::{
             agent_lifecycle::Trigger,
             lifecycle_task::{Action, Request},
@@ -1159,113 +743,24 @@ impl Lease {
             .tasks
             .run(
                 Request {
-                    id,
                     action,
                     generation: self.generation,
                 },
                 owner.cancellation(),
                 async move {
                     match action {
-                        Action::AutoUpdate => {
-                            lease
-                                .install_operation_inner(true, false, id, Trigger::Automatic)
-                                .await
-                        }
+                        Action::AutoUpdate => lease.install_inner(false, Trigger::Automatic).await,
                         Action::RequiredUpdate => {
-                            lease
-                                .install_operation_inner(true, false, id, Trigger::Required)
-                                .await
+                            lease.install_inner(false, Trigger::Required).await
                         }
                         Action::Install { integrations } => {
-                            lease
-                                .install_operation_inner(force, integrations, id, Trigger::Manual)
-                                .await
+                            lease.install_inner(integrations, Trigger::Manual).await
                         }
-                        Action::Helpers => lease.configure_integrations_operation_inner(id).await,
-                        Action::Recover => lease.recover_installation_inner(id).await,
-                        Action::Remove { build } => {
-                            lease
-                                .removal_inner(
-                                    id,
-                                    Some(
-                                        std::str::from_utf8(&build)
-                                            .map_err(|_| "Invalid Needle removal build")?,
-                                    ),
-                                )
-                                .await
-                        }
-                        Action::RestoreRemoval => lease.removal_inner(id, None).await,
-                        Action::RestoreHelpers { build, ownership } => {
-                            lease
-                                .restore_standalone_helpers_inner(
-                                    id,
-                                    std::str::from_utf8(&build)
-                                        .map_err(|_| "Invalid helper build")?,
-                                    std::str::from_utf8(&ownership)
-                                        .map_err(|_| "Invalid helper ownership")?,
-                                )
-                                .await
-                        }
-                        Action::Keep { index, fingerprint } => {
-                            let owner = lease.owner.upgrade().ok_or(STALE)?;
-                            let _guard = owner.lifecycle.operation.lock().await;
-                            lease.validate()?;
-                            let result = crate::agent_lifecycle::review_helpers(
-                                &lease.connection,
-                                &owner.lifecycle.receipts,
-                                id,
-                                Some((
-                                    index,
-                                    std::str::from_utf8(&fingerprint).map_err(|e| e.to_string())?,
-                                )),
-                            )
-                            .await?;
-                            lease.validate()?;
-                            serde_json::to_string(&result).map_err(|e| e.to_string())
-                        }
+                        Action::Uninstall => lease.uninstall_inner().await,
                     }
                 },
             )
             .await
-    }
-    pub async fn review_helpers(
-        &self,
-        id: Uuid,
-    ) -> Result<crate::lifecycle_receipts::protocol::HelperReview, String> {
-        let owner = self.owner.upgrade().ok_or(STALE)?;
-        let _guard = owner.lifecycle.operation.lock().await;
-        self.validate()?;
-        let result = crate::agent_lifecycle::review_helpers(
-            &self.connection,
-            &owner.lifecycle.receipts,
-            id,
-            None,
-        )
-        .await;
-        self.validate()?;
-        result
-    }
-    pub async fn keep_helper(
-        &self,
-        id: Uuid,
-        index: usize,
-        fingerprint: String,
-    ) -> Result<crate::lifecycle_receipts::protocol::HelperReview, String> {
-        if index >= 32 || !crate::agent_runtime::protocol::valid_build(&fingerprint) {
-            return Err("Invalid file review decision".into());
-        }
-        let fingerprint = fingerprint
-            .as_bytes()
-            .try_into()
-            .map_err(|_| "Invalid file fingerprint")?;
-        let value = self
-            .run_lifecycle(
-                id,
-                crate::lifecycle_task::Action::Keep { index, fingerprint },
-                false,
-            )
-            .await?;
-        serde_json::from_str(&value).map_err(|e| e.to_string())
     }
     pub async fn check_installation(&self) -> Result<crate::agent_lifecycle::Status, String> {
         self.check_installation_inner(false).await
@@ -1279,20 +774,16 @@ impl Lease {
         if !status.automatic_update_available()
             || !owner
                 .lifecycle
-                .automatic_update_unblocked(self.connection.server())?
+                .automatic_update_unblocked(self.connection.server())
             || !owner
                 .lifecycle
                 .claim_automatic_update(std::time::Instant::now())
         {
             return Ok(());
         }
-        self.run_lifecycle(
-            Uuid::new_v4(),
-            crate::lifecycle_task::Action::AutoUpdate,
-            true,
-        )
-        .await
-        .map(|_| ())
+        self.run_lifecycle(crate::lifecycle_task::Action::AutoUpdate)
+            .await
+            .map(|_| ())
     }
     /// Replaces a Needle that is too old for a feature this desktop needs,
     /// unless an update is already running or recently failed. Approval and
@@ -1317,11 +808,7 @@ impl Lease {
             .lifecycle
             .claim_required_update(std::time::Instant::now())?;
         let result = self
-            .run_lifecycle(
-                Uuid::new_v4(),
-                crate::lifecycle_task::Action::RequiredUpdate,
-                true,
-            )
+            .run_lifecycle(crate::lifecycle_task::Action::RequiredUpdate)
             .await;
         owner.lifecycle.finish_required_update(&result);
         result.map(|_| ()).map_err(failed)
@@ -1349,23 +836,19 @@ impl Lease {
         let result = crate::agent_lifecycle::check(&self.connection).await;
         self.validate()?;
         owner.lifecycle.record(self.generation, &result);
-        let history = match &result {
-            Ok(status) => match status.installed_hash.as_deref() {
-                Some(hash) => {
-                    crate::agent_lifecycle::helpers::inspect(&self.connection, hash).await
-                }
-                None => Ok(None),
-            },
-            Err(error) => Err(error.clone()),
-        };
-        self.validate()?;
-        owner.lifecycle.helper_history.record(history);
         result
     }
     pub async fn require_installed(&self) -> Result<(), String> {
         self.validate()?;
         let result = agent::require_installed(&self.connection).await;
         self.validate()?;
+        if result
+            .as_ref()
+            .is_err_and(|error| error == agent::NOT_INSTALLED)
+            && let Some(owner) = self.owner.upgrade()
+        {
+            owner.lifecycle.found_missing(self.generation);
+        }
         result
     }
     pub fn callbacks(&self) -> crate::ssh::callback::Callbacks {
@@ -1386,10 +869,6 @@ pub async fn acquire(state: &Shared, expected: &Server) -> Result<Lease, String>
 pub async fn resolve(state: &Shared, id: Uuid) -> Result<Arc<ServerSession>, String> {
     state.owner(id)
 }
-
-#[cfg(test)]
-#[path = "server_removal_tests.rs"]
-mod removal_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1470,43 +949,6 @@ mod tests {
         other.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn persisted_removal_blocks_services_without_revoking_the_server_session() {
-        let directory = tempfile::tempdir().unwrap();
-        let server = profile();
-        let id = Uuid::new_v4();
-        {
-            let registry = Registry::new(directory.path());
-            registry
-                .receipts
-                .begin_removal(&server, id, &"7".repeat(64))
-                .await
-                .unwrap();
-        }
-        let registry = Registry::new(directory.path());
-        let owner = registry.session(&server, 0);
-        assert!(!owner.is_revoked());
-        assert!(owner.require_agent_available().is_err());
-        assert!(
-            crate::monitor::snapshot(&owner)
-                .await
-                .unwrap_err()
-                .contains("removal")
-        );
-        assert!(
-            owner.connected_lease().await.is_none(),
-            "blocked metrics must not connect"
-        );
-        let snapshot = registry.lifecycle_operations();
-        assert_eq!(
-            snapshot[&server.id]["removals"][0]["operationId"],
-            id.to_string()
-        );
-        let desired = owner.permissions.snapshot().desired;
-        assert_eq!(desired.browser, server.browser_enabled);
-        assert_eq!(desired.clipboard, server.clipboard_enabled);
-    }
-
     #[test]
     fn consent_and_preferences_keep_owner_but_connection_revision_revokes_it() {
         let registry = Registry::default();
@@ -1564,61 +1006,6 @@ mod tests {
                 .unwrap(),
             STALE
         );
-    }
-
-    #[tokio::test]
-    #[ignore = "Run with cargo xtask test ssh -- server_session::tests"]
-    async fn removal_admission_keeps_existing_ssh_transport_usable() {
-        let registry = Registry::default();
-        let mut server = profile();
-        server.ssh_port = std::env::var("NEWPORT_TEST_SSH_PORT")
-            .unwrap()
-            .parse()
-            .unwrap();
-        server.identity_file = Some(std::env::var("NEWPORT_TEST_IDENTITY").unwrap());
-        let owner = registry.session(&server, 0);
-        let lease = owner.acquire(&server).await.unwrap();
-        assert_eq!(
-            lease.execute("printf connected", None).await.unwrap(),
-            "connected"
-        );
-        let generation = owner.generation.load(Ordering::Acquire);
-        // This tests desktop admission, not remote removal. No remote files are
-        // changed; the pending intent must leave native SSH channels available.
-        registry
-            .receipts
-            .begin_removal(&server, Uuid::new_v4(), &"8".repeat(64))
-            .await
-            .unwrap();
-        assert!(
-            lease
-                .launch(agent::Service::Git)
-                .await
-                .err()
-                .unwrap()
-                .contains("removal")
-        );
-        assert!(
-            lease
-                .launch(agent::Service::Monitor)
-                .await
-                .err()
-                .unwrap()
-                .contains("removal")
-        );
-        assert_eq!(
-            lease.execute("printf still-connected", None).await.unwrap(),
-            "still-connected"
-        );
-        let fresh = owner.acquire(&server).await.unwrap();
-        assert_eq!(
-            fresh.execute("printf shared", None).await.unwrap(),
-            "shared"
-        );
-        assert_eq!(owner.generation.load(Ordering::Acquire), generation);
-        assert_eq!(owner.agent_runtime.snapshot().status, "unknown");
-        assert!(!owner.is_revoked());
-        registry.shutdown().await;
     }
 
     #[tokio::test]

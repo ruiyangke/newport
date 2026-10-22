@@ -20,6 +20,11 @@ pub struct Record {
     pub device_id: String,
     /// The API's license object, kept verbatim so newer fields survive.
     pub license: serde_json::Value,
+    /// The latest time the account site vouched for, as UTC Unix seconds: a
+    /// response's `Date` or a token's `iat`. Newport Remote's clock guard never
+    /// lets this computer's clock run behind it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_time: Option<i64>,
 }
 fn schema_version() -> u64 {
     SCHEMA_VERSION
@@ -31,6 +36,7 @@ impl Record {
             credential,
             device_id,
             license,
+            trusted_time: None,
         }
     }
 }

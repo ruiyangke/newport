@@ -158,15 +158,8 @@ impl Newport {
                 }
                 if let Err(error) = &result
                     && error.dispatched
-                    && let Ok(value) =
-                        backend.call("git_pending_operations", json!({"serverId":server}))
-                    && let Ok(receipts) = newport_gpui::git_operation::receipts(value, &server)
-                    && receipts.iter().any(|r| {
-                        r.operation_id == id
-                            && r.state == newport_gpui::git_operation::ReceiptState::Rejected
-                    })
+                    && retire_rejected_receipt(&backend, &server, id)
                 {
-                    retire_completed_receipt(&backend, &server, id, &State::Failed);
                     let _ = send.send(Reply::Rejected(error.message.clone()));
                     return;
                 }
@@ -233,6 +226,14 @@ impl Newport {
                 };
                 if let Ok(operation) = &result {
                     retire_completed_receipt(&backend, &server, id, &operation.state);
+                }
+                // The lookup can prove the command never started (the server
+                // has no record of it); the backend then marks it rejected.
+                if result.is_err() && retire_rejected_receipt(&backend, &server, id) {
+                    let _ = send.send(Reply::Rejected(
+                        "The command never started on the server, so nothing changed.".into(),
+                    ));
+                    return;
                 }
                 let result = Reply::Outcome(result);
                 let _ = send.send(result);
@@ -630,6 +631,24 @@ fn retire_completed_receipt(
             json!({"serverId":server,"operationId":id}),
         );
     }
+}
+
+/// Whether the backend recorded this command as rejected before it ran; such
+/// a receipt is retired here, as nothing about it needs recovery.
+fn retire_rejected_receipt(backend: &backend::Backend, server: &str, id: uuid::Uuid) -> bool {
+    let rejected = backend
+        .call("git_pending_operations", json!({"serverId":server}))
+        .and_then(|value| newport_gpui::git_operation::receipts(value, server))
+        .is_ok_and(|receipts| {
+            receipts.iter().any(|r| {
+                r.operation_id == id
+                    && r.state == newport_gpui::git_operation::ReceiptState::Rejected
+            })
+        });
+    if rejected {
+        retire_completed_receipt(backend, server, id, &State::Failed);
+    }
+    rejected
 }
 
 // Successful/running commands remain silent. Recovery actions only look up the

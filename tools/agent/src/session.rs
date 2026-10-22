@@ -27,8 +27,44 @@ impl Drop for Cleanup {
     }
 }
 
+/// This session behind its desktop's alias, while it is the newest one.
+struct Alias {
+    path: PathBuf,
+    target: PathBuf,
+}
+impl Alias {
+    /// Moves the alias to `target` atomically. Anything but a link there
+    /// is left alone, and the session simply has no alias.
+    fn point(path: PathBuf, target: &std::path::Path) -> io::Result<Option<Self>> {
+        if fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_symlink()) {
+            return Ok(None);
+        }
+        let staged = path.with_file_name(format!(
+            ".{}.{}",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&staged);
+        std::os::unix::fs::symlink(target, &staged)?;
+        fs::rename(&staged, &path)?;
+        Ok(Some(Self {
+            path,
+            target: target.to_owned(),
+        }))
+    }
+}
+impl Drop for Alias {
+    fn drop(&mut self) {
+        // A newer session of this desktop owns it now: leave it.
+        if fs::read_link(&self.path).is_ok_and(|t| t == self.target) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 pub(crate) struct Session {
     // Fields drop in order: stop readers before deleting files and releasing ownership.
+    _alias: Option<Alias>,
     x11: Option<x_server::Server>,
     wayland: Option<wl_server::Server>,
     publication: Option<crate::routing::Publication>,
@@ -202,8 +238,14 @@ impl Session {
             .as_ref()
             .map(|scope| crate::routing::publish(scope, client, &root))
             .transpose()?;
+        // A standalone root is already one fixed directory.
+        let alias = match crate::paths::client_alias(&root, client) {
+            Some(path) if scope.is_some() => Alias::point(path, &root)?,
+            _ => None,
+        };
         Ok((
             Self {
+                _alias: alias,
                 publication,
                 _directory: directory,
                 x11,

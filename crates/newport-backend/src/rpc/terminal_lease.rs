@@ -1,4 +1,4 @@
-//! Terminal ownership is held until the native connection ends.
+//! A terminal is held until the connection that opened it ends.
 use super::{Host, TerminalOpen};
 use newport_platform::ipc::asynchronous::Stream;
 use newport_platform::ipc::protocol::{Response, VERSION};

@@ -1,7 +1,7 @@
 //! Offline whole-page CPU fixtures. No main-loop timer, startup request, or save hook.
 use super::{
     Newport, Page, appearance, file_preview, git, navigation, overview, settings, sidebar_layout,
-    theme, window_state, workspace_state,
+    theme, ui_state, window_state, workspace_state,
 };
 use gpui_kit::{
     self as gpui, AppContext, Context, Entity, IntoElement, Render, TestAppContext,
@@ -14,7 +14,7 @@ use std::time::Instant;
 pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
     Newport::observe_connectivity(cx);
     let restored = workspace_state::Selection::default();
-    let window_state = window_state::WindowState::load(cx);
+    let window_state = window_state::WindowState::load(None, cx);
     let sidebar_layout = sidebar_layout::SidebarLayout::isolated(cx);
     let appearance = appearance::Appearance::Light;
     // A private nonexistent socket also isolates any accidental request from the host.
@@ -25,12 +25,12 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
     let (_, replies) = std::sync::mpsc::channel();
     let chart_focus = cx.focus_handle();
     let mut this = Newport {
+        ui_state: ui_state::Writer::disabled(),
         window_state,
         terminals: Default::default(),
         terminal_immersive: false,
         integration_refresh_pending: Default::default(),
-        needle_removal_reviews: Default::default(),
-        needle_helper_ui: Default::default(),
+        needle_uninstall_confirmations: Default::default(),
         integration_shell: cx.new(|cx| crate::integration::ShellCode::new(window, cx)),
         integration_scroll: gpui::ScrollHandle::new(),
         server_form: None,
@@ -506,24 +506,38 @@ fn workspace_shortcuts_follow_the_host_platform_and_respect_modals(cx: &mut Test
         gpui::base::Root::new(entity, window, cx)
     });
     let workspace = workspace.unwrap();
+    // Pages ask the backend for reads; nothing answers in this fixture.
+    let (work, _requests) = std::sync::mpsc::sync_channel(256);
+    workspace.update(visual, |view, _| view.work = work.into());
     frame(visual);
-    let primary = if cfg!(target_os = "macos") {
-        "cmd"
+    let (primary, views) = if cfg!(target_os = "macos") {
+        ("cmd", "ctrl-cmd")
     } else {
-        "ctrl"
+        ("ctrl", "ctrl-shift")
     };
+    // Views by number, in sidebar order; 8 is Remote apps, absent here.
     for (number, expected) in [
         (2, Page::Ports),
         (3, Page::Services),
         (4, Page::Containers),
         (5, Page::Terminal),
         (6, Page::Files),
+        (7, Page::Projects),
+        (8, Page::Projects),
+        (9, Page::Integration),
         (1, Page::Overview),
     ] {
-        visual.simulate_keystrokes(&format!("{primary}-{number}"));
+        visual.simulate_keystrokes(&format!("{views}-{number}"));
         frame(visual);
-        assert!(workspace.read_with(visual, |view, _| view.page) == expected);
+        assert!(
+            workspace.read_with(visual, |view, _| view.page) == expected,
+            "{number}"
+        );
     }
+    // Numbers alone select tabs; Overview has none, so nothing changes.
+    visual.simulate_keystrokes(&format!("{primary}-2"));
+    frame(visual);
+    assert!(workspace.read_with(visual, |view, _| view.page) == Page::Overview);
     for visible in [false, true] {
         visual.simulate_keystrokes(&format!("{primary}-shift-l"));
         frame(visual);
@@ -540,20 +554,20 @@ fn workspace_shortcuts_follow_the_host_platform_and_respect_modals(cx: &mut Test
         window.open_dialog(cx, |dialog, _, _| dialog.title("Fixture modal"));
     });
     frame(visual);
-    visual.simulate_keystrokes(&format!("{primary}-shift-l {primary}-1"));
+    visual.simulate_keystrokes(&format!("{primary}-shift-l {views}-1"));
     frame(visual);
     assert!(workspace.read_with(visual, |view, _| view.sidebar_visible));
     assert!(workspace.read_with(visual, |view, _| view.page) == Page::Settings);
     visual.update(|window, cx| window.close_dialog(cx));
     workspace.update_in(visual, |view, window, cx| view.focus.focus(window, cx));
     frame(visual);
-    visual.simulate_keystrokes(&format!("{primary}-1"));
+    visual.simulate_keystrokes(&format!("{views}-1"));
     frame(visual);
     assert!(workspace.read_with(visual, |view, _| view.page) == Page::Overview);
     visual.simulate_keystrokes(&format!("{primary}-n"));
     frame(visual);
     assert!(workspace.read_with(visual, |view, _| view.server_form.is_some()));
-    visual.simulate_keystrokes(&format!("{primary}-2"));
+    visual.simulate_keystrokes(&format!("{views}-2"));
     frame(visual);
     assert!(workspace.read_with(visual, |view, _| view.page) == Page::Overview);
 }
@@ -616,6 +630,7 @@ fn integration_exposes_connection_states_and_locks_controls_during_updates(
         let entity = cx.new(|cx| {
             let mut view = owner(window, cx);
             view.page = Page::Integration;
+            view.snapshot["runtime"]["agentStatus"]["fixture"] = json!({"installed":true});
             view
         });
         view = Some(entity.clone());
@@ -802,270 +817,6 @@ fn integration_exposes_connection_states_and_locks_controls_during_updates(
         px(crate::controls::PAGE_PADDING)
     );
     assert_eq!(heading.left(), px(crate::controls::PAGE_PADDING));
-    view.update(visual, |view, cx| {
-        view.snapshot["runtime"]["agentOperations"]["fixture"] = json!({"operations":[
-            {"phase":"ready", "intent":{"integrations":true}, "error":"Manual shell setup needed. /home/fixture/.bashrc is a symlink."},
-            {"phase":"ready", "intent":{"integrations":false}, "error":null}
-        ]});
-        cx.notify();
-    });
-    frame(visual);
-    assert!(nodes(visual).iter().any(
-        |n| n.label() == Some("Manual shell setup needed. /home/fixture/.bashrc is a symlink.")
-    ));
-    assert!(
-        !nodes(visual)
-            .iter()
-            .any(|n| n.label() == Some("Installation unfinished"))
-    );
-    view.update(visual, |view, cx| {
-        view.snapshot["runtime"]["agentOperations"]["fixture"]["operations"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"phase":"ready", "intent":{"integrations":true}, "error":null}));
-        cx.notify();
-    });
-    frame(visual);
-    assert!(!nodes(visual).iter().any(
-        |n| n.label() == Some("Manual shell setup needed. /home/fixture/.bashrc is a symlink.")
-    ));
-}
-#[gpui::test]
-fn integration_recovery_scopes_actions_and_preserves_retry_after_failure(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        gpui_kit::component::init(cx);
-        theme::install(false, cx);
-        cx.set_reduce_motion(true);
-    });
-    let mut view = None;
-    let (_, visual) = cx.add_window_view(|window, cx| {
-        let entity = cx.new(|cx| {
-            let mut v = owner(window, cx);
-            v.page = Page::Integration;
-            v
-        });
-        view = Some(entity.clone());
-        PageHost(entity)
-    });
-    let view = view.unwrap();
-    let operation = uuid::Uuid::new_v4().to_string();
-    let (work, requests) = std::sync::mpsc::sync_channel(8);
-    view.update(visual, |view, cx| {
-        view.work = work.into();
-        view.snapshot["runtime"]["agentOperations"]["fixture"] = json!({"operations":[{
-            "phase":"needsResolution", "intent":{"operationId":operation}, "error":"A shell file changed after installation."
-        }]});
-        cx.notify();
-    });
-    visual.simulate_resize(size(px(550.), px(1500.)));
-    frame(visual);
-    // A missing recorded build cannot be resumed, including from a stale callback.
-    for error in [
-        "The recorded Needle build is no longer bundled; resolve this operation before installing a different build",
-        "Recorded Needle candidate is missing; inspect this operation before proceeding",
-    ] {
-        view.update(visual, |view, cx| {
-            view.snapshot["runtime"]["agentOperations"]["fixture"]["operations"][0]["error"] =
-                json!(error);
-            cx.notify();
-        });
-        frame(visual);
-        let snapshot = visual.update(|window, _| gpui_kit::base::test_support::snapshots(window));
-        assert!(
-            !snapshot
-                .iter()
-                .any(|n| n.label() == Some("Resume installation"))
-        );
-        let restore = snapshot
-            .iter()
-            .find(|n| n.label() == Some("Restore previous state"))
-            .unwrap();
-        let sharing = snapshot
-            .iter()
-            .find(|n| n.label() == Some("Clipboard access") && n.role() == Some(gpui::Role::Label))
-            .unwrap();
-        assert!(restore.bounds().bottom() < sharing.bounds().top());
-        view.update(visual, |view, cx| {
-            view.integration_recovery("fixture", &operation, false, cx)
-        });
-        assert!(requests.try_recv().is_err());
-        visual.simulate_click(restore.bounds().center(), Default::default());
-        frame(visual);
-        let request = requests.try_recv().expect("restore remains available");
-        assert_eq!(request.method, "recover_agent");
-        view.update(visual, |view, cx| {
-            view.resources.complete(
-                &request.key,
-                request.generation,
-                Err("connection interrupted".into()),
-            );
-            cx.notify();
-        });
-    }
-    view.update(visual, |view, cx| {
-        view.snapshot["runtime"]["agentOperations"]["fixture"]["operations"][0]["error"] =
-            json!("A shell file changed after installation.");
-        cx.notify();
-    });
-    frame(visual);
-    for (label, method) in [
-        ("Resume installation", "resume_agent"),
-        ("Restore previous state", "recover_agent"),
-    ] {
-        let snapshot = visual.update(|window, _| gpui_kit::base::test_support::snapshots(window));
-        let button = snapshot
-            .iter()
-            .find(|n| n.label() == Some(label))
-            .expect("recovery action visible");
-        assert!(button.bounds().right() <= px(550.));
-        visual.simulate_click(button.bounds().center(), Default::default());
-        frame(visual);
-        let request = requests.try_recv().unwrap();
-        assert_eq!(request.method, method);
-        assert_eq!(
-            request.args,
-            json!({"id":"fixture", "operationId":operation})
-        );
-        visual.simulate_click(button.bounds().center(), Default::default());
-        assert!(
-            requests.try_recv().is_err(),
-            "duplicate action must be disabled"
-        );
-        view.update(visual, |view, cx| {
-            view.resources.complete(
-                &request.key,
-                request.generation,
-                Err("connection interrupted".into()),
-            );
-            cx.notify();
-        });
-        frame(visual);
-    }
-    view.update(visual, |view, cx| {
-        view.snapshot["runtime"]["agentOperations"]["fixture"]["operations"][0]["phase"] =
-            json!("rollingBack");
-        cx.notify();
-    });
-    frame(visual);
-    let snapshot = visual.update(|window, _| gpui_kit::base::test_support::snapshots(window));
-    assert!(
-        snapshot
-            .iter()
-            .any(|n| n.label() == Some("Try restoring again"))
-    );
-    assert!(
-        !snapshot
-            .iter()
-            .any(|n| n.label() == Some("Resume installation"))
-    );
-    view.update(visual, |view, cx| {
-        view.snapshot["runtime"]["agentOperations"]["fixture"]["operations"][0]["phase"] =
-            json!("rolledBack");
-        cx.notify();
-    });
-    frame(visual);
-    let snapshot = visual.update(|window, _| gpui_kit::base::test_support::snapshots(window));
-    assert!(
-        !snapshot
-            .iter()
-            .any(|n| n.label() == Some("Try restoring again"))
-    );
-    view.update(visual, |view, cx| {
-        view.snapshot["runtime"]["agentOperations"]["fixture"]["operations"][0]["phase"] =
-            json!("needsResolution");
-        view.snapshot["runtime"]["agentOperations"]["fixture"]["operations"][0]["intent"]["kind"] =
-            json!("helpers");
-        cx.notify();
-    });
-    frame(visual);
-    let snapshot = visual.update(|window, _| gpui_kit::base::test_support::snapshots(window));
-    for label in [
-        "Shell setup unfinished",
-        "Resume shell setup",
-        "Restore shell setup",
-    ] {
-        assert!(
-            snapshot.iter().any(|n| n.label() == Some(label)),
-            "missing {label}"
-        );
-    }
-    view.update(visual, |view, cx| {
-        view.snapshot["runtime"]["agentOperations"]["fixture"]["operations"][0]["phase"] =
-            json!("rollingBack");
-        cx.notify();
-    });
-    frame(visual);
-    let snapshot = visual.update(|window, _| gpui_kit::base::test_support::snapshots(window));
-    let review = snapshot
-        .iter()
-        .find(|n| n.label() == Some("Review files"))
-        .unwrap();
-    visual.simulate_click(review.bounds().center(), Default::default());
-    frame(visual);
-    let request = requests.try_recv().unwrap();
-    assert_eq!(request.method, "review_agent");
-    assert_eq!(
-        request.args,
-        json!({"id":"fixture", "operationId":operation})
-    );
-    let path = format!(
-        "/home/fixture/{}/.bashrc",
-        "long-directory-name/".repeat(12)
-    );
-    let token = "a".repeat(64);
-    let report = json!({"operationId":operation, "files":[{"index":2,"path":path,"status":"conflict","message":"The shell block changed.","fingerprint":token}]});
-    view.update(visual, |view, cx| {
-        view.resources
-            .complete(&request.key, request.generation, Ok(report.clone()));
-        cx.notify();
-    });
-    for width in [1000., 550.] {
-        visual.simulate_resize(size(px(width), px(1500.)));
-        frame(visual);
-        let snapshot = visual.update(|window, _| gpui_kit::base::test_support::snapshots(window));
-        for label in [&path, "Keep current file", "Try restoring again"] {
-            let node = snapshot.iter().find(|n| n.label() == Some(label)).unwrap();
-            assert!(
-                node.bounds().right() <= px(width),
-                "{label} exceeds {width}"
-            );
-        }
-    }
-    let snapshot = visual.update(|window, _| gpui_kit::base::test_support::snapshots(window));
-    let keep = snapshot
-        .iter()
-        .find(|n| n.label() == Some("Keep current file"))
-        .unwrap();
-    visual.simulate_click(keep.bounds().center(), Default::default());
-    frame(visual);
-    let request = requests.try_recv().unwrap();
-    assert_eq!(request.method, "keep_agent_file");
-    assert_eq!(
-        request.args,
-        json!({"id":"fixture", "operationId":operation,"index":2,"fingerprint":token})
-    );
-    visual.simulate_click(keep.bounds().center(), Default::default());
-    assert!(requests.try_recv().is_err());
-    view.update(visual, |view, cx| {
-        view.resources.complete(
-            &request.key,
-            request.generation,
-            Err("File changed; refresh the review.".into()),
-        );
-        cx.notify();
-    });
-    frame(visual);
-    let snapshot = visual.update(|window, _| gpui_kit::base::test_support::snapshots(window));
-    assert!(
-        snapshot
-            .iter()
-            .any(|n| n.label() == Some("File changed; refresh the review."))
-    );
-    assert!(
-        !snapshot
-            .iter()
-            .any(|n| n.label() == Some("Keep current file"))
-    );
 }
 
 #[gpui::test]

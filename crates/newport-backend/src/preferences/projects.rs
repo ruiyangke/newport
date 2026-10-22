@@ -124,6 +124,20 @@ pub async fn git_projects_remove(
     .map_err(|e| e.to_string())?
 }
 
+/// Drops a deleted server's projects.
+pub(super) fn forget_server(
+    values: &mut serde_json::Map<String, serde_json::Value>,
+    server_id: Uuid,
+) -> Result<(), String> {
+    let mut rows = decode(values.get(KEY).cloned())?;
+    rows.retain(|row| row.server_id != server_id);
+    values.insert(
+        KEY.into(),
+        serde_json::to_value(&rows).map_err(|e| e.to_string())?,
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

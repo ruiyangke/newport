@@ -212,7 +212,7 @@ async fn runtime_loss_recovers_monitor_without_caching_ten_minute_unavailability
         .acquire(&server)
         .await
         .unwrap()
-        .install(false, false)
+        .install(false)
         .await
         .unwrap();
     crate::monitor::snapshot(&owner).await.unwrap();

@@ -1485,7 +1485,7 @@ mod tests {
             assert_eq!(actual, kind);
             data
         }
-        assert_eq!(event(&mut stream, b'R').await, b"newport-agent/6");
+        assert_eq!(event(&mut stream, b'R').await, b"newport-agent/1");
         let bytes = archive(BTreeMap::from([(
             "text/plain".into(),
             "SSH clipboard 世界\n".as_bytes().to_vec(),
@@ -1571,7 +1571,7 @@ mod tests {
                 .acquire(&server)
                 .await
                 .unwrap()
-                .install(true, false)
+                .install(false)
                 .await
                 .unwrap();
             tokio::time::timeout(Duration::from_secs(10), async {

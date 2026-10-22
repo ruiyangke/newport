@@ -65,6 +65,26 @@ pub(crate) fn runtime() -> io::Result<PathBuf> {
     private_home_directory(Path::new(&home), ".cache/newport/run")
 }
 
+/// A desktop's live clipboard session under one name beside the runtimes: a
+/// link to the session's directory (`r-…/i-…`), moved to each new session.
+/// Shells and the programs they start keep display paths through it, so a
+/// runtime restart doesn't strand them on a deleted one. Named from a hash of
+/// the client, as short as the others: socket paths have a length limit.
+pub(crate) fn client_alias(session: &Path, client: &str) -> Option<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let runtime = session.parent()?;
+    let named = |path: &Path, prefix: &str| {
+        path.file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(prefix))
+    };
+    if client.is_empty() || !named(session, "i-") || !named(runtime, "r-") {
+        return None;
+    }
+    let digest = Sha256::digest(client.as_bytes());
+    let name: String = digest[..4].iter().map(|b| format!("{b:02x}")).collect();
+    Some(runtime.parent()?.join(format!("c-{name}")))
+}
+
 /// The clipboard root a desktop publishes to when it runs without a session registry.
 pub(crate) fn standalone_root(home: &Path) -> PathBuf {
     home.join(".cache/newport/clipboard")
@@ -82,7 +102,7 @@ pub(crate) fn integration_display_path(value: &str) -> bool {
         .map(|c| c.as_os_str().to_string_lossy())
         .collect();
     match parts.as_slice() {
-        [directory, _] => directory.starts_with("wl-"),
+        [directory, _] => directory.starts_with("wl-") || directory.starts_with("c-"),
         [runtime, integration, _] => runtime.starts_with("r-") && integration.starts_with("i-"),
         _ => false,
     }

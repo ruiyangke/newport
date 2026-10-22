@@ -17,7 +17,16 @@ impl Newport {
         effects: newport_client::account::Effects,
         cx: &mut Context<Self>,
     ) -> bool {
+        // Open Remote apps follow the license: renewed with each new token,
+        // and a warning with the day they close when Pro ends here. The
+        // warning wins over the notice that reports the same change.
+        let warning = crate::remote_apps::follow_account(self.account.status(), cx)
+            .map(Notification::warning);
         let Some(notice) = effects.notice else {
+            if let Some(warning) = warning {
+                self.notification = Some(warning);
+                return true;
+            }
             return effects.changed;
         };
         let notification = match notice.kind {
@@ -48,6 +57,9 @@ impl Newport {
                 })
             }
         });
+        if let Some(warning) = warning {
+            self.notification = Some(warning);
+        }
         true
     }
 
@@ -56,6 +68,12 @@ impl Newport {
     fn confirm_sign_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let owner = cx.entity().downgrade();
         let title = "Sign out of Newport on this computer?";
+        let mut detail =
+            "This computer gives up its place on your account. You can sign in again any time."
+                .to_owned();
+        if crate::remote_apps::active_sessions(cx) > 0 {
+            detail.push_str(" Open remote apps will close.");
+        }
         window.open_dialog(cx, move |dialog, window, _| {
             let owner = owner.clone();
             dialog
@@ -74,9 +92,7 @@ impl Newport {
                         .flex_col()
                         .gap_3()
                         .pt_3()
-                        .child(crate::label(
-                            "This computer gives up its place on your account. You can sign in again any time.",
-                        ))
+                        .child(crate::label(detail.clone()))
                         .child(
                             crate::project_dialog::actions()
                                 .child(
@@ -90,7 +106,13 @@ impl Newport {
                                         .label("Sign out")
                                         .on_click(move |_, window, cx| {
                                             let _ = owner.update(cx, |this, cx| {
-                                                this.run_account(AccountAction::SignOut, cx)
+                                                // A signed-out computer runs nothing on the
+                                                // account: end open Remote apps once the
+                                                // sign-out has started.
+                                                if this.account.run(AccountAction::SignOut) {
+                                                    crate::remote_apps::stop_all(cx);
+                                                    cx.notify();
+                                                }
                                             });
                                             window.close_dialog(cx);
                                         }),
@@ -100,7 +122,7 @@ impl Newport {
         });
     }
 
-    fn run_account(&mut self, action: AccountAction, cx: &mut Context<Self>) {
+    pub(super) fn run_account(&mut self, action: AccountAction, cx: &mut Context<Self>) {
         if self.account.run(action) {
             cx.notify();
         }
@@ -177,9 +199,10 @@ impl Newport {
                                 .child(label),
                         )
                         // Free is the default, so only Trial and Pro earn a tag here.
-                        .when(signed_in && plan.tier != Tier::Free, |row| {
-                            row.child(plan.tag(dark, cx))
-                        })
+                        .when(
+                            signed_in && !matches!(plan.tier, Tier::Free | Tier::FreeSeat),
+                            |row| row.child(plan.tag(dark, cx)),
+                        )
                         // The row opens a menu, unlike Settings above it.
                         .when(signed_in, |row| {
                             row.child(
@@ -237,9 +260,13 @@ impl Newport {
                 let opened = weak.clone();
                 button
                     .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                        let (upgrade, manage, sign_out) =
-                            (weak.clone(), weak.clone(), weak.clone());
-                        let free = plan.tier == Tier::Free;
+                        let (upgrade, manage, sign_out, seat) =
+                            (weak.clone(), weak.clone(), weak.clone(), weak.clone());
+                        // A trial can upgrade too, without waiting for it to end.
+                        let free = matches!(plan.tier, Tier::Free | Tier::Trial);
+                        let free_seat = plan.tier == Tier::FreeSeat;
+                        let payment_failed = plan.payment_failed;
+                        let billing = weak.clone();
                         let (email, name, plan) = (email.clone(), name.clone(), plan.clone());
                         // No leading icons, so the header and the items share one edge.
                         menu.max_w(px(MENU_MAX_WIDTH))
@@ -250,6 +277,25 @@ impl Newport {
                                 .disabled(true),
                             )
                             .separator()
+                            // Seats are moved on the account page.
+                            .when(free_seat, |menu| {
+                                menu.item(browser_item("Use Pro on this computer").on_click(
+                                    move |_, _, cx| {
+                                        let _ = seat.update(cx, |this, cx| {
+                                            this.run_account(AccountAction::OpenPortal, cx)
+                                        });
+                                    },
+                                ))
+                            })
+                            .when(payment_failed, |menu| {
+                                menu.item(browser_item("Update payment").on_click(
+                                    move |_, _, cx| {
+                                        let _ = billing.update(cx, |this, cx| {
+                                            this.run_account(AccountAction::OpenBilling, cx)
+                                        });
+                                    },
+                                ))
+                            })
                             .when(free, |menu| {
                                 menu.item(browser_item("Upgrade to Pro").on_click(
                                     move |_, _, cx| {
@@ -396,6 +442,8 @@ fn avatar(email: &str, cx: &App) -> Div {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tier {
     Free,
+    /// A Pro or trial account whose seat for this computer is free.
+    FreeSeat,
     Trial,
     Pro,
 }
@@ -405,14 +453,18 @@ enum Tier {
 struct Plan {
     tier: Tier,
     detail: SharedString,
-    /// The detail needs attention soon: a trial in its last days.
+    /// The detail needs attention soon: a trial in its last days, or a
+    /// failed payment.
     urgent: bool,
+    /// The last payment failed; the menu offers to fix it.
+    payment_failed: bool,
 }
 
 impl Plan {
     fn tag(&self, dark: bool, cx: &App) -> Div {
         let (label, fill, ink) = match self.tier {
             Tier::Free => ("Free", cx.theme().muted, cx.theme().muted_foreground),
+            Tier::FreeSeat => ("Free seat", cx.theme().muted, cx.theme().muted_foreground),
             Tier::Trial => ("Trial", theme::trial_fill(dark), theme::warning(dark)),
             Tier::Pro => ("Pro", theme::pro_fill(dark), theme::pro_ink(dark)),
         };
@@ -438,11 +490,27 @@ fn plan(license: Option<&License>, now: chrono::DateTime<chrono::Utc>) -> Plan {
         .and_then(|license| parse(&license.ends_at))
         .map(|ends| (ends.with_timezone(&chrono::Utc) - now).num_hours())
         .map(|hours| ((hours + 23) / 24).max(1));
+    let free_seat = license.is_some_and(|license| license.seat.as_deref() == Some("free"));
     let (tier, detail) = match license.map(|license| (license.state.as_str(), license)) {
+        Some(("active" | "grace", _)) if free_seat => {
+            (Tier::FreeSeat, "Pro is on your other computers".to_owned())
+        }
+        // A trial's seat can't move, so this computer can only upgrade.
+        Some(("trial", _)) if free_seat => {
+            (Tier::Free, "Your trial is on another computer".to_owned())
+        }
         Some(("active" | "grace", license)) if license.plan.as_deref() == Some("comp") => {
             (Tier::Pro, "Complimentary".to_owned())
         }
-        Some(("active" | "grace", license)) => (
+        // The last payment failed: Pro runs until the grace period ends,
+        // then stops unless the payment goes through.
+        Some(("grace", license)) => (
+            Tier::Pro,
+            date(&license.valid_until)
+                .map(|stops| format!("Payment failed · Pro stops {stops}"))
+                .unwrap_or_else(|| "Payment failed".to_owned()),
+        ),
+        Some(("active", license)) => (
             Tier::Pro,
             // A renewing plan needs no date; one that won't renew says when it stops.
             date(&license.ends_at)
@@ -460,10 +528,14 @@ fn plan(license: Option<&License>, now: chrono::DateTime<chrono::Utc>) -> Plan {
         Some(("expired" | "revoked", _)) => (Tier::Free, "Newport Pro ended".to_owned()),
         _ => (Tier::Free, String::new()),
     };
+    let payment_failed = license.is_some_and(|license| {
+        license.state == "grace" && license.plan.as_deref() != Some("comp") && !free_seat
+    });
     Plan {
         tier,
         detail: detail.into(),
-        urgent: trial_days.is_some_and(|days| days <= TRIAL_ENDING_DAYS),
+        urgent: payment_failed || trial_days.is_some_and(|days| days <= TRIAL_ENDING_DAYS),
+        payment_failed,
     }
 }
 
@@ -484,6 +556,26 @@ mod tests {
             ends_at: ends.map(Into::into),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_failed_payment_says_when_pro_stops() {
+        let now = chrono::Utc::now();
+        let grace = License {
+            valid_until: Some("2027-10-02T12:00:00Z".into()),
+            ..license("grace", Some("pro"), None, None)
+        };
+        let shown = plan(Some(&grace), now);
+        assert_eq!(shown.tier, Tier::Pro);
+        assert!(
+            shown.detail.starts_with("Payment failed · Pro stops"),
+            "{}",
+            shown.detail
+        );
+        assert!(shown.urgent && shown.payment_failed);
+        // A complimentary plan has no payment to fail.
+        let comp = plan(Some(&license("grace", Some("comp"), None, None)), now);
+        assert!(!comp.payment_failed);
     }
 
     #[test]
@@ -523,6 +615,12 @@ mod tests {
         );
         let none = license("none", None, None, None);
         assert_eq!(shown(Some(&none)), (Tier::Free, String::new()));
+        let mut seat = license("active", Some("pro"), Some("2027-10-02T12:00:00Z"), None);
+        seat.seat = Some("free".into());
+        assert_eq!(
+            shown(Some(&seat)),
+            (Tier::FreeSeat, "Pro is on your other computers".into())
+        );
         assert_eq!(shown(None), (Tier::Free, String::new()));
     }
 
@@ -541,9 +639,15 @@ mod tests {
         fn status(phase: &str) -> Value {
             let free = phase == "free";
             let named = phase == "named";
-            let signed_in = free || named || phase == "signedIn";
+            let trial = phase == "trial";
+            let grace = phase == "grace";
+            let signed_in = free || named || trial || grace || phase == "signedIn";
             let license = if free {
                 json!({"state":"none","plan":null})
+            } else if trial {
+                json!({"state":"trial","plan":"trial","seat":"trial","endsAt":"2027-10-02T12:00:00Z"})
+            } else if grace {
+                json!({"state":"grace","plan":"pro","seat":"pro","validUntil":"2027-10-02T12:00:00Z"})
             } else {
                 json!({"state":"active","plan":"pro","renewsAt":"2027-10-02T12:00:00Z"})
             };
@@ -663,6 +767,36 @@ mod tests {
             let menu = labels(cx);
             assert!(menu.contains(&"Sign out".to_owned()), "{menu:?}");
             assert!(!menu.iter().any(|label| label.contains("Upgrade to Pro")));
+        }
+
+        #[gpui_kit::test]
+        fn a_trial_can_upgrade_and_a_failed_payment_can_be_fixed(cx: &mut TestAppContext) {
+            let phase = Rc::new(RefCell::new("trial"));
+            let (owner, _, cx) = shell(cx, phase);
+            click(cx, "ada@example.com");
+            settle(&owner, cx);
+            let menu = labels(cx);
+            assert!(
+                menu.iter().any(|label| label.contains("Upgrade to Pro")),
+                "{menu:?}"
+            );
+            assert!(
+                !menu.iter().any(|label| label.contains("Update payment")),
+                "{menu:?}"
+            );
+        }
+
+        #[gpui_kit::test]
+        fn a_failed_payment_says_when_pro_stops_and_offers_billing(cx: &mut TestAppContext) {
+            let phase = Rc::new(RefCell::new("grace"));
+            let (owner, _, cx) = shell(cx, phase);
+            click(cx, "ada@example.com");
+            settle(&owner, cx);
+            let menu = labels(cx);
+            assert!(
+                menu.iter().any(|label| label.contains("Update payment")),
+                "{menu:?}"
+            );
         }
 
         #[gpui_kit::test]

@@ -114,7 +114,7 @@ pub fn run(args: &[String]) -> Result<()> {
     while i < args.len() {
         ensure!(
             args[i] == "--filter" && i + 1 < args.len(),
-            "Usage: remote [--filter TEST]"
+            "Usage: cargo xtask test remote [--filter TEST]"
         );
         filter = Some(args[i + 1].clone());
         i += 2;

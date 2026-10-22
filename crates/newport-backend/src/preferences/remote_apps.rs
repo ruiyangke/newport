@@ -124,6 +124,26 @@ fn for_server(rows: Vec<Command>, server_id: Uuid) -> Vec<Command> {
         .collect()
 }
 
+/// Drops a deleted server's saved commands and its installed-agent record.
+pub(super) fn forget_server(
+    values: &mut serde_json::Map<String, serde_json::Value>,
+    server_id: Uuid,
+) -> Result<(), String> {
+    let mut commands = decode_commands(values.get(COMMANDS).cloned())?;
+    commands.retain(|row| row.server_id != server_id);
+    values.insert(
+        COMMANDS.into(),
+        serde_json::to_value(&commands).map_err(|e| e.to_string())?,
+    );
+    let mut installed = decode_installed(values.get(INSTALLED).cloned())?;
+    installed.retain(|server| *server != server_id);
+    values.insert(
+        INSTALLED.into(),
+        serde_json::to_value(&installed).map_err(|e| e.to_string())?,
+    );
+    Ok(())
+}
+
 async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {

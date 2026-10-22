@@ -259,7 +259,7 @@ pub fn run(options: &Options) -> Result<Package> {
     let (target_directory, version) = metadata()?;
     ensure!(
         version == product.version,
-        "Native package and product versions differ"
+        "Package and product versions differ"
     );
     let mut output = target_directory;
     if let Some(triple) = target {
@@ -299,7 +299,7 @@ pub fn run(options: &Options) -> Result<Package> {
     println!("Development package: {}", package.stage.display());
     println!("Archive: {}", package.archive.display());
     if let Some(installer) = &package.installer {
-        println!("Unsigned native installer: {}", installer.display());
+        println!("Unsigned installer: {}", installer.display());
     }
     Ok(package)
 }

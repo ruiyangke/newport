@@ -40,7 +40,7 @@ impl Logs {
     pub(super) fn new(window: &mut Window, cx: &mut Context<ServicesPanel>) -> Self {
         let find = cx.new(|cx| InputState::new(window, cx).placeholder("Search these lines"));
         let editor = cx.new(|cx| {
-            EditorState::new(window, cx)
+            crate::controls::code_editor(window, cx)
                 .line_number(true)
                 .searchable(true)
                 .soft_wrap(true)
@@ -211,7 +211,7 @@ impl Logs {
             self.editor_identity = identity;
             self.editor_value = text.into();
             self.editor = cx.new(|cx| {
-                EditorState::new(window, cx)
+                crate::controls::code_editor(window, cx)
                     .line_number(true)
                     .searchable(true)
                     .soft_wrap(true)

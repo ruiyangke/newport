@@ -101,7 +101,7 @@ impl Service {
         #[cfg(not(any(target_os = "macos", windows)))]
         {
             let _ = (version, desktop);
-            Err("Native update installation is not available on this platform yet.".into())
+            Err("Installing updates isn’t available on this platform yet.".into())
         }
     }
 
@@ -355,7 +355,7 @@ impl<P: Package> CheckJob<P> {
         // fails here, the reservation guard must still publish a retryable error.
         let result = result.map(|package| package.map(|package| (package.version(), package)));
         if let Err(error) = &result {
-            eprintln!("Native update check failed: {error}");
+            eprintln!("Update check failed: {error}");
         }
         let mut state = self.service.state();
         self.completed = true;

@@ -62,6 +62,32 @@ pub(super) struct Workspace {
     pub scroll: UniformListScrollHandle,
     pub error: Option<String>,
 }
+impl Workspace {
+    /// An open repository with no switch under way: it can be set aside
+    /// whole while another page shows.
+    pub(super) fn settled(&self) -> bool {
+        self.repo["repoId"].is_string()
+            && self.switching_path.is_none()
+            && !self.switching_repo["repoId"].is_string()
+    }
+    /// Releases the repositories it holds open on the server.
+    pub(super) fn release(&mut self) {
+        let pending = std::mem::take(&mut self.switching_repo);
+        if pending["repoId"].is_string() && pending["repoId"] != self.repo["repoId"] {
+            let server = self.server.clone();
+            std::thread::spawn(move || {
+                backend::Backend::discover().release_repository(&server, &pending)
+            });
+        }
+        let repo = std::mem::take(&mut self.repo);
+        let server = self.server.clone();
+        if repo["repoId"].is_string() {
+            std::thread::spawn(move || {
+                backend::Backend::discover().release_repository(&server, &repo)
+            });
+        }
+    }
+}
 struct SavedView {
     workspace: Workspace,
     resources: ResourceGroup,
@@ -683,20 +709,7 @@ impl Newport {
         text(&self.git.selected["path"], "display")
     }
     pub(super) fn git_release(&mut self) {
-        let pending = std::mem::take(&mut self.git.switching_repo);
-        if pending["repoId"].is_string() && pending["repoId"] != self.git.repo["repoId"] {
-            let server = self.server.clone();
-            std::thread::spawn(move || {
-                backend::Backend::discover().release_repository(&server, &pending)
-            });
-        }
-        let repo = std::mem::take(&mut self.git.repo);
-        let server = self.git.server.clone();
-        if repo["repoId"].is_string() {
-            std::thread::spawn(move || {
-                backend::Backend::discover().release_repository(&server, &repo)
-            });
-        }
+        self.git.release();
     }
     pub(super) fn git_refresh(&mut self) {
         if self.git.switching_path.is_some() || !self.git.repo["repoId"].is_string() {

@@ -14,6 +14,9 @@ pub enum Command {
     AccountOpenPortal,
     AccountOpenBilling,
     AccountRefresh,
+    AccountStartTrial,
+    /// The Remote apps license, for Newport Remote over the owner-only socket.
+    AccountRemoteLicense,
 }
 impl Command {
     pub fn parse(method: &str) -> Option<Self> {
@@ -41,6 +44,11 @@ impl Command {
                 account.refresh_now().await;
                 encode(account.status())
             }
+            Self::AccountStartTrial => {
+                account.start_trial().await.map_err(error)?;
+                encode(account.status())
+            }
+            Self::AccountRemoteLicense => encode(account.remote_license().await.map_err(error)?),
         }
     }
 }

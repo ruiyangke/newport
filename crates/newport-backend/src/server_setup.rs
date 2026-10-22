@@ -50,36 +50,9 @@ pub async fn inspect(state: &Shared, expected: Server) -> Result<Value, String> 
     if owner.is_revoked() {
         return Err("Server connection changed. Restart setup.".into());
     }
-    let mut specs = parse(&output?)?;
-    specs["operationId"] = owner
-        .lifecycle
-        .receipts
-        .for_server(&server)?
-        .into_iter()
-        .find(|r| !r.phase.terminal() && !r.intent.integrations)
-        .map(|r| json!(r.intent.operation_id))
-        .unwrap_or(Value::Null);
-    specs["helperOperationId"] = owner
-        .lifecycle
-        .receipts
-        .for_server(&server)?
-        .into_iter()
-        .find(|r| !r.phase.terminal() && !r.intent.kind.is_deployment())
-        .map(|r| json!(r.intent.operation_id))
-        .unwrap_or(Value::Null);
-    Ok(specs)
+    parse(&output?)
 }
 pub async fn install(state: &Shared, expected: Server) -> Result<(), String> {
-    install_with_id(state, expected, None).await
-}
-pub async fn install_with_id(
-    state: &Shared,
-    expected: Server,
-    operation_id: Option<uuid::Uuid>,
-) -> Result<(), String> {
-    if operation_id.is_some_and(|id| id.is_nil()) {
-        return Err("Invalid Needle operation ID".into());
-    }
     let (_, owner) = current_owner(state, &expected)?;
     let captured = owner.clone();
     let server = state
@@ -106,11 +79,7 @@ pub async fn install_with_id(
         .await?;
     crate::monitor::retry_installation(&owner).await;
     let session = owner.acquire(&server).await?;
-    let result = match operation_id {
-        Some(id) => session.install_operation(false, false, id).await,
-        None => session.install(false, false).await,
-    };
-    result?;
+    session.install(false).await?;
     if owner.is_revoked() {
         return Err("Server connection changed. Restart setup.".into());
     }
@@ -122,7 +91,6 @@ pub async fn finish(
     expected: Server,
     browser: bool,
     clipboard: bool,
-    operation_id: Option<uuid::Uuid>,
 ) -> Result<Option<String>, String> {
     let (server, owner, permission_revision, preferences) = {
         let (server, owner) = current_owner(state, &expected)?;
@@ -131,32 +99,13 @@ pub async fn finish(
         (server, owner, revision, preferences)
     };
     let session = owner.acquire(&server).await?;
-    let ready = if browser || clipboard {
-        match operation_id {
-            Some(id) => session
-                .configure_integrations_operation(id)
-                .await
-                .map(|_| ()),
-            None => session.configure_integrations().await.map(|_| ()),
-        }
-    } else {
-        session.require_installed().await
-    };
-    ready?;
     let notice = if browser || clipboard {
-        owner
-            .lifecycle
-            .receipts
-            .for_server(&server)?
-            .into_iter()
-            .rev()
-            .find(|r| {
-                !r.intent.kind.is_deployment()
-                    && r.phase == crate::lifecycle_receipts::Phase::Ready
-                    && operation_id.is_none_or(|id| r.intent.operation_id == id)
-            })
-            .and_then(|r| r.error)
+        // Installing with integrations writes the command links and shell
+        // setup; what it couldn't write comes back as a notice.
+        let outcome = session.install(true).await?;
+        crate::agent_lifecycle::setup_notice(&outcome)
     } else {
+        session.require_installed().await?;
         None
     };
     let id = expected.id;

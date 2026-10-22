@@ -10,7 +10,12 @@ impl RequestError {
     pub fn from_response(value: &Value) -> Self {
         Self {
             message: crate::backend::error_text(value),
-            code: value.get("code").and_then(Value::as_str).map(str::to_owned),
+            // Account refusals name their code `reason`.
+            code: value
+                .get("code")
+                .or_else(|| value.get("reason"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
         }
     }
 }

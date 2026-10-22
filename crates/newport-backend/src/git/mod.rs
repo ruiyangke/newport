@@ -234,7 +234,6 @@ async fn connection(
     let (server, owner) = state.current(server_id).map_err(Error::transport)?;
     let revision = owner.revision();
     let slot = &owner.git;
-    owner.require_agent_available().map_err(Error::transport)?;
     let live = |session: &Option<Arc<Session>>| {
         session
             .as_ref()
@@ -524,10 +523,6 @@ async fn execute(
             }));
         }
     }
-    session
-        .connection
-        .require_agent_available()
-        .map_err(Error::transport)?;
     session.touch();
     let operation_id = match &request {
         Request::Start { operation_id, .. }
@@ -844,19 +839,11 @@ mod connection_tests {
         let owner = manager.sessions.session(&server, 0);
         let state = crate::manager::share(manager);
         let ssh = owner.acquire(&server).await.unwrap();
-        ssh.install_operation(true, false, Uuid::new_v4())
-            .await
-            .unwrap();
+        ssh.install(false).await.unwrap();
         let session = connection(&Identity, &state, server.id).await.unwrap();
         // Hold exactly the guard used for an admitted Git mutation. A bounded
-        // removal drain must return busy without closing that request's stream.
+        // uninstall drain must return busy without closing that request's stream.
         let admitted = session.access.write().await;
-        owner
-            .lifecycle
-            .receipts
-            .begin_removal(&server, Uuid::new_v4(), &"9".repeat(64))
-            .await
-            .unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(50), owner.git.drain())
                 .await
@@ -894,9 +881,7 @@ mod connection_tests {
         let owner = manager.sessions.session(&server, 0);
         let state = crate::manager::share(manager);
         let ssh = owner.acquire(&server).await.unwrap();
-        ssh.install_operation(true, false, Uuid::new_v4())
-            .await
-            .unwrap();
+        ssh.install(false).await.unwrap();
         let (a, b) = tokio::join!(
             connection(&Identity, &state, server.id),
             connection(&Identity, &state, server.id)

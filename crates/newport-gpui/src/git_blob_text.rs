@@ -36,7 +36,7 @@ impl BlobText {
             .editor
             .get_or_insert_with(|| {
                 cx.new(|cx| {
-                    EditorState::new(window, cx)
+                    crate::controls::code_editor(window, cx)
                         .line_number(true)
                         .searchable(true)
                         .replaceable(false)

@@ -1064,7 +1064,7 @@ impl Newport {
             return self.render_server_setup(cx);
         }
         if self.setup_flow.as_ref().is_some_and(|f| f.skipped) {
-            return self.setup_skipped(cx);
+            return self.needle_required("Monitoring", cx);
         }
         let data = self
             .resources

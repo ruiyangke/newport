@@ -98,8 +98,8 @@ mod git_worktree_picker;
 mod git_worktree_view;
 mod git_worktrees;
 mod integration;
-mod integration_helpers;
-mod integration_removal;
+mod integration_needle;
+mod needle_required;
 mod request_dispatch;
 mod server_setup;
 mod setup_preview;
@@ -164,6 +164,7 @@ mod theme;
 mod tunnel_actions;
 mod tunnel_delete;
 mod tunnel_form;
+mod ui_state;
 mod window_state;
 mod workspace_state;
 use gpui_kit::assets::IconName;
@@ -231,12 +232,14 @@ struct Work {
     args: Value,
 }
 struct Newport {
+    /// Saves where the window and workspace were left, off the UI thread.
+    ui_state: ui_state::Writer,
     terminal_immersive: bool,
     window_state: window_state::WindowState,
     terminals: std::collections::HashMap<String, Entity<terminal_workspace::Workspace>>,
     integration_refresh_pending: std::collections::HashSet<String>,
-    needle_removal_reviews: std::collections::HashMap<String, integration_removal::Review>,
-    needle_helper_ui: std::collections::HashMap<String, integration_helpers::State>,
+    needle_uninstall_confirmations:
+        std::collections::HashMap<String, integration_needle::Confirmation>,
     integration_shell: Entity<integration::ShellCode>,
     integration_scroll: ScrollHandle,
     server_form: Option<Entity<server_form::ServerForm>>,
@@ -400,6 +403,7 @@ impl Newport {
     fn new(
         window: &mut Window,
         window_state: window_state::WindowState,
+        saved: ui_state::UiState,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::observe_connectivity(cx);
@@ -412,9 +416,8 @@ impl Newport {
             // Remote app windows close with their sessions, before Newport exits.
             remote_apps::shutdown(cx);
             this.save_workspace_selection();
-            if let Err(error) = this.window_state.save() {
-                eprintln!("Could not save native window state: {error}");
-            }
+            this.ui_state.window(this.window_state.placement());
+            this.ui_state.flush();
             let ids: Vec<_> = this
                 .terminals
                 .values()
@@ -484,7 +487,8 @@ impl Newport {
             }
         })
         .detach();
-        let restored = workspace_state::load();
+        let restored = saved.workspace.clone();
+        let ui_state = ui_state::Writer::start(saved);
         let chart_focus = cx.focus_handle();
         cx.on_blur(&chart_focus, window, |this, _, cx| {
             this.overview_state.inspection = None;
@@ -493,12 +497,12 @@ impl Newport {
         })
         .detach();
         let mut this = Self {
+            ui_state,
             window_state,
             terminals: Default::default(),
             terminal_immersive: false,
             integration_refresh_pending: Default::default(),
-            needle_removal_reviews: Default::default(),
-            needle_helper_ui: Default::default(),
+            needle_uninstall_confirmations: Default::default(),
             integration_shell: cx.new(|cx| integration::ShellCode::new(window, cx)),
             integration_scroll: ScrollHandle::new(),
             server_form: None,
@@ -670,10 +674,18 @@ impl Newport {
         let changes_search_changed = self.poll_git_changes();
         let remote_refs_changed = self.poll_remote_refs();
         let remote_search_changed = self.poll_git_remote_search();
-        self.window_state.settle();
+        if let Some(placement) = self.window_state.settle() {
+            self.ui_state.window(placement);
+        }
         let mut changed = branch_search_changed;
         self.sync_navigation_focus(cx);
         changed |= remote_apps::take_changed(cx);
+        // A running remote app that failed: its windows just vanished, so say
+        // why wherever the person is.
+        if let Some(message) = remote_apps::take_notices(cx).pop() {
+            self.notification = Some(Notification::error(message));
+            changed = true;
+        }
         self.poll_remote_apps(cx);
         changed |= self.poll_checkout_search();
         changed |= self.poll_checkout_scroll();
@@ -927,10 +939,14 @@ impl Newport {
                 }
             } else if reply.key.starts_with("server-delete:") {
                 let result = self.resources.get(&reply.key).unwrap();
+                let deleted = result.error.is_none();
                 self.notification = Some(match &result.error {
                     Some(error) => Notification::error(error.clone()),
                     None => Notification::success("Server deleted."),
                 });
+                if deleted && let Some(id) = reply.key.strip_prefix("server-delete:") {
+                    self.forget_server_state(&id.to_owned());
+                }
                 self.request("snapshot", "snapshot", json!({}));
             } else if reply.key.starts_with("server-test:") {
                 if reply.server == self.server {
@@ -1061,6 +1077,9 @@ impl Newport {
         if !navigation {
             self.setup_flow = None;
             self.overview_state.cached_reads = None;
+            for library in self.project_libraries.values_mut() {
+                library.drop_checkout();
+            }
         }
         self.project_checks = None;
         self.close_project_folder();
@@ -1126,10 +1145,15 @@ impl Newport {
                     return;
                 }
                 self.restore_connections();
-                self.discover_connections(false);
+                if !self.needle_missing() {
+                    self.discover_connections(false);
+                }
                 self.refresh_connection_projects(Instant::now());
             }
             Page::Projects => {
+                if self.needle_missing() {
+                    return;
+                }
                 if self.selection.is_some() {
                     self.git_refresh();
                 } else {
@@ -1590,15 +1614,21 @@ impl Render for Newport {
             }))
             .on_action(
                 cx.listener(|this, action: &navigation::OpenView, window, cx| {
+                    let page = action.page;
                     if !window.has_active_dialog(cx)
                         && this.server_form.is_none()
-                        && let Some(page) = navigation::shortcut_page(action.number)
+                        && navigation::views(cx).iter().any(|(view, _)| *view == page)
                     {
                         this.navigate(page, cx);
                         // The previous page may own the focused terminal/input.
                         // Do not leave global shortcuts on an unmounted focus path.
                         this.focus.focus(window, cx);
                     }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, action: &navigation::SelectTab, window, cx| {
+                    this.select_tab(action.number, window, cx)
                 }),
             )
             .on_action(cx.listener(|this, _: &NewServer, window, cx| {
@@ -1778,10 +1808,6 @@ pub fn run_with_options_and_ready(
     setup: impl FnOnce(&mut App) + 'static,
     ready: impl FnOnce() + 'static,
 ) -> Result<(), String> {
-    let _agent_relay = match newport_client::agent_relay::start(&backend::Backend::discover()) {
-        Ok(relay) => relay,
-        Err(error) => return Err(format!("Couldn’t start native SSH agent relay: {error}")),
-    };
     if let Err(error) = grammars::init() {
         eprintln!("Syntax highlighting unavailable: {error}");
     }
@@ -1805,7 +1831,6 @@ pub fn run_with_options_and_ready(
         cx.on_action(|_: &Quit, cx| {
             let _ = request_quit(cx);
         });
-        navigation::install_desktop_commands(cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -1813,9 +1838,12 @@ pub fn run_with_options_and_ready(
         })
         .detach();
         // Before the window's first frame, so a restored Remote apps page
-        // and its sidebar entry are there from the start.
+        // and its sidebar entry are there from the start; and before the
+        // menus, so the View menu lists it too.
         remote_apps::start(cx);
-        let window_state = window_state::WindowState::load(cx);
+        navigation::install_desktop_commands(cx);
+        let saved = ui_state::load();
+        let window_state = window_state::WindowState::load(saved.window, cx);
         let bounds = window_state.bounds();
         let opened = cx.open_window(
             WindowOptions {
@@ -1826,7 +1854,7 @@ pub fn run_with_options_and_ready(
                 window_min_size: Some(size(px(640.), px(480.))),
                 window_background: WindowBackgroundAppearance::Opaque,
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Newport — Native".into()),
+                    title: Some("Newport".into()),
                     // On Windows transparency removes the system caption and
                     // its controls. Keep native minimize/maximize/close until
                     // the shell explicitly provides a replacement title bar.
@@ -1844,7 +1872,7 @@ pub fn run_with_options_and_ready(
                     false
                 });
                 window.set_rem_size(px(14.));
-                let view = cx.new(|cx| Newport::new(window, window_state, cx));
+                let view = cx.new(|cx| Newport::new(window, window_state, saved, cx));
                 cx.new(|cx| {
                     gpui_kit::base::Root::new(view, window, cx).bg(gpui_kit::transparent_black())
                 })

@@ -26,7 +26,7 @@ impl rpc::Host for GitHost {
     async fn dispatch(&self, method: &str, args: Value) -> Result<Value, Value> {
         let events = self.events.clone();
         Command::parse(method)
-            .ok_or_else(|| json!("Unknown native command"))?
+            .ok_or_else(|| json!("Unknown command"))?
             .dispatch(
                 &Services {
                     identity: self.identity.as_ref(),
@@ -277,7 +277,8 @@ mod remote_tests {
             // All mutations are confined to a generated path in the disposable container.
             let root = format!("/home/fixture/native-git-{}", Uuid::new_v4());
             setup.execute(&format!("mkdir {root}"), None).await.unwrap();
-            let connected = crate::git::git_connect(
+            // Git requests below need a connected Git session.
+            crate::git::git_connect(
                 fixture.identity.as_ref(),
                 &fixture.manager,
                 fixture.server.id,
@@ -378,7 +379,7 @@ mod remote_tests {
                 .expect("commit never entered its hook");
                 let lease = owner.acquire(&fixture.server).await.unwrap();
                 if upgrade {
-                    lease.install(true, false).await.unwrap();
+                    lease.install(false).await.unwrap();
                 } else {
                     owner.agent_runtime.exhaust_registration_budget_for_test();
                 }

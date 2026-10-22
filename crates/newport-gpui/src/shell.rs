@@ -168,6 +168,7 @@ impl Newport {
         self.restore_git = None;
         self.suspend_connections();
         self.suspend_project_library();
+        self.suspend_checkout();
         if self.page == Page::Overview {
             self.overview_state.cached_reads =
                 Some(self.resources.take_cached(&["page", "history"]));
@@ -183,7 +184,7 @@ impl Newport {
         {
             self.resources.restore(reads);
         }
-        if page == Page::Projects {
+        if page == Page::Projects && !self.resume_checkout() {
             self.restore_git = self.git_destinations.get(&self.server).cloned();
         }
         self.save_workspace_selection();

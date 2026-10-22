@@ -91,6 +91,8 @@ Windows support is experimental; installers are not Authenticode-signed. Remote 
 
 Newport is built with Rust and GPUI. See the [development guide](crates/newport-app/README.md) for builds and packaging, and the [testing guide](docs/testing.md) for local and remote checks.
 
+Set the repository's Git hooks once, and keep them on: `git config core.hooksPath .githooks`. They keep commit messages under 150 characters and keep the private newport-remote crates out of every Cargo manifest, lockfile and Cargo configuration; CI runs the same check.
+
 [User documentation](docs/README.md) · [Issues and feature requests](https://github.com/ruiyangke/newport/issues)
 
 Bug reports should include app and OS versions, reproduction steps, and relevant logs with sensitive information removed.

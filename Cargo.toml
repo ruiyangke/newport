@@ -18,8 +18,11 @@ resolver = "3"
 [profile.dev]
 debug = 1
 
-# Preserve the shipping host's usable Stronghold snapshot performance.
+# Stronghold's key derivation (scrypt) is unusably slow unoptimized, and most
+# of its time is in Salsa20's block function, a crate of its own.
 [profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.salsa20]
 opt-level = 3
 
 # GPUI Kit 0.8.0 plus Newport's patch series: the fork's newport/v0.8.0 branch,

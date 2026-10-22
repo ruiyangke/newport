@@ -2,7 +2,7 @@
 use crate::serialization;
 use std::io::{self, Read, Write};
 pub const MAX_FRAME: usize = 33 * 1024 * 1024;
-pub const VERSION: &str = "newport-agent/6";
+pub const VERSION: &str = "newport-agent/1";
 const OVERHEAD: usize = 16;
 pub fn encode(kind: u8, data: &[u8]) -> io::Result<Vec<u8>> {
     if data.len() > MAX_FRAME {

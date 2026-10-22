@@ -85,7 +85,7 @@ impl CodeWorkspace {
         let loaded = Loaded::parse(value)?;
         let paged = loaded.page.is_some();
         let editor = cx.new(|cx| {
-            let mut editor = EditorState::new(window, cx)
+            let mut editor = crate::controls::code_editor(window, cx)
                 // Sections may start mid-line; do not claim page-local numbers are file lines.
                 .line_number(!paged)
                 .searchable(true)
@@ -147,7 +147,7 @@ impl CodeWorkspace {
         cx: &mut Context<Self>,
     ) -> Buffer {
         let editor = cx.new(|cx| {
-            let mut editor = EditorState::new(window, cx);
+            let mut editor = crate::controls::code_editor(window, cx);
             editor.set_readonly(true, cx);
             editor
         });

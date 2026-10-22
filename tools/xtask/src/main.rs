@@ -8,19 +8,20 @@ mod benchmark;
 mod build_info;
 mod check;
 mod contract;
+mod desktop;
 mod dev_run;
 mod fixture_suites;
 mod ghostty;
 mod grammars;
 mod https;
 mod keychain;
-mod native;
 mod package;
 mod pdfium;
 mod pe;
 mod process;
 mod release;
 mod remote;
+mod remote_apps;
 mod signing;
 mod ssh;
 mod util;
@@ -73,17 +74,31 @@ enum Task {
     },
     /// Run the desktop app with staged resources and a development profile.
     Dev {
+        /// Compile Remote apps in, from the private newport-remote checkout
+        /// (NEWPORT_REMOTE_DIR, default ../newport-remote).
+        #[arg(long)]
+        remote_apps: bool,
         #[arg(last = true)]
         args: Vec<OsString>,
     },
     /// Build the desktop app with staged resources.
-    Build(BuildArgs),
+    Build {
+        #[command(flatten)]
+        build: BuildArgs,
+        /// Compile Remote apps in, from the private newport-remote checkout.
+        #[arg(long)]
+        remote_apps: bool,
+    },
     /// Build and stage the tree-sitter grammar libraries.
     Grammars(BuildArgs),
     /// Download, verify and stage PDFium (Windows targets).
     Pdfium(BuildArgs),
     /// Build the Linux agent binaries in Docker, or verify prebuilt ones with NEWPORT_PREBUILT=1.
-    Agents,
+    Agents {
+        /// Only when they are missing or older than the agent's sources.
+        #[arg(long)]
+        if_changed: bool,
+    },
     /// Record or verify an artifact manifest (newport-build.json).
     Artifact {
         #[command(subcommand)]
@@ -117,8 +132,8 @@ enum Task {
 
 #[derive(Subcommand)]
 enum TestSuite {
-    /// Persistence, resource staging and native lifecycle.
-    Native {
+    /// Persistence, resource staging and the desktop app's lifecycle.
+    Desktop {
         #[arg(long)]
         headless: bool,
     },
@@ -136,12 +151,12 @@ enum TestSuite {
     Https,
     /// Agent runtime checks inside the Alpine image.
     Runtime,
-    /// Real agent Git responses through the native validators.
+    /// Real agent Git responses through the app's validators.
     GitContract {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Agent Git CLI responses through the native validators.
+    /// Agent Git CLI responses through the app's validators.
     GitCliContract {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -153,21 +168,28 @@ enum TestSuite {
     },
     /// macOS protected Keychain test with a signed test bundle.
     Keychain,
+    /// newport-gpui's tests with Remote apps compiled in, the only way that
+    /// code is tested.
+    RemoteApps {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 fn main() -> Result<()> {
     match Cli::parse().command {
         Task::Env { github, command } => ghostty::env_command(github, &command),
-        Task::Dev { args } => check::dev(&args),
-        Task::Build(args) => check::build(&args),
+        Task::Dev { remote_apps, args } => check::dev(&args, remote_apps),
+        Task::Build { build, remote_apps } => check::build(&build, remote_apps),
         Task::Grammars(args) => grammars::build(args.release, args.target().as_deref()).map(drop),
         Task::Pdfium(args) => pdfium::stage(args.release, args.target().as_deref()).map(drop),
-        Task::Agents => remote::build_agents(),
+        Task::Agents { if_changed: false } => remote::build_agents(),
+        Task::Agents { if_changed: true } => check::agents_if_changed(),
         Task::Artifact { action } => artifact::run(action),
         Task::DevRun { binary, args } => dev_run::run(&binary, &args),
         Task::Check { scope } => check::run(scope),
         Task::Test { suite } => match suite {
-            TestSuite::Native { headless } => native::run(headless),
+            TestSuite::Desktop { headless } => desktop::run(headless),
             TestSuite::Ssh { args } => ssh::run(&args),
             TestSuite::Remote { args } => remote::run(&args),
             TestSuite::Https => https::run(),
@@ -176,6 +198,7 @@ fn main() -> Result<()> {
             TestSuite::GitCliContract { args } => contract::run(true, &args),
             TestSuite::Benchmark { args } => benchmark::run(&args),
             TestSuite::Keychain => keychain::run(),
+            TestSuite::RemoteApps { args } => check::test_remote_apps(&args),
         },
         Task::Package(options) => package::run(&options).map(drop),
         Task::Release { action } => release::run(action),

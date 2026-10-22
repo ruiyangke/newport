@@ -22,6 +22,6 @@ async fn main() -> Result<(), String> {
         std::time::Duration::from_secs(60),
     )
     .await?;
-    println!("Native startup health verified for {expected}; no update was accepted.");
+    println!("Startup health verified for {expected}; no update was accepted.");
     Ok(())
 }

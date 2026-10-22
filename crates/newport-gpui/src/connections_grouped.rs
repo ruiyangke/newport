@@ -282,7 +282,12 @@ fn connections_skeleton(table: bool) -> AnyElement {
         .into_any_element()
 }
 
-fn connections_viewport(viewport: f32, content: AnyElement) -> impl IntoElement {
+/// The page's centred column; a notice about the page leads it.
+fn connections_viewport(
+    viewport: f32,
+    notice: Option<AnyElement>,
+    content: AnyElement,
+) -> impl IntoElement {
     let layout = DetailLayout::new(viewport);
     div()
         .id("connections-scroll")
@@ -305,6 +310,9 @@ fn connections_viewport(viewport: f32, content: AnyElement) -> impl IntoElement 
                 .px(px(layout.horizontal))
                 .pt(px(layout.top))
                 .pb(px(layout.bottom))
+                .when_some(notice, |column, notice| {
+                    column.child(div().flex_shrink_0().mb(px(12.)).child(notice))
+                })
                 .child(content),
         )
 }
@@ -549,7 +557,10 @@ impl Newport {
         let no_entries = groups.is_empty();
         let resource = self.resources.get("page");
         let has_reading = resource.is_some_and(|r| r.value.is_array());
-        let initial_loading = !has_reading && resource.is_none_or(|r| r.error.is_none());
+        // Discovery runs on Needle; saved forwards don't.
+        let needle_missing = self.needle_missing();
+        let initial_loading =
+            !needle_missing && !has_reading && resource.is_none_or(|r| r.error.is_none());
         let manual_pending = resource.is_some_and(|r| r.manual_pending);
         let filter = if state.filter == 2 && attention == 0 {
             0
@@ -745,7 +756,9 @@ impl Newport {
                 }
             }
         };
-        let problem = resource.and_then(|r| r.error.clone());
+        let problem = resource
+            .and_then(|r| r.error.clone())
+            .filter(|_| !needle_missing);
         // Discovery has never worked here: say why, and that forwarding by
         // port number does not depend on it.
         let undiscovered = !has_reading && problem.is_some();
@@ -778,15 +791,7 @@ impl Newport {
                 - crate::controls::CONTROL_HEIGHT
                 - 1.)
                 / 2.))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(160.))
-                    .max_w(px(crate::controls::SEARCH_WIDTH))
-                    .child(
-                        crate::controls::search_input(input, cx).aria_label("Find a connection"),
-                    ),
-            )
+            .child(crate::controls::page_search(input, "Find a connection", cx))
             .child(Selector::new(
                 format!("port-filter:{}", self.server),
                 "Show",
@@ -937,7 +942,10 @@ impl Newport {
                     ),
                 )
             })
-            .when(no_entries && has_reading, |view| {
+            .when(no_entries && needle_missing, |view| {
+                view.child(self.needle_required("Port discovery", cx))
+            })
+            .when(no_entries && has_reading && !needle_missing, |view| {
                 view.child(empty::pane(
                     IconName::Network,
                     "Nothing to forward yet",
@@ -961,6 +969,8 @@ impl Newport {
             .truncate()
             .child(if has_reading {
                 displayed_summary
+            } else if needle_missing {
+                "Port discovery needs Needle".into()
             } else if updating {
                 "Updating Needle…".into()
             } else if undiscovered {
@@ -1015,7 +1025,12 @@ impl Newport {
                         .py(px(8.)),
                 )
             })
-            .child(connections_viewport(viewport, content))
+            .child(connections_viewport(
+                viewport,
+                (needle_missing && !no_entries)
+                    .then(|| self.needle_required_notice("Port discovery", cx)),
+                content,
+            ))
             .child(
                 div()
                     .flex_shrink_0()
@@ -1852,6 +1867,7 @@ mod tests {
                 .child(div().w(px(self.sidebar)).flex_shrink_0())
                 .child(super::connections_viewport(
                     f32::from(window.viewport_size().width),
+                    None,
                     div()
                         .debug_selector(|| "connections-content".into())
                         .h(px(80.))

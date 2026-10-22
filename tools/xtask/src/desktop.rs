@@ -1,4 +1,4 @@
-//! Native persistence and executable checks, using only disposable profiles.
+//! The desktop app's persistence and executable checks, using only disposable profiles.
 use crate::{command, ghostty, grammars, pdfium, process};
 use anyhow::{Context, Result};
 
@@ -16,14 +16,14 @@ pub fn run(headless: bool) -> Result<()> {
             "--",
             "--test-threads=1",
         ]))
-        .with_context(|| format!("Native persistence checks failed: {filter}"))?;
+        .with_context(|| format!("Persistence checks failed: {filter}"))?;
     }
 
     // Grammar libraries and Windows PDFium are loaded beside the executable.
     // These staging helpers honor Cargo's target and target-directory settings.
-    grammars::build(false, None).context("Staging native grammar resources")?;
+    grammars::build(false, None).context("Staging grammar resources")?;
     if cfg!(target_os = "windows") {
-        pdfium::stage(false, None).context("Staging native Windows PDFium")?;
+        pdfium::stage(false, None).context("Staging Windows PDFium")?;
     }
 
     let env = ghostty::prepare()?;
@@ -40,8 +40,8 @@ pub fn run(headless: bool) -> Result<()> {
     if headless {
         lifecycle.args(["--skip", "standalone_gui"]);
     }
-    process::run(&mut lifecycle).context("Standalone native lifecycle checks failed")?;
-    println!("PASS: native persistence and standalone lifecycle checks");
+    process::run(&mut lifecycle).context("Desktop lifecycle checks failed")?;
+    println!("PASS: desktop persistence and lifecycle checks");
     if headless || !cfg!(target_os = "macos") {
         println!("GUI activation/shutdown acceptance is not covered by this headless run.");
     }

@@ -86,6 +86,27 @@ pub(crate) fn revision(_: &str) -> Option<&'static str> {
     None
 }
 
+/// When the agent this build installs on such a server was built (Unix
+/// seconds), which orders it against installed releases.
+#[cfg(newport_remote_apps)]
+pub(crate) fn built_at(architecture: &str) -> Option<u64> {
+    use std::sync::OnceLock;
+    static X86_64: OnceLock<Option<u64>> = OnceLock::new();
+    static AARCH64: OnceLock<Option<u64>> = OnceLock::new();
+    let cell = match architecture {
+        "x86_64" => &X86_64,
+        "aarch64" => &AARCH64,
+        _ => return None,
+    };
+    let data = archive(architecture)?;
+    *cell.get_or_init(|| newport_remote_app::deploy::built_at(data))
+}
+
+#[cfg(not(newport_remote_apps))]
+pub(crate) fn built_at(_: &str) -> Option<u64> {
+    None
+}
+
 /// Start installing on a server whose `uname -m` is `architecture`. The
 /// returned progress tracks the upload until the install ends.
 #[cfg(newport_remote_apps)]

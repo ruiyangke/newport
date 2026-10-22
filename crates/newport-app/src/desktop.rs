@@ -1,4 +1,4 @@
-//! Main-thread dispatch and platform operations for the standalone host.
+//! Main-thread dispatch and platform operations for the application.
 use newport_backend::{application::DesktopCommands, desktop_integration::DesktopIntegration};
 use serde_json::{Value, json};
 
@@ -174,7 +174,7 @@ impl DesktopCommands for Commands {
                     .map_err(|error| json!(error))
             }
             // GPUI owns native file pickers and uses explicit-path transfer RPCs.
-            _ => Err(json!(format!("Unknown native command: {method}"))),
+            _ => Err(json!(format!("Unknown command: {method}"))),
         }
     }
 }

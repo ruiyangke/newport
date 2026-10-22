@@ -195,9 +195,11 @@ impl Newport {
 
     pub(super) fn poll_services(&mut self, cx: &mut Context<Self>) {
         let available = self.configuration_available();
-        let visible_server =
-            (self.window_visible && !self.modal_open && self.page == Page::Services)
-                .then_some(self.server.as_str());
+        let visible_server = (self.window_visible
+            && !self.modal_open
+            && self.page == Page::Services
+            && !self.needle_missing())
+        .then_some(self.server.as_str());
         poll_services(
             &mut self.services_panels,
             &mut self.retired_services,

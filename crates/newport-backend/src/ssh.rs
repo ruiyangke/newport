@@ -356,7 +356,7 @@ pub(crate) async fn terminal_with_session(
     let _demand = transport.demand();
     let mut cancelled = owner.cancellation();
     let run = async {
-        let selector = owner.integration_session_id().to_string();
+        let selector = owner.integration_session_id();
         let mut size = (cols, rows);
         loop {
             let acquired = tokio::select! {
@@ -366,7 +366,7 @@ pub(crate) async fn terminal_with_session(
             let (result, lost) = match acquired {
                 Ok((connection, _, _lease)) => {
                     let result = connection
-                        .terminal(&mut size, &mut input, output, &selector)
+                        .terminal(&mut size, &mut input, output, selector)
                         .await;
                     let lost = connection.is_closed()
                         || result.as_ref().is_err_and(|e| e.is::<ConnectionLost>());
@@ -443,12 +443,26 @@ impl Drop for SessionChannel<'_> {
         });
     }
 }
+/// What a Newport terminal runs: the login shell, started with Needle's
+/// exports for this computer's session, so sharing works without any shell
+/// setup. The person's startup files run after it and may add to them. `sh`
+/// runs it whatever the login shell is, and the selector is a UUID from the
+/// session owner, never shell input.
+pub fn terminal_command(selector: uuid::Uuid) -> String {
+    format!(
+        "exec sh -c 'NEWPORT_SESSION={selector}; export NEWPORT_SESSION; \
+         agent=\"$HOME/.local/bin/newport-agent\"; \
+         if [ -x \"$agent\" ] && exports=$(\"$agent\" env --shell sh 2>/dev/null); then \
+         eval \"$exports\"; fi; unset agent exports; exec \"$SHELL\" -l'"
+    )
+}
+
 async fn terminal_session(
     connection: &Arc<Connection>,
     size: &mut (u32, u32),
     input: &mut tokio::sync::mpsc::Receiver<crate::terminal::Input>,
     output: &tokio::sync::mpsc::Sender<crate::terminal::Event>,
-    integration: Option<&str>,
+    integration: uuid::Uuid,
 ) -> Result<TerminalEnd> {
     use crate::terminal::{Event, Input};
     let (mut reader, writer) =
@@ -466,18 +480,8 @@ async fn terminal_session(
             .request_pty(true, "xterm-256color", size.0, size.1, 0, 0, &[])
             .await?;
         terminal_request_reply(&mut reader, "the terminal PTY", &mut early_output).await?;
-        if let Some(selector) = integration {
-            // An exec request avoids relying on sshd AcceptEnv configuration.
-            // The UUID comes from the session owner, never shell input.
-            writer
-                .exec(
-                    true,
-                    format!("exec env NEWPORT_SESSION='{selector}' \"$SHELL\" -l"),
-                )
-                .await?;
-        } else {
-            writer.request_shell(true).await?;
-        }
+        // An exec request avoids relying on sshd AcceptEnv configuration.
+        writer.exec(true, terminal_command(integration)).await?;
         terminal_request_reply(&mut reader, "an interactive shell", &mut early_output).await?;
         Ok::<_, anyhow::Error>(())
     })

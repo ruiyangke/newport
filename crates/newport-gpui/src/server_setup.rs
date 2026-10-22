@@ -38,7 +38,7 @@ impl Newport {
     /// Needle is found missing. Both come from the last snapshot: the backend
     /// checks Needle in the background, never while the window draws. An
     /// unchecked server (`installed` null) is not treated as missing.
-    fn needs_setup(&self, server: &Value) -> bool {
+    pub(super) fn needs_setup(&self, server: &Value) -> bool {
         server["setupComplete"] != true
             || self.snapshot["runtime"]["agentStatus"][text(server, "id")]["installed"] == false
     }
@@ -116,16 +116,8 @@ impl Newport {
         if flow.error.is_none() {
             if flow.phase == 0 {
                 flow.specs = resource.value.clone();
-                flow.phase = if flow.specs["installed"] == true
-                    && flow.specs["helperOperationId"].is_string()
-                {
-                    2
-                } else {
-                    1
-                };
-            } else {
-                flow.phase += 1;
             }
+            flow.phase += 1;
             let finished = flow.phase == 3;
             self.request("snapshot", "snapshot", json!({}));
             if finished {
@@ -174,13 +166,8 @@ impl Newport {
             2 => "finish",
             _ => return,
         };
-        if flow.phase == 1 && flow.specs["operationId"].is_null() {
-            flow.specs["operationId"] = json!(uuid::Uuid::new_v4().to_string());
-        }
-        if flow.phase == 2 && flow.specs["helperOperationId"].is_null() {
-            flow.specs["helperOperationId"] = json!(uuid::Uuid::new_v4().to_string());
-        }
-        let args = json!({"expectedConnection":server,"browser":flow.browser,"clipboard":flow.clipboard,"operationId":flow.specs["operationId"],"helperOperationId":flow.specs["helperOperationId"]});
+        let args =
+            json!({"expectedConnection":server,"browser":flow.browser,"clipboard":flow.clipboard});
         flow.pending = true;
         // A retry keeps the failed step on screen, with the button busy, so
         // the page doesn't swap to a spinner and back. Installation shows
@@ -641,25 +628,6 @@ impl Newport {
                 }
             }))
     }
-    pub(super) fn setup_skipped(&self, cx: &mut Context<Self>) -> AnyElement {
-        crate::empty::pane(
-            IconName::Activity,
-            "Monitoring is off",
-            "Set up monitoring to see this server’s metrics and processes.",
-            cx,
-        )
-        .child(
-            crate::controls::button("resume-setup")
-                .label("Set up monitoring")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.setup_flow = None;
-                    this.resources.invalidate_prefix("setup-");
-                    this.poll_setup();
-                    cx.notify();
-                })),
-        )
-        .into_any_element()
-    }
 }
 #[derive(Clone, Copy)]
 struct ErrorCopy {
@@ -941,46 +909,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn inspection_resumes_an_existing_helper_operation_without_another_install(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(|cx| {
-            gpui_kit::component::init(cx);
-            theme::install(false, cx);
-        });
-        let mut owner = None;
-        let (_, visual) = cx.add_window_view(|window, cx| {
-            let view = cx.new(|cx| {
-                let mut v = page_perf_tests::owner(window, cx);
-                v.page = Page::Overview;
-                v.snapshot["config"]["servers"][0]["setupComplete"] = json!(false);
-                v.snapshot["config"]["servers"][0]["agentInstallApproved"] = json!(true);
-                v
-            });
-            owner = Some(view.clone());
-            Host(view)
-        });
-        let view = owner.unwrap();
-        let (work, requests) = std::sync::mpsc::sync_channel(16);
-        view.update(visual, |v, _| {
-            v.work = work.into();
-            v.poll_setup();
-        });
-        let inspect = requests.try_recv().unwrap();
-        let helper_id = uuid::Uuid::new_v4().to_string();
-        view.update(visual, |v, cx| {
-            v.resources.complete(&inspect.key, inspect.generation, Ok(json!({"installed":true,"helperOperationId":helper_id,"os":"Ubuntu","arch":"x86_64"})));
-            v.poll_setup();
-            assert_eq!(v.setup_flow.as_ref().unwrap().phase, 2);
-            v.setup_request(cx);
-        });
-        let sent: Vec<_> = requests.try_iter().collect();
-        assert!(sent.iter().all(|r| r.method != "setup_install"));
-        let finish = sent.iter().find(|r| r.method == "setup_finish").unwrap();
-        assert_eq!(finish.args["helperOperationId"], helper_id);
-    }
-
-    #[gpui::test]
     fn timeline_waits_for_consent_and_keeps_errors_on_the_current_step(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::component::init(cx);
@@ -1041,8 +969,6 @@ mod tests {
         view.update(visual, |v, cx| v.setup_request(cx));
         let install = requests.try_recv().unwrap();
         assert_eq!(install.method, "setup_install");
-        let operation_id = install.args["operationId"].as_str().unwrap();
-        assert!(uuid::Uuid::parse_str(operation_id).is_ok());
         view.update(visual, |v, cx| {
             v.navigate(Page::Integration, cx);
             assert!(v.resources.get(&install.key).unwrap().pending);
@@ -1051,7 +977,6 @@ mod tests {
             assert_eq!(flow.phase, 1);
             assert!(flow.pending);
             assert_eq!(flow.specs["total"], 5242880);
-            assert_eq!(flow.specs["operationId"], operation_id);
         });
         assert!(
             requests
@@ -1115,17 +1040,6 @@ mod tests {
         let finish = requests.try_recv().unwrap();
         assert_eq!(finish.method, "setup_finish");
         assert_eq!(finish.args["clipboard"], false);
-        let helper_id = finish.args["helperOperationId"].as_str().unwrap();
-        assert!(uuid::Uuid::parse_str(helper_id).is_ok());
-        assert_ne!(helper_id, operation_id);
-        view.update(visual, |v, cx| {
-            v.navigate(Page::Integration, cx);
-            v.navigate(Page::Overview, cx);
-            assert_eq!(
-                v.setup_flow.as_ref().unwrap().specs["helperOperationId"],
-                helper_id
-            );
-        });
         requests.try_iter().for_each(drop);
         view.update(visual, |v, cx| {
             let mut snapshot = v.snapshot.clone();

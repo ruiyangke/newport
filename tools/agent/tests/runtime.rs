@@ -27,6 +27,19 @@ impl Drop for Worker {
 }
 // Keep IPC roots independent across concurrent tests and short enough for
 // macOS Unix sockets. Product runtime paths are selected independently.
+/// `env` without a session it may use: it still succeeds, with only the
+/// stable part (Needle's commands on PATH), so a shell that starts now still
+/// reaches them later.
+fn stable_only(output: &std::process::Output) -> bool {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    output.status.success()
+        && stdout.contains("/.local/bin")
+        && !stdout.contains("NEWPORT_SESSION")
+        && !stdout.contains("DISPLAY")
+        && !output.stderr.is_empty()
+}
+/// The Git worker's protocol.
+const GIT: u32 = newport_agent::git::protocol::VERSION;
 fn fixture_home() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("np-runtime-")
@@ -255,116 +268,6 @@ fn negotiates_build_and_capabilities_without_installing_anything() {
 }
 
 #[test]
-fn maintenance_excludes_every_cli_service_without_installing_anything() {
-    let home = fixture_home();
-    let maintenance =
-        newport_agent::installation_use::MaintenanceLease::acquire(home.path()).unwrap();
-    for args in [
-        vec!["runtime", "--stdio"],
-        vec!["worker", "invalid", "registration"],
-        vec!["serve"],
-        vec!["git-rpc", "--stdio"],
-        vec!["monitor", "--stdio"],
-        vec!["clipboard", "-o"],
-        vec!["open", "https://example.test"],
-        vec!["display", "--backend", "wayland"],
-        vec!["env"],
-        vec!["sessions"],
-    ] {
-        let result = Command::new(BIN)
-            .args(&args)
-            .env("HOME", home.path())
-            .env("XDG_RUNTIME_DIR", home.path())
-            .output()
-            .unwrap();
-        assert!(!result.status.success(), "{args:?}");
-        assert!(
-            result.stdout.is_empty(),
-            "feature output before admission: {args:?}"
-        );
-        assert!(
-            String::from_utf8_lossy(&result.stderr).contains("maintenance is in progress"),
-            "{args:?}: {:?}",
-            result.stderr
-        );
-    }
-    let aliases = fixture_home();
-    for name in ["xclip", "wl-paste", "newport-browser", "xdg-open"] {
-        let alias = aliases.path().join(name);
-        std::os::unix::fs::symlink(BIN, &alias).unwrap();
-        let result = Command::new(alias)
-            .env("HOME", home.path())
-            .env("XDG_RUNTIME_DIR", home.path())
-            .output()
-            .unwrap();
-        assert!(!result.status.success());
-        assert!(String::from_utf8_lossy(&result.stderr).contains("maintenance is in progress"));
-    }
-    let probe = Command::new(BIN)
-        .args(["deployment", "protocol"])
-        .env("HOME", home.path())
-        .env("XDG_RUNTIME_DIR", home.path())
-        .output()
-        .unwrap();
-    assert!(probe.status.success());
-    let probe: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap();
-    assert_eq!(probe["usageLease"], 2);
-    assert!(!home.path().join(".local/bin").exists());
-    assert!(!home.path().join(".local/share/newport/needle").exists());
-    drop(maintenance);
-    let mut runtime = Runtime::start(home.path(), "");
-    runtime.initialize();
-    runtime.request(
-        runtime.hello.instance_id.clone(),
-        protocol::Operation::Shutdown,
-    );
-    runtime.stopped();
-}
-
-#[test]
-fn runtime_and_worker_usage_leases_survive_controller_loss_independently() {
-    let home = fixture_home();
-    let other_home = fixture_home();
-    let path = std::env::var("PATH").unwrap();
-    let mut first = Runtime::start(home.path(), &path);
-    first.initialize();
-    let mut second = Runtime::start(home.path(), &path);
-    second.initialize();
-    assert!(newport_agent::installation_use::MaintenanceLease::acquire(home.path()).is_err());
-    assert!(newport_agent::installation_use::MaintenanceLease::acquire(other_home.path()).is_ok());
-    let registration = first.register("git", 4);
-    let mut worker = first.worker(&registration, "git", home.path());
-    let mut output = worker.stdout.take().unwrap();
-    let (send, receive) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let _ = send.send(newport_agent::git::protocol::read(&mut output));
-    });
-    assert!(matches!(
-        receive
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap()
-            .unwrap(),
-        newport_agent::git::protocol::Message::Hello { .. }
-    ));
-    // A stopped worker cannot process controller EOF yet, but still owns the
-    // installation. Maintenance must not infer lifetime from control alone.
-    assert_eq!(unsafe { libc::kill(worker.id() as i32, libc::SIGSTOP) }, 0);
-    first.child.kill().unwrap();
-    first.child.wait().unwrap();
-    second.request(
-        second.hello.instance_id.clone(),
-        protocol::Operation::Shutdown,
-    );
-    second.stopped();
-    assert!(newport_agent::installation_use::MaintenanceLease::acquire(home.path()).is_err());
-    worker.kill().unwrap();
-    worker.wait().unwrap();
-    let maintenance =
-        newport_agent::installation_use::MaintenanceLease::acquire(home.path()).unwrap();
-    maintenance.validate().unwrap();
-}
-
-#[test]
 fn permission_revocation_bypasses_an_incomplete_feature_upload() {
     use newport_agent::{integration_control as control, wire};
     use std::io::Write;
@@ -418,7 +321,7 @@ fn permission_revocation_bypasses_an_incomplete_feature_upload() {
     );
     assert!(worker.try_wait().unwrap().is_none());
     // Revocation is scoped to this worker; the runtime can still admit Git.
-    let git_id = runtime.register("git", 4);
+    let git_id = runtime.register("git", GIT);
     let mut git = runtime.worker(&git_id, "git", home.path());
     assert!(matches!(
         newport_agent::git::protocol::read(git.stdout.as_mut().unwrap()).unwrap(),
@@ -536,7 +439,7 @@ fn missing_git_does_not_disable_other_capabilities_and_eof_stops_control() {
     let home = fixture_home();
     let mut runtime = Runtime::start(home.path(), "");
     assert!(!runtime.hello.dependencies["git"]);
-    assert!(runtime.hello.require("git", 4).is_err());
+    assert!(runtime.hello.require("git", GIT).is_err());
     runtime.hello.require("integration", 1).unwrap();
     runtime.initialize();
     runtime.input.take();
@@ -658,7 +561,7 @@ fn two_desktops_route_helpers_explicitly_without_crossing_sessions() {
         command.output().unwrap()
     };
     let ambiguous = helper(None, &["env"]);
-    assert!(!ambiguous.status.success());
+    assert!(stable_only(&ambiguous));
     assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("Multiple Newport sessions"));
     for (runtime, worker, events, format) in [
         (&first, &mut a, &ea, "application/x-first"),
@@ -719,7 +622,7 @@ fn two_desktops_route_helpers_explicitly_without_crossing_sessions() {
             },
         },
     );
-    assert!(!helper(Some(&first.session), &["env"]).status.success());
+    assert!(stable_only(&helper(Some(&first.session), &["env"])));
     let only_second = helper(None, &["env"]);
     assert!(only_second.status.success());
     assert!(String::from_utf8_lossy(&only_second.stdout).contains(&second.session));
@@ -747,7 +650,7 @@ fn two_desktops_route_helpers_explicitly_without_crossing_sessions() {
     let mut worker = restarted.worker(&worker_id, "integration", home.path());
     let restarted_events = events(&mut worker);
     event(&restarted_events, b'R');
-    assert!(!helper(Some(&first.session), &["env"]).status.success());
+    assert!(stable_only(&helper(Some(&first.session), &["env"])));
     let reply = restarted.request(
         restarted.hello.instance_id.clone(),
         protocol::Operation::Permissions {
@@ -787,7 +690,7 @@ fn workers_require_the_negotiated_build_before_serving_feature_protocols() {
     let home = fixture_home();
     let mut runtime = Runtime::start(home.path(), &std::env::var("PATH").unwrap());
     runtime.initialize();
-    let worker_id = runtime.register("git", 4);
+    let worker_id = runtime.register("git", GIT);
     let rejected = Command::new(BIN)
         .args(["worker", &"0".repeat(64), "git"])
         .stdin(Stdio::null())
@@ -874,7 +777,7 @@ fn registration_cannot_be_used_in_another_runtime() {
     first.initialize();
     let mut second = Runtime::start(home.path(), &path);
     second.initialize();
-    let worker = first.register("git", 4);
+    let worker = first.register("git", GIT);
     let mut wrong = second.worker(&worker, "git", home.path());
     assert!(!wrong.wait().unwrap().success());
     assert!(first
@@ -1118,7 +1021,7 @@ fn reconnect_reconciles_old_selectors_and_retires_only_the_replaced_client() {
             .unwrap()
     };
     // Alias resolution must not grant permissions or use the old endpoint.
-    assert!(!helper(&old.session).status.success());
+    assert!(stable_only(&helper(&old.session)));
     assert!(next
         .request(
             next.hello.instance_id.clone(),
@@ -1179,7 +1082,7 @@ fn reconnect_reconciles_old_selectors_and_retires_only_the_replaced_client() {
         .unwrap()
         .error
         .is_none());
-    assert!(!helper(&old.session).status.success());
+    assert!(stable_only(&helper(&old.session)));
 }
 
 #[test]
@@ -1207,10 +1110,10 @@ fn unknown_selector_recovers_only_a_single_known_client_and_remembers_the_bindin
     };
     let old = uuid::Uuid::new_v4().to_string();
     assert!(
-        !helper(&old, &["env"]).status.success(),
+        stable_only(&helper(&old, &["env"])),
         "must not recover disabled integrations"
     );
-    assert!(!helper("invalid-id", &["env"]).status.success());
+    assert!(stable_only(&helper("invalid-id", &["env"])));
     assert!(runtime
         .request(
             runtime.hello.instance_id.clone(),
@@ -1256,16 +1159,16 @@ fn unknown_selector_recovers_only_a_single_known_client_and_remembers_the_bindin
     let mut other = Runtime::start(home.path(), "");
     other.initialize();
     let _other_worker = start_integration(&mut other, home.path());
-    assert!(helper(&old, &["env"]).status.success());
+    assert!(String::from_utf8_lossy(&helper(&old, &["env"]).stdout).contains(&runtime.session));
     let unknown = uuid::Uuid::new_v4().to_string();
-    assert!(!helper(&unknown, &["env"]).status.success());
+    assert!(stable_only(&helper(&unknown, &["env"])));
     other.request(
         other.hello.instance_id.clone(),
         protocol::Operation::Shutdown,
     );
     other.stopped();
     assert!(
-        !helper(&unknown, &["env"]).status.success(),
+        stable_only(&helper(&unknown, &["env"])),
         "an offline other desktop still makes guessing unsafe"
     );
     assert!(runtime
@@ -1284,5 +1187,203 @@ fn unknown_selector_recovers_only_a_single_known_client_and_remembers_the_bindin
         .unwrap()
         .error
         .is_none());
-    assert!(!helper(&old, &["env"]).status.success());
+    assert!(stable_only(&helper(&old, &["env"])));
+}
+
+#[test]
+fn shells_keep_a_working_clipboard_display_when_the_runtime_restarts() {
+    use newport_agent::integration_control as control;
+    let home = fixture_home();
+    let enable = |runtime: &mut Runtime, worker_id: &str| {
+        assert!(runtime
+            .request(
+                runtime.hello.instance_id.clone(),
+                protocol::Operation::Permissions {
+                    worker_id: worker_id.to_owned(),
+                    permissions: control::Permissions {
+                        revision: 1,
+                        browser: false,
+                        clipboard: true
+                    }
+                }
+            )
+            .applied
+            .unwrap()
+            .error
+            .is_none());
+    };
+    // The same desktop again, as Newport starts it: the same client and,
+    // derived from its profile and the server, the same session ID.
+    let start = |previous: Option<(&str, &str)>| {
+        let mut runtime = Runtime::start(home.path(), "");
+        if let Some((client, session)) = previous {
+            runtime.client = client.to_owned();
+            runtime.session = session.to_owned();
+        }
+        runtime.initialize();
+        let id = runtime.register("integration", control::VERSION);
+        let mut worker = runtime.worker(&id, "integration", home.path());
+        assert_eq!(
+            newport_agent::wire::read(worker.stdout.as_mut().unwrap())
+                .unwrap()
+                .0,
+            b'R'
+        );
+        enable(&mut runtime, &id);
+        (runtime, worker)
+    };
+    // What `eval "$(newport-agent env)"` gives a shell, given its display.
+    let shell = |wayland: Option<&str>| {
+        let mut command = Command::new(BIN);
+        command
+            .args(["env", "--shell", "sh"])
+            .env("HOME", home.path())
+            .env("XDG_RUNTIME_DIR", home.path())
+            .env_remove("DISPLAY")
+            .env_remove("XAUTHORITY")
+            .env_remove("WAYLAND_DISPLAY");
+        if let Some(wayland) = wayland {
+            command.env("WAYLAND_DISPLAY", wayland);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("export WAYLAND_DISPLAY="))
+            .map(|value| value.trim_matches('\'').to_owned())
+            .expect("clipboard display exported")
+    };
+    let (first, first_worker) = start(None);
+    let display = shell(None);
+    let alias = std::path::Path::new(&display).parent().unwrap().to_owned();
+    let name = alias.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.starts_with("c-") && name.len() == 10, "{display}");
+    let old_directory = std::fs::canonicalize(&alias).unwrap();
+    assert!(std::os::unix::net::UnixStream::connect(&display).is_ok());
+    // The runtime restarts, as on an update, a reconnect or a reinstall; a
+    // shell in tmux keeps the path it was given.
+    let (client, session) = (first.client.clone(), first.session.clone());
+    drop(first);
+    drop(first_worker);
+    let (_next, mut next_worker) = start(Some((&client, &session)));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::fs::canonicalize(&alias).ok().as_ref() == Some(&old_directory)
+        || std::os::unix::net::UnixStream::connect(&display).is_err()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the kept path doesn't reach the new session"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(shell(Some(&display)), display, "the path stays the same");
+    // A shell from before the alias holds the old session's own path:
+    // running `env` again moves it to the live one.
+    let stranded = old_directory.join("wayland.sock");
+    assert_eq!(shell(Some(&stranded.to_string_lossy())), display);
+    // A program that started months ago, like Claude Code in tmux: its display
+    // variables name a dead session, and `xclip` on PATH finds the live one
+    // when it runs.
+    newport_agent::wire::write(
+        next_worker.stdin.as_mut().unwrap(),
+        b'M',
+        &rmp_serde::to_vec(&(7i64, vec!["image/png"])).unwrap(),
+    )
+    .unwrap();
+    let mut stdout = next_worker.stdout.take().unwrap();
+    let (frames, published) = mpsc::sync_channel(8);
+    std::thread::spawn(move || {
+        while let Ok((kind, _)) = newport_agent::wire::read(&mut stdout) {
+            if frames.send(kind).is_err() {
+                break;
+            }
+        }
+    });
+    while published.recv_timeout(Duration::from_secs(5)).unwrap() != b'A' {}
+    let bin = home.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(BIN, bin.join("xclip")).unwrap();
+    let paste = Command::new(bin.join("xclip"))
+        .args(["-selection", "clipboard", "-t", "TARGETS", "-o"])
+        .env("HOME", home.path())
+        .env("XDG_RUNTIME_DIR", home.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("NEWPORT_SESSION", &session)
+        .env("DISPLAY", ":100")
+        .env("XAUTHORITY", old_directory.join("Xauthority"))
+        .env("WAYLAND_DISPLAY", &stranded)
+        .output()
+        .unwrap();
+    assert!(
+        paste.status.success(),
+        "{}",
+        String::from_utf8_lossy(&paste.stderr)
+    );
+    assert!(String::from_utf8_lossy(&paste.stdout).contains("image/png"));
+}
+
+#[test]
+fn clipboard_commands_hand_what_newport_doesnt_serve_to_the_servers_own() {
+    let home = fixture_home();
+    let bin = home.path().join("bin");
+    let native = home.path().join("native");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&native).unwrap();
+    for name in ["xclip", "wl-paste"] {
+        std::os::unix::fs::symlink(BIN, bin.join(name)).unwrap();
+        let script = native.join(name);
+        std::fs::write(&script, format!("#!/bin/sh\necho \"native {name} $*\"\n")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let run = |name: &str, args: &[&str], display: Option<&str>, path: &str| {
+        let mut command = Command::new(bin.join(name));
+        command
+            .args(args)
+            .env("HOME", home.path())
+            .env("XDG_RUNTIME_DIR", home.path())
+            .env("PATH", path)
+            .env_remove("NEWPORT_SESSION")
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("XAUTHORITY")
+            .env_remove("DISPLAY");
+        if let Some(display) = display {
+            command.env("DISPLAY", display);
+        }
+        command.output().unwrap()
+    };
+    let path = format!("{}:{}", bin.display(), native.display());
+    let stdout = |output: std::process::Output| String::from_utf8(output.stdout).unwrap();
+    // Copying, another selection, an option Newport doesn't serve.
+    assert_eq!(
+        stdout(run("xclip", &["-i"], None, &path)),
+        "native xclip -i\n"
+    );
+    assert_eq!(
+        stdout(run("xclip", &["-selection", "primary", "-o"], None, &path)),
+        "native xclip -selection primary -o\n"
+    );
+    assert_eq!(
+        stdout(run("wl-paste", &["--primary"], None, &path)),
+        "native wl-paste --primary\n"
+    );
+    // A desktop of the server's own reads its own clipboard.
+    assert_eq!(
+        stdout(run(
+            "xclip",
+            &["-selection", "clipboard", "-o"],
+            Some(":0"),
+            &path
+        )),
+        "native xclip -selection clipboard -o\n"
+    );
+    // Without a native command, Newport says what it serves.
+    let alone = run("xclip", &["-i"], None, &bin.display().to_string());
+    assert!(!alone.status.success());
+    assert!(String::from_utf8_lossy(&alone.stderr).contains("read-only"));
 }

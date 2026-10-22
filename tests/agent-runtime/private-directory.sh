@@ -12,7 +12,6 @@ if "$agent" open google.com > "$HOME/open.log" 2>&1; then
     exit 1
 fi
 grep -q 'only HTTP and HTTPS' "$HOME/open.log"
-test -f "$HOME/.local/state/newport/usage/lease"
 "$agent" runtime --stdio < /dev/null > "$HOME/hello"
 # Skip the 4-byte length: a byte above 0x7f there is invalid UTF-8 to BusyBox grep.
 tail -c +5 "$HOME/hello" | grep -q "$HOME/.cache/newport/run/"

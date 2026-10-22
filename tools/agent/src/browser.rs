@@ -1,7 +1,6 @@
 //! Browser commands and the agent-side request broker.
 use crate::wire;
 use std::{
-    env, fs,
     io::{self, Write},
     os::unix::net::{UnixListener, UnixStream},
     process::Command,
@@ -12,24 +11,7 @@ pub fn open(args: &[String], desktop: bool) -> io::Result<()> {
         return Err(io::Error::other("usage: newport-agent open URL"));
     }
     let selection = crate::routing::select(Some("browser"));
-    let wayland = env::var("WAYLAND_DISPLAY").unwrap_or_default();
-    let authority = env::var("XAUTHORITY").unwrap_or_default();
-    let fake_wayland = selection
-        .as_ref()
-        .is_ok_and(|s| wayland == s.root.join("wayland.sock").to_string_lossy())
-        || wayland.starts_with("/tmp/newport-runtime-")
-        || crate::paths::integration_display_path(&wayland);
-    let fake_x = authority.starts_with("/tmp/newport-runtime-")
-        || crate::x_endpoint::is_authority_path(&authority)
-        || crate::paths::integration_display_path(&authority)
-        || selection.as_ref().is_ok_and(|s| {
-            fs::read_to_string(s.root.join("display"))
-                .ok()
-                .is_some_and(|v| env::var("DISPLAY").ok().as_deref() == Some(v.trim()))
-        });
-    let graphical = (env::var("DISPLAY").is_ok_and(|v| !v.is_empty()) && !fake_x)
-        || (!wayland.is_empty() && !fake_wayland)
-        || env::var_os("WAYLAND_SOCKET").is_some();
+    let graphical = crate::native::real_desktop(selection.as_ref().ok().map(|s| s.root.as_path()));
     if desktop && graphical {
         if let Some(native) = crate::native::find("xdg-open") {
             use std::os::unix::process::CommandExt;

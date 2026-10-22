@@ -1,4 +1,4 @@
-//! Native feature dispatch without application-framework state or handles.
+//! Feature command dispatch: each command gets the services it uses, nothing more.
 use super::arguments::{argument, encode, error};
 use crate::{manager::Shared, metrics_db::MetricsDb, terminal::Sessions};
 use serde::Deserialize;
@@ -13,8 +13,8 @@ pub struct Services<'a> {
     pub terminals: &'a Sessions,
 }
 
-/// Feature command allowlist. The desktop client opens terminals through the
-/// terminal lease protocol rather than `terminal_open`.
+/// Feature command allowlist. Terminals open only through the terminal lease
+/// protocol, which ties each one to the connection that opened it.
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Command {
@@ -55,7 +55,6 @@ pub enum Command {
     ComposeJob,
     ComposeCancel,
     ComposeJobs,
-    TerminalOpen,
     TerminalRead,
     TerminalWrite,
     TerminalResize,
@@ -380,18 +379,6 @@ impl Command {
                 crate::commands::compose_jobs(services.manager, argument(args, "id")?)
                     .await
                     .map_err(error)?,
-            ),
-            Self::TerminalOpen => encode(
-                crate::commands::terminal_open(
-                    services.manager,
-                    services.terminals,
-                    argument(args, "id")?,
-                    argument(args, "session")?,
-                    argument(args, "cols")?,
-                    argument(args, "rows")?,
-                )
-                .await
-                .map_err(error)?,
             ),
             Self::TerminalRead => encode(
                 crate::commands::terminal_read(services.terminals, argument(args, "session")?)

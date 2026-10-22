@@ -38,6 +38,22 @@ pub struct License {
     pub ends_at: Option<String>,
     #[serde(default)]
     pub trial_used: bool,
+    /// This computer already used a free trial, under any account.
+    #[serde(default)]
+    pub trial_used_here: bool,
+    /// `pro`, `trial` or `free`: the seat this computer holds on the account.
+    pub seat: Option<String>,
+    /// Why this computer has no Remote token, from the account site.
+    pub message: Option<String>,
+}
+
+impl License {
+    /// Whether this computer runs Newport Pro: a paid, complimentary or trial
+    /// plan, on a seat that isn't free.
+    pub fn holds_pro(&self) -> bool {
+        matches!(self.state.as_str(), "active" | "grace" | "trial")
+            && self.seat.as_deref() != Some("free")
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -52,6 +68,9 @@ pub struct Status {
     #[serde(default)]
     pub signing_out: bool,
     notice: Option<RawNotice>,
+    /// Grows whenever the backend saves a different license token.
+    #[serde(default)]
+    pub license_revision: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -98,6 +117,7 @@ pub enum Action {
     SignOut,
     OpenPortal,
     OpenBilling,
+    StartTrial,
 }
 impl Action {
     fn method(self) -> &'static str {
@@ -107,6 +127,7 @@ impl Action {
             Self::SignOut => "account_sign_out",
             Self::OpenPortal => "account_open_portal",
             Self::OpenBilling => "account_open_billing",
+            Self::StartTrial => "account_start_trial",
         }
     }
 
@@ -311,6 +332,80 @@ impl Account {
     }
 }
 
+/// What a Remote apps session needs to prove this computer holds Newport Pro.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteLicense {
+    pub token: String,
+    /// This computer's machine hash, as the token names it.
+    pub machine: String,
+    /// The latest time the account site vouched for, as UTC Unix seconds.
+    pub trusted_time: i64,
+    /// When the token runs out, as UTC Unix seconds; 0 when unknown.
+    #[serde(default)]
+    pub expires_at: i64,
+}
+
+impl std::fmt::Debug for RemoteLicense {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteLicense")
+            .field("trusted_time", &self.trusted_time)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Why this computer has no Remote apps license: the backend's reason
+/// (`signed_out`, `free`, `free_seat`, `trial_elsewhere`, `offline`, `clock`,
+/// `unavailable`) and the sentence to show.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LicenseRefusal {
+    pub reason: Option<String>,
+    pub message: String,
+}
+
+impl LicenseRefusal {
+    /// Worth asking again shortly: the license couldn't be read or the
+    /// account site couldn't be reached. Plan, seat and sign-in refusals
+    /// change only when the account does.
+    pub fn transient(&self) -> bool {
+        matches!(
+            self.reason.as_deref(),
+            None | Some("unavailable" | "offline")
+        )
+    }
+
+    /// The account step that fixes this refusal, if there is one.
+    pub fn action(&self) -> Option<Action> {
+        match self.reason.as_deref()? {
+            "signed_out" => Some(Action::SignIn),
+            "free" | "trial_elsewhere" => Some(Action::OpenBilling),
+            "free_seat" => Some(Action::OpenPortal),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for LicenseRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// This computer's Remote apps license, or why it has none. Blocking: call it
+/// off the UI thread.
+pub fn remote_license(backend: &Backend) -> Result<RemoteLicense, LicenseRefusal> {
+    let value = backend
+        .call_detailed_with_timeout("account_remote_license", json!({}), Duration::from_secs(15))
+        .map_err(|error| LicenseRefusal {
+            reason: error.code,
+            message: error.message,
+        })?;
+    serde_json::from_value(value).map_err(|_| LicenseRefusal {
+        reason: None,
+        message: "Newport couldn’t read this computer’s license.".into(),
+    })
+}
+
 /// Backend errors are already worded for people; transport failures are not.
 fn error_message(action: Action, message: String) -> String {
     if message.ends_with('.') && !message.contains("Backend") && !message.contains("IPC") {
@@ -322,6 +417,7 @@ fn error_message(action: Action, message: String) -> String {
         Action::CancelSignIn => "Couldn’t cancel signing in. Try again.",
         Action::OpenPortal => "Couldn’t open your account. Try again.",
         Action::OpenBilling => "Couldn’t open Billing. Try again.",
+        Action::StartTrial => "Couldn’t start the free trial. Try again.",
     }
     .into()
 }

@@ -129,7 +129,6 @@ pub(crate) async fn read(
     let registry = if key.remote_apps() {
         &owner.queries.remote_apps
     } else {
-        owner.require_agent_available()?;
         if key.services() {
             &owner.queries.services
         } else {

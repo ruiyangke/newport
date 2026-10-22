@@ -4,14 +4,13 @@ pub const LINUX: &[&str] = &[
     "remote_tests::",
     "agent_lifecycle::",
     "server_setup::lifecycle_tests::",
-    "server_session::removal_tests::",
     "git::connection_tests::",
 ];
 
 pub fn runs(names: Vec<String>) -> Vec<Vec<String>> {
     // The shared remote_tests suite restores its fixture changes. Lifecycle tests
-    // intentionally leave corrupt journals, signed metadata or removed builds;
-    // each of those must receive a fresh server, including after a panic.
+    // install, uninstall or leave signed metadata and removed builds; each of
+    // those must receive a fresh server, including after a panic.
     let (shared, isolated): (Vec<_>, Vec<_>) = names
         .into_iter()
         .partition(|name| name.contains("remote_tests::"));

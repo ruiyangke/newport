@@ -2,9 +2,9 @@
 
 One Linux binary provides remote metrics, Git, clipboard, and browser services.
 Newport starts negotiated workers over SSH and owns their lifecycle. Initial
-installation requires approval. For approved installations, Newport checks on
-connection and hourly while connected, then automatically installs a newer signed
-Needle bundled with the desktop. Ordinary feature access starts the installed build.
+installation requires approval. After that, Newport checks on connection and
+hourly while connected, and replaces any Needle that isn't its own build with the
+one it bundles. Ordinary feature access starts the installed build.
 
 ## Build and test
 
@@ -36,7 +36,7 @@ newport-agent install
 | `clipboard -o [-t FORMAT]` | Read a clipboard format |
 | `open URL` | Open an HTTP(S) URL on the connected computer |
 | `display --backend BACKEND -- COMMAND` | Run a command with an isolated X11 or Wayland clipboard display |
-| `install` | Install owned aliases and shell configuration, preserving unrelated files |
+| `install` | Write the command links and shell setup, leaving unrelated files alone |
 
 See the [sharing guide](../../docs/clipboard.md) for shell setup and browser login
 callbacks. Internal services include `runtime --stdio`, `git-rpc --stdio`,
@@ -58,30 +58,40 @@ off sharing does not mean that all agent services stop.
 
 Runtime directories are private and use OS lifetime locks. Startup sweeps only
 recognized abandoned directories; unknown or ambiguous paths are retained.
-Installation admission uses `~/.local/state/newport/usage` and does not require
-writable `/tmp`.
 
-## Deployment and recovery
+## Install and uninstall
 
-Managed builds live under
-`~/.local/share/newport/needle/builds/SHA256/newport-agent`. Newport verifies the
-candidate handshake, serializes activation, and atomically switches the command
-symlink. Existing workers retain their negotiated build.
+A server has Needle installed or not; there is nothing in between.
 
-Automatic upgrades require verified release ordering and never downgrade or
-replace an unknown build. They defer while another lifecycle operation is active
-or recovery is unfinished. Failed attempts are throttled; use the Integrations
-page for manual updates and recovery. Checks do not reconnect disconnected servers
-or reinstall a removed agent.
+Installing (also updating) stages the build under
+`~/.local/share/newport/needle/builds/SHA256/newport-agent`, verifies its
+handshake, and runs `deployment install SHA256 [--integrations]`, which points
+`~/.local/bin/newport-agent` at it and, with integrations, writes the command
+links and the shell setup block. It is idempotent: running it again changes
+nothing, and an interrupted install is finished by installing again. Existing
+workers keep their negotiated build. Afterwards, and when a runtime starts,
+older builds are removed unless they are the active build, a process still runs
+them, or they were staged within the last hour. On systems without `/proc`, no
+build is removed. Journals that older Needle versions kept are deleted. A
+Needle installed as a plain file at `~/.local/bin/newport-agent` (by hand, or
+before builds were managed) is recognized by the protocol name it contains and
+replaced; any other file there is left alone and the install stops.
 
-Helper writes are preflighted and journaled with ownership evidence and backups.
-Recovery preserves unrelated edits; conflicts require review. Durable operation
-IDs let retries observe previous outcomes without repeating uncertain writes.
-Removing an installation requires settled operations and no active services;
-retained builds and backups support restoration.
+Shell setup is a block between `# >>> Newport >>>` and `# <<< Newport <<<`,
+written atomically with the file's permissions. A startup file that is a
+symlink or read-only is left alone, and the person is told what to add by hand.
+Another `xclip`, `wl-paste` or `xdg-open` stays; `newport-browser` must be free.
 
-The `deployment` commands implement preparation, activation, operation lookup,
-reconciliation, helper review, recovery, removal, and restoration. Their protocol
-and compatibility checks are defined in [deployment.rs](src/deployment.rs).
-Use the Integrations page for ordinary lifecycle changes. Do not delete ownership
-journals, backups, or usage locks as a repair shortcut.
+Uninstalling is Newport's job and needs no Needle executable: it runs
+[agent-uninstall.sh](../../crates/newport-backend/src/agent-uninstall.sh) over
+SSH, which stops Needle's processes, removes the shell setup blocks, the
+links pointing at Needle and a plain-file Needle at its entry point, and deletes `~/.local/share/newport`,
+`~/.cache/newport`, `~/.local/state/newport` and the runtime directory. It can't
+be undone; installing again starts from nothing.
+
+Needle follows Newport: once installing is approved, any Needle that isn't
+Newport's own build is replaced automatically, on connection and hourly. The one
+exception is a signed release known to be newer than Newport's, which would be a
+downgrade; Newport says to update Newport then. Failed attempts are throttled; use the
+Integrations page to install, update or uninstall by hand. Checks do not
+reconnect disconnected servers or reinstall an uninstalled agent.

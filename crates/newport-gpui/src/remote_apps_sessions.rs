@@ -39,8 +39,16 @@ struct Session {
     app_name: String,
     /// Windows are showing.
     running: bool,
-    /// Set once the session has finished, with its failure if any.
-    ended: Option<Option<String>>,
+    /// Windows appeared at some point, so a failure ends a running session
+    /// rather than a launch.
+    #[cfg_attr(not(newport_remote_apps), allow(dead_code))]
+    shown: bool,
+    /// Set once the session has finished, with what to say about it if
+    /// anything.
+    ended: Option<Option<api::Ending>>,
+    /// When this session's license runs out, as UTC Unix seconds (0 until it
+    /// has one); updated by each renewal it accepts.
+    lease: Arc<std::sync::atomic::AtomicI64>,
     /// Quit was chosen before the windows appeared.
     cancelled: bool,
     #[cfg(newport_remote_apps)]
@@ -54,6 +62,11 @@ pub(crate) struct Sessions {
     changed: Arc<AtomicBool>,
     /// Record sessions without streaming, for tests.
     scripted: bool,
+    /// Running sessions that failed, to tell the person wherever they are:
+    /// their windows just vanished.
+    notices: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Whether a renewal runs or must run again.
+    renewal: Arc<std::sync::Mutex<Renewal>>,
     #[cfg(newport_remote_apps)]
     registry: RefCell<Option<newport_remote_provider_gpui::session_registry::SessionRegistry>>,
 }
@@ -65,6 +78,8 @@ impl Sessions {
             next: Cell::new(0),
             changed: Default::default(),
             scripted: false,
+            notices: Default::default(),
+            renewal: Default::default(),
             #[cfg(newport_remote_apps)]
             registry: Default::default(),
         }
@@ -85,6 +100,7 @@ impl Sessions {
         let id = self.record(server, app_id.into(), app_id.into());
         if let Some(session) = self.sessions.borrow_mut().iter_mut().find(|s| s.id == id) {
             session.running = false;
+            session.shown = false;
         }
     }
 
@@ -147,8 +163,8 @@ impl Sessions {
                 app_id: session.app_id.clone(),
                 app_name: session.app_name.clone(),
                 state: match &session.ended {
-                    Some(error) => api::SessionState::Ended {
-                        error: error.clone(),
+                    Some(ending) => api::SessionState::Ended {
+                        ending: ending.clone(),
                     },
                     None if session.running => api::SessionState::Running,
                     None => api::SessionState::Starting,
@@ -178,6 +194,103 @@ impl Sessions {
         self.changed.store(true, Ordering::Release);
     }
 
+    /// Stop every session, as signing out does: a signed-out computer runs
+    /// nothing on the account.
+    pub fn stop_all(&self) {
+        let ids: Vec<_> = self
+            .sessions
+            .borrow()
+            .iter()
+            .filter(|session| session.ended.is_none())
+            .map(|session| session.id)
+            .collect();
+        for id in ids {
+            self.stop(id);
+        }
+    }
+
+    /// When the first open session closes unless its license is renewed, as
+    /// UTC Unix seconds.
+    pub fn lease_end(&self) -> Option<i64> {
+        self.sessions
+            .borrow()
+            .iter()
+            .filter(|session| session.ended.is_none() && !session.cancelled)
+            .map(|session| session.lease.load(Ordering::Acquire))
+            .filter(|end| *end > 0)
+            .min()
+    }
+
+    /// Running sessions that failed since last asked, worded for a toast.
+    pub fn take_notices(&self) -> Vec<String> {
+        std::mem::take(&mut *self.notices.lock().unwrap())
+    }
+
+    /// Whether a renewal that failed, or that a newer token overtook, should
+    /// run again now.
+    pub fn renewal_due(&self) -> bool {
+        self.active() > 0 && self.renewal.lock().unwrap().due(std::time::Instant::now())
+    }
+
+    /// Hand every running session the newest license, so the agents move
+    /// their deadlines. Asks the backend off the UI thread. A renewal asked for
+    /// while one runs follows it; one that can't reach the license is retried.
+    pub fn renew(&self, cx: &mut App) {
+        if self.scripted || self.active() == 0 {
+            return;
+        }
+        if !self.renewal.lock().unwrap().start() {
+            return;
+        }
+        #[cfg(newport_remote_apps)]
+        {
+            // Sessions still connecting are reached when they finish: each
+            // asks for a renewal then (see `stream`).
+            let controls: Vec<_> = self
+                .sessions
+                .borrow()
+                .iter()
+                .filter(|session| session.ended.is_none())
+                .filter_map(|session| {
+                    let native = session.native.as_ref()?;
+                    Some((native.control(), session.lease.clone()))
+                })
+                .collect();
+            let renewal = self.renewal.clone();
+            std::thread::spawn(move || {
+                let license = match newport_client::account::remote_license(
+                    &crate::backend::Backend::discover(),
+                ) {
+                    Ok(license) => license,
+                    // No license now: the sessions keep their current deadline.
+                    // Only a license that couldn't be read is worth asking for
+                    // again soon; a plan or seat refusal changes with the account.
+                    Err(refusal) => {
+                        eprintln!("Remote apps license not renewed: {refusal}");
+                        return renewal
+                            .lock()
+                            .unwrap()
+                            .finish(!refusal.transient(), std::time::Instant::now());
+                    }
+                };
+                for (control, lease) in controls {
+                    match control.renew_license(session_license(&license)) {
+                        Ok(()) => lease.store(license.expires_at, Ordering::Release),
+                        Err(error) => {
+                            eprintln!("A Remote apps session refused its renewed license: {error}")
+                        }
+                    }
+                }
+                // A session's refusal is final for that token.
+                renewal
+                    .lock()
+                    .unwrap()
+                    .finish(true, std::time::Instant::now());
+            });
+        }
+        let _ = cx;
+    }
+
     /// Stop every session before the application quits.
     pub fn shutdown(&self, _cx: &mut App) {
         #[cfg(newport_remote_apps)]
@@ -197,7 +310,9 @@ impl Sessions {
             app_id,
             app_name,
             running: self.scripted,
+            shown: self.scripted,
             ended: None,
+            lease: Default::default(),
             cancelled: false,
             #[cfg(newport_remote_apps)]
             native: None,
@@ -286,17 +401,49 @@ impl Sessions {
             server: launch.server_name.to_owned(),
         };
         let server = launch.server.to_owned();
+        let server_name = launch.server_name.to_owned();
         let hud = streaming.hud;
+        let lease = self
+            .sessions
+            .borrow()
+            .iter()
+            .find(|session| session.id == id)
+            .map(|session| session.lease.clone())
+            .unwrap_or_default();
+        let renewal = self.renewal.clone();
+        let notices = self.notices.clone();
         cx.spawn(async move |cx| {
             // A blocking exchange of up to 45 s: keep it off GPUI's executors.
+            // Newport Pro comes first: without a license nothing runs on the server.
             let (sender, receiver) = async_channel::bounded(1);
             std::thread::spawn(move || {
-                let _ = sender.send_blocking(open_stream(&server, &command));
+                // The client's own check (signature, this Mac, the clock
+                // guard) runs before anything starts on the server.
+                let refused = |message: String| api::Ending::Refused {
+                    message,
+                    action: None,
+                };
+                let opened =
+                    newport_client::account::remote_license(&crate::backend::Backend::discover())
+                        .map_err(|refusal| api::Ending::Refused {
+                            action: refusal.action(),
+                            message: refusal.message,
+                        })
+                        .and_then(|license| {
+                            session_license(&license)
+                                .verify()
+                                .map_err(|rejection| refused(rejection.message().to_owned()))?;
+                            let stream = open_stream(&server, &command).map_err(refused)?;
+                            Ok((license, stream))
+                        });
+                let _ = sender.send_blocking(opened);
             });
-            let opened = receiver
-                .recv()
-                .await
-                .unwrap_or_else(|_| Err("The connection attempt stopped.".into()));
+            let opened = receiver.recv().await.unwrap_or_else(|_| {
+                Err(api::Ending::Refused {
+                    message: "The connection attempt stopped.".into(),
+                    action: None,
+                })
+            });
             let watched = sessions.clone();
             let cancelled = move || {
                 watched
@@ -311,11 +458,19 @@ impl Sessions {
                 }
                 changed.store(true, Ordering::Release);
             };
-            let fail = |error: String| update(&|session| session.ended = Some(Some(error.clone())));
-            let (reader, writer, close, outcome) = match opened {
-                Ok(stream) => stream,
-                Err(error) => return fail(error),
+            // A session cancelled while starting has nothing to report.
+            let fail = |ending: api::Ending| {
+                update(&|session| {
+                    if !session.cancelled {
+                        session.ended = Some(Some(ending.clone()));
+                    }
+                })
             };
+            let (license, (reader, writer, close, outcome)) = match opened {
+                Ok(opened) => opened,
+                Err(ending) => return fail(ending),
+            };
+            lease.store(license.expires_at, Ordering::Release);
             if cancelled() {
                 close();
                 return;
@@ -331,12 +486,18 @@ impl Sessions {
                     settings,
                     display,
                     native_sizing: true,
+                    license: Some(session_license(&license)),
                     ..Default::default()
                 },
             );
             let connection = match attached {
                 Ok(connection) => connection,
-                Err(error) => return fail(error),
+                Err(message) => {
+                    return fail(api::Ending::Refused {
+                        message,
+                        action: None,
+                    });
+                }
             };
             if cancelled() {
                 connection.control().terminate();
@@ -354,13 +515,34 @@ impl Sessions {
                         identity,
                         quit_on_end: false,
                         on_finished: Some(Rc::new(move |control, _| {
-                            let error = match control.state() {
-                                client::SessionState::Finished(client::SessionOutcome::Failed(
-                                    error,
-                                )) => Some(error),
-                                _ => None,
-                            };
-                            finished(&|session| session.ended = Some(error.clone()));
+                            let state = control.state();
+                            finished(&|session| {
+                                session.ended = Some(match &state {
+                                    client::SessionState::Finished(
+                                        client::SessionOutcome::HandedOff,
+                                    ) => Some(api::Ending::HandedOff),
+                                    client::SessionState::Finished(
+                                        client::SessionOutcome::Failed(error),
+                                    ) if session.shown => {
+                                        // Its windows just vanished: say why,
+                                        // wherever the person is in Newport.
+                                        notices.lock().unwrap().push(format!(
+                                            "{} on {} closed: {error}",
+                                            session.app_name, server_name
+                                        ));
+                                        Some(api::Ending::Failed(error.clone()))
+                                    }
+                                    // Refused before any window, such as by
+                                    // the agent's license check.
+                                    client::SessionState::Finished(
+                                        client::SessionOutcome::Failed(error),
+                                    ) => Some(api::Ending::Refused {
+                                        message: error.clone(),
+                                        action: None,
+                                    }),
+                                    _ => None,
+                                });
+                            });
                         })),
                         registry: Some(registry),
                     },
@@ -368,11 +550,20 @@ impl Sessions {
                 )
             });
             match presented {
-                Ok(native) => update(&|session| {
-                    session.running = native.is_running();
-                    session.native = Some(native.clone());
+                Ok(native) => {
+                    update(&|session| {
+                        session.running = native.is_running();
+                        session.shown |= session.running;
+                        session.native = Some(native.clone());
+                    });
+                    // A renewal that ran while this session was connecting
+                    // skipped it; bring it up to date now.
+                    renewal.lock().unwrap().request();
+                }
+                Err(message) => fail(api::Ending::Refused {
+                    message,
+                    action: None,
                 }),
-                Err(error) => fail(error),
             }
         })
         .detach();
@@ -386,9 +577,64 @@ impl Sessions {
             let running = session.native.as_ref().is_some_and(|n| n.is_running());
             if session.ended.is_none() && running != session.running {
                 session.running = running;
+                session.shown |= running;
                 self.changed.store(true, Ordering::Release);
             }
         }
+    }
+}
+
+/// Renewal bookkeeping: one renewal at a time, again when one was asked for
+/// meanwhile (a newer token may have arrived after it read the license), and
+/// again after a pause when the license couldn't be read.
+#[derive(Debug, Default)]
+struct Renewal {
+    running: bool,
+    again_at: Option<std::time::Instant>,
+}
+
+#[cfg_attr(not(newport_remote_apps), allow(dead_code))]
+impl Renewal {
+    /// How long a renewal that couldn't read the license waits to try again.
+    const RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Starts a renewal, or asks the running one to be followed by another.
+    fn start(&mut self) -> bool {
+        if self.running {
+            self.again_at = Some(std::time::Instant::now());
+            return false;
+        }
+        self.running = true;
+        self.again_at = None;
+        true
+    }
+
+    /// Asks for a renewal as soon as none runs.
+    fn request(&mut self) {
+        self.again_at = Some(std::time::Instant::now());
+    }
+
+    fn finish(&mut self, read: bool, now: std::time::Instant) {
+        self.running = false;
+        if !read {
+            self.again_at = Some(now + Self::RETRY);
+        }
+    }
+
+    fn due(&self, now: std::time::Instant) -> bool {
+        !self.running && self.again_at.is_some_and(|at| at <= now)
+    }
+}
+
+/// The license as a Remote session takes it.
+#[cfg(newport_remote_apps)]
+fn session_license(
+    license: &newport_client::account::RemoteLicense,
+) -> newport_remote_client::SessionLicense {
+    newport_remote_client::SessionLicense {
+        token: license.token.clone(),
+        machine: license.machine.clone(),
+        trusted_time: license.trusted_time,
     }
 }
 
@@ -626,6 +872,28 @@ impl newport_remote_transport::Driver for StreamDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renewals_run_one_at_a_time_and_retry_a_license_they_couldnt_read() {
+        let now = std::time::Instant::now();
+        let mut renewal = Renewal::default();
+        assert!(!renewal.due(now));
+        assert!(renewal.start());
+        // A newer token while it runs: it is followed by another.
+        assert!(!renewal.start());
+        assert!(!renewal.due(now), "not while one runs");
+        renewal.finish(true, now);
+        assert!(renewal.due(std::time::Instant::now()));
+        assert!(renewal.start());
+        renewal.finish(true, now);
+        assert!(!renewal.due(now + Renewal::RETRY * 10), "done");
+
+        // The backend couldn't give the license: again after a pause.
+        assert!(renewal.start());
+        renewal.finish(false, now);
+        assert!(!renewal.due(now));
+        assert!(renewal.due(now + Renewal::RETRY));
+    }
 
     #[test]
     fn agent_commands_quote_every_word() {

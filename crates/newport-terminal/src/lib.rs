@@ -2,7 +2,8 @@
 //!
 //! Ghostty owns the VT parser and both screen buffers. The UI consumes owned
 //! viewport snapshots, and the transport consumes the replies in [`Effects`].
-//! No remote escape sequence is allowed to access the host clipboard.
+//! A program may copy text to the host clipboard (OSC 52 writes, as tmux
+//! does); no remote escape sequence can read or clear it.
 
 mod engine;
 mod frame;

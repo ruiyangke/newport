@@ -1,13 +1,9 @@
 //! Native navigation preferences stay in the opened data profile.
 use super::Page;
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    io::{self, Write},
-    path::{Path, PathBuf},
-};
+use std::io;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Selection {
     pub server: String,
     pub page: Page,
@@ -54,12 +50,9 @@ fn valid_path(value: &serde_json::Value) -> bool {
             .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
             .is_some_and(|bytes| bytes.starts_with(b"/") && !bytes.contains(&0))
 }
-fn path() -> Option<PathBuf> {
-    newport_client::profile::directory().map(|base| base.join("gpui-workspace-state.json"))
-}
-fn decode(bytes: &[u8]) -> io::Result<Selection> {
-    let mut selection: Selection =
-        serde_json::from_slice(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+/// A restored selection with anything invalid dropped; an impossible server
+/// identity refuses the whole selection.
+pub(super) fn sanitize(mut selection: Selection) -> io::Result<Selection> {
     if selection.server.len() > 256 || selection.server.contains('\0') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -95,41 +88,6 @@ fn decode(bytes: &[u8]) -> io::Result<Selection> {
         !server.is_empty() && server.len() <= 256 && !server.contains('\0')
     });
     Ok(selection)
-}
-pub(super) fn load() -> Selection {
-    let Some(path) = path() else {
-        return Selection::default();
-    };
-    match fs::read(path).and_then(|bytes| decode(&bytes)) {
-        Ok(value) => value,
-        Err(error) => {
-            if error.kind() != io::ErrorKind::NotFound {
-                eprintln!("Could not restore native workspace: {error}");
-            }
-            Selection::default()
-        }
-    }
-}
-fn write(path: &Path, selection: &Selection) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let bytes = serde_json::to_vec(selection)?;
-    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temp, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temp);
-    }
-    result
 }
 impl super::Newport {
     pub(super) fn restore_git_destination(&mut self) {
@@ -184,6 +142,15 @@ impl super::Newport {
         })
     }
 
+    /// A deleted server's remembered views go with it.
+    pub(super) fn forget_server_state(&mut self, server: &String) {
+        self.git_destinations.remove(server);
+        self.overview_state.preferences.remove(server);
+        self.overview_state.interfaces.remove(server);
+        self.project_preferences.remove(server);
+        self.save_workspace_selection();
+    }
+
     pub(super) fn save_workspace_selection(&mut self) {
         if !self.configuration_available() {
             return;
@@ -196,23 +163,16 @@ impl super::Newport {
                 self.git_destinations.remove(&self.server);
             }
         }
-        if let Some(path) = path()
-            && let Err(error) = write(
-                &path,
-                &Selection {
-                    server: self.server.clone(),
-                    page: self.page,
-                    workspace_page: self.workspace_page,
-                    git: self.git_destination(),
-                    network_interfaces: self.overview_state.interfaces.clone(),
-                    overview_preferences: self.overview_state.preferences.clone(),
-                    git_destinations: self.git_destinations.clone(),
-                    project_preferences: self.project_preferences.clone(),
-                },
-            )
-        {
-            eprintln!("Could not save native workspace: {error}");
-        }
+        self.ui_state.workspace(Selection {
+            server: self.server.clone(),
+            page: self.page,
+            workspace_page: self.workspace_page,
+            git: self.git_destination(),
+            network_interfaces: self.overview_state.interfaces.clone(),
+            overview_preferences: self.overview_state.preferences.clone(),
+            git_destinations: self.git_destinations.clone(),
+            project_preferences: self.project_preferences.clone(),
+        });
     }
 }
 #[cfg(test)]
@@ -221,8 +181,11 @@ mod connection_recovery_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{Selection, decode};
+    use super::{Selection, sanitize};
     use crate::Page;
+    fn decode(bytes: &[u8]) -> std::io::Result<Selection> {
+        sanitize(serde_json::from_slice(bytes).map_err(std::io::Error::other)?)
+    }
     #[test]
     fn container_session_choices_never_enter_persistent_workspace_state() {
         let input = serde_json::json!({

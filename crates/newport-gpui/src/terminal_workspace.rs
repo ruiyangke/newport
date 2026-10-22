@@ -91,6 +91,23 @@ impl Workspace {
         self.focus_active(window, cx);
         cx.notify();
     }
+    /// Tab `number` (1–8), or the last tab for 9, as browsers number them.
+    pub(super) fn select_tab(
+        &mut self,
+        number: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = crate::navigation::tab_index(number, self.tabs.len()) else {
+            return;
+        };
+        if self.rename.is_some() {
+            return;
+        }
+        self.active = index;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
     pub fn deactivate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for tab in &self.tabs {
             tab.view.update(cx, |view, cx| view.deactivate(window, cx));
@@ -1261,6 +1278,22 @@ mod tests {
         cx.simulate_resize(size(px(700.), px(400.)));
         draw(cx);
         (workspace.unwrap(), cx)
+    }
+
+    #[gpui::test]
+    fn numbers_select_tabs_and_nine_is_the_last(cx: &mut TestAppContext) {
+        let (workspace, cx) = visual_fixture(cx);
+        let count = workspace.read_with(cx, |w, _| w.tabs.len());
+        assert!(count >= 2);
+        for (number, expected) in [(2, 1), (9, count - 1), (1, 0), (8, 0)] {
+            workspace.update_in(cx, |w, window, cx| w.select_tab(number, window, cx));
+            // A number past the last tab leaves the current one.
+            assert_eq!(
+                workspace.read_with(cx, |w, _| w.active),
+                expected,
+                "{number}"
+            );
+        }
     }
 
     fn draw(cx: &mut VisualTestContext) {

@@ -779,15 +779,15 @@ impl Backend {
         }
     }
     pub fn discover() -> Self {
-        let base = std::env::var_os("NEWPORT_DATA_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                #[cfg(windows)]
-                let root = dirs::data_local_dir().unwrap_or_default();
-                #[cfg(not(windows))]
-                let root = dirs::data_dir().unwrap_or_default();
-                default_profile(&root)
-            });
+        // The profile this process opened, or a non-empty NEWPORT_DATA_DIR,
+        // the same rule the window's own preferences follow.
+        let base = crate::profile::directory().unwrap_or_else(|| {
+            #[cfg(windows)]
+            let root = dirs::data_local_dir().unwrap_or_default();
+            #[cfg(not(windows))]
+            let root = dirs::data_dir().unwrap_or_default();
+            default_profile(&root)
+        });
         Self {
             path: newport_platform::ipc::profile_endpoint(&base),
         }
@@ -811,7 +811,7 @@ impl Backend {
     ) -> Result<Value, crate::request_error::RequestError> {
         self.call_detailed_with_timeout(method, args, request_timeout(method))
     }
-    fn call_detailed_with_timeout(
+    pub fn call_detailed_with_timeout(
         &self,
         method: &str,
         args: Value,
@@ -882,7 +882,9 @@ impl Backend {
         Ok(stream)
     }
 
-    pub(crate) fn open_terminal_lease(&self, args: Value) -> Result<Stream, String> {
+    /// Opens a terminal held for as long as the returned stream lives:
+    /// dropping it closes the terminal.
+    pub fn open_terminal_lease(&self, args: Value) -> Result<Stream, String> {
         self.exchange_with_timeout(protocol::TERMINAL_OPEN_LEASE, args, Duration::from_secs(10))
             .map(|(_, stream)| stream)
             .map_err(|error| error.message)
@@ -894,10 +896,9 @@ impl Backend {
         args: Value,
         timeout: Duration,
     ) -> Result<(Value, Stream), crate::request_error::RequestError> {
-        crate::agent_relay::await_registration(&self.path)?;
         let mut stream = newport_platform::ipc::connect_private(&self.path).map_err(|_| {
             format!(
-                "Cannot reach Newport's backend. Start Newport with --native-client. Socket: {}",
+                "Cannot reach Newport's backend. Open Newport (with the same NEWPORT_DATA_DIR for a development build). Socket: {}",
                 self.path.display()
             )
         })?;

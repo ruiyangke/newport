@@ -82,6 +82,8 @@ pub struct TerminalView {
     focus_reporter: FocusReporter,
     pub title: String,
     pending_title: Option<(String, Instant)>,
+    /// Text a program copied (tmux, an editor), for the clipboard.
+    copied: Option<String>,
     pub status: TerminalStatus,
     pub input_error: Option<String>,
     server: String,
@@ -153,6 +155,7 @@ impl TerminalView {
             focus_reporter: FocusReporter::default(),
             title: "Terminal".into(),
             pending_title: None,
+            copied: None,
             status: TerminalStatus::default(),
             input_error: None,
             server,
@@ -350,6 +353,9 @@ impl TerminalView {
         }
     }
     fn effects(&mut self, effects: Effects) {
+        if let Some(text) = effects.copy {
+            self.copied = Some(text);
+        }
         if let Some(title) = effects.title {
             let title = title
                 .filter(|t| !t.is_empty())
@@ -416,6 +422,9 @@ impl TerminalView {
         self.report_focus();
         let result = self.engine.flush_expired();
         changed |= self.accept_effects(result);
+        if let Some(text) = self.copied.take() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
         changed |= self.flush_title(Instant::now());
         self.flush_input();
         // Hidden PTYs must still consume output, answer device queries and
@@ -1614,6 +1623,28 @@ mod tests {
             view.pending_title.as_mut().unwrap().1 = Instant::now() - Duration::from_millis(150);
             view.tick(cx);
             assert_eq!(view.title, "Terminal");
+        });
+    }
+    #[gpui::test]
+    fn copying_in_tmux_reaches_the_clipboard_but_reading_it_never_answers(cx: &mut TestAppContext) {
+        let view = fixture(cx);
+        view.update(cx, |view, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("mine".into()));
+            // Exactly what tmux 3.8 writes for a copy (captured from
+            // `tmux set-buffer -w "copied from tmux"` in an xterm-256color PTY).
+            view.receive(Event::Data(
+                b"\x1b]52;;Y29waWVkIGZyb20gdG11eA==\x07".to_vec(),
+            ));
+            view.tick(cx);
+            assert_eq!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref(),
+                Some("copied from tmux")
+            );
+            view.receive(Event::Data(b"\x1b]52;c;?\x07".to_vec()));
+            view.tick(cx);
+            assert!(view.input.is_empty(), "no reply carries the clipboard");
         });
     }
 }

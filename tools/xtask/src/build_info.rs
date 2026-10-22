@@ -74,7 +74,7 @@ fn check(info: &BuildInfo, product: &util::App, expect: Expect) -> Result<()> {
             .debug
             .is_some_and(|debug| info.debug_assertions != debug)
     {
-        bail!("The native binary does not match the requested package; rebuild before packaging");
+        bail!("The app binary does not match the requested package; rebuild before packaging");
     }
     Ok(())
 }
@@ -82,7 +82,7 @@ fn check(info: &BuildInfo, product: &util::App, expect: Expect) -> Result<()> {
 fn read_with(binary: &Path, expect: Expect, timeout: Duration) -> Result<BuildInfo> {
     let info: BuildInfo = output(binary, timeout)
         .and_then(|bytes| Ok(serde_json::from_slice(&bytes)?))
-        .context("Cannot read native binary build metadata; rebuild before packaging")?;
+        .context("Cannot read the app binary's build metadata; rebuild before packaging")?;
     check(&info, &util::app()?, expect)?;
     Ok(info)
 }
@@ -226,7 +226,7 @@ mod tests {
             let binary = script(directory.path(), body);
             let error = read_with(&binary, Expect::default(), timeout).unwrap_err();
             assert!(
-                error.to_string().contains("Cannot read native binary"),
+                error.to_string().contains("Cannot read the app binary"),
                 "{body}"
             );
         }

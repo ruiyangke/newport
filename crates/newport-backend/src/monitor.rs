@@ -122,7 +122,6 @@ pub async fn ask(
     }
     let shared = server.monitor.for_request(request);
     let mut slot = shared.lock().await;
-    server.require_agent_available()?;
     if slot
         .open
         .as_ref()

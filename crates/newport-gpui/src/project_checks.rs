@@ -27,7 +27,7 @@ impl Newport {
         self.poll_project_checks_at(Instant::now(), cx);
     }
     fn poll_project_checks_at(&mut self, now: Instant, cx: &mut Context<Self>) {
-        let library = self.project_library_visible();
+        let library = self.project_library_visible() && !self.needle_missing();
         if !library {
             self.project_checks = None;
             return;

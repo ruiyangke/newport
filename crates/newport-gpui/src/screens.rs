@@ -58,6 +58,17 @@ impl Newport {
             )
             .into_any_element();
         }
+        // Needle's pages share one state while it's missing; Overview shows
+        // setup itself, and Connections still lists saved forwards.
+        let needle_feature = match self.page {
+            Page::Projects => Some("Git"),
+            Page::Services => Some("Services"),
+            Page::Containers => Some("Containers"),
+            _ => None,
+        };
+        if let Some(feature) = needle_feature.filter(|_| self.needle_missing()) {
+            return self.needle_required(feature, cx);
+        }
         match self.page {
             Page::Overview => self.overview(cx),
             Page::Ports => self.ports(cx),

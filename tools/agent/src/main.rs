@@ -11,32 +11,6 @@ fn run(args: &[String]) -> std::io::Result<()> {
         .file_name()
         .unwrap_or_default()
         .to_string_lossy();
-    // Hold admission for the complete service process, including registered
-    // workers and command aliases. Lifecycle commands obtain
-    // their own maintenance authority rather than a conflicting shared lease.
-    let service = matches!(
-        name.as_ref(),
-        "xclip" | "wl-paste" | "newport-browser" | "xdg-open"
-    ) || matches!(
-        args.get(1).map(String::as_str),
-        Some(
-            "runtime"
-                | "worker"
-                | "serve"
-                | "git-rpc"
-                | "monitor"
-                | "clipboard"
-                | "open"
-                | "display"
-                | "env"
-                | "sessions"
-        )
-    );
-    let _lease = if service {
-        Some(newport_agent::installation_use::ServiceLease::acquire()?)
-    } else {
-        None
-    };
     match name.as_ref() {
         "xclip" => newport_agent::clipboard::read(&args[1..]),
         "wl-paste" => newport_agent::clipboard::wl_paste(&args[1..]),

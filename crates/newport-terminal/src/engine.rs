@@ -2,7 +2,7 @@ use crate::{Frame, Palette, Result, RgbColor, frame::Renderer};
 use libghostty_vt::{
     Terminal,
     selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection},
-    terminal::{Mode, Point, ScrollViewport},
+    terminal::{ClipboardLocation, ClipboardWriteError, Mode, Point, ScrollViewport},
 };
 use std::{
     cell::{Cell, Ref, RefCell},
@@ -25,7 +25,13 @@ pub struct Effects {
     pub title: Option<Option<String>>,
     pub replies: Vec<Vec<u8>>,
     pub bell: bool,
+    /// Text a program copied (OSC 52, as tmux and editors do), for the host
+    /// clipboard. The latest copy wins.
+    pub copy: Option<String>,
 }
+
+/// The most a program may copy at once; larger copies are refused.
+const COPY_LIMIT: usize = 8 << 20;
 
 struct Shared {
     renderer: RefCell<Renderer>,
@@ -106,8 +112,36 @@ impl Engine {
                 }
             }
         })?;
-        // No clipboard handlers: remote OSC must never read or modify the
-        // host clipboard. The UI handles explicit copy/paste separately.
+        // Programs may copy text to the host clipboard, the way copying in
+        // tmux or an editor reaches the terminal's computer. Nothing else:
+        // no reads (no read handler is installed, so OSC 52 queries are
+        // ignored), no clearing, no primary selection, text only, bounded.
+        terminal.on_clipboard_write({
+            let shared = shared.clone();
+            move |_, write| {
+                let text = (write.location() == ClipboardLocation::Standard)
+                    .then(|| {
+                        write
+                            .contents()
+                            .find(|content| content.mime.starts_with("text/plain"))
+                    })
+                    .flatten()
+                    .filter(|content| content.data.len() <= COPY_LIMIT)
+                    .and_then(|content| String::from_utf8(content.data.to_vec()).ok());
+                let accepted = text.is_some();
+                if let (Some(text), Ok(mut effects)) = (text, shared.effects.try_borrow_mut()) {
+                    effects.copy = Some(text);
+                }
+                write.reply(
+                    if accepted {
+                        Ok(())
+                    } else {
+                        Err(ClipboardWriteError::Denied)
+                    },
+                    false,
+                );
+            }
+        })?;
         shared.renderer.borrow_mut().update(&terminal)?;
         Ok(Self {
             terminal,
