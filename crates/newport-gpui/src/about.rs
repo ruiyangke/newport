@@ -54,7 +54,6 @@ pub fn show(window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) {
     use gpui_kit::component::WindowExt;
     window.open_alert_dialog(cx, |dialog, _, _| {
         dialog
-            .aria_label("About Newport")
             .title("About Newport")
             .description(format!("Newport {}", version()))
             .show_cancel(false)
