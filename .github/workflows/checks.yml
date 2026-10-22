@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
@@ -28,7 +28,7 @@ jobs:
       - name: No private crates in Cargo files
         run: sh .githooks/pre-commit
       - run: rustup show
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             .
@@ -40,7 +40,7 @@ jobs:
       - run: cargo test --locked --manifest-path tools/xtask/Cargo.toml
       - name: Replay real CLI responses through native validators
         run: cargo xtask test git-cli-contract --output target/git-contract.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@v7
         with:
           name: git-contract
           path: target/git-contract.json
@@ -70,7 +70,7 @@ jobs:
     env:
       CARGO_BUILD_TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
@@ -85,14 +85,14 @@ jobs:
           $llvm >> $env:GITHUB_PATH
       - name: Check native source formatting
         run: cargo fmt -p newport-domain -p newport-client -p newport-platform -p newport-backend -p newport-gpui -p newport-app -p newport-grammars -p newport-release -p newport-terminal --check
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             .
             tools/xtask
           key: native-core-${{ matrix.arch }}
           save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@v8
         with:
           name: linux-agents
           path: resources/agents
@@ -130,7 +130,7 @@ jobs:
     env:
       CARGO_BUILD_TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
@@ -139,7 +139,7 @@ jobs:
       - name: Install Metal shader compiler
         if: runner.os == 'macOS'
         run: xcrun --sdk macosx metal --version || { xcodebuild -downloadComponent MetalToolchain && xcrun --sdk macosx metal --version; }
-      - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
+      - uses: ilammy/setup-nasm@v1
         if: runner.os == 'Windows' && matrix.arch == 'windows-x64'
       - name: Locate LLVM for ARM64 dependencies
         if: runner.os == 'Windows' && matrix.arch == 'windows-arm64'
@@ -148,14 +148,14 @@ jobs:
           $llvm = 'C:\Program Files\LLVM\bin'
           if (!(Test-Path "$llvm\clang.exe")) { throw 'LLVM is required for ARM64' }
           $llvm >> $env:GITHUB_PATH
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             .
             tools/xtask
           key: native-ui-${{ matrix.arch }}
           save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@v8
         with:
           name: linux-agents
           path: resources/agents
@@ -175,7 +175,7 @@ jobs:
       - name: Build native macOS app bundle
         if: runner.os == 'macOS'
         run: cargo xtask package --debug --skip-build
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@v7
         if: runner.os == 'macOS'
         with:
           name: newport-native-${{ matrix.arch }}-adhoc-app
@@ -220,7 +220,7 @@ jobs:
           $env:NEWPORT_TEST_INSTALLER = $installers[0].FullName
           cargo test --locked -p newport-release --test native_package_runtime -- --ignored --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'Native installer runtime acceptance failed' }
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@v7
         if: runner.os == 'Windows'
         with:
           name: newport-native-${{ matrix.arch }}-unsigned-installer
@@ -236,12 +236,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: cachix/install-nix-action@v31
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             tools/agent
@@ -259,23 +259,23 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
       - run: rustup show
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tools/xtask
           key: agent-build-harness
           save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
       - run: cargo xtask agents
       - run: cargo xtask test runtime
       - run: cargo xtask artifact record resources/agents
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-agents
           path: resources/agents/
@@ -291,24 +291,24 @@ jobs:
       NEWPORT_PREBUILT: "1"
       NEWPORT_TEST_DOCKER_CONTEXT: colima
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@v8
         with:
           name: linux-agents
           path: resources/agents
       - run: chmod +x resources/agents/newport-agent-*
       - run: rustup show
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             .
             tools/xtask
           key: remote
           save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - uses: cachix/install-nix-action@v31
       # Compile before the VM reserves host memory. Match fixtures::backend_command
       # so the harness reuses this binary without spending its fixture budget on
       # a cold Intel build (which exceeded 20 minutes on hosted macOS).
@@ -360,14 +360,14 @@ jobs:
       run:
         working-directory: newport
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
           path: newport
           persist-credentials: false
       - id: revision
         run: echo "commit=$(cat .github/newport-remote-revision)" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           repository: ruiyangke/newport-remote
           ref: ${{ steps.revision.outputs.commit }}
@@ -375,7 +375,7 @@ jobs:
           ssh-key: ${{ secrets.NEWPORT_REMOTE_DEPLOY_KEY }}
           persist-credentials: false
       - run: rustup show
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             newport/tools/xtask
@@ -386,7 +386,7 @@ jobs:
       # libaom needs an assembler on x86_64.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libopus-dev libclang-dev nasm
       - run: cargo xtask remote-agents --arch ${{ matrix.arch }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@v7
         with:
           name: remote-agent-${{ matrix.arch }}
           path: newport/target/remote-agent/${{ matrix.arch }}.tar.gz
@@ -405,14 +405,14 @@ jobs:
       run:
         working-directory: newport
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
           path: newport
           persist-credentials: false
       - id: revision
         run: echo "commit=$(cat .github/newport-remote-revision)" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           repository: ruiyangke/newport-remote
           ref: ${{ steps.revision.outputs.commit }}
@@ -422,19 +422,19 @@ jobs:
       - run: rustup show
       - name: Install Metal shader compiler
         run: xcrun --sdk macosx metal --version || { xcodebuild -downloadComponent MetalToolchain && xcrun --sdk macosx metal --version; }
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             newport
             newport/tools/xtask
           key: remote-apps
           save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@v8
         with:
           name: linux-agents
           path: newport/resources/agents
       - run: cargo xtask artifact verify resources/agents
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@v8
         with:
           pattern: remote-agent-*
           path: newport/target/remote-agent
