@@ -67,14 +67,34 @@ fn docker_build(stage: &str, arch: &str, output: &std::path::Path) -> Result<()>
     .success(Duration::from_secs(2400))
     .with_context(|| format!("Docker agent {stage} build failed for {platform}"))
 }
-pub fn runtime() -> Result<()> {
+/// The Linux agent architectures, or the named subset of them.
+fn architectures(names: &[String]) -> Result<Vec<&'static str>> {
+    const ALL: [&str; 2] = ["x86_64", "aarch64"];
+    if names.is_empty() {
+        return Ok(ALL.to_vec());
+    }
+    names
+        .iter()
+        .map(|name| {
+            ALL.into_iter()
+                .find(|arch| arch == name)
+                .with_context(|| format!("Unknown architecture {name}; use x86_64 or aarch64"))
+        })
+        .collect()
+}
+
+pub fn runtime(names: &[String]) -> Result<()> {
     let temp = tempfile::tempdir()?;
-    for arch in ["x86_64", "aarch64"] {
+    for arch in architectures(names)? {
         docker_build("runtime-check", arch, temp.path())?;
     }
     Ok(())
 }
-pub fn build_agents() -> Result<()> {
+
+/// Builds the Linux agents, or only the named architectures, into
+/// resources/agents; binaries of other architectures are left as they are.
+pub fn build_agents(names: &[String]) -> Result<()> {
+    let selected = architectures(names)?;
     if std::env::var("NEWPORT_PREBUILT").as_deref() == Ok("1") {
         return crate::artifact::verify(Path::new("resources/agents"));
     }
@@ -90,9 +110,9 @@ pub fn build_agents() -> Result<()> {
         return Ok(());
     }
     fs::create_dir_all(&output)?;
-    // Build both successfully before replacing the bundled binaries.
+    // Build every selected one successfully before replacing the bundled binaries.
     let staging = tempfile::tempdir_in(&output)?;
-    for arch in ["x86_64", "aarch64"] {
+    for arch in &selected {
         docker_build("artifact", arch, staging.path())?;
     }
     // A locally rebuilt payload must not inherit a signed release identity.
@@ -101,7 +121,7 @@ pub fn build_agents() -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    for arch in ["x86_64", "aarch64"] {
+    for arch in &selected {
         let name = format!("newport-agent-{arch}");
         fs::rename(staging.path().join(&name), output.join(&name))?;
     }
@@ -138,7 +158,7 @@ pub fn run(args: &[String]) -> Result<()> {
     std::env::set_var("DOCKER_HOST", endpoint);
     std::env::set_var("DOCKER_CONTEXT", context);
     std::env::set_var("NEWPORT_TEST_DOCKER", &docker);
-    build_agents()?;
+    build_agents(&[])?;
     let toolchain = fs::read_to_string(root().join("rust-toolchain.toml"))?;
     let channel = toolchain
         .lines()

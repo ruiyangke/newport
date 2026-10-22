@@ -87,7 +87,7 @@ pub fn agents_if_changed() -> Result<()> {
     match built {
         None => {
             eprintln!("Linux agent binaries are missing; building them in Docker");
-            crate::remote::build_agents()?;
+            crate::remote::build_agents(&[])?;
         }
         // Prebuilt agents (CI artifacts) are verified, not rebuilt.
         Some(built)
@@ -95,7 +95,7 @@ pub fn agents_if_changed() -> Result<()> {
                 && newest_source(&crate::root().join("tools/agent"))? > Some(built) =>
         {
             eprintln!("Linux agent sources changed; rebuilding the agents in Docker");
-            crate::remote::build_agents()?;
+            crate::remote::build_agents(&[])?;
         }
         Some(_) => {}
     }

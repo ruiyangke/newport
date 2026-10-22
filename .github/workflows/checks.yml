@@ -14,9 +14,11 @@ permissions:
   contents: read
 env:
   CARGO_TERM_COLOR: always
+# Jobs are named "Area: what (platform)". Tooling and Needle start at once;
+# the desktop builds wait only for the Needle binaries they embed.
 jobs:
   tooling:
-    name: Release tooling and Git contracts
+    name: "Tooling: release and Git contracts"
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -27,15 +29,15 @@ jobs:
       # The pre-commit hook's check, for commits made without the hooks.
       - name: No private crates in Cargo files
         run: sh .githooks/pre-commit
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - name: Lint workflows
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+      - uses: ./.github/actions/rust
         with:
+          cache-key: tooling
           workspaces: |
             .
             tools/agent
             tools/xtask
-          key: native-contracts
-          save-if: ${{ github.event_name != 'pull_request' }}
       - run: sudo apt-get update && sudo apt-get install -y nsis
       - run: cargo test --locked --manifest-path tools/xtask/Cargo.toml
       - name: Replay real CLI responses through native validators
@@ -47,23 +49,162 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Each architecture builds natively; under emulation arm64 took 25 minutes.
+  needle-build:
+    name: "Needle: build (${{ matrix.arch }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        with:
+          cache-key: needle-build-${{ matrix.arch }}
+          workspaces: tools/xtask
+      - run: cargo xtask agents --arch ${{ matrix.arch }}
+      - run: cargo xtask test runtime --arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: needle-${{ matrix.arch }}
+          path: resources/agents/newport-agent-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # The verified pair every desktop build embeds and the release signs.
+  needle-package:
+    name: "Needle: package"
+    needs: needle-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: needle-*
+          path: resources/agents
+          merge-multiple: true
+      - run: chmod +x resources/agents/newport-agent-*
+      - uses: ./.github/actions/rust
+        with:
+          cache-key: needle-package
+          workspaces: tools/xtask
+      - run: cargo xtask artifact record resources/agents
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-agents
+          path: resources/agents/
+          if-no-files-found: error
+          retention-days: 30
+
+  needle-tests:
+    name: "Needle: tests (${{ matrix.platform }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: Linux
+          - os: macos-15
+            platform: macOS
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      # Shell setup is tested against bash, zsh and fish; the clipboard against
+      # the system xclip and wl-clipboard.
+      - name: Install test shells and clipboard tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh fish xclip wl-clipboard
+      - name: Install test shells
+        if: runner.os == 'macOS'
+        run: brew install bash fish
+      - uses: ./.github/actions/rust
+        with:
+          cache-key: needle-tests-${{ matrix.platform }}
+          workspaces: |
+            tools/agent
+            tools/xtask
+      - run: cargo xtask check xtask
+      - run: cargo xtask check agent
+      - run: cargo xtask test https
+
+  # SSH, terminals and Docker services against real OpenSSH from macOS. Hosted
+  # ARM Macs can't run Linux VMs, so this is the Intel runner with colima.
+  needle-remote:
+    name: "Needle: SSH and Docker (macOS Intel)"
+    needs: needle-package
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    env:
+      NEWPORT_PREBUILT: "1"
+      NEWPORT_TEST_DOCKER_CONTEXT: colima
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-agents
+          path: resources/agents
+      - run: chmod +x resources/agents/newport-agent-*
+      - uses: ./.github/actions/rust
+        with:
+          cache-key: needle-remote
+      - name: Install colima and Docker
+        run: |
+          brew install colima docker docker-buildx
+          mkdir -p ~/.docker/cli-plugins
+          ln -sfn "$(brew --prefix)/opt/docker-buildx/bin/docker-buildx" ~/.docker/cli-plugins/docker-buildx
+      # Compile before the VM reserves host memory. Match fixtures::backend_command
+      # so the harness reuses this binary without spending its fixture budget on
+      # a cold Intel build (which exceeded 20 minutes on hosted macOS).
+      - name: Compile remote backend tests
+        timeout-minutes: 40
+        run: cargo test --locked -p newport-backend --lib --no-run --target-dir target
+      - name: Start Linux VM
+        timeout-minutes: 15
+        run: colima start --cpu 3 --memory 6 --arch x86_64 --vm-type=vz --mount-type=virtiofs
+      - run: cargo xtask test remote
+      - name: Docker diagnostics
+        if: failure()
+        run: |
+          docker info
+          docker ps -a
+
   # Interactive launch/IME/clipboard/DPI acceptance is a separate release gate;
   # these build/test jobs do not cover it.
-  native-core:
-    name: Native contracts and IPC (${{ matrix.arch }})
-    needs: agents
+  desktop-core:
+    name: "Desktop: core (${{ matrix.platform }})"
+    needs: needle-package
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-15
-            arch: macos-arm64
+            platform: macOS
             target: aarch64-apple-darwin
           - os: windows-2025
-            arch: windows-x64
+            platform: Windows x64
             target: x86_64-pc-windows-msvc
           - os: windows-11-arm
-            arch: windows-arm64
+            platform: Windows arm64
             target: aarch64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -74,24 +215,19 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
-      - run: rustup show
-      - run: rustup target add ${{ matrix.target }}
       - name: Locate LLVM for ARM64 dependencies
-        if: runner.os == 'Windows' && matrix.arch == 'windows-arm64'
+        if: matrix.target == 'aarch64-pc-windows-msvc'
         shell: pwsh
         run: |
           $llvm = 'C:\Program Files\LLVM\bin'
           if (!(Test-Path "$llvm\clang.exe")) { throw 'LLVM is required for ARM64' }
           $llvm >> $env:GITHUB_PATH
+      - uses: ./.github/actions/rust
+        with:
+          target: ${{ matrix.target }}
+          cache-key: desktop-core-${{ matrix.target }}
       - name: Check native source formatting
         run: cargo fmt -p newport-domain -p newport-client -p newport-platform -p newport-backend -p newport-gpui -p newport-app -p newport-grammars -p newport-release -p newport-terminal --check
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            .
-            tools/xtask
-          key: native-core-${{ matrix.arch }}
-          save-if: ${{ github.event_name != 'pull_request' }}
       - uses: actions/download-artifact@v8
         with:
           name: linux-agents
@@ -109,22 +245,25 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo run --locked -p newport-platform --example system_events_check
 
-  native-ui:
-    name: Native UI (${{ matrix.arch }})
-    needs: agents
+  desktop-ui:
+    name: "Desktop: UI (${{ matrix.platform }})"
+    needs: needle-package
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-15
-            arch: macos-arm64
+            platform: macOS
             target: aarch64-apple-darwin
+            artifact: macos-arm64
           - os: windows-2025
-            arch: windows-x64
+            platform: Windows x64
             target: x86_64-pc-windows-msvc
+            artifact: windows-x64
           - os: windows-11-arm
-            arch: windows-arm64
+            platform: Windows arm64
             target: aarch64-pc-windows-msvc
+            artifact: windows-arm64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
@@ -134,27 +273,22 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
-      - run: rustup show
-      - run: rustup target add ${{ matrix.target }}
       - name: Install Metal shader compiler
         if: runner.os == 'macOS'
         run: xcrun --sdk macosx metal --version || { xcodebuild -downloadComponent MetalToolchain && xcrun --sdk macosx metal --version; }
       - uses: ilammy/setup-nasm@v1
-        if: runner.os == 'Windows' && matrix.arch == 'windows-x64'
+        if: matrix.target == 'x86_64-pc-windows-msvc'
       - name: Locate LLVM for ARM64 dependencies
-        if: runner.os == 'Windows' && matrix.arch == 'windows-arm64'
+        if: matrix.target == 'aarch64-pc-windows-msvc'
         shell: pwsh
         run: |
           $llvm = 'C:\Program Files\LLVM\bin'
           if (!(Test-Path "$llvm\clang.exe")) { throw 'LLVM is required for ARM64' }
           $llvm >> $env:GITHUB_PATH
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust
         with:
-          workspaces: |
-            .
-            tools/xtask
-          key: native-ui-${{ matrix.arch }}
-          save-if: ${{ github.event_name != 'pull_request' }}
+          target: ${{ matrix.target }}
+          cache-key: desktop-ui-${{ matrix.target }}
       - uses: actions/download-artifact@v8
         with:
           name: linux-agents
@@ -178,7 +312,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: runner.os == 'macOS'
         with:
-          name: newport-native-${{ matrix.arch }}-adhoc-app
+          name: newport-native-${{ matrix.artifact }}-adhoc-app
           path: target/${{ matrix.target }}/debug/native-package/Newport-macos.zip
           if-no-files-found: error
           retention-days: 7
@@ -223,127 +357,17 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: runner.os == 'Windows'
         with:
-          name: newport-native-${{ matrix.arch }}-unsigned-installer
+          name: newport-native-${{ matrix.artifact }}-unsigned-installer
           path: target/${{ matrix.target }}/debug/native-package/*-setup.exe
           if-no-files-found: error
           retention-days: 7
 
-  agent-tests:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-15]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
-      - uses: cachix/install-nix-action@v31
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            tools/agent
-            tools/xtask
-          key: nix-agent
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - run: nix develop --command cargo xtask check xtask
-      - run: nix develop --command cargo xtask check agent
-      - run: nix develop --command cargo xtask test https
-      - name: Validate workflows
-        if: runner.os == 'Linux'
-        run: nix develop --command actionlint
-
-  agents:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: tools/xtask
-          key: agent-build-harness
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: docker/setup-qemu-action@v4
-        with:
-          platforms: arm64
-      - run: cargo xtask agents
-      - run: cargo xtask test runtime
-      - run: cargo xtask artifact record resources/agents
-      - uses: actions/upload-artifact@v7
-        with:
-          name: linux-agents
-          path: resources/agents/
-          if-no-files-found: error
-          retention-days: 30
-
-  remote:
-    needs: agents
-    # macOS remote transport coverage; hosted ARM Macs cannot run Linux VMs.
-    runs-on: macos-15-intel
-    timeout-minutes: 90
-    env:
-      NEWPORT_PREBUILT: "1"
-      NEWPORT_TEST_DOCKER_CONTEXT: colima
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
-      - uses: actions/download-artifact@v8
-        with:
-          name: linux-agents
-          path: resources/agents
-      - run: chmod +x resources/agents/newport-agent-*
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            .
-            tools/xtask
-          key: remote
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: cachix/install-nix-action@v31
-      # Compile before the VM reserves host memory. Match fixtures::backend_command
-      # so the harness reuses this binary without spending its fixture budget on
-      # a cold Intel build (which exceeded 20 minutes on hosted macOS).
-      - name: Compile remote backend tests
-        timeout-minutes: 40
-        run: nix develop .#remote --command cargo test --locked -p newport-backend --lib --no-run --target-dir target
-      - name: Start Linux VM
-        timeout-minutes: 15
-        run: nix develop .#remote --command colima start --cpu 3 --memory 6 --arch x86_64 --vm-type=vz --mount-type=virtiofs
-      - run: nix develop .#remote --command cargo xtask test remote
-      - name: Docker diagnostics
-        if: failure()
-        run: |
-          nix develop .#remote --command docker info
-          nix develop .#remote --command docker ps -a
-
-  # Remote apps need the private newport-remote crates and agent. Pull
-  # requests from forks get no key and skip them; main must build them.
-  remote-apps-access:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      available: ${{ steps.key.outputs.available }}
-    steps:
-      - id: key
-        env:
-          KEY: ${{ secrets.NEWPORT_REMOTE_DEPLOY_KEY }}
-        run: if [ -n "$KEY" ]; then echo available=true; else echo available=false; fi >> "$GITHUB_OUTPUT"
-
-  # Each archive is packed once, natively, and every later build of this
-  # commit (the Remote apps check, the release) embeds these exact bytes.
-  remote-agents:
-    name: Remote apps agent (${{ matrix.arch }})
-    needs: remote-apps-access
-    if: needs.remote-apps-access.outputs.available == 'true'
+  # Remote apps need the private newport-remote crates and agent, pinned in
+  # .github/newport-remote-revision. Pull requests from forks get no key and
+  # skip these; main must build them (see "All checks passed").
+  remote-apps-agent:
+    name: "Remote apps: agent (${{ matrix.arch }})"
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
       matrix:
@@ -374,17 +398,18 @@ jobs:
           path: newport-remote
           ssh-key: ${{ secrets.NEWPORT_REMOTE_DEPLOY_KEY }}
           persist-credentials: false
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./newport/.github/actions/rust
         with:
+          working-directory: newport
+          cache-key: remote-apps-agent-${{ matrix.arch }}
           workspaces: |
             newport/tools/xtask
             newport-remote
-          key: remote-agent-${{ matrix.arch }}
-          save-if: ${{ github.event_name != 'pull_request' }}
       # newport-remote's own tooling links its client's audio and AV1 libraries;
       # libaom needs an assembler on x86_64.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libopus-dev libclang-dev nasm
+      # Each archive is packed once here, and every later build of this commit
+      # (the app check, the release) embeds these exact bytes.
       - run: cargo xtask remote-agents --arch ${{ matrix.arch }}
       - uses: actions/upload-artifact@v7
         with:
@@ -394,8 +419,8 @@ jobs:
           retention-days: 30
 
   remote-apps:
-    name: Remote apps (macos-arm64)
-    needs: [agents, remote-agents]
+    name: "Remote apps: app (macOS)"
+    needs: [needle-package, remote-apps-agent]
     runs-on: macos-15
     timeout-minutes: 90
     env:
@@ -419,16 +444,15 @@ jobs:
           path: newport-remote
           ssh-key: ${{ secrets.NEWPORT_REMOTE_DEPLOY_KEY }}
           persist-credentials: false
-      - run: rustup show
       - name: Install Metal shader compiler
         run: xcrun --sdk macosx metal --version || { xcodebuild -downloadComponent MetalToolchain && xcrun --sdk macosx metal --version; }
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./newport/.github/actions/rust
         with:
+          working-directory: newport
+          cache-key: remote-apps
           workspaces: |
             newport
             newport/tools/xtask
-          key: remote-apps
-          save-if: ${{ github.event_name != 'pull_request' }}
       - uses: actions/download-artifact@v8
         with:
           name: linux-agents
@@ -449,24 +473,17 @@ jobs:
   passed:
     name: All checks passed
     if: always()
-    needs: [tooling, native-core, native-ui, agent-tests, agents, remote, remote-apps-access, remote-agents, remote-apps]
+    needs: [tooling, needle-build, needle-package, needle-tests, needle-remote, desktop-core, desktop-ui, remote-apps-agent, remote-apps]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every check
         env:
           RESULTS: ${{ toJSON(needs) }}
-          REMOTE_APPS: ${{ needs.remote-apps-access.outputs.available }}
-          EVENT: ${{ github.event_name }}
+          # Only a pull request from a fork, which gets no key, may skip Remote apps.
+          FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
-          # Only a pull request without the key may skip Remote apps.
           optional='[]'
-          if [ "$REMOTE_APPS" != true ]; then
-            if [ "$EVENT" != pull_request ]; then
-              echo "Remote apps weren't built: set the NEWPORT_REMOTE_DEPLOY_KEY secret" >&2
-              exit 1
-            fi
-            optional='["remote-agents", "remote-apps"]'
-          fi
+          if [ "$FORK_PR" = true ]; then optional='["remote-apps-agent", "remote-apps"]'; fi
           failed=$(jq -r --argjson optional "$optional" 'to_entries | map(select(.value.result != "success" and ((.value.result == "skipped" and (.key as $k | $optional | index($k))) | not)) | .key) | join(", ")' <<< "$RESULTS")
           if [ -n "$failed" ]; then echo "Checks did not pass: $failed" >&2; exit 1; fi

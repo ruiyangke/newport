@@ -20,7 +20,7 @@ crates may build for another target.
 | `cargo xtask build [--release] [--target <triple>] [--remote-apps]` | The same resources, then `cargo build -p newport-app` in that environment. |
 | `cargo xtask grammars [--release] [--target <triple>]` | Builds every tree-sitter grammar library and stages it in `<target>/<profile>/grammars`. `dev` and `build` do this when the staged libraries are missing or older than `crates/newport-grammars`, `Cargo.lock` or the language list. |
 | `cargo xtask pdfium [--release] [--target <triple>]` | Downloads, verifies and stages PDFium for Windows. |
-| `cargo xtask agents [--if-changed]` | Builds the Linux agent binaries in Docker; `--if-changed` only when they are missing or older than `tools/agent`'s sources (as `dev` and `build` do). With `NEWPORT_PREBUILT=1` it verifies downloaded ones instead. |
+| `cargo xtask agents [--if-changed \| --arch x86_64\|aarch64]` | Builds the Linux agent binaries in Docker; `--if-changed` only when they are missing or older than `tools/agent`'s sources (as `dev` and `build` do), `--arch` only that architecture (CI builds each natively). With `NEWPORT_PREBUILT=1` it verifies downloaded ones instead. |
 | `cargo xtask remote-agents [--arch x86_64\|aarch64]…` | Builds the Remote apps agent archives in `target/remote-agent` (see [Remote apps](#remote-apps)). |
 | `cargo xtask artifact record\|verify <dir>` | Records or checks `newport-build.json`: per-file SHA-256 and the commit. |
 | `cargo xtask dev-run <binary> [<args>…]` | macOS cargo runner. Bundles, signs and launches `newport` through LaunchServices; other binaries run directly. |
@@ -41,7 +41,7 @@ so changing a patch rebuilds the terminal engine.
 | `cargo xtask test ssh` | Disposable SSH fixture: terminal, file and RPC operations. |
 | `cargo xtask test remote [--filter <test>]` | Testcontainers with real OpenSSH and remote services. |
 | `cargo xtask test https` | Agent Git over HTTPS against a local `git http-backend`. |
-| `cargo xtask test runtime` | Agent runtime checks inside the Alpine image. |
+| `cargo xtask test runtime [--arch x86_64\|aarch64]` | Agent runtime checks inside the Alpine image, for both architectures or the one named. |
 | `cargo xtask test git-contract [--output <path>]` | Real agent Git responses through the app's validators. |
 | `cargo xtask test git-cli-contract [--output <path>]` | Agent Git CLI responses through the app's validators. |
 | `cargo xtask test benchmark --output <path> [--agent <path>] [--before <rev>] [--after <rev>] [--size <size>]… [--rounds <n>] [--latency-ms <ms>]` | Git benchmark; `--output` is required and `--rounds` defaults to 3. |

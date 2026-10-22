@@ -98,6 +98,10 @@ enum Task {
         /// Only when they are missing or older than the agent's sources.
         #[arg(long)]
         if_changed: bool,
+        /// Only these architectures (x86_64, aarch64); default both. CI
+        /// builds each on a runner of that architecture.
+        #[arg(long = "arch", conflicts_with = "if_changed")]
+        architectures: Vec<String>,
     },
     /// Build the Remote apps agent archives in target/remote-agent, from the
     /// private newport-remote checkout (NEWPORT_REMOTE_DIR).
@@ -157,7 +161,11 @@ enum TestSuite {
     /// Agent Git over HTTPS.
     Https,
     /// Agent runtime checks inside the Alpine image.
-    Runtime,
+    Runtime {
+        /// Only these architectures (x86_64, aarch64); default both.
+        #[arg(long = "arch")]
+        architectures: Vec<String>,
+    },
     /// Real agent Git responses through the app's validators.
     GitContract {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -190,8 +198,13 @@ fn main() -> Result<()> {
         Task::Build { build, remote_apps } => check::build(&build, remote_apps),
         Task::Grammars(args) => grammars::build(args.release, args.target().as_deref()).map(drop),
         Task::Pdfium(args) => pdfium::stage(args.release, args.target().as_deref()).map(drop),
-        Task::Agents { if_changed: false } => remote::build_agents(),
-        Task::Agents { if_changed: true } => check::agents_if_changed(),
+        Task::Agents {
+            if_changed: false,
+            architectures,
+        } => remote::build_agents(&architectures),
+        Task::Agents {
+            if_changed: true, ..
+        } => check::agents_if_changed(),
         Task::RemoteAgents { architectures } => remote_apps::build_archives(&architectures),
         Task::Artifact { action } => artifact::run(action),
         Task::DevRun { binary, args } => dev_run::run(&binary, &args),
@@ -201,7 +214,7 @@ fn main() -> Result<()> {
             TestSuite::Ssh { args } => ssh::run(&args),
             TestSuite::Remote { args } => remote::run(&args),
             TestSuite::Https => https::run(),
-            TestSuite::Runtime => remote::runtime(),
+            TestSuite::Runtime { architectures } => remote::runtime(&architectures),
             TestSuite::GitContract { args } => contract::run(false, &args),
             TestSuite::GitCliContract { args } => contract::run(true, &args),
             TestSuite::Benchmark { args } => benchmark::run(&args),
