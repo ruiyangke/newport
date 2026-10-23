@@ -85,43 +85,8 @@ fn diagnostics(label: &str, server: &ContainerAsync<GenericImage>) {
     }
 }
 
-fn backend_command() -> Command {
-    let mut command = crate::command("cargo");
-    command
-        .args(["test", "--locked", "-p", "newport-backend", "--lib"])
-        .arg("--target-dir")
-        .arg(crate::root().join("target"))
-        .env_remove("CARGO_TARGET_DIR");
-    command
-}
-
 pub(super) fn prepare(filters: &[String]) -> Result<(PathBuf, Vec<Vec<String>>)> {
-    // Cold compilation must not consume the fixture runtime allowance.
-    // Reuse Cargo's reported executable across isolated servers instead of
-    // recompiling or guessing a hashed name in target/debug/deps.
-    let output = tempfile::NamedTempFile::new()?;
-    let build = crate::process::run(
-        backend_command()
-            .args(["--no-run", "--message-format=json"])
-            .stdout(output.reopen()?),
-    );
-    let mut executable = None;
-    for line in std::fs::read_to_string(output.path())?.lines() {
-        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if let Some(rendered) = message["message"]["rendered"].as_str() {
-            eprint!("{rendered}");
-        }
-        if message["reason"] == "compiler-artifact"
-            && message["target"]["name"] == "newport_backend"
-            && message["profile"]["test"] == true
-        {
-            executable = message["executable"].as_str().map(PathBuf::from);
-        }
-    }
-    build?;
-    let executable = executable.context("Cargo did not report the backend test executable")?;
+    let executable = crate::fixture_suites::backend_executable()?;
     let list = crate::process::text(
         Command::new(&executable)
             .args(["--ignored", "--list"])

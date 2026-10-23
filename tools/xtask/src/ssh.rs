@@ -15,17 +15,7 @@ pub fn run(args: &[String]) -> Result<()> {
         "tools/agent/target",
         "--locked",
     ]))?;
-    // Compilation has its own budget, separate from fixture readiness/tests.
-    process::run(command("cargo").args([
-        "test",
-        "--locked",
-        "-p",
-        "newport-backend",
-        "--lib",
-        "--no-run",
-        "--target-dir",
-        "target",
-    ]))?;
+    let executable = crate::fixture_suites::backend_executable()?;
     process::run(command("cargo").args([
         "build",
         "--manifest-path",
@@ -70,18 +60,10 @@ pub fn run(args: &[String]) -> Result<()> {
     let mut server =
         Process::spawn(command(root().join("target/debug/examples/ssh_fixture")).arg(dir))?;
     process::ready(&dir.join("port"), &mut server)?;
-    let mut test_command = command("cargo");
-    test_command.args(["test", "--target-dir", "target"]);
     let mut tests = Process::spawn(
-        test_command
-            .args([
-                "--manifest-path",
-                "crates/newport-backend/Cargo.toml",
-                "--locked",
-            ])
+        command(&executable)
             .args(args)
             .args([
-                "--",
                 "--ignored",
                 "--skip",
                 "updates::",
