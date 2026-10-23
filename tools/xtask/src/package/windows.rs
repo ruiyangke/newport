@@ -741,9 +741,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn compiler_reads_a_snapshot_and_a_failed_build_preserves_the_previous_installer() {
-        use std::os::unix::fs::PermissionsExt;
         let Fixture { directory, app } = fixture(Arch::X86_64);
-        let compiler = directory.path().join("compiler.sh");
+        let compiler = directory.path().join("compiler");
         let output = directory.path().join("setup.exe");
         let verified = directory.path().join("snapshot-verified");
         fs::write(&output, "previous installer").unwrap();
@@ -764,8 +763,7 @@ exit 1
             staged = app.join("newport.exe").display(),
             verified = verified.display(),
         );
-        fs::write(&compiler, script).unwrap();
-        fs::set_permissions(&compiler, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::script(&compiler, &script);
         let message = error(build_installer(&app, Arch::X86_64, &output, &compiler));
         assert!(message.contains("failed"), "{message}");
         assert_eq!(fs::read_to_string(&output).unwrap(), "previous installer");

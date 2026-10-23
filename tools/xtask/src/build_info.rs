@@ -127,7 +127,6 @@ pub fn mac_info_plist(info: &BuildInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     fn info(product: &util::App) -> BuildInfo {
         BuildInfo {
@@ -187,10 +186,8 @@ mod tests {
 
     #[cfg(unix)]
     fn script(directory: &Path, body: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let path = directory.join("newport");
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_support::script(&path, body);
         path
     }
 
@@ -222,17 +219,23 @@ mod tests {
         .unwrap();
         assert_eq!(read.arch, "aarch64");
         let timeout = Duration::from_secs(5);
-        for body in ["exit 3", "echo not-json", "head -c 5000 /dev/zero"] {
+        for (body, cause) in [
+            ("exit 3", "Exited with"),
+            ("echo not-json", "expected ident"),
+            ("head -c 5000 /dev/zero", "Output too large"),
+        ] {
             let binary = script(directory.path(), body);
             let error = read_with(&binary, Expect::default(), timeout).unwrap_err();
             assert!(
                 error.to_string().contains("Cannot read the app binary"),
                 "{body}"
             );
+            assert!(format!("{error:#}").contains(cause), "{body}: {error:#}");
         }
         let binary = script(directory.path(), "exec sleep 10");
         let started = Instant::now();
-        assert!(read_with(&binary, Expect::default(), Duration::from_millis(200)).is_err());
+        let error = read_with(&binary, Expect::default(), Duration::from_millis(200)).unwrap_err();
+        assert!(format!("{error:#}").contains("Timed out"), "{error:#}");
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 

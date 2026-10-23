@@ -24,6 +24,8 @@ mod remote;
 mod remote_apps;
 mod signing;
 mod ssh;
+#[cfg(all(test, unix))]
+mod test_support;
 mod util;
 
 pub use util::{command, root};
