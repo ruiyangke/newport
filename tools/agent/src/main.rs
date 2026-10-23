@@ -1,6 +1,10 @@
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if let Err(error) = run(&args) {
+    let result = if std::env::args_os().nth(1).is_some_and(|arg| arg == "gui") {
+        newport_agent::gui_launch::run(std::env::args_os().skip(2).collect())
+    } else {
+        run(&std::env::args().collect::<Vec<_>>())
+    };
+    if let Err(error) = result {
         eprintln!("newport-agent: {error}");
         std::process::exit(1);
     }
@@ -13,6 +17,7 @@ fn run(args: &[String]) -> std::io::Result<()> {
         .to_string_lossy();
     match name.as_ref() {
         "xclip" => newport_agent::clipboard::read(&args[1..]),
+        "xsel" => newport_agent::clipboard::xsel(&args[1..]),
         "wl-paste" => newport_agent::clipboard::wl_paste(&args[1..]),
         "newport-browser" => newport_agent::browser::open(&args[1..], false),
         "xdg-open" => newport_agent::browser::open(&args[1..], true),
@@ -49,6 +54,7 @@ fn run(args: &[String]) -> std::io::Result<()> {
             Some("listeners") if args.len() == 2 => newport_agent::ports::print_listeners(),
             Some("print-env") if args.len() == 2 => newport_agent::lsp::print_env(),
             Some("env") => newport_agent::environment::print(&args[2..]),
+            Some("gui") => newport_agent::gui_launch::run(std::env::args_os().skip(2).collect()),
             Some("install") => newport_agent::install::install(),
             Some("deployment") => newport_agent::deployment::run(&args[2..]),
             Some("display") => match newport_agent::display::run(std::env::args_os().skip(2)) {

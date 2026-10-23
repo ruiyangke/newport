@@ -12,6 +12,7 @@ pub mod environment;
 pub mod git;
 pub mod install;
 pub use runtime_protocol::integration as integration_control;
+mod legacy_install;
 mod local_socket;
 pub mod lsp;
 pub mod monitor;
@@ -43,3 +44,7 @@ mod demand;
 mod shell_setup;
 
 mod file_watch;
+
+pub mod gui_launch;
+mod gui_notice;
+pub mod gui_protocol;

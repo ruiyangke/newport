@@ -74,7 +74,9 @@ installer; use `--target` to select the matching architecture explicitly.
 Production packages use [.github/workflows/release.yml](../../.github/workflows/release.yml):
 macOS Apple Silicon and Windows ARM64/x64, signed agent/update payloads, macOS
 Developer ID signing and notarization, a combined update manifest, checksums,
-and an unpublished draft release. Packaging success does not certify upgrades.
+and automatic R2 publication, with a retained `release-<tag>` workflow artifact.
+Website deployment is managed separately.
+See [release publishing](../../docs/releases.md). Packaging success does not certify upgrades.
 
 ## Automatic updates
 
@@ -83,7 +85,9 @@ download a newer signed package, and offer **Restart to update**. Installation
 waits for the user to restart. Debug, isolated-profile, and App Store builds do
 not use this updater.
 
-The updater verifies packages against the existing public key. macOS replacement
+The updater reads `https://newport.app/updates/latest.json` and downloads
+versioned packages from the website's R2 storage. It verifies packages against
+the existing public key. macOS replacement
 uses a journal, health checks, and rollback; Windows drains the app before
 launching the installer. Preserve the original signing key and the existing
 credential/profile identities across releases.

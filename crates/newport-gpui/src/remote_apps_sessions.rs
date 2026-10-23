@@ -33,6 +33,8 @@ pub(crate) struct Launch<'a> {
 }
 
 struct Session {
+    terminal_released: Option<std::time::Instant>,
+    clipboard_disabled: Arc<AtomicBool>,
     id: api::SessionId,
     server: String,
     app_id: String,
@@ -134,6 +136,87 @@ impl Sessions {
         self.start(launch, request.id, request.name, arguments, cx)
     }
 
+    pub fn start_terminal(&self, launch: Launch, cx: &mut App) -> Result<api::SessionId, String> {
+        self.start(
+            launch,
+            "newport.terminal".into(),
+            "Terminal apps".into(),
+            "--display private".into(),
+            cx,
+        )
+    }
+    pub fn terminal_error(&self, id: api::SessionId) -> Option<String> {
+        let sessions = self.sessions.borrow();
+        let ended = || "GUI session ended. Reconnect the terminal to launch GUI apps.".to_owned();
+        let Some(session) = sessions.iter().find(|s| s.id == id) else {
+            return Some(ended());
+        };
+        if let Some(ending) = &session.ended {
+            return Some(match ending {
+                Some(api::Ending::Refused { message, .. }) | Some(api::Ending::Failed(message)) => {
+                    message.clone()
+                }
+                _ => ended(),
+            });
+        }
+        #[cfg(newport_remote_apps)]
+        if let Some(native) = &session.native {
+            return native.error();
+        }
+        None
+    }
+    pub fn terminal_environment(
+        &self,
+        id: api::SessionId,
+    ) -> Option<Result<newport_domain::terminal::GuiEnvironment, String>> {
+        if let Some(error) = self.terminal_error(id) {
+            return Some(Err(error));
+        }
+        #[cfg(newport_remote_apps)]
+        if let Some(environment) = self
+            .sessions
+            .borrow()
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.native.as_ref())
+            .and_then(|native| native.control().terminal_environment())
+        {
+            let environment = newport_domain::terminal::GuiEnvironment(environment.0);
+            return Some(environment.validate().map(|()| environment));
+        }
+        None
+    }
+    pub fn set_terminal_clipboard(&self, server: &str, enabled: bool) {
+        for session in
+            self.sessions.borrow().iter().filter(|s| {
+                s.server == server && s.app_id == "newport.terminal" && s.ended.is_none()
+            })
+        {
+            session
+                .clipboard_disabled
+                .store(!enabled, Ordering::Release);
+            #[cfg(newport_remote_apps)]
+            if let Some(native) = &session.native {
+                native.control().set_clipboard_enabled(enabled);
+            }
+        }
+    }
+    pub fn set_session_clipboard(&self, id: api::SessionId, enabled: bool) {
+        if let Some(session) = self.sessions.borrow().iter().find(|s| s.id == id) {
+            session
+                .clipboard_disabled
+                .store(!enabled, Ordering::Release);
+            #[cfg(newport_remote_apps)]
+            if let Some(native) = &session.native {
+                native.control().set_clipboard_enabled(enabled);
+            }
+        }
+    }
+    pub fn release_terminal(&self, id: api::SessionId) {
+        if let Some(session) = self.sessions.borrow_mut().iter_mut().find(|s| s.id == id) {
+            session.terminal_released = Some(std::time::Instant::now());
+        }
+    }
     /// Sessions whose windows are open or opening, on any server.
     pub fn active(&self) -> usize {
         self.sessions
@@ -305,6 +388,8 @@ impl Sessions {
         let id = api::SessionId(self.next.get() + 1);
         self.next.set(id.0);
         self.sessions.borrow_mut().push(Session {
+            terminal_released: None,
+            clipboard_disabled: Default::default(),
             id,
             server: server.to_owned(),
             app_id,
@@ -393,6 +478,7 @@ impl Sessions {
             .get_or_insert_with(|| provider::session_registry::SessionRegistry::new(cx))
             .clone();
         registry.ensure_accepting(cx)?;
+        let terminal_display = app_id == "newport.terminal";
         let id = self.record(launch.server, app_id, app_name.clone());
         let sessions = self.sessions.clone();
         let changed = self.changed.clone();
@@ -409,6 +495,13 @@ impl Sessions {
             .iter()
             .find(|session| session.id == id)
             .map(|session| session.lease.clone())
+            .unwrap_or_default();
+        let clipboard_disabled = self
+            .sessions
+            .borrow()
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.clipboard_disabled.clone())
             .unwrap_or_default();
         let renewal = self.renewal.clone();
         let notices = self.notices.clone();
@@ -483,6 +576,7 @@ impl Sessions {
             let attached = client::RemoteSession::attach(
                 channel,
                 client::SessionOptions {
+                    terminal_display,
                     settings,
                     display,
                     native_sizing: true,
@@ -499,6 +593,9 @@ impl Sessions {
                     });
                 }
             };
+            connection
+                .control()
+                .set_clipboard_enabled(!clipboard_disabled.load(Ordering::Acquire));
             if cancelled() {
                 connection.control().terminate();
                 return;
@@ -573,12 +670,31 @@ impl Sessions {
     /// Mark sessions whose windows appeared since the last look.
     pub fn poll(&self) {
         #[cfg(newport_remote_apps)]
-        for session in self.sessions.borrow_mut().iter_mut() {
-            let running = session.native.as_ref().is_some_and(|n| n.is_running());
-            if session.ended.is_none() && running != session.running {
-                session.running = running;
-                session.shown |= running;
-                self.changed.store(true, Ordering::Release);
+        {
+            let mut idle = Vec::new();
+            for session in self.sessions.borrow_mut().iter_mut() {
+                let running = session.native.as_ref().is_some_and(|n| n.is_running());
+                if session.ended.is_none() && running != session.running {
+                    session.running = running;
+                    session.shown |= running;
+                    self.changed.store(true, Ordering::Release);
+                }
+                // Keep windows after the last tab closes. A short grace also
+                // covers a window being mapped as its launching shell exits.
+                if session.ended.is_none()
+                    && session
+                        .terminal_released
+                        .is_some_and(|at| at.elapsed() > std::time::Duration::from_secs(2))
+                    && session
+                        .native
+                        .as_ref()
+                        .is_none_or(|n| n.window_count() == 0)
+                {
+                    idle.push(session.id);
+                }
+            }
+            for id in idle {
+                self.stop(id);
             }
         }
     }
@@ -872,6 +988,51 @@ impl newport_remote_transport::Driver for StreamDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_permission_revocation_keeps_windows_and_updates_all_generations() {
+        let sessions = Sessions::scripted();
+        let a = sessions.record(
+            "server-a",
+            "newport.terminal".into(),
+            "Terminal apps".into(),
+        );
+        let b = sessions.record(
+            "server-a",
+            "newport.terminal".into(),
+            "Terminal apps".into(),
+        );
+        let other = sessions.record(
+            "server-b",
+            "newport.terminal".into(),
+            "Terminal apps".into(),
+        );
+        let app = sessions.record("server-a", "chromium.desktop".into(), "Chromium".into());
+        sessions.set_terminal_clipboard("server-a", false);
+        let disabled = |id| {
+            sessions
+                .sessions
+                .borrow()
+                .iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .clipboard_disabled
+                .load(Ordering::Acquire)
+        };
+        assert!(disabled(a) && disabled(b));
+        assert!(!disabled(other) && !disabled(app));
+        assert_eq!(
+            sessions.active(),
+            4,
+            "permission changes must not close applications"
+        );
+        sessions.set_terminal_clipboard("server-a", true);
+        assert!(!disabled(a) && !disabled(b));
+        // A display finishing startup applies its own permission, without
+        // overwriting a newer display started after sharing was enabled.
+        sessions.set_session_clipboard(a, false);
+        assert!(disabled(a) && !disabled(b));
+    }
 
     #[test]
     fn renewals_run_one_at_a_time_and_retry_a_license_they_couldnt_read() {

@@ -578,6 +578,20 @@ impl Lease {
         self.validate()?;
         result
     }
+    pub(crate) fn supports_gui_notices(&self) -> bool {
+        self.runtime
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|runtime| runtime.hello().require("gui-notices", 1).is_ok())
+    }
+    pub(crate) fn supports_gui_launch(&self) -> bool {
+        self.runtime
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|runtime| runtime.hello().require("gui-launch", 1).is_ok())
+    }
     pub async fn apply_permissions(
         &self,
         epoch: u64,
@@ -633,6 +647,17 @@ impl Lease {
     pub async fn install(&self, integrations: bool) -> Result<String, String> {
         self.run_lifecycle(crate::lifecycle_task::Action::Install { integrations })
             .await
+    }
+    /// Enabling sharing also opts into its command links and shell setup. Keep
+    /// this separate from deployment so live workers retain their installed build.
+    pub(crate) async fn setup_integrations(&self) -> Result<(), String> {
+        let output = self
+            .run_lifecycle(crate::lifecycle_task::Action::SetupIntegrations)
+            .await?;
+        if let Some(notice) = crate::agent_lifecycle::setup_notice(&output) {
+            log::warn!("{notice}");
+        }
+        Ok(())
     }
     /// Uninstalls Needle: nothing of it stays on the server. Final.
     pub async fn uninstall(&self) -> Result<String, String> {
@@ -698,6 +723,15 @@ impl Lease {
         progress.finish(&result);
         result
     }
+    async fn setup_integrations_inner(&self) -> Result<String, String> {
+        self.validate()?;
+        let owner = self.owner.upgrade().ok_or(STALE)?;
+        let _operation = owner.lifecycle.operation.lock().await;
+        self.validate()?;
+        agent::require_installed(&self.connection).await?;
+        self.execute("\"$HOME/.local/bin/newport-agent\" install 2>&1", None)
+            .await
+    }
     async fn uninstall_inner(&self) -> Result<String, String> {
         self.validate()?;
         let owner = self.owner.upgrade().ok_or(STALE)?;
@@ -756,6 +790,7 @@ impl Lease {
                         Action::Install { integrations } => {
                             lease.install_inner(integrations, Trigger::Manual).await
                         }
+                        Action::SetupIntegrations => lease.setup_integrations_inner().await,
                         Action::Uninstall => lease.uninstall_inner().await,
                     }
                 },

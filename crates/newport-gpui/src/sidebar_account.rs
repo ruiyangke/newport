@@ -29,6 +29,7 @@ impl Newport {
             }
             return effects.changed;
         };
+        self.terminal_setup_notice(&notice);
         let notification = match notice.kind {
             NoticeKind::Success => Notification::success(notice.message),
             NoticeKind::Info => Notification::info(notice.message),

@@ -1,4 +1,4 @@
-//! `xclip` and `wl-paste` as Needle's commands. Like `xdg-open`, they serve
+//! `xclip`, `xsel`, and `wl-paste` as Needle's commands. Like `xdg-open`, they serve
 //! what Newport provides, reading the desktop's clipboard through whichever
 //! session is live when they run, and hand everything else to the server's
 //! own command: writes, other selections, and a desktop of the server's own.
@@ -14,6 +14,39 @@ pub fn read(args: &[String]) -> io::Result<()> {
 
 pub fn wl_paste(args: &[String]) -> io::Result<()> {
     serve("wl-paste", args, wl_paste_request(args))
+}
+
+pub fn xsel(args: &[String]) -> io::Result<()> {
+    serve("xsel", args, xsel_request(args))
+}
+
+/// clipboardy (used by OpenCode v1) reads text with `xsel --clipboard --output`.
+/// xsel defaults to PRIMARY, so both the selection and read must be explicit.
+fn xsel_request(args: &[String]) -> io::Result<String> {
+    let mut clipboard = false;
+    let mut output = false;
+    for arg in args {
+        match arg.as_str() {
+            "--clipboard" => clipboard = true,
+            "--output" => output = true,
+            short if short.starts_with('-') && short.len() > 1 => {
+                for option in short[1..].chars() {
+                    match option {
+                        'b' => clipboard = true,
+                        'o' => output = true,
+                        _ => return Err(io::Error::other("unsupported xsel option")),
+                    }
+                }
+            }
+            _ => return Err(io::Error::other("unsupported xsel option")),
+        }
+    }
+    if !clipboard || !output {
+        return Err(io::Error::other(
+            "usage: xsel --clipboard --output; clipboard is read-only",
+        ));
+    }
+    Ok("text/plain".into())
 }
 
 /// The format an `xclip` read asks for, or why Newport doesn't serve it.

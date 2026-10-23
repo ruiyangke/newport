@@ -58,10 +58,16 @@ so changing a patch rebuilds the terminal engine.
 | `cargo xtask release windows-update <installer> --arch <arch> --app-executable <exe> --output <dir>` | Signed Windows update payload and manifest fragment. |
 | `cargo xtask release merge <latest.json> <fragment>… --version <v> --output <path>` | Merges the fragments, verifies every signature, and writes `SHA256SUMS`. |
 | `cargo xtask release sign-needle` | Verifies `resources/agents` and signs the agent release. |
+| `cargo xtask release verify-packages <latest.json> --assets <dir>` | Verifies all three update targets against the production public key, signed version and filename before distribution. Accepts existing signed manifests for migration without fetching their URLs. |
+| `cargo xtask release deploy <dir> [--dry-run] [--bucket <name>]` | Verifies and publishes the complete distribution to Cloudflare R2, then conditionally advances the update feed. Uses bucket-scoped S3 credentials; no website checkout or deployment. |
 
 Signing uses `newport-release` as a library. The release workflow builds the
 xtask binary in a step without secrets and runs that binary with them; commands
 that build the desktop remove the signing secrets from the child environment.
+The workflow uploads verified packages and release metadata directly to Cloudflare
+R2, and retains a `release-<tag>` artifact. The independently deployed website
+reads the feed from R2 at request time. See [the release guide](../../docs/releases.md), including the
+transition feed required by older installed builds.
 
 ## Local signing
 

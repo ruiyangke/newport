@@ -1,6 +1,6 @@
 {
   "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc3MjIzQTY2RTM2QkJERDIKUldUU3ZXdmpaam9pZDhjZjFHN1ZGWmlSZ1crL2NoRUZYd0JUU0RGbE9tc1k4OWN6dnZkOFFnOTYK",
   "endpoints": [
-    "https://github.com/ruiyangke/newport/releases/latest/download/latest.json"
+    "https://newport.app/updates/latest.json"
   ]
 }

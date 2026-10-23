@@ -690,6 +690,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha2",
+ "shlex",
  "socket2",
  "tar",
  "tempfile",

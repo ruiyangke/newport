@@ -31,6 +31,15 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: cargo xtask release verify
+      - name: Check release storage configuration
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          test -n "$R2_ACCESS_KEY_ID" || { echo 'Missing repository secret R2_ACCESS_KEY_ID'; exit 1; }
+          test -n "$R2_SECRET_ACCESS_KEY" || { echo 'Missing repository secret R2_SECRET_ACCESS_KEY'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'Missing repository variable CLOUDFLARE_ACCOUNT_ID'; exit 1; }
 
   # As in checks.yml: each architecture on a runner of that architecture.
   needle-build:
@@ -316,13 +325,14 @@ jobs:
           path: target/${{ matrix.target }}/release/native-package/update/*
           if-no-files-found: error
 
-  draft:
-    name: "Release: draft on GitHub"
+  distribution:
+    name: "Release: publish to Cloudflare"
     needs: [resolve, macos, windows]
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      contents: write
+    timeout-minutes: 30
+    environment:
+      name: cloudflare-production
+      url: https://newport.app/updates/latest.json
     steps:
       - uses: actions/checkout@v7
         with:
@@ -339,14 +349,27 @@ jobs:
           path: release
           merge-multiple: true
       - run: rustup show
-      - name: Merge all update targets and create draft
+      - name: Merge and verify all update targets
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_COMMIT: ${{ needs.resolve.outputs.commit }}
         run: |
-          cargo test --locked --manifest-path tools/xtask/Cargo.toml release::manifest::
+          cargo test --locked --manifest-path tools/xtask/Cargo.toml release::
           cargo xtask release merge release/latest.json release/windows-*.json --version "${RELEASE_TAG#v}" --output release/latest.json
           rm release/windows-*.json
           test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$RELEASE_COMMIT"
-          gh release create "$RELEASE_TAG" release/* --verify-tag --draft --title "Newport $RELEASE_TAG" --generate-notes
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ inputs.tag }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 90
+      - name: Build the release publisher before loading credentials
+        run: cargo build --locked --manifest-path tools/xtask/Cargo.toml
+      - name: Publish verified release to R2
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: tools/xtask/target/debug/xtask release deploy release

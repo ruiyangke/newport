@@ -68,6 +68,8 @@ fn describe() -> io::Result<protocol::Hello> {
             "Monitoring requires Linux.",
         ),
         ("integration", crate::integration_control::VERSION, true, ""),
+        ("gui-notices", 1, true, ""),
+        ("gui-launch", 1, true, ""),
         ("lsp", crate::lsp::VERSION, true, ""),
     ] {
         capabilities.insert(

@@ -114,7 +114,7 @@ pub fn updater_public_key() -> Result<String> {
     Ok(read_json::<Updater>(&root().join("resources/updater.json"))?.pubkey)
 }
 
-/// `https://github.com/<owner>/<repo>/releases/download/v<version>/`, from the updater endpoint.
+/// Versioned website payload directory, from the updater endpoint.
 pub fn release_download_base(version: &str) -> Result<String> {
     #[derive(Deserialize)]
     struct Updater {
@@ -126,9 +126,18 @@ pub fn release_download_base(version: &str) -> Result<String> {
         .first()
         .context("resources/updater.json has no endpoint")?;
     let base = endpoint
-        .strip_suffix("/latest/download/latest.json")
+        .strip_suffix("/latest.json")
         .context("Unexpected updater endpoint")?;
-    Ok(format!("{base}/download/v{version}/"))
+    ensure!(
+        !version.is_empty()
+            && version
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'))
+            && version != "."
+            && version != "..",
+        "Invalid release version"
+    );
+    Ok(format!("{base}/{version}/"))
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -432,10 +441,13 @@ mod tests {
     }
 
     #[test]
-    fn release_downloads_come_from_the_updater_repository() {
+    fn release_downloads_come_from_the_update_website() {
         assert_eq!(
             release_download_base("1.2.3").unwrap(),
-            "https://github.com/ruiyangke/newport/releases/download/v1.2.3/"
+            "https://newport.app/updates/1.2.3/"
         );
+        for version in ["", "..", "../1.2.3", "1.2.3?download", "1.2.3#fragment"] {
+            assert!(release_download_base(version).is_err());
+        }
     }
 }

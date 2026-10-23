@@ -214,6 +214,7 @@ fn run(client: &str, options: SessionOptions, output: &mut impl Write) -> io::Re
                         );
                         demand.update(offer);
                         session.source.enable(demand.clone());
+                        session.refresh_clipboard()?;
                         wire::write(output, b'A', b"Clipboard available on demand.")?;
                     }
                     b'D' if clipboard || managed => {
@@ -253,6 +254,7 @@ fn run(client: &str, options: SessionOptions, output: &mut impl Write) -> io::Re
                             );
                             return Err(error);
                         }
+                        session.refresh_clipboard()?;
                         let backend = crate::native::update(snapshot);
                         wire::write(output, b'A', backend.as_bytes())?;
                         crate::diagnostics::event(
@@ -260,6 +262,26 @@ fn run(client: &str, options: SessionOptions, output: &mut impl Write) -> io::Re
                             "snapshot_acknowledged",
                             &format!("elapsed_ms={}", started.elapsed().as_millis()),
                         );
+                    }
+                    b'G' if managed && data.is_empty() => {
+                        session.enable_gui_notices()?;
+                        session.publish_features(browser.enabled())?;
+                        wire::write(output, b'A', b"")?;
+                    }
+                    b'L' if managed && data.is_empty() => {
+                        if session.gui_launch.is_none() {
+                            session.gui_launch = Some(crate::gui_launch::Broker::start(
+                                snapshot.parent().unwrap(),
+                            )?);
+                        }
+                        session.publish_features(browser.enabled())?;
+                        wire::write(output, b'A', b"")?;
+                    }
+                    b'J' if managed => {
+                        if let Some(broker) = &mut session.gui_launch {
+                            broker.reply(&data)?;
+                        }
+                        wire::write(output, b'A', b"")?;
                     }
                     b'H' if data.is_empty() => {
                         if let Ok(file) = fs::OpenOptions::new().write(true).open(snapshot) {
@@ -277,8 +299,14 @@ fn run(client: &str, options: SessionOptions, output: &mut impl Write) -> io::Re
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
             Err(mpsc::RecvTimeoutError::Timeout) => (),
         }
+        if session.source.gui.take() {
+            wire::write(output, b'G', b"")?;
+        }
         demand.poll(output)?;
         browser.poll(output)?;
+        if let Some(broker) = &mut session.gui_launch {
+            broker.poll(output)?;
+        }
     }
 }
 

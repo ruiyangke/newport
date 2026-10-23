@@ -89,6 +89,45 @@ publishing or moving a version tag.
 
 ## Upgrade acceptance
 
+### Released Porthop agent regression
+
+`tests/agent-runtime/porthop-upgrade.py` exercises a real Porthop 0.2.3 agent
+extracted from its published desktop archive. It verifies the archive checksum,
+uses that release's upload installer, starts the old runtime, then stages,
+negotiates with, activates and reinstalls the current agent. It covers Bash,
+Zsh, Fish, installation without integrations, and existing native commands.
+Custom, absolute, chained and dangling Porthop aliases must disappear; unrelated
+files, links and system clipboard commands must survive. The old process and its
+clipboard cache must also be removed.
+
+Use the `newport-test-remote:local` image built by the remote test suite and a
+fresh Linux `newport-agent` matching its CPU. Keep test binaries in a temporary
+directory, separate from signed release resources. From the repository root:
+
+```sh
+upgrade_dir=$(mktemp -d)
+curl --fail --location \
+  https://github.com/ruiyangke/newport/releases/download/v0.2.3/Porthop-0.2.3-macos-arm64.app.tar.gz \
+  --output "$upgrade_dir/Porthop-0.2.3-macos-arm64.app.tar.gz"
+git show v0.2.3:src-tauri/src/agent-install.sh > "$upgrade_dir/porthop-install.sh"
+# Copy the freshly built Linux binary to "$upgrade_dir/newport-agent".
+docker run --rm --user fixture --network none --entrypoint python3 \
+  -v "$PWD:/workspace:ro" -v "$upgrade_dir:/upgrade:ro" \
+  newport-test-remote:local \
+  /workspace/tests/agent-runtime/porthop-upgrade.py /upgrade \
+  > "$upgrade_dir/upgrade.log" 2>&1
+cat "$upgrade_dir/upgrade.log"
+```
+
+The macOS archive contains both Linux architectures; no desktop executable runs.
+All installation homes are temporary directories inside the container, which
+runs as the unprivileged fixture account without network access. The log records
+binary hashes and command links before and after each scenario. This exercises
+the production installer scripts and runtime protocol directly, without the
+desktop UI or SSH transport.
+
+### Desktop release upgrades
+
 For production-path credential and upgrade acceptance, use a disposable OS account
 or VM snapshot. Install the previous release, create fixture servers, passwords,
 bookmarks, preferences and metrics through its UI, then quit it normally. Record

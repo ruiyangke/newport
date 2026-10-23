@@ -3,6 +3,8 @@
 //! `started` records whether this connection scope has ever reached a shell. It
 //! survives retries and disconnection so existing terminal output can stay visible.
 
+use std::time::{Duration, Instant};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
     Connecting,
@@ -11,6 +13,44 @@ pub enum Phase {
     Disconnected,
     Exited(Option<u32>),
     Failed(String),
+}
+
+/// A shell that ends this soon after becoming ready failed to start.
+const STARTUP_EXIT: Duration = Duration::from_secs(2);
+
+/// Used shells close on exit. Startup exits stay visible so their output and
+/// exit status explain what happened, in both tabs and installation popups.
+#[derive(Default)]
+pub(super) struct ExitPolicy {
+    ready_at: Option<Instant>,
+    keep: bool,
+}
+
+impl ExitPolicy {
+    pub(super) fn observe(&mut self, phase: &Phase) {
+        match phase {
+            Phase::Connecting => *self = Self::default(),
+            Phase::Connected => {
+                *self = Self {
+                    ready_at: Some(Instant::now()),
+                    keep: false,
+                }
+            }
+            Phase::Exited(_) => {
+                self.keep = self.ready_at.is_none_or(|at| at.elapsed() < STARTUP_EXIT);
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn should_close(&self, phase: &Phase) -> bool {
+        !self.keep && matches!(phase, Phase::Exited(_))
+    }
+
+    #[cfg(test)]
+    pub(super) fn elapse_startup(&mut self) {
+        self.ready_at = self.ready_at.map(|at| at - STARTUP_EXIT * 2);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

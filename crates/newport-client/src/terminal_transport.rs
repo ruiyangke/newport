@@ -73,7 +73,27 @@ impl Session {
         Self::start(Arc::new(backend), server, columns, rows)
     }
 
+    pub fn open_with_gui(
+        server: &str,
+        columns: u16,
+        rows: u16,
+        gui: Option<newport_domain::terminal::GuiEnvironment>,
+    ) -> Result<Self, String> {
+        if let Some(gui) = &gui {
+            gui.validate()?;
+        }
+        Self::start_gui(Arc::new(Backend::discover()), server, columns, rows, gui)
+    }
     fn start(rpc: Arc<dyn Rpc>, server: &str, columns: u16, rows: u16) -> Result<Self, String> {
+        Self::start_gui(rpc, server, columns, rows, None)
+    }
+    fn start_gui(
+        rpc: Arc<dyn Rpc>,
+        server: &str,
+        columns: u16,
+        rows: u16,
+        gui: Option<newport_domain::terminal::GuiEnvironment>,
+    ) -> Result<Self, String> {
         dimensions(columns, rows)?;
         uuid::Uuid::parse_str(server).map_err(|_| "Invalid terminal server ID")?;
         let id = uuid::Uuid::new_v4();
@@ -83,7 +103,8 @@ impl Session {
         let state = lifecycle.clone();
         let server = server.to_owned();
         thread::spawn(move || {
-            let lease = match rpc.open(json!({"id":server,"session":id,"cols":columns,"rows":rows}))
+            let lease = match rpc
+                .open(json!({"id":server,"session":id,"cols":columns,"rows":rows,"gui":gui}))
             {
                 Ok(lease) => Some(lease),
                 Err(error) => {

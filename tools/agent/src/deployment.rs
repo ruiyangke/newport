@@ -389,7 +389,9 @@ pub fn run(args: &[String]) -> io::Result<()> {
             installation.verify(hash)?;
             installation.install(hash)?;
             let notice = if rest.is_empty() {
-                None
+                let notices = crate::shell_setup::remove_porthop(&home)?;
+                crate::legacy_install::remove(&home)?;
+                crate::install::setup_notice(notices)
             } else {
                 crate::install::apply()?
             };

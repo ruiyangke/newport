@@ -20,12 +20,14 @@ use std::{
 #[derive(Clone)]
 pub(crate) struct Source {
     pub path: PathBuf,
+    pub(crate) gui: Arc<crate::gui_notice::Notices>,
     store: Arc<std::sync::OnceLock<Arc<crate::demand::Store>>>,
 }
 impl Source {
     pub fn new(path: &Path) -> Self {
         Self {
             path: path.into(),
+            gui: Default::default(),
             store: Arc::new(std::sync::OnceLock::new()),
         }
     }

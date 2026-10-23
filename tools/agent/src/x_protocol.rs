@@ -7,7 +7,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-const CHUNK: usize = 64 * 1024;
+const CLIENT_PROPERTY_LIMIT: usize = 64 * 1024;
+const PROPERTY_COUNT_LIMIT: usize = 128;
+// One maximum-size clipboard plus the existing client negotiation allowance.
+const PROPERTY_BYTES_LIMIT: usize =
+    crate::snapshot::LIMIT + PROPERTY_COUNT_LIMIT * CLIENT_PROPERTY_LIMIT;
 const OWNER: u32 = 2;
 
 #[derive(Clone, Copy)]
@@ -96,23 +100,17 @@ struct Property {
     format: u8,
     bytes: Vec<u8>,
 }
-struct Transfer {
-    key: (u32, u32),
-    kind: u32,
-    bytes: Vec<u8>,
-    offset: usize,
-}
 struct Client {
     socket: UnixStream,
     order: Order,
     seq: u16,
+    gui_notified: bool,
     base: u32,
     shared: Arc<Shared>,
     windows: HashSet<u32>,
     graphics_contexts: HashSet<u32>,
     masks: HashMap<u32, u32>,
     properties: HashMap<(u32, u32), Property>,
-    transfer: Option<Transfer>,
 }
 
 /// X11 setup with one tiny logical screen. Nothing is ever drawn or mapped.
@@ -211,13 +209,13 @@ pub fn serve(
         socket,
         order: o,
         seq: 0,
+        gui_notified: false,
         base,
         shared,
         windows: HashSet::new(),
         graphics_contexts: HashSet::new(),
         masks: HashMap::new(),
         properties: HashMap::new(),
-        transfer: None,
     };
     loop {
         let mut h = [0; 4];
@@ -268,34 +266,14 @@ impl Client {
         if self.properties.remove(&key).is_some() {
             self.notify_property(key, 1)?;
         }
-        if let Some(mut t) = self.transfer.take() {
-            if t.key == key {
-                let end = (t.offset + CHUNK).min(t.bytes.len());
-                self.properties.insert(
-                    key,
-                    Property {
-                        kind: t.kind,
-                        format: 8,
-                        bytes: t.bytes[t.offset..end].to_vec(),
-                    },
-                );
-                let finished = t.offset == t.bytes.len();
-                t.offset = end;
-                if !finished {
-                    self.transfer = Some(t);
-                } else {
-                    crate::diagnostics::event(
-                        &self.shared.snapshot,
-                        "x11_transfer_served",
-                        &format!("bytes={}", t.bytes.len()),
-                    );
-                }
-                self.notify_property(key, 0)?;
-            } else {
-                self.transfer = Some(t);
-            }
-        }
         Ok(())
+    }
+    fn property_fits(&self, key: (u32, u32), size: usize) -> bool {
+        let retained = self.properties.iter().filter(|(k, _)| **k != key);
+        let (count, bytes) = retained.fold((0, 0), |(count, bytes), (_, p)| {
+            (count + 1, bytes + p.bytes.len())
+        });
+        count < PROPERTY_COUNT_LIMIT && size <= PROPERTY_BYTES_LIMIT.saturating_sub(bytes)
     }
     fn selection(&mut self, r: &[u8]) -> io::Result<()> {
         let o = self.order;
@@ -377,6 +355,10 @@ impl Client {
                     bytes,
                 })
         };
+        let key = (window, property);
+        let fits = value
+            .as_ref()
+            .is_some_and(|value| self.property_fits(key, value.bytes.len()));
         crate::diagnostics::event(
             &self.shared.snapshot,
             "x11_request",
@@ -385,33 +367,18 @@ impl Client {
                 target_name.chars().take(128).collect::<String>(),
                 value.is_some(),
                 value.as_ref().map_or(0, |v| v.bytes.len()),
-                self.transfer.is_some() || self.properties.len() >= 128
+                value.is_some() && !fits
             ),
         );
         if let Some(value) = value {
-            let key = (window, property);
-            if self.transfer.is_some() || self.properties.len() >= 128 {
+            if !fits {
                 property = 0;
             } else {
-                if value.bytes.len() > CHUNK {
-                    let size = value.bytes.len() as u32;
-                    self.transfer = Some(Transfer {
-                        key,
-                        kind: value.kind,
-                        bytes: value.bytes,
-                        offset: 0,
-                    });
-                    self.properties.insert(
-                        key,
-                        Property {
-                            kind: self.atom("INCR"),
-                            format: 32,
-                            bytes: o.words([size]),
-                        },
-                    );
-                } else {
-                    self.properties.insert(key, value);
-                }
+                // We own the server and already hold the bounded value, so no
+                // ChangeProperty request limit requires INCR. Ordinary properties
+                // also avoid arboard's 10 ms inter-chunk deadline under VM load.
+                // GetProperty still supports partial reads via offset/length.
+                self.properties.insert(key, value);
                 self.notify_property(key, 0)?;
             }
         } else {
@@ -425,13 +392,19 @@ impl Client {
         o.set32(&mut b, 20, property);
         self.send(&b)
     }
+    fn gui_attempt(&mut self) {
+        if !self.gui_notified {
+            self.shared.source.gui.signal();
+            self.gui_notified = true;
+        }
+    }
     fn request(&mut self, r: &[u8]) -> io::Result<()> {
         let op = r[0];
         let o = self.order;
         let min = match op {
             1 => 32,
             2 => 12,
-            4 => 8,
+            4 | 8 | 9 => 8,
             16 => 8,
             17 => 8,
             18 => 24,
@@ -452,6 +425,19 @@ impl Client {
             return self.error(16, op, 0);
         }
         match op {
+            // Hidden selection windows are ordinary clipboard traffic. Mapping
+            // a window, or asking for a renderer, requires GUI setup.
+            8 | 9 => {
+                let window = o.u32(r, 4);
+                if r.len() != 8 {
+                    return self.error(16, op, 0);
+                }
+                if window != 1 && !self.windows.contains(&window) {
+                    return self.error(3, op, window);
+                }
+                self.gui_attempt();
+                self.error(1, op, 0)
+            }
             1 | 2 => {
                 let id = o.u32(r, 4);
                 let at = if op == 1 { 28 } else { 8 };
@@ -490,9 +476,6 @@ impl Client {
                     self.send(&b)?;
                 }
                 self.properties.retain(|k, _| k.0 != id);
-                if self.transfer.as_ref().is_some_and(|t| t.key.0 == id) {
-                    self.transfer = None;
-                }
                 Ok(())
             }
             16 => {
@@ -538,10 +521,10 @@ impl Client {
                     return self.error(2, op, 0);
                 }
                 let n = (o.u32(r, 20) as usize).saturating_mul(format as usize / 8);
-                if n > CHUNK || r.len() != 24 + padded(n) {
+                if n > CLIENT_PROPERTY_LIMIT || r.len() != 24 + padded(n) {
                     return self.error(16, op, 0);
                 }
-                if self.properties.len() >= 128 {
+                if !self.property_fits(key, n) {
                     return self.error(11, op, 0);
                 }
                 self.properties.insert(
@@ -586,10 +569,6 @@ impl Client {
                     }
                 }
                 if delete {
-                    // Queue the next INCR chunk's PropertyNotify before waking
-                    // the reader with this reply. arboard starts a 10 ms timer
-                    // on receipt; sending the event afterward makes a server
-                    // scheduling delay look like an empty clipboard.
                     self.delete(key)?;
                 }
                 self.send(&b)
@@ -656,6 +635,9 @@ impl Client {
                 if r.len() != 8 + padded(n) {
                     return self.error(16, op, 0);
                 }
+                if matches!(&r[8..8 + n], b"GLX" | b"RENDER") {
+                    self.gui_attempt();
+                }
                 let b = self.packet(1, 0);
                 self.send(&b)
             }
@@ -668,6 +650,50 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_valid_render_requests_signal_gui_intent() {
+        for (request, expected) in [
+            (vec![8, 0, 2, 0, 1, 0, 0, 0], true),   // MapWindow(root)
+            (vec![8, 0, 2, 0, 90, 0, 0, 0], false), // unknown window
+            (vec![8, 0, 1, 0], false),              // malformed
+            (
+                [vec![98, 0, 3, 0, 3, 0, 0, 0], b"GLX\0".to_vec()].concat(),
+                true,
+            ),
+            (
+                [vec![98, 0, 4, 0, 6, 0, 0, 0], b"RENDER\0\0".to_vec()].concat(),
+                true,
+            ),
+            (
+                [vec![98, 0, 4, 0, 6, 0, 0, 0], b"XFIXES\0\0".to_vec()].concat(),
+                false,
+            ),
+        ] {
+            let path = PathBuf::from("/unused-snapshot");
+            let source = crate::clipboard_source::Source::new(&path);
+            source.gui.enable();
+            let (socket, _reader) = UnixStream::pair().unwrap();
+            let mut client = Client {
+                socket,
+                order: Order(true),
+                seq: 1,
+                gui_notified: false,
+                base: 0,
+                shared: Arc::new(Shared {
+                    atoms: Mutex::new(Atoms::default()),
+                    snapshot: path,
+                    source: source.clone(),
+                }),
+                windows: Default::default(),
+                graphics_contexts: Default::default(),
+                masks: Default::default(),
+                properties: Default::default(),
+            };
+            client.request(&request).unwrap();
+            assert_eq!(source.gui.take(), expected, "{request:?}");
+        }
+    }
 
     /// Another account (anyone the listener doesn't recognise) needs the cookie.
     #[test]
@@ -701,79 +727,6 @@ mod tests {
             assert_eq!(status[0] == 1, admitted);
             drop(client);
             let _ = serving.join();
-        }
-    }
-
-    #[test]
-    fn incr_next_chunk_is_announced_before_get_property_reply() {
-        for order in [Order(true), Order(false)] {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("snapshot.tar");
-            let (socket, mut reader) = UnixStream::pair().unwrap();
-            reader
-                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
-                .unwrap();
-            let key = (3, 69);
-            let mut client = Client {
-                socket,
-                order,
-                seq: 1,
-                base: 0,
-                shared: Arc::new(Shared {
-                    atoms: Mutex::new(Atoms::default()),
-                    snapshot: path.clone(),
-                    source: crate::clipboard_source::Source::new(&path),
-                }),
-                windows: HashSet::from([key.0]),
-                graphics_contexts: HashSet::new(),
-                masks: HashMap::from([(key.0, 1 << 22)]),
-                properties: HashMap::from([(
-                    key,
-                    Property {
-                        kind: 31,
-                        format: 8,
-                        bytes: b"first".to_vec(),
-                    },
-                )]),
-                transfer: Some(Transfer {
-                    key,
-                    kind: 31,
-                    bytes: b"last".to_vec(),
-                    offset: 0,
-                }),
-            };
-            let mut request = vec![0; 24];
-            request[0] = 20; // GetProperty with delete=true.
-            request[1] = 1;
-            order.set16(&mut request, 2, 6);
-            order.set32(&mut request, 4, key.0);
-            order.set32(&mut request, 8, key.1);
-            order.set32(&mut request, 12, 31);
-            order.set32(&mut request, 20, u32::MAX / 4);
-
-            for expected in [b"first".as_slice(), b"last".as_slice()] {
-                client.request(&request).unwrap();
-                // A reader may be scheduled as soon as it receives the reply.
-                // The next chunk (including the zero-length terminator) must
-                // already be announced, without another server scheduling turn.
-                for state in [1, 0] {
-                    let mut event = [0; 32];
-                    reader.read_exact(&mut event).unwrap();
-                    assert_eq!(event[0], 28, "PropertyNotify must precede the reply");
-                    assert_eq!(event[16], state);
-                    assert_eq!(order.u32(&event, 4), key.0);
-                    assert_eq!(order.u32(&event, 8), key.1);
-                }
-                let mut reply = [0; 32];
-                reader.read_exact(&mut reply).unwrap();
-                assert_eq!(reply[0], 1);
-                assert_eq!(order.u32(&reply, 16) as usize, expected.len());
-                let mut bytes = vec![0; order.u32(&reply, 4) as usize * 4];
-                reader.read_exact(&mut bytes).unwrap();
-                assert_eq!(&bytes[..expected.len()], expected);
-            }
-            assert!(client.transfer.is_none());
-            assert!(client.properties[&key].bytes.is_empty());
         }
     }
 }

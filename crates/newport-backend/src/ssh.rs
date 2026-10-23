@@ -335,7 +335,7 @@ pub async fn terminal(
 ) -> Result<()> {
     let registry = crate::server_session::Registry::default();
     let owner = registry.session(server, 0);
-    terminal_with_session(owner, server, cols, rows, input, output).await
+    terminal_with_session(owner, server, cols, rows, input, output, None, None).await
 }
 
 pub(crate) async fn terminal_with_session(
@@ -345,6 +345,8 @@ pub(crate) async fn terminal_with_session(
     rows: u32,
     mut input: tokio::sync::mpsc::Receiver<crate::terminal::Input>,
     output: &tokio::sync::mpsc::Sender<crate::terminal::Event>,
+    gui: Option<newport_domain::terminal::GuiEnvironment>,
+    terminal_id: Option<uuid::Uuid>,
 ) -> Result<()> {
     use crate::terminal::Event;
     if !owner.server().same_connection(server) || owner.is_revoked() {
@@ -366,7 +368,14 @@ pub(crate) async fn terminal_with_session(
             let (result, lost) = match acquired {
                 Ok((connection, _, _lease)) => {
                     let result = connection
-                        .terminal(&mut size, &mut input, output, selector)
+                        .terminal(
+                            &mut size,
+                            &mut input,
+                            output,
+                            selector,
+                            gui.as_ref(),
+                            terminal_id,
+                        )
                         .await;
                     let lost = connection.is_closed()
                         || result.as_ref().is_err_and(|e| e.is::<ConnectionLost>());
@@ -449,12 +458,50 @@ impl Drop for SessionChannel<'_> {
 /// runs it whatever the login shell is, and the selector is a UUID from the
 /// session owner, never shell input.
 pub fn terminal_command(selector: uuid::Uuid) -> String {
-    format!(
-        "exec sh -c 'NEWPORT_SESSION={selector}; export NEWPORT_SESSION; \
-         agent=\"$HOME/.local/bin/newport-agent\"; \
-         if [ -x \"$agent\" ] && exports=$(\"$agent\" env --shell sh 2>/dev/null); then \
-         eval \"$exports\"; fi; unset agent exports; exec \"$SHELL\" -l'"
-    )
+    terminal_command_with_gui(selector, None)
+}
+fn terminal_command_with_gui(
+    selector: uuid::Uuid,
+    gui: Option<&newport_domain::terminal::GuiEnvironment>,
+) -> String {
+    terminal_command_with_identity(selector, gui, None)
+}
+fn terminal_command_with_identity(
+    selector: uuid::Uuid,
+    gui: Option<&newport_domain::terminal::GuiEnvironment>,
+    terminal: Option<uuid::Uuid>,
+) -> String {
+    let mut setup = String::new();
+    if let Some(id) = terminal {
+        setup.push_str(&format!("export NEWPORT_TERMINAL='{id}'; "));
+    }
+    if let Some(gui) = gui {
+        // Validated at IPC admission. Only fixed display/toolkit names are accepted;
+        // no PATH, preload variables, or executable shell fragments cross this boundary.
+        let authority = gui
+            .0
+            .get("XAUTHORITY")
+            .and_then(Option::as_deref)
+            .unwrap_or_default();
+        setup.push_str(&format!("if [ -r {} ]; then ", shell_quote(authority)));
+        for (name, value) in &gui.0 {
+            match value {
+                Some(value) => setup.push_str(&format!("export {name}={}; ", shell_quote(value))),
+                None => setup.push_str(&format!("unset {name}; ")),
+            }
+        }
+        setup.push_str(
+            "export NEWPORT_GUI_DISPLAY=\"$DISPLAY\" NEWPORT_GUI_AUTHORITY=\"$XAUTHORITY\"; ",
+        );
+        setup.push_str("else printf '%s\\n' 'Newport GUI session ended. Reconnect this terminal to launch GUI apps.' >&2; fi; ");
+    }
+    let script = format!(
+        "NEWPORT_SESSION={selector}; export NEWPORT_SESSION; {setup}\
+        agent=\"$HOME/.local/bin/newport-agent\"; \
+        if [ -x \"$agent\" ] && exports=$(\"$agent\" env --shell sh 2>/dev/null); then \
+        eval \"$exports\"; fi; unset agent exports; exec \"$SHELL\" -l"
+    );
+    format!("exec sh -c {}", shell_quote(&script))
 }
 
 async fn terminal_session(
@@ -463,6 +510,8 @@ async fn terminal_session(
     input: &mut tokio::sync::mpsc::Receiver<crate::terminal::Input>,
     output: &tokio::sync::mpsc::Sender<crate::terminal::Event>,
     integration: uuid::Uuid,
+    gui: Option<&newport_domain::terminal::GuiEnvironment>,
+    terminal: Option<uuid::Uuid>,
 ) -> Result<TerminalEnd> {
     use crate::terminal::{Event, Input};
     let (mut reader, writer) =
@@ -481,7 +530,12 @@ async fn terminal_session(
             .await?;
         terminal_request_reply(&mut reader, "the terminal PTY", &mut early_output).await?;
         // An exec request avoids relying on sshd AcceptEnv configuration.
-        writer.exec(true, terminal_command(integration)).await?;
+        writer
+            .exec(
+                true,
+                terminal_command_with_identity(integration, gui, terminal),
+            )
+            .await?;
         terminal_request_reply(&mut reader, "an interactive shell", &mut early_output).await?;
         Ok::<_, anyhow::Error>(())
     })
@@ -1140,5 +1194,88 @@ mod connection_retry_tests {
         .await;
         assert!(result.is_err());
         assert_eq!(attempts, 1);
+    }
+}
+
+#[cfg(test)]
+mod terminal_gui_tests {
+    use super::*;
+    #[test]
+    fn terminal_identity_reaches_the_login_shell_without_gui_setup() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let shell = home.path().join("login-shell");
+        std::fs::write(
+            &shell,
+            "#!/bin/sh\nprintf '%s\\n' \"$NEWPORT_SESSION\" \"$NEWPORT_TERMINAL\" \"$1\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let routing = uuid::Uuid::new_v4();
+        let terminal = uuid::Uuid::new_v4();
+        let result = std::process::Command::new("sh")
+            .args([
+                "-c",
+                &terminal_command_with_identity(routing, None, Some(terminal)),
+            ])
+            .env("HOME", home.path())
+            .env("SHELL", shell)
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            format!("{routing}\n{terminal}\n-l\n")
+        );
+    }
+    #[test]
+    fn gui_environment_is_quoted_and_survives_login_shell_startup() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let authority = home.path().join("authority ' $(touch SHOULD_NOT_EXIST)");
+        std::fs::write(&authority, "fixture").unwrap();
+        let shell = home.path().join("login-shell");
+        std::fs::write(&shell, "#!/bin/sh\nprintf '%s\\n' \"$DISPLAY\" \"$XAUTHORITY\" \"$NEWPORT_GUI_DISPLAY\" \"${WAYLAND_DISPLAY-unset}\" \"$NEWPORT_SESSION\" \"$1\"\n").unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let gui = newport_domain::terminal::GuiEnvironment(
+            [
+                ("DISPLAY".into(), Some(":75".into())),
+                (
+                    "XAUTHORITY".into(),
+                    Some(authority.to_string_lossy().into_owned()),
+                ),
+                ("WAYLAND_DISPLAY".into(), None),
+                ("WAYLAND_SOCKET".into(), None),
+            ]
+            .into(),
+        );
+        gui.validate().unwrap();
+        let id = uuid::Uuid::new_v4();
+        let run = || {
+            std::process::Command::new("sh")
+                .args(["-c", &terminal_command_with_gui(id, Some(&gui))])
+                .current_dir(home.path())
+                .env("HOME", home.path())
+                .env("SHELL", &shell)
+                .env("WAYLAND_DISPLAY", "clipboard-only")
+                .env_remove("DISPLAY")
+                .env_remove("XAUTHORITY")
+                .env_remove("NEWPORT_GUI_DISPLAY")
+                .env_remove("NEWPORT_GUI_AUTHORITY")
+                .output()
+                .unwrap()
+        };
+        let result = run();
+        assert!(result.status.success());
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            format!(":75\n{}\n:75\nunset\n{id}\n-l\n", authority.display())
+        );
+        assert!(!home.path().join("SHOULD_NOT_EXIST").exists());
+        std::fs::remove_file(authority).unwrap();
+        let expired = run();
+        assert!(expired.status.success());
+        assert!(String::from_utf8_lossy(&expired.stderr).contains("GUI session ended"));
+        assert!(String::from_utf8_lossy(&expired.stdout).starts_with("\n\n\nclipboard-only"));
     }
 }

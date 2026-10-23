@@ -15,6 +15,7 @@ use wayland_protocols_wlr::data_control::v1::server::{
     zwlr_data_control_offer_v1::{self as offer, ZwlrDataControlOfferV1 as Offer},
 };
 use wayland_server::{
+    protocol::wl_compositor::{self, WlCompositor},
     protocol::wl_seat::{self, WlSeat},
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, Weak,
 };
@@ -56,6 +57,7 @@ impl State {
     pub(crate) fn register(handle: &DisplayHandle) {
         handle.create_global::<Self, WlSeat, _>(7, ());
         handle.create_global::<Self, Manager, _>(2, ());
+        handle.create_global::<Self, WlCompositor, _>(1, ());
     }
 
     pub(crate) fn refresh(&mut self, handle: &DisplayHandle) {
@@ -105,6 +107,40 @@ impl State {
             offer.offer("text/plain;charset=utf-8".into());
         }
         device.selection(Some(&offer));
+    }
+}
+
+// Clipboard clients only bind the seat and data-control manager. A compositor
+// binding is a rendering request, even if the toolkit stops at missing globals.
+impl GlobalDispatch<WlCompositor, ()> for State {
+    fn bind(
+        state: &mut Self,
+        _: &DisplayHandle,
+        _: &Client,
+        object: New<WlCompositor>,
+        _: &(),
+        init: &mut DataInit<'_, Self>,
+    ) {
+        state.source.gui.signal();
+        init.init(object, ());
+    }
+}
+impl Dispatch<WlCompositor, ()> for State {
+    fn request(
+        _: &mut Self,
+        _: &Client,
+        object: &WlCompositor,
+        request: wl_compositor::Request,
+        _: &(),
+        _: &DisplayHandle,
+        init: &mut DataInit<'_, Self>,
+    ) {
+        let message = "Set up GUI apps in Newport, then open a new terminal";
+        match request {
+            wl_compositor::Request::CreateSurface { id } => init.post_error(id, 0u32, message),
+            wl_compositor::Request::CreateRegion { id } => init.post_error(id, 0u32, message),
+            _ => object.post_error(0u32, message),
+        }
     }
 }
 

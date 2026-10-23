@@ -679,7 +679,9 @@ pub async fn background(state: Shared, app: crate::desktop_integration::Desktop)
     let profiles = state.sessions.profiles();
     let mut starting = tokio::task::JoinSet::new();
     for (profile, _) in profiles {
-        if !profile.clipboard_enabled && !profile.browser_enabled {
+        let gui_guidance =
+            app.supports_gui_notices() && profile.setup_complete && profile.agent_install_approved;
+        if !profile.clipboard_enabled && !profile.browser_enabled && !gui_guidance {
             continue;
         }
         let app = app.clone();

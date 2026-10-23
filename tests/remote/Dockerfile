@@ -9,6 +9,12 @@ COPY fixture/Cargo.toml fixture/Cargo.lock ./
 COPY fixture/src ./src
 RUN cargo build --release --locked
 
+FROM oven/bun:1.4.4 AS opencode-probe
+WORKDIR /opencode-probe
+COPY opencode-probe/package.json opencode-probe/bun.lock ./
+RUN bun install --frozen-lockfile --ignore-scripts
+COPY opencode-probe ./
+
 # The CLI backend requires Git with --attr-source (Git 2.43+).
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends openssh-server git bash zsh fish ca-certificates procps iproute2 xclip wl-clipboard direnv \
@@ -18,6 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends openssh-server 
     && mkdir -p /run/sshd /home/fixture/.ssh /srv/fixture \
     && printf 'newport remote fixture\n' > /srv/fixture/index.html
 COPY --from=probe /probe/target/release/newport-arboard-probe /usr/local/bin/arboard-probe
+COPY --from=opencode-probe /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=opencode-probe /opencode-probe /opt/opencode-probe
 COPY sshd_config /etc/ssh/sshd_config
 COPY --from=probe /fixture/target/release/newport-test-fixture /usr/local/bin/newport-test-fixture
 COPY start.sh /usr/local/bin/start-fixture

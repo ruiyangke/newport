@@ -11,7 +11,18 @@ use std::{
 /// Whether this shell is on a desktop of the server's own, not one Newport
 /// provides: a display from a Newport session, this one or an earlier one,
 /// doesn't count. Newport's commands defer to the server's own there.
+pub(crate) fn gui_display() -> bool {
+    let display = env::var("DISPLAY").unwrap_or_default();
+    let authority = env::var("XAUTHORITY").unwrap_or_default();
+    !display.is_empty()
+        && !authority.is_empty()
+        && env::var("NEWPORT_GUI_DISPLAY").ok().as_deref() == Some(display.as_str())
+        && env::var("NEWPORT_GUI_AUTHORITY").ok().as_deref() == Some(authority.as_str())
+}
 pub(crate) fn real_desktop(selection: Option<&std::path::Path>) -> bool {
+    if gui_display() {
+        return false;
+    }
     let wayland = env::var("WAYLAND_DISPLAY").unwrap_or_default();
     let authority = env::var("XAUTHORITY").unwrap_or_default();
     let fake_wayland = selection
@@ -74,7 +85,7 @@ fn publish(mut command: Command, data: Vec<u8>) -> bool {
     success
 }
 pub fn update(path: &std::path::Path) -> &'static str {
-    if env::var("NEWPORT_CLIPBOARD_NATIVE").as_deref() == Ok("0") {
+    if gui_display() || env::var("NEWPORT_CLIPBOARD_NATIVE").as_deref() == Ok("0") {
         return "Clipboard synced.";
     }
     let Ok(formats) = crate::snapshot::read(path) else {

@@ -77,10 +77,20 @@ Needle installed as a plain file at `~/.local/bin/newport-agent` (by hand, or
 before builds were managed) is recognized by the protocol name it contains and
 replaced; any other file there is left alone and the install stops.
 
+Installing also removes the old Porthop agent and its marked helper scripts.
+It scans every symlink directly in `~/.local/bin` and removes those pointing to
+Porthop's agent or helpers, including custom names, dangling links, and chains
+of links within that directory. It stops the old agent before deleting its
+clipboard cache and removes Porthop's shell setup blocks and shell setup lock.
+Unrelated commands and files
+are preserved. This cleanup runs even without `--integrations`; with integrations,
+the standard helper names receive Newport's links. Staging alone leaves Porthop
+in place until the new build has been verified and activated.
+
 Shell setup is a block between `# >>> Newport >>>` and `# <<< Newport <<<`,
 written atomically with the file's permissions. A startup file that is a
 symlink or read-only is left alone, and the person is told what to add by hand.
-Another `xclip`, `wl-paste` or `xdg-open` stays; `newport-browser` must be free.
+Another `xclip`, `xsel`, `wl-paste` or `xdg-open` stays; `newport-browser` must be free.
 
 Uninstalling is Newport's job and needs no Needle executable: it runs
 [agent-uninstall.sh](../../crates/newport-backend/src/agent-uninstall.sh) over

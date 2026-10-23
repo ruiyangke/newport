@@ -1,6 +1,9 @@
-use crate::{terminal_status::Phase, terminal_view::TerminalView, *};
+use crate::{
+    terminal_status::{ExitPolicy, Phase},
+    terminal_view::TerminalView,
+    *,
+};
 use newport_client::terminal_command::CommandDraft;
-use std::time::{Duration, Instant};
 
 use newport_domain::terminal::MAX_TERMINALS;
 
@@ -12,34 +15,6 @@ struct TerminalTab {
     exit: ExitPolicy,
     _observer: Subscription,
     _links: Subscription,
-}
-
-/// A shell that ends this soon after becoming ready failed to start.
-const STARTUP_EXIT: Duration = Duration::from_secs(2);
-
-/// Exits after use close their tab. A startup exit (nologin, a profile that
-/// exits) keeps it, so the output and exit status explain what happened.
-#[derive(Default)]
-struct ExitPolicy {
-    ready_at: Option<Instant>,
-    keep: bool,
-}
-impl ExitPolicy {
-    fn observe(&mut self, phase: &Phase) {
-        match phase {
-            Phase::Connecting => *self = Self::default(),
-            Phase::Connected => {
-                *self = Self {
-                    ready_at: Some(Instant::now()),
-                    keep: false,
-                }
-            }
-            Phase::Exited(_) => {
-                self.keep = self.ready_at.is_none_or(|at| at.elapsed() < STARTUP_EXIT);
-            }
-            _ => {}
-        }
-    }
 }
 
 struct Rename {
@@ -65,6 +40,24 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    pub(super) fn select_session(
+        &mut self,
+        id: uuid::Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.view.read(cx).session_id() == Some(id))
+        else {
+            return false;
+        };
+        self.active = index;
+        self.focus_active(window, cx);
+        cx.notify();
+        true
+    }
     pub(super) fn contains_focus(&self, window: &Window, cx: &App) -> bool {
         self.tabs.iter().any(|tab| {
             tab.focus.contains_focused(window, cx)
@@ -470,7 +463,7 @@ impl Workspace {
         // its identity and selection.
         for index in (0..self.tabs.len()).rev() {
             let tab = &self.tabs[index];
-            if tab.exit.keep || !matches!(tab.view.read(cx).status.phase, Phase::Exited(_)) {
+            if !tab.exit.should_close(&tab.view.read(cx).status.phase) {
                 continue;
             }
             restore_focus |= tab.focus.contains_focused(window, cx)
@@ -717,7 +710,7 @@ impl Render for Workspace {
                                     .unwrap_or_else(|| automatic_tab_title(&remote_title, id));
                                 let startup_exit = {
                                     let status = &tab.view.read(cx).status;
-                                    (tab.exit.keep && matches!(status.phase, Phase::Exited(_)))
+                                    (!tab.exit.should_close(&status.phase) && matches!(status.phase, Phase::Exited(_)))
                                         .then(|| status.label())
                                 };
                                 let hint = startup_exit.clone().or_else(|| {
@@ -829,6 +822,17 @@ impl Render for Workspace {
                                 spacer.window_control_area(WindowControlArea::Drag)
                             }),
                     )
+                    .when(crate::remote_apps::available(cx), |bar| {
+                        bar.child(crate::controls::icon_button("terminal-gui-setup")
+                            .icon(Icon::new(IconName::LayoutGrid).size(px(crate::controls::ICON_SIZE)))
+                            .ghost()
+                            .accessibility_label("GUI app setup")
+                            .tooltip("GUI app setup")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                crate::terminal_setup::request(&this.server, true, cx);
+                                cx.notify();
+                            })))
+                    })
                     .when_some(state.as_ref(), |bar, state| {
                         bar.child(
                             div()
@@ -952,8 +956,7 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandDraft, MAX_TERMINALS, STARTUP_EXIT, Workspace, custom_name, selected_after_close,
-        tab_destination,
+        CommandDraft, MAX_TERMINALS, Workspace, custom_name, selected_after_close, tab_destination,
     };
     use crate::terminal_view::TerminalView;
     use gpui_kit::{
@@ -1692,8 +1695,7 @@ mod tests {
         cx.run_until_parked();
         workspace.update(cx, |w, _| {
             let tab = w.tabs.iter_mut().find(|t| t.view == *view).unwrap();
-            let ready = tab.exit.ready_at.expect("observed ready shell");
-            tab.exit.ready_at = Some(ready - STARTUP_EXIT * 2);
+            tab.exit.elapse_startup();
         });
     }
 
@@ -1803,7 +1805,7 @@ mod tests {
         // The decision is made at exit; time passing does not close the tab later.
         workspace.update(cx, |w, _| {
             for tab in &mut w.tabs {
-                tab.exit.ready_at = tab.exit.ready_at.map(|at| at - STARTUP_EXIT * 2);
+                tab.exit.elapse_startup();
             }
         });
         draw(cx);

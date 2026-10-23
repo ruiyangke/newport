@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
+        mpsc, Arc,
     },
     thread,
     time::{Duration, Instant},
@@ -20,6 +20,7 @@ pub struct Server {
     endpoint: Endpoint,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
+    refresh: mpsc::Sender<mpsc::SyncSender<()>>,
 }
 impl Server {
     pub fn start(snapshot: &Path) -> io::Result<Self> {
@@ -57,6 +58,7 @@ impl Server {
         let stopped = stop.clone();
         let mut state = State::new(source, stop.clone());
         let clients = Arc::new(AtomicUsize::new(0));
+        let (refresh, requests) = mpsc::channel::<mpsc::SyncSender<()>>();
         let thread = thread::spawn(move || {
             let mut checked = Instant::now() - Duration::from_secs(1);
             while !stopped.load(Ordering::Relaxed) {
@@ -87,7 +89,8 @@ impl Server {
                         }
                     }
                 }
-                if checked.elapsed() >= Duration::from_millis(100) {
+                let refreshed = requests.try_recv().ok();
+                if refreshed.is_some() || checked.elapsed() >= Duration::from_millis(100) {
                     state.refresh(&handle);
                     checked = Instant::now();
                 }
@@ -97,7 +100,10 @@ impl Server {
                 if display.flush_clients().is_err() {
                     break;
                 }
-                thread::sleep(Duration::from_millis(5));
+                if let Some(refreshed) = refreshed {
+                    let _ = refreshed.send(());
+                }
+                thread::park_timeout(Duration::from_millis(5));
             }
             // Dropping Display closes clients. Pipe workers notice this flag too.
             stopped.store(true, Ordering::Relaxed);
@@ -106,7 +112,21 @@ impl Server {
             endpoint,
             stop,
             thread: Some(thread),
+            refresh,
         })
+    }
+    /// Publish selection changes before the agent acknowledges their revision.
+    /// Native clients (including OpenTUI) use a Wayland sync barrier immediately
+    /// before reading; leaving publication to the timer exposes a stale offer.
+    pub(crate) fn refresh(&self) -> io::Result<()> {
+        let (done, completed) = mpsc::sync_channel(1);
+        self.refresh.send(done).map_err(io::Error::other)?;
+        if let Some(thread) = &self.thread {
+            thread.thread().unpark();
+        }
+        completed
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(io::Error::other)
     }
     pub fn is_running(&self) -> bool {
         !self.stop.load(Ordering::Relaxed)
@@ -119,6 +139,7 @@ impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
             let _ = thread.join();
         }
     }

@@ -65,6 +65,9 @@ impl Drop for Alias {
 pub(crate) struct Session {
     // Fields drop in order: stop readers before deleting files and releasing ownership.
     _alias: Option<Alias>,
+    clipboard: bool,
+    gui_notices: bool,
+    pub(crate) gui_launch: Option<crate::gui_launch::Broker>,
     x11: Option<x_server::Server>,
     wayland: Option<wl_server::Server>,
     publication: Option<crate::routing::Publication>,
@@ -77,11 +80,18 @@ pub(crate) struct Session {
 }
 impl Session {
     pub(crate) fn set_clipboard(&mut self, enabled: bool) -> io::Result<()> {
-        if self.wayland.is_some() == enabled {
+        if self.clipboard == enabled {
             return Ok(());
         }
         let root = self.snapshot.parent().expect("session root");
         if !enabled {
+            self.clipboard = false;
+            if self.gui_notices {
+                // The closed demand store prevents any clipboard reads, while
+                // display requests can still guide the user to GUI setup.
+                let _ = fs::remove_file(root.join("snapshot.tar"));
+                return Ok(());
+            }
             self.x11 = None;
             self.wayland = None;
             for name in ["snapshot.tar", "display", "Xauthority"] {
@@ -93,13 +103,17 @@ impl Session {
             }
             return Ok(());
         }
-        let source = crate::clipboard_source::Source::new(&self.snapshot);
+        self.x11 = None;
+        self.wayland = None;
+        let mut source = crate::clipboard_source::Source::new(&self.snapshot);
+        source.gui = self.source.gui.clone();
         let wayland = wl_server::Server::start_source(source.clone(), &root.join("wayland.sock"))?;
         let x11 = optional_x11(source.clone())?;
         if let Some(x11) = &x11 {
             private_write(&root.join("display"), x11.display.as_bytes())?;
             private_write(&root.join("Xauthority"), &fs::read(x11.authority())?)?;
         }
+        self.clipboard = true;
         self.source = source;
         self.wayland = Some(wayland);
         self.x11 = x11;
@@ -107,20 +121,45 @@ impl Session {
     }
 
     pub(crate) fn clipboard_enabled(&self) -> bool {
-        self.wayland.is_some()
+        self.clipboard
+    }
+
+    pub(crate) fn refresh_clipboard(&self) -> io::Result<()> {
+        if let Some(wayland) = &self.wayland {
+            wayland.refresh()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn enable_gui_notices(&mut self) -> io::Result<()> {
+        if self.gui_notices {
+            return Ok(());
+        }
+        let clipboard = self.clipboard;
+        self.set_clipboard(true)?;
+        self.clipboard = clipboard;
+        self.gui_notices = true;
+        self.source.gui.enable();
+        Ok(())
     }
 
     pub(crate) fn publish_features(&self, browser: bool) -> io::Result<()> {
         private_write(
             &self.snapshot.with_file_name("features"),
             format!(
-                "{} {}",
+                "{} {} {} {}",
                 if self.clipboard_enabled() {
                     "clipboard"
                 } else {
                     ""
                 },
-                if browser { "browser" } else { "" }
+                if browser { "browser" } else { "" },
+                if self.gui_notices { "gui" } else { "" },
+                if self.gui_launch.is_some() {
+                    "gui-launch"
+                } else {
+                    ""
+                }
             )
             .as_bytes(),
         )
@@ -246,6 +285,9 @@ impl Session {
         Ok((
             Self {
                 _alias: alias,
+                clipboard,
+                gui_notices: false,
+                gui_launch: None,
                 publication,
                 _directory: directory,
                 x11,

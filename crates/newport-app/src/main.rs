@@ -309,6 +309,29 @@ fn run() -> Result<(), String> {
                                 }
                             }
                             desktop::Action::Run(action) => action(),
+                            desktop::Action::GuiSetup(server) => {
+                                let _ = cx.update(|cx| {
+                                    newport_gpui::request_terminal_gui_setup(&server, cx)
+                                });
+                            }
+                            desktop::Action::GuiLaunch {
+                                server,
+                                terminal,
+                                application,
+                                reply,
+                                cancelled,
+                            } => {
+                                let _ = cx.update(|cx| {
+                                    newport_gpui::request_terminal_gui_launch(
+                                        server,
+                                        terminal,
+                                        application,
+                                        reply,
+                                        cancelled,
+                                        cx,
+                                    )
+                                });
+                            }
                             desktop::Action::Activate(acknowledge) => {
                                 if !acknowledge.is_closed() {
                                     let result = cx.update(newport_gpui::activate);

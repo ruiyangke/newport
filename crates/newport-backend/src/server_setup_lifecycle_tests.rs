@@ -26,6 +26,189 @@ impl crate::desktop_integration::DesktopIntegration for Desktop {
     }
 }
 
+struct ImageDesktop;
+const PNG: &[u8] = include_bytes!("../../../tools/agent/tests/pixel.png");
+impl crate::desktop_integration::DesktopIntegration for ImageDesktop {
+    fn on_main_thread(&self, action: Box<dyn FnOnce() + Send>) -> Result<(), String> {
+        action();
+        Ok(())
+    }
+    fn clipboard_revision(&self) -> Option<isize> {
+        Some(1)
+    }
+    fn clipboard_offer(&self, previous: Option<isize>) -> Option<(isize, Vec<String>)> {
+        (previous != Some(1)).then(|| (1, vec!["image/png".into()]))
+    }
+    fn read_clipboard_format(&self, revision: isize, format: &str) -> Option<Vec<u8>> {
+        (revision == 1 && format == "image/png").then(|| PNG.to_vec())
+    }
+    fn open_url(&self, _: &str) -> Result<(), String> {
+        panic!("No browser requests expected")
+    }
+}
+
+#[tokio::test]
+#[ignore = "Requires disposable Linux OpenSSH fixture"]
+async fn enabling_clipboard_after_setup_supports_image_paste_without_system_xclip() {
+    use sha2::{Digest, Sha256};
+    let directory = tempfile::tempdir().unwrap();
+    let server: Server = serde_json::from_value(json!({
+        "id":Uuid::new_v4(), "name":"Image paste fixture", "sshHost":"127.0.0.1", "sshUser":"fixture",
+        "sshPort":std::env::var("NEWPORT_TEST_SSH_PORT").unwrap().parse::<u16>().unwrap(),
+        "identityFile":std::env::var("NEWPORT_TEST_IDENTITY").unwrap(), "agentInstallApproved":true
+    })).unwrap();
+    let mut manager =
+        crate::manager::Manager::new(crate::profile::Store::for_test(directory.path().into()));
+    manager
+        .save(crate::model::Config {
+            servers: vec![server.clone()],
+            tunnels: vec![],
+        })
+        .await
+        .unwrap();
+    let owner = manager
+        .sessions
+        .session(&server, manager.connection_revision(server.id));
+    let state = crate::manager::share(manager);
+    let ssh = owner.acquire(&server).await.unwrap();
+    ssh.install(false).await.unwrap();
+    finish(&state, Arc::new(ImageDesktop), server.clone(), false, false)
+        .await
+        .unwrap();
+    ssh.execute("test ! -e \"$HOME/.local/bin/xclip\" && mkdir -p \"$HOME/paste-bin\" && ln -s /usr/bin/grep \"$HOME/paste-bin/grep\"", None).await.unwrap();
+    crate::monitor::snapshot(&owner).await.unwrap();
+    let runtime = owner.agent_runtime.snapshot().hello.unwrap().instance_id;
+    let generation = owner.transport_snapshot().generation;
+    let access = state.lock().await.integration_access();
+    let expected_connection = state.lock().await.connection_scope(server.id).unwrap();
+    crate::commands::set_integration_enabled(
+        &state,
+        Arc::new(ImageDesktop),
+        server.id,
+        crate::commands::IntegrationFeature::Clipboard,
+        true,
+        expected_connection.clone(),
+        &access,
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !owner.permissions.clipboard_enabled() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Claude Code's detection and PNG commands, with no system xclip or wl-paste
+    // available. Allow the bridge's first clipboard offer to reach the server.
+    let paste = r#"
+        PATH="$HOME/paste-bin"; export PATH
+        if command -v xclip || command -v wl-paste; then exit 1; fi
+        eval "$("$HOME/.local/bin/newport-agent" env)"
+        test "$(command -v xclip)" = "$HOME/.local/bin/xclip" || exit 1
+        xclip -selection clipboard -t TARGETS -o 2>/dev/null | grep -E 'image/(png|jpeg|jpg|gif|webp|bmp)' ||
+            wl-paste -l 2>/dev/null | grep -E 'image/(png|jpeg|jpg|gif|webp|bmp)' || exit 1
+        xclip -selection clipboard -t image/png -o > "$HOME/pasted.png" 2>/dev/null ||
+            wl-paste --type image/png > "$HOME/pasted.png" 2>/dev/null || exit 1
+        /usr/bin/sha256sum "$HOME/pasted.png"
+    "#;
+    let output = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match ssh.execute(paste, None).await {
+                Ok(output) => break output,
+                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+    })
+    .await
+    .expect("image paste through the installed helper");
+    let expected: String = Sha256::digest(PNG)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert!(output.contains(&expected), "{output}");
+    assert_eq!(
+        owner.agent_runtime.snapshot().hello.unwrap().instance_id,
+        runtime
+    );
+    assert_eq!(owner.transport_snapshot().generation, generation);
+    let setup = ssh.execute(SHELL_SETUP, None).await.unwrap();
+    assert!(setup.contains(">>> Newport >>>"), "{setup}");
+    crate::commands::set_integration_enabled(
+        &state,
+        Arc::new(ImageDesktop),
+        server.id,
+        crate::commands::IntegrationFeature::Clipboard,
+        false,
+        expected_connection.clone(),
+        &access,
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while ssh.execute(paste, None).await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("disabling sharing must revoke cached images too");
+    assert_eq!(ssh.execute(SHELL_SETUP, None).await.unwrap(), setup);
+
+    // A later off choice must win even when enabling is waiting on shell setup.
+    let gate = owner.lifecycle.operation.lock().await;
+    let enable = tokio::spawn({
+        let state = state.clone();
+        let access = access.clone();
+        let expected_connection = expected_connection.clone();
+        async move {
+            crate::commands::set_integration_enabled(
+                &state,
+                Arc::new(ImageDesktop),
+                server.id,
+                crate::commands::IntegrationFeature::Clipboard,
+                true,
+                expected_connection,
+                &access,
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while owner.lifecycle.tasks.active().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        crate::commands::set_integration_enabled(
+            &state,
+            Arc::new(ImageDesktop),
+            server.id,
+            crate::commands::IntegrationFeature::Clipboard,
+            false,
+            expected_connection,
+            &access,
+        ),
+    )
+    .await
+    .expect("disabling must not wait for setup")
+    .unwrap();
+    drop(gate);
+    assert!(enable.await.unwrap().unwrap_err().contains("superseded"));
+    assert!(!owner.permissions.snapshot().desired.clipboard);
+    assert!(
+        !state
+            .lock()
+            .await
+            .server(server.id)
+            .unwrap()
+            .clipboard_enabled
+    );
+    crate::manager::shutdown(&state).await;
+}
+
 #[tokio::test]
 #[ignore = "Requires disposable Linux OpenSSH fixture"]
 async fn setup_completion_cannot_overwrite_revocation_and_toggles_preserve_services() {
@@ -118,7 +301,7 @@ async fn setup_completion_cannot_overwrite_revocation_and_toggles_preserve_servi
     );
     assert!(!owner.permissions.snapshot().desired.clipboard);
     assert_eq!(owner.permissions.snapshot().session_epoch, epoch);
-    // Setup wrote the shell setup; toggles never touch it.
+    // Turning off preserves the command links and shell configuration.
     assert!(shell_setup.contains(">>> Newport >>>"), "{shell_setup}");
     crate::commands::set_integration_enabled(
         &state,

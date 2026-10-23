@@ -7,7 +7,22 @@ use std::time::Duration;
 #[allow(dead_code)]
 #[path = "../../../tools/agent/src/clipboard_wire.rs"]
 mod clipboard_wire;
+#[allow(dead_code)]
+#[path = "../../../tools/agent/src/gui_protocol.rs"]
+mod gui_protocol;
 use tokio::sync::watch;
+
+#[derive(Default)]
+struct GuiLaunches(
+    std::collections::HashMap<uuid::Uuid, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+);
+impl Drop for GuiLaunches {
+    fn drop(&mut self) {
+        for cancelled in self.0.values() {
+            cancelled.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
 
 const MAX_DATA: usize = 32 * 1024 * 1024;
 
@@ -461,6 +476,13 @@ async fn run_once(
         let desired = *changes.borrow_and_update();
         let permission_epoch = owner.permissions.snapshot().session_epoch;
         session.apply_permissions(permission_epoch, desired).await?;
+        let gui_notices = app.supports_gui_notices() && session.supports_gui_notices();
+        if gui_notices { agent.request(b'G', &[]).await?; }
+        let gui_launch = app.supports_gui_notices() && session.supports_gui_launch();
+        if gui_launch { agent.request(b'L', &[]).await?; }
+        let mut gui_pending = GuiLaunches::default();
+        let mut gui_replies = tokio::task::JoinSet::new();
+        let mut last_gui_notice: Option<std::time::Instant> = None;
         ready("Agent connected.".into(), path_needed);
         log::info!(
             "Integration agent connected (clipboard={}, browser={})",
@@ -489,6 +511,40 @@ async fn run_once(
                         let (kind, data) = event?;
                         match kind {
                             b'O' => agent.open(&data).await?,
+                            b'G' if gui_notices && data.is_empty() => {
+                                session.validate()?;
+                                if last_gui_notice.is_none_or(|at| at.elapsed() >= Duration::from_secs(3)) {
+                                    last_gui_notice = Some(std::time::Instant::now());
+                                    app.request_gui_setup(&server.id.to_string());
+                                }
+                            }
+                            b'L' if gui_launch => {
+                                session.validate()?;
+                                let request: gui_protocol::Request = gui_protocol::decode(&data).map_err(|e| e.to_string())?;
+                                request.validate().map_err(|e| e.to_string())?;
+                                if gui_pending.0.len() >= gui_protocol::MAX_PENDING || gui_pending.0.contains_key(&request.id) {
+                                    let reply = gui_protocol::Reply { id: request.id, environment: None,
+                                        error: Some("Too many pending GUI launches. Try again.".into()) };
+                                    agent.request(b'J', &gui_protocol::encode(&reply).map_err(|e| e.to_string())?).await?;
+                                    continue;
+                                }
+                                let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                gui_pending.0.insert(request.id, cancelled.clone());
+                                let (reply, response) = tokio::sync::oneshot::channel();
+                                app.request_gui_launch(&server.id.to_string(), &request.terminal.to_string(), &request.application,
+                                    Box::new(move |result| { let _ = reply.send(result); }), cancelled);
+                                gui_replies.spawn(async move {
+                                    let result = tokio::time::timeout(Duration::from_secs(gui_protocol::WAIT_SECONDS), response).await
+                                        .ok().and_then(Result::ok).unwrap_or_else(|| Err("GUI launch cancelled or timed out.".into()));
+                                    (request.id, result)
+                                });
+                            }
+                            b'K' if gui_launch => {
+                                let id: uuid::Uuid = gui_protocol::decode(&data).map_err(|e| e.to_string())?;
+                                if let Some(cancelled) = gui_pending.0.remove(&id) {
+                                    cancelled.store(true, std::sync::atomic::Ordering::Release);
+                                }
+                            }
                             b'C' => {
                                 let request = clipboard_wire::Request::decode(&data).map_err(|e| e.to_string())?;
                                 if !owner.permissions.clipboard_enabled() || reads.len() + replies.len() >= 8 {
@@ -508,6 +564,18 @@ async fn run_once(
                             Ok(_) => {},
                             Err(error) if error.is_cancelled() => {},
                             Err(error) => return Err(error.to_string()),
+                        }
+                    }
+                    result = gui_replies.join_next(), if !gui_replies.is_empty() => {
+                        if let Some(Ok((id, result))) = result
+                            && let Some(cancelled) = gui_pending.0.remove(&id)
+                        {
+                            session.validate()?;
+                            let result = result.and_then(|environment| environment.validate().map(|()| environment));
+                            let (environment, error) = match result { Ok(env) => (Some(env.0), None), Err(error) => (None, Some(error)) };
+                            agent.request(b'J', &gui_protocol::encode(&gui_protocol::Reply { id, environment, error })
+                                .map_err(|e| e.to_string())?).await?;
+                            cancelled.store(true, std::sync::atomic::Ordering::Release);
                         }
                     }
                     // One bounded chunk per turn lets events and timers run between writes.

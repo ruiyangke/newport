@@ -36,6 +36,8 @@ pub struct TerminalOpen {
     pub session: Uuid,
     pub cols: u32,
     pub rows: u32,
+    #[serde(default)]
+    pub gui: Option<newport_domain::terminal::GuiEnvironment>,
 }
 
 /// The application supplies the services. Returning the terminal guard

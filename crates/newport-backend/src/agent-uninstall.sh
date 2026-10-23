@@ -70,7 +70,7 @@ if [ -f "$fish" ] && [ ! -L "$fish" ] && ! grep -q '[^[:space:]]' "$fish"; then
 fi
 
 # The command links that point at the entry point.
-for name in xclip wl-paste xdg-open newport-browser; do
+for name in xclip xsel wl-paste xdg-open newport-browser; do
     link="$bin/$name"
     [ -L "$link" ] || continue
     case "$(readlink "$link")" in

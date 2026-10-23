@@ -199,7 +199,7 @@ fn invalid_shell_configuration_fails_before_alias_changes() {
             .env("SHELL", "/bin/bash")
             .run_output();
         assert!(!result.status.success());
-        for name in ["xclip", "wl-paste", "xdg-open", "newport-browser"] {
+        for name in ["xclip", "xsel", "wl-paste", "xdg-open", "newport-browser"] {
             assert!(fs::symlink_metadata(bin.join(name)).is_err(), "{name}");
         }
         assert_eq!(fs::read_to_string(&rc).unwrap(), content);

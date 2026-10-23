@@ -95,6 +95,20 @@ impl Sessions {
         rows: u32,
         owner: Arc<crate::server_session::ServerSession>,
     ) -> Result<(), String> {
+        self.open_bound_with_gui(id, server, cols, rows, owner, None)
+    }
+    pub fn open_bound_with_gui(
+        &self,
+        id: Uuid,
+        server: Server,
+        cols: u32,
+        rows: u32,
+        owner: Arc<crate::server_session::ServerSession>,
+        gui: Option<newport_domain::terminal::GuiEnvironment>,
+    ) -> Result<(), String> {
+        if let Some(gui) = &gui {
+            gui.validate()?;
+        }
         size(cols, rows)?;
         let mut sessions = self.inner.entries.lock().unwrap();
         if sessions.contains_key(&id) {
@@ -111,7 +125,8 @@ impl Sessions {
         let task_owner = owner.clone();
         let task = tokio::spawn(async move {
             if let Err(error) =
-                ssh::terminal_with_session(task_owner, &server, cols, rows, rx, &tx).await
+                ssh::terminal_with_session(task_owner, &server, cols, rows, rx, &tx, gui, Some(id))
+                    .await
             {
                 let _ = tx.send(Event::Error(format!("{error:#}"))).await;
             }

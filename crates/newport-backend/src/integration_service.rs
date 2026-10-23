@@ -93,7 +93,7 @@ impl Slot {
         let desired = owner.permissions.snapshot().desired;
         server.clipboard_enabled = desired.clipboard;
         server.browser_enabled = desired.browser;
-        if !server.clipboard_enabled && !server.browser_enabled {
+        if !server.clipboard_enabled && !server.browser_enabled && !app.supports_gui_notices() {
             return Ok(());
         }
         *self.state.lock().unwrap() = Some(Snapshot {

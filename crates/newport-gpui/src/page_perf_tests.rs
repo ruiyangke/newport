@@ -29,6 +29,7 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
         window_state,
         terminals: Default::default(),
         terminal_immersive: false,
+        terminal_setup: Default::default(),
         integration_refresh_pending: Default::default(),
         needle_uninstall_confirmations: Default::default(),
         integration_shell: cx.new(|cx| crate::integration::ShellCode::new(window, cx)),

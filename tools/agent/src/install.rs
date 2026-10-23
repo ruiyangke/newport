@@ -7,7 +7,7 @@ use std::{
 };
 
 /// The commands Needle answers, as links to `newport-agent` in `~/.local/bin`.
-const LINKS: [&str; 4] = ["xclip", "wl-paste", "xdg-open", "newport-browser"];
+const LINKS: [&str; 5] = ["xclip", "xsel", "wl-paste", "xdg-open", "newport-browser"];
 
 /// `newport-agent install`, run by hand on a server.
 pub fn install() -> io::Result<()> {
@@ -33,12 +33,17 @@ pub(crate) fn apply() -> io::Result<Option<String>> {
         PathBuf::from(env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is required"))?);
     // Shell setup first: a malformed startup file fails before any link.
     let notices = crate::shell_setup::apply()?;
+    crate::legacy_install::remove(&home)?;
     let directory = home.join(".local/bin");
     fs::create_dir_all(&directory)?;
     for name in LINKS {
         link(&directory.join(name), name == "newport-browser")?;
     }
-    Ok((!notices.is_empty()).then(|| format!("Manual shell setup needed. {}", notices.join(" "))))
+    Ok(setup_notice(notices))
+}
+
+pub(crate) fn setup_notice(notices: Vec<String>) -> Option<String> {
+    (!notices.is_empty()).then(|| format!("Manual shell setup needed. {}", notices.join(" ")))
 }
 
 /// A link to `newport-agent`, unless something else is there: another

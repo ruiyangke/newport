@@ -16,6 +16,8 @@ pub(crate) enum Action {
     Install {
         integrations: bool,
     },
+    /// Set up commands and shell exports using the already installed Needle.
+    SetupIntegrations,
     Uninstall,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

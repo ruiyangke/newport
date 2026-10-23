@@ -8,6 +8,7 @@ use super::*;
 use crate::remote_apps_api as api;
 use crate::remote_apps_install as install;
 use crate::remote_apps_sessions::{Launch, Sessions};
+use crate::terminal_status::ExitPolicy;
 use gpui_kit::component::{button::ButtonGroup, input::InputEvent};
 use std::{
     cell::{Cell, RefCell},
@@ -39,6 +40,8 @@ struct InstallTerminal {
     /// The command it was opened with; the button that opened it shows so.
     command: String,
     view: Entity<crate::terminal_view::TerminalView>,
+    exit: ExitPolicy,
+    _observer: Subscription,
 }
 
 /// The floating terminal's height.
@@ -148,6 +151,8 @@ const WALL_GAP: f32 = 14.;
 /// Everything Remote apps keeps outside the page.
 struct State {
     sessions: Rc<Sessions>,
+    terminal_displays:
+        RefCell<std::collections::HashMap<String, std::rc::Weak<crate::terminal_gui::Display>>>,
     /// Servers that allow clipboard sharing, from the accepted snapshot.
     clipboard: RefCell<HashSet<String>>,
     /// The account as running sessions last saw it: its license revision, and
@@ -163,6 +168,21 @@ impl Global for State {}
 pub(crate) fn start(cx: &mut App) {
     if !cx.has_global::<State>() {
         cx.set_global(State::load(Sessions::new()));
+        // Session cleanup must continue when the main window is hidden and
+        // the last terminal tab has released a display with windows still open.
+        let sessions = Rc::downgrade(&cx.global::<State>().sessions);
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(250))
+                    .await;
+                let Some(sessions) = sessions.upgrade() else {
+                    break;
+                };
+                cx.update(|_| sessions.poll());
+            }
+        })
+        .detach();
     }
 }
 
@@ -170,6 +190,7 @@ pub(crate) fn start(cx: &mut App) {
 #[cfg(test)]
 pub(crate) fn start_scripted(cx: &mut App) {
     cx.set_global(State::load(Sessions::scripted()));
+    cx.set_global(crate::terminal_gui::TestProbe(Ok(None)));
 }
 
 /// Whether this build shows Remote apps.
@@ -182,6 +203,37 @@ fn sessions(cx: &App) -> Option<Rc<Sessions>> {
     cx.try_global::<State>().map(|state| state.sessions.clone())
 }
 
+/// A display is shared by tabs on one saved server in this app/profile.
+pub(crate) fn terminal_display(
+    server: &str,
+    cx: &mut App,
+) -> Option<Rc<crate::terminal_gui::Display>> {
+    let state = cx.try_global::<State>()?;
+    if !state.sessions.available() {
+        return None;
+    }
+    if state.account.get().1 != Some(true) {
+        return None;
+    }
+    let existing = state
+        .terminal_displays
+        .borrow()
+        .get(server)
+        .and_then(std::rc::Weak::upgrade);
+    if let Some(existing) = existing
+        .filter(|display| display.reusable() && (display.clipboard || !clipboard(server, cx)))
+    {
+        return Some(existing);
+    }
+    let sessions = state.sessions.clone();
+    let clipboard = clipboard(server, cx);
+    let display = crate::terminal_gui::Display::start(server.to_owned(), sessions, clipboard, cx);
+    cx.global::<State>()
+        .terminal_displays
+        .borrow_mut()
+        .insert(server.to_owned(), Rc::downgrade(&display));
+    Some(display)
+}
 /// Stop sessions and close their windows before quitting.
 pub(crate) fn shutdown(cx: &mut App) {
     if let Some(sessions) = sessions(cx) {
@@ -305,7 +357,7 @@ pub(crate) fn active_sessions(cx: &App) -> usize {
 /// The agent to launch from a status reading: the release this build carries
 /// for the server's architecture. Builds without a bundled release (no
 /// Remote apps, tests) use the installed agent.
-fn launch_agent(status: &Value) -> Result<String, String> {
+pub(crate) fn launch_agent(status: &Value) -> Result<String, String> {
     let installed = status["agent"].as_str().filter(|agent| !agent.is_empty());
     let Some(bundled) = status["architecture"].as_str().and_then(install::revision) else {
         return installed
@@ -407,11 +459,24 @@ pub(crate) fn sync_permissions(snapshot: &Value, cx: &App) {
     let Some(state) = cx.try_global::<State>() else {
         return;
     };
-    *state.clipboard.borrow_mut() = rows(&snapshot["config"]["servers"])
+    let allowed: HashSet<String> = rows(&snapshot["config"]["servers"])
         .iter()
         .filter(|server| server["clipboardEnabled"] == true)
         .map(|server| text(server, "id"))
         .collect();
+    for server in state.clipboard.borrow().union(&allowed) {
+        if state.clipboard.borrow().contains(server) != allowed.contains(server) {
+            state
+                .sessions
+                .set_terminal_clipboard(server, allowed.contains(server));
+        }
+    }
+    for (server, display) in state.terminal_displays.borrow().iter() {
+        if let Some(display) = display.upgrade() {
+            display.set_clipboard_permission(allowed.contains(server));
+        }
+    }
+    *state.clipboard.borrow_mut() = allowed;
 }
 
 fn clipboard(server: &str, cx: &App) -> bool {
@@ -496,6 +561,7 @@ impl State {
     fn load(sessions: Sessions) -> Self {
         Self {
             sessions: Rc::new(sessions),
+            terminal_displays: Default::default(),
             clipboard: Default::default(),
             account: Default::default(),
             warned_end: Default::default(),
@@ -513,7 +579,7 @@ fn commands_key(server: &str) -> String {
     format!("remote-apps-commands:{server}")
 }
 
-fn decode_settings(value: &Value) -> api::StreamingSettings {
+pub(crate) fn decode_settings(value: &Value) -> api::StreamingSettings {
     let defaults = api::StreamingSettings::default();
     api::StreamingSettings {
         audio: value["audio"].as_bool().unwrap_or(defaults.audio),
@@ -709,7 +775,7 @@ fn count(n: usize, one: &str, many: &str) -> String {
 const STATUS_POLL: Duration = Duration::from_secs(15);
 const CATALOGUE_POLL: Duration = Duration::from_secs(60);
 
-fn status_key(server: &str) -> String {
+pub(super) fn status_key(server: &str) -> String {
     format!("remote-apps-status:{server}")
 }
 fn catalogue_key(server: &str) -> String {
@@ -1204,11 +1270,28 @@ impl Launchpad {
         window.defer(cx, move |window, cx| focus.focus(window, cx));
         self.terminals_opened += 1;
         let id = self.terminals_opened;
+        let mut previous = view.read(cx).status.phase.clone();
+        let observer = cx.observe(&view, move |this, view, cx| {
+            let phase = view.read(cx).status.phase.clone();
+            if phase == previous {
+                return;
+            }
+            previous = phase.clone();
+            let Some(terminal) = this.terminal.as_mut().filter(|terminal| terminal.id == id) else {
+                return;
+            };
+            terminal.exit.observe(&phase);
+            if terminal.exit.should_close(&phase) {
+                this.close_terminal(cx);
+            }
+        });
         self.terminal = Some(InstallTerminal {
             id,
             title,
             command,
             view,
+            exit: ExitPolicy::default(),
+            _observer: observer,
         });
         cx.notify();
         // Check the server again every few seconds while this shell is open;
@@ -1250,6 +1333,7 @@ impl Launchpad {
         terminal.view.update(cx, |view, _| view.close());
         // A check in flight may have started before the install finished.
         cx.emit(LaunchpadEvent::Recheck { replace: true });
+        cx.notify();
     }
 
     /// The floating shell, over the page's lower part.
@@ -1303,7 +1387,7 @@ impl Launchpad {
                             div()
                                 .text_size(px(12.))
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Close it when it’s done to check again."),
+                                .child("Type exit when finished to close and check again."),
                         )
                         .child(
                             div()
@@ -3651,7 +3735,13 @@ impl Newport {
             view.observe(resources);
             view.update_automatically(cx);
         });
-        view.into_any_element()
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .children(self.terminal_launch_banner(cx))
+            .child(div().flex_1().min_h_0().child(view))
+            .into_any_element()
     }
 
     /// Ask the backend for the selected server's Remote apps queries while
@@ -4342,6 +4432,160 @@ mod tests {
         view.update(visual, |v, cx| v.navigate(crate::Page::RemoteApps, cx));
         frame(visual);
         assert!(visual.debug_bounds("remote-apps-terminal").is_some());
+    }
+
+    #[gpui::test]
+    fn install_shell_exit_closes_the_popup_and_rechecks_dependencies(cx: &mut TestAppContext) {
+        let (view, visual) = page(cx, None);
+        let missing = json!({"agent": null, "system": "Linux", "architecture": "aarch64",
+            "missing": [{"id": "xvfb", "name": "Xvfb", "purpose": "Applications",
+                "required": true, "packages": {"apt": "xvfb"}}], "osRelease": "ID=debian"});
+        feed(&view, visual, missing.clone(), None);
+        click(visual, "remote-apps-get-started");
+        answer(&view, visual, missing.clone());
+        reveal(visual);
+        let launchpad = view.read_with(visual, |v, _| v.remote_apps.clone().unwrap());
+        let rechecks = Rc::new(RefCell::new(Vec::new()));
+        let observed = rechecks.clone();
+        let _subscription = visual.update(|_, cx| {
+            cx.subscribe(&launchpad, move |_, event, _| {
+                if let super::LaunchpadEvent::Recheck { replace } = event {
+                    observed.borrow_mut().push(*replace);
+                }
+            })
+        });
+        let mut previous: Option<gpui::Entity<crate::terminal_view::TerminalView>> = None;
+        // An explicit exit code and EOF all mean the shell is finished.
+        for code in [Some(0), Some(1), None] {
+            answer(&view, visual, missing.clone());
+            click(visual, "remote-apps-check-fix-3");
+            let shell =
+                launchpad.read_with(visual, |v, _| v.terminal.as_ref().unwrap().view.clone());
+            if let Some(previous) = previous.take() {
+                previous.update(visual, |v, cx| {
+                    v.status.exited(Some(0));
+                    cx.notify();
+                });
+                frame(visual);
+                assert!(
+                    launchpad.read_with(visual, |v, _| v.terminal.is_some()),
+                    "an old shell must not close its replacement"
+                );
+            }
+            shell.update(visual, |v, cx| {
+                v.status.ready();
+                cx.notify();
+            });
+            visual.run_until_parked();
+            launchpad.update(visual, |v, _| {
+                v.terminal.as_mut().unwrap().exit.elapse_startup()
+            });
+            if code.is_none() {
+                view.update(visual, |v, cx| v.navigate(crate::Page::Overview, cx));
+                frame(visual);
+            }
+            rechecks.borrow_mut().clear();
+            shell.update(visual, |v, cx| {
+                v.status.exited(code);
+                cx.notify();
+            });
+            frame(visual);
+            assert!(launchpad.read_with(visual, |v, _| v.terminal.is_none()));
+            assert!(visual.debug_bounds("remote-apps-terminal").is_none());
+            assert_eq!(
+                *rechecks.borrow(),
+                vec![true],
+                "exit must replace any stale dependency read"
+            );
+            view.update(visual, |v, cx| v.navigate(crate::Page::RemoteApps, cx));
+            frame(visual);
+            assert!(visual.debug_bounds("remote-apps-terminal").is_none());
+            launchpad.read_with(visual, |v, _| {
+                assert!(
+                    matches!(v.installs.get(&v.server), Some(super::Install::Diagnosing(d))
+                    if d.shown == super::CHECKS.len()),
+                    "exit must not replay the checklist"
+                );
+            });
+            previous = Some(shell);
+        }
+    }
+
+    #[gpui::test]
+    fn install_shell_keeps_startup_failures_visible_and_closes_after_retry(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, visual) = page(cx, None);
+        let launchpad = view.read_with(visual, |v, _| v.remote_apps.clone().unwrap());
+        for ready in [false, true] {
+            launchpad.update_in(visual, |v, window, cx| {
+                v.open_terminal(
+                    "Install Xvfb".into(),
+                    "sudo apt install xvfb".into(),
+                    window,
+                    cx,
+                );
+            });
+            frame(visual);
+            let shell =
+                launchpad.read_with(visual, |v, _| v.terminal.as_ref().unwrap().view.clone());
+            shell.update(visual, |v, cx| {
+                v.status.failed("connection lost");
+                cx.notify();
+            });
+            frame(visual);
+            assert!(
+                visual.debug_bounds("remote-apps-terminal").is_some(),
+                "failure stays retryable"
+            );
+            if ready {
+                shell.update(visual, |v, cx| {
+                    v.status.ready();
+                    cx.notify();
+                });
+                visual.run_until_parked();
+            }
+            shell.update(visual, |v, cx| {
+                v.status.exited(Some(1));
+                cx.notify();
+            });
+            frame(visual);
+            assert!(
+                visual.debug_bounds("remote-apps-terminal").is_some(),
+                "startup exit stays visible"
+            );
+            launchpad.update(visual, |v, _| {
+                v.terminal.as_mut().unwrap().exit.elapse_startup()
+            });
+            shell.update(visual, |_, cx| cx.notify());
+            frame(visual);
+            assert!(
+                visual.debug_bounds("remote-apps-terminal").is_some(),
+                "later output must not reconsider a startup exit"
+            );
+            shell.update(visual, |v, cx| {
+                v.status.begin();
+                cx.notify();
+            });
+            visual.run_until_parked();
+            shell.update(visual, |v, cx| {
+                v.status.ready();
+                cx.notify();
+            });
+            visual.run_until_parked();
+            launchpad.update(visual, |v, _| {
+                v.terminal.as_mut().unwrap().exit.elapse_startup()
+            });
+            shell.update(visual, |v, cx| {
+                v.status.exited(Some(0));
+                cx.notify();
+            });
+            frame(visual);
+            assert!(
+                visual.debug_bounds("remote-apps-terminal").is_none(),
+                "a used shell closes after retry"
+            );
+        }
     }
 
     #[gpui::test]

@@ -255,8 +255,10 @@ impl ExecSession {
         input: &mut tokio::sync::mpsc::Receiver<crate::terminal::Input>,
         output: &tokio::sync::mpsc::Sender<crate::terminal::Event>,
         selector: uuid::Uuid,
+        gui: Option<&newport_domain::terminal::GuiEnvironment>,
+        terminal: Option<uuid::Uuid>,
     ) -> Result<super::TerminalEnd> {
-        super::terminal_session(&self.0, size, input, output, selector).await
+        super::terminal_session(&self.0, size, input, output, selector, gui, terminal).await
     }
     /// Exactly one attempt. The server-session supervisor owns retry policy.
     pub(crate) async fn connect_session(server: &Server) -> Result<Self, ConnectFailure> {

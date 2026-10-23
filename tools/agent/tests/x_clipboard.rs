@@ -166,6 +166,105 @@ fn reads_formats_and_large_image_across_connections() {
 }
 
 #[test]
+fn large_selection_is_a_normal_property_with_partial_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("snapshot.tar");
+    let image: Vec<_> = (0..393_421).map(|i| (i % 251) as u8).collect();
+    snapshot(&path, &[("image/png", &image)]);
+    let server = Server::start(&path, None).unwrap();
+    let c = connect(&server);
+    let w = window(&c);
+    let target = atom(&c, "image/png");
+    let property = atom(&c, "TEST_PROPERTY");
+    c.convert_selection(w, atom(&c, "CLIPBOARD"), target, property, CURRENT_TIME)
+        .unwrap();
+    c.flush().unwrap();
+    loop {
+        if let Event::SelectionNotify(event) = c.wait_for_event().unwrap() {
+            assert_eq!(event.property, property);
+            break;
+        }
+    }
+    // The data is already in the server. Avoid INCR's event deadline in readers
+    // such as arboard, even when the value exceeds a core X11 request's size.
+    // A later clipboard revision must not mix bytes into this conversion.
+    snapshot(&path, &[("text/plain", b"new clipboard")]);
+    let mut received = Vec::new();
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let reply = c
+            .get_property(true, w, property, target, (received.len() / 4) as u32, 8192)
+            .unwrap()
+            .reply()
+            .unwrap();
+        assert_eq!(
+            reply.type_, target,
+            "large selections must not require INCR"
+        );
+        assert_eq!(reply.format, 8);
+        assert!(!reply.value.is_empty());
+        received.extend(reply.value);
+        assert_eq!(reply.bytes_after as usize, image.len() - received.len());
+        if reply.bytes_after == 0 {
+            break;
+        }
+    }
+    assert_eq!(received, image);
+    assert_eq!(
+        c.get_property(false, w, property, AtomEnum::ANY, 0, 1)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .type_,
+        0,
+        "delete=true removes the property only after its final portion"
+    );
+    assert_eq!(read(&c, w, "UTF8_STRING").unwrap(), b"new clipboard");
+}
+
+#[test]
+fn retained_large_selections_are_bounded_and_deletion_releases_capacity() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("snapshot.tar");
+    let image = vec![7; 32 * 1024 * 1024];
+    snapshot(&path, &[("image/png", &image)]);
+    let server = Server::start(&path, None).unwrap();
+    let c = connect(&server);
+    let w = window(&c);
+    let first = atom(&c, "FIRST_PROPERTY");
+    let second = atom(&c, "SECOND_PROPERTY");
+    let request = |property| {
+        c.convert_selection(
+            w,
+            atom(&c, "CLIPBOARD"),
+            atom(&c, "image/png"),
+            property,
+            CURRENT_TIME,
+        )
+        .unwrap();
+        c.flush().unwrap();
+        loop {
+            if let Event::SelectionNotify(event) = c.wait_for_event().unwrap() {
+                break event.property;
+            }
+        }
+    };
+    assert_eq!(request(first), first, "one maximum-size clipboard fits");
+    assert_eq!(
+        request(second),
+        0,
+        "unread properties cannot grow without bound"
+    );
+    assert_eq!(
+        request(first),
+        first,
+        "replacement does not double-count storage"
+    );
+    c.delete_property(w, first).unwrap().check().unwrap();
+    assert_eq!(request(second), second, "deletion releases the budget");
+}
+
+#[test]
 fn rejects_clipboard_writes() {
     let dir = tempfile::tempdir().unwrap();
     let server = Server::start(&dir.path().join("missing"), None).unwrap();
@@ -296,7 +395,7 @@ fn unmodified_arboard_reads_text_and_png() {
     assert_eq!(clipboard.get_text().unwrap(), "arboard bridge");
     let image = clipboard.get_image().unwrap();
     assert_eq!((image.width, image.height), (1, 1));
-    // Incompressible pixels force arboard's real INCR reader, not just our test client.
+    // Incompressible pixels exercise a large property with the real arboard reader.
     use image::ImageEncoder;
     let mut seed = 123456789u32;
     let pixels: Vec<u8> = (0..256 * 256 * 4)
@@ -458,7 +557,7 @@ fn xlib_default_graphics_context_lifecycle_is_bounded_and_validated() {
 fn native_xclip_reads_formats_text_and_png_through_xlib() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("snapshot.tar");
-    let text = b"native xclip INCR transfer\n".repeat(8192);
+    let text = b"native xclip large transfer\n".repeat(8192);
     let png = include_bytes!("pixel.png");
     snapshot(&path, &[("text/plain", &text), ("image/png", png)]);
     let server = Server::start(&path, None).unwrap();

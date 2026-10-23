@@ -30,7 +30,7 @@ pub fn print(args: &[String]) -> io::Result<()> {
         // Needle's commands still go on PATH: they find a session when run.
         Err(error) => {
             eprintln!("newport-agent: {error}");
-            let output = render(&home, Path::new(""), "", None, false, fish);
+            let output = render(&home, Path::new(""), "", None, false, fish) + &gui_exports(fish);
             return io::stdout().lock().write_all(output.as_bytes());
         }
     };
@@ -67,7 +67,35 @@ pub fn print(args: &[String]) -> io::Result<()> {
             format!("export NEWPORT_SESSION='{id}'\n")
         });
     }
+    output.push_str(&gui_exports(fish));
     io::stdout().lock().write_all(output.as_bytes())
+}
+
+// Preparing PATH does not wait for the integration transport to finish connecting.
+fn gui_exports(fish: bool) -> String {
+    let mut output = String::new();
+    if env::var("NEWPORT_TERMINAL").is_ok_and(|id| uuid::Uuid::parse_str(&id).is_ok()) {
+        if let Ok(directory) = crate::gui_launch::prepare() {
+            let directory = directory.to_string_lossy();
+            output.push_str(&gui_path(&directory, fish));
+        }
+    }
+    output
+}
+
+fn gui_path(directory: &str, fish: bool) -> String {
+    let quoted = if fish {
+        format!("'{}'", directory.replace('\\', "\\\\").replace('\'', "\\'"))
+    } else {
+        format!("'{}'", directory.replace('\'', "'\\''"))
+    };
+    if fish {
+        format!("if not contains -- {quoted} $PATH\nset -gx PATH {quoted} $PATH\nend\n")
+    } else {
+        // prepare() may add a launcher while its directory is already on PATH.
+        // Forget native paths cached before that launcher existed.
+        format!("case \":${{PATH-}}:\" in *\":\"{quoted}\":\"*) ;; *) export PATH={quoted}${{PATH:+:\"$PATH\"}} ;; esac\nhash -r 2>/dev/null || :\n")
+    }
 }
 
 fn render(
@@ -105,11 +133,21 @@ fn render(
             &format!("{home}/.local/bin/newport-browser"),
         ));
     }
-    if features.split_whitespace().any(|f| f == "clipboard") {
+    if features
+        .split_whitespace()
+        .any(|f| f == "clipboard" || f == "gui")
+    {
         let socket = root.join("wayland.sock").to_string_lossy().into_owned();
         let authority = root.join("Xauthority").to_string_lossy().into_owned();
         // Do not redirect applications in an existing graphical desktop session.
         // Existing Newport shells may refresh their display after reconnection.
+        let gui_guard = if fish {
+            "if set -q DISPLAY[1]; and set -q XAUTHORITY[1]; and test \"$NEWPORT_GUI_DISPLAY\" = \"$DISPLAY\"; and test \"$NEWPORT_GUI_AUTHORITY\" = \"$XAUTHORITY\"\n"
+        } else {
+            "if [ -n \"${DISPLAY-}\" ] && [ -n \"${XAUTHORITY-}\" ] && [ \"${NEWPORT_GUI_DISPLAY-}\" = \"$DISPLAY\" ] && [ \"${NEWPORT_GUI_AUTHORITY-}\" = \"$XAUTHORITY\" ]; then\n"
+        };
+        output.push_str(gui_guard);
+        output.push_str(if fish { "true\nelse\n" } else { ":\nelse\n" });
         output.push_str(&if stale {
             if fish { "if true\n" } else { "if true; then\n" }.to_owned()
         } else if fish {
@@ -123,9 +161,9 @@ fn render(
             output.push_str(&export("XAUTHORITY", &authority));
         }
         output.push_str(if fish {
-            "set -e WAYLAND_SOCKET\nend\n"
+            "set -e WAYLAND_SOCKET\nend\nend\n"
         } else {
-            "unset WAYLAND_SOCKET\nfi\n"
+            "unset WAYLAND_SOCKET\nfi\nfi\n"
         });
     }
     output
@@ -134,6 +172,32 @@ fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn refreshed_launchers_replace_cached_native_commands() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let gui = root.path().join("gui");
+        let native = root.path().join("native");
+        fs::create_dir(&gui).unwrap();
+        fs::create_dir(&native).unwrap();
+        for (name, output) in [("cached-app", "native"), ("new-launcher", "launcher")] {
+            let path = native.join(name);
+            fs::write(&path, format!("#!/bin/sh\nprintf '%s\\n' {output}\n")).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let refresh = gui_path(gui.to_str().unwrap(), false);
+        let script = format!(
+            "PATH=\"$1:$2:/usr/bin:/bin\"\ncached-app\nmv \"$2/new-launcher\" \"$1/cached-app\"\n{refresh}\ncached-app"
+        );
+        let result = std::process::Command::new("bash")
+            .args(["--noprofile", "--norc", "-eu", "-c", &script, "fixture"])
+            .arg(gui)
+            .arg(native)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{:?}", result);
+        assert_eq!(result.stdout, b"native\nlauncher\n");
+    }
     #[test]
     fn shell_output_is_quoted_and_path_is_idempotent() {
         let home = "/tmp/test ' $(exit 99)";
@@ -168,5 +232,27 @@ mod tests {
             output,
             format!("{home}/.local/bin:/usr/bin\n{home}/.local/bin/newport-browser\n:99\n")
         );
+    }
+    #[test]
+    fn graphical_terminal_keeps_display_when_shell_setup_repeats_or_session_is_stale() {
+        for stale in [false, true] {
+            let script = render(
+                "/tmp/test",
+                Path::new("/tmp/newport-clipboard"),
+                "browser clipboard",
+                Some(":99"),
+                stale,
+                false,
+            );
+            let output = std::process::Command::new("sh").args(["-eu", "-c", &format!("{script}\n{script}\nprintf '%s\\n' \"$DISPLAY\" \"$XAUTHORITY\" \"${{WAYLAND_DISPLAY-unset}}\" \"$BROWSER\"")])
+                .env("DISPLAY", ":75").env("XAUTHORITY", "/tmp/newport-gui/Xauthority")
+                .env("NEWPORT_GUI_DISPLAY", ":75").env("NEWPORT_GUI_AUTHORITY", "/tmp/newport-gui/Xauthority")
+                .env_remove("WAYLAND_DISPLAY").output().unwrap();
+            assert!(output.status.success(), "{:?}", output);
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                ":75\n/tmp/newport-gui/Xauthority\nunset\n/tmp/test/.local/bin/newport-browser\n"
+            );
+        }
     }
 }

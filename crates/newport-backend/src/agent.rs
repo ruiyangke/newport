@@ -291,6 +291,12 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
                     b'A' => return Ok(String::from_utf8_lossy(&data).into_owned()),
                     b'O' => self.open(&data).await?,
                     b'C' if self.deferred.len() < 8 => self.deferred.push_back((kind, data)),
+                    b'G' if data.is_empty() && self.deferred.len() < 8 => {
+                        self.deferred.push_back((kind, data))
+                    }
+                    b'L' | b'K' if self.deferred.len() < 64 => {
+                        self.deferred.push_back((kind, data))
+                    }
                     _ => return Err("Unexpected agent event.".into()),
                 }
             }

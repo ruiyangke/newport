@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ruiyangke/newport/releases"><strong>Download Newport</strong></a> ·
+  <a href="https://newport.app/#download"><strong>Download Newport</strong></a> ·
   <a href="docs/README.md">User guides</a> ·
   <a href="https://github.com/ruiyangke/newport/issues">Report an issue</a>
 </p>
@@ -76,13 +76,14 @@ Newport must be running for desktop integrations. Some authentication flows requ
 
 ## Installation
 
-Download the latest published release, [v0.3.0](https://github.com/ruiyangke/newport/releases/tag/v0.3.0):
+Download the latest release from [newport.app](https://newport.app/#download).
+See [release notes](https://newport.app/releases) for changes.
 
 | Platform | Package |
 | --- | --- |
-| macOS 14+, Apple silicon | [Download ZIP](https://github.com/ruiyangke/newport/releases/download/v0.3.0/Newport-0.3.0-macos-arm64.zip) |
-| Windows x86_64 | [Download installer](https://github.com/ruiyangke/newport/releases/download/v0.3.0/Newport-0.3.0-windows-x86_64-setup.exe) |
-| Windows ARM64 | [Download installer](https://github.com/ruiyangke/newport/releases/download/v0.3.0/Newport-0.3.0-windows-aarch64-setup.exe) |
+| macOS 14+, Apple silicon | [Download ZIP](https://newport.app/downloads/latest/macos-arm64) |
+| Windows x86_64 | [Download installer](https://newport.app/downloads/latest/windows-x86_64) |
+| Windows ARM64 | [Download installer](https://newport.app/downloads/latest/windows-aarch64) |
 
 Windows support is experimental; installers are not Authenticode-signed. Remote hosts run Linux; there is no Linux desktop build.
 

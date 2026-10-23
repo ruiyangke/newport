@@ -307,16 +307,22 @@ fn unescape(path: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Local filesystems as `df -P -B1 -l` filters them in cockpit.sh: a
-/// /dev-backed source, or whatever is mounted at "/".
+/// Capacity-bearing local filesystems: a /dev-backed source, or the root mount.
+/// SquashFS package images (including Snap) are immutable and normally report
+/// no free space. Their backing files are already counted on the real disk.
 fn mounts(text: &str) -> Vec<(String, String)> {
     let mut seen = Vec::new();
     let mut out = Vec::new();
     for line in text.lines() {
         let mut fields = line.split_whitespace();
-        let (Some(device), Some(mount)) = (fields.next(), fields.next()) else {
+        let (Some(device), Some(mount), Some(filesystem)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
             continue;
         };
+        if filesystem == "squashfs" {
+            continue;
+        }
         let (device, mount) = (unescape(device), unescape(mount));
         if !(device.starts_with("/dev/") || mount == "/") || seen.contains(&mount) {
             continue;
@@ -955,6 +961,55 @@ mod tests {
         assert_eq!(snapshot["processes"][0]["user"], "ci");
         // Zero elapsed time never divides by zero.
         assert_eq!(snapshot["cpu"], 0.0);
+    }
+
+    #[test]
+    fn storage_ignores_package_images_without_hiding_real_full_disks() {
+        let dir = tempfile::tempdir().unwrap();
+        // Installed package revisions must not consume the disk reporting
+        // budget, even when they precede the physical disks in the mount table.
+        let mut table = (0..=MAX_MOUNTS)
+            .map(|n| format!("/dev/loop{n} /snap/package/{n} squashfs ro,nodev 0 0\n"))
+            .collect::<String>();
+        table.push_str(
+            "/dev/loop900 /var/lib/snapd/snap/editor/1 squashfs ro 0 0\n\
+             /dev/loop901 /opt/application-image squashfs ro 0 0\n\
+             overlay / overlay rw 0 0\n\
+             /dev/sda2 /boot ext4 rw 0 0\n\
+             /dev/sda1 /boot/efi vfat rw 0 0\n\
+             /dev/sdb1 /snap/data ext4 rw 0 0\n\
+             /dev/loop902 /srv/loop\\040data ext4 rw 0 0\n\
+             /dev/sdc1 /recovery ext4 ro 0 0\n",
+        );
+        write(dir.path(), "proc/self/mounts", &table);
+        let mut source = source(dir.path());
+        source.statvfs = |_| {
+            Some(FsUsage {
+                total: 100,
+                used: 100,
+                available: 0,
+            })
+        };
+        let sample = source.sample();
+        let snapshot = source.snapshot(&sample, &sample);
+        let disks = snapshot["disks"].as_array().unwrap();
+        assert_eq!(
+            disks
+                .iter()
+                .map(|disk| disk["mount"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "/",
+                "/boot",
+                "/boot/efi",
+                "/snap/data",
+                "/srv/loop data",
+                "/recovery"
+            ]
+        );
+        assert!(disks
+            .iter()
+            .all(|disk| disk["used"] == 100 && disk["available"] == 0));
     }
 
     #[test]

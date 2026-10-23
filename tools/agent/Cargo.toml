@@ -32,6 +32,7 @@ fs2 = "0.4"
 socket2 = "0.6"
 wayland-server = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["server"] }
+shlex = "2"
 
 [dev-dependencies]
 x11rb = "0.13"

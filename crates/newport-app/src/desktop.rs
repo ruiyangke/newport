@@ -9,6 +9,14 @@ pub enum Action {
         std::sync::mpsc::SyncSender<Result<(), String>>,
     ),
     Run(Box<dyn FnOnce() + Send>),
+    GuiSetup(String),
+    GuiLaunch {
+        server: String,
+        terminal: String,
+        application: String,
+        reply: newport_backend::desktop_integration::GuiReply,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    },
     Activate(tokio::sync::oneshot::Sender<Result<(), String>>),
     #[cfg(any(target_os = "macos", windows))]
     Tray(newport_platform::tray::Action),
@@ -92,6 +100,28 @@ impl DesktopIntegration for Integration {
     }
     fn open_url(&self, url: &str) -> Result<(), String> {
         open::that(url).map_err(|error| error.to_string())
+    }
+    fn supports_gui_notices(&self) -> bool {
+        newport_gpui::supports_terminal_gui_setup()
+    }
+    fn request_gui_setup(&self, server: &str) {
+        let _ = self.0.try_send(Action::GuiSetup(server.to_owned()));
+    }
+    fn request_gui_launch(
+        &self,
+        server: &str,
+        terminal: &str,
+        application: &str,
+        reply: newport_backend::desktop_integration::GuiReply,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let _ = self.0.try_send(Action::GuiLaunch {
+            server: server.into(),
+            terminal: terminal.into(),
+            application: application.into(),
+            reply,
+            cancelled,
+        });
     }
     fn app_version(&self) -> String {
         env!("CARGO_PKG_VERSION").into()

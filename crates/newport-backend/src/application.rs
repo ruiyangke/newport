@@ -244,15 +244,19 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
     }
 
     async fn open_terminal(&self, request: rpc::TerminalOpen) -> Result<Box<dyn Send>, String> {
-        crate::commands::terminal_open(
-            &self.state.manager,
-            &self.state.terminals,
-            request.id,
+        if let Some(gui) = &request.gui {
+            gui.validate()?;
+        }
+        let owner = self.state.manager.owner(request.id)?;
+        let server = owner.server().clone();
+        self.state.terminals.open_bound_with_gui(
             request.session,
+            server,
             request.cols,
             request.rows,
-        )
-        .await?;
+            owner,
+            request.gui,
+        )?;
         Ok(Box::new(TerminalLease {
             state: self.state.clone(),
             session: request.session,

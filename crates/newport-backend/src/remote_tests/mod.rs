@@ -20,6 +20,7 @@ mod containers;
 mod git;
 mod lsp;
 mod monitor;
+mod opencode;
 mod ports;
 mod recovery;
 mod services;

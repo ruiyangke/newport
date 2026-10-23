@@ -88,6 +88,7 @@ pub struct TerminalView {
     pub input_error: Option<String>,
     server: String,
     session: Option<Session>,
+    gui: Option<std::rc::Rc<crate::terminal_gui::Display>>,
     open_on_show: bool,
     command_eligible: bool,
     command_draft: newport_client::terminal_command::CommandDraft,
@@ -160,6 +161,7 @@ impl TerminalView {
             input_error: None,
             server,
             session: None,
+            gui: None,
             open_on_show: true,
             command_eligible: true,
             command_draft: Default::default(),
@@ -238,6 +240,7 @@ impl TerminalView {
         cx.notify();
     }
     pub fn close(&mut self) {
+        self.gui = None;
         self.open_on_show = false;
         self.session.take();
         self.observed_ready = false;
@@ -270,7 +273,7 @@ impl TerminalView {
         self.open_on_show = true;
         cx.notify();
     }
-    fn open(&mut self) {
+    fn open(&mut self, cx: &mut Context<Self>) {
         self.open_on_show = false;
         self.command_eligible = false;
         // terminal_open already carries the measured size. Only later layout
@@ -280,13 +283,21 @@ impl TerminalView {
         self.observed_ready = false;
         self.status.begin();
         self.input_error = None;
+        // GUI setup belongs to a program launch, never to opening an SSH shell.
         match Session::open(&self.server, self.dimensions.0, self.dimensions.1) {
-            Ok(session) => self.session = Some(session),
+            Ok(session) => {
+                crate::terminal_setup::register(session.id(), &self.server, cx.weak_entity(), cx);
+                self.session = Some(session);
+            }
             Err(error) => {
                 self.clear_input();
                 self.status.failed(error);
             }
         }
+    }
+    pub(super) fn retain_gui(&mut self, display: std::rc::Rc<crate::terminal_gui::Display>) {
+        self.gui = Some(display);
+        self.input_error = None;
     }
     pub fn reconnect(&mut self, cx: &mut Context<Self>) {
         self.clear_find(cx);
@@ -298,7 +309,7 @@ impl TerminalView {
         // Explicit reconnect applies to background tabs too. Use their last
         // measured dimensions (80x24 before the first display);
         // only automatic first opens and scope changes wait for layout.
-        self.open();
+        self.open(cx);
         cx.notify();
     }
     pub(super) fn ready(&self) -> bool {
@@ -396,6 +407,13 @@ impl TerminalView {
         }
     }
     fn tick(&mut self, cx: &mut Context<Self>) {
+        if self.session.is_some()
+            && let Some(error) = self.gui.as_ref().and_then(|gui| gui.error())
+        {
+            self.gui = None;
+            self.input_error = Some(error);
+            cx.notify();
+        }
         let hidden_presentation = (!self.visible).then(|| self.tab_presentation());
         let mut changed = self.scroll_selection();
         // The transport may already be ahead of the bounded output consumer.
@@ -629,7 +647,7 @@ impl TerminalView {
             cx.notify();
         }
         if self.open_on_show {
-            self.open();
+            self.open(cx);
             cx.notify();
         }
     }

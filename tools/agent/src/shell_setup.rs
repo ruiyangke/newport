@@ -20,15 +20,23 @@ pub fn block(fish: bool) -> String {
 }
 
 fn block_range(original: &str) -> io::Result<Option<std::ops::Range<usize>>> {
+    marked_range(original, START, END)
+}
+
+fn marked_range(
+    original: &str,
+    start_marker: &str,
+    end_marker: &str,
+) -> io::Result<Option<std::ops::Range<usize>>> {
     let mut starts = Vec::new();
     let mut ends = Vec::new();
     let mut offset = 0;
     for line in original.split_inclusive('\n') {
         let length = line.len();
         let line = line.trim_end_matches(['\r', '\n']);
-        if line == START {
+        if line == start_marker {
             starts.push(offset);
-        } else if line == END {
+        } else if line == end_marker {
             ends.push(offset + length);
         }
         offset += length;
@@ -36,9 +44,9 @@ fn block_range(original: &str) -> io::Result<Option<std::ops::Range<usize>>> {
     match (starts.as_slice(), ends.as_slice()) {
         ([], []) => Ok(None),
         ([start], [end]) if start < end => Ok(Some(*start..*end)),
-        _ => Err(io::Error::other(
-            "Newport shell markers are incomplete or duplicated; leaving file unchanged",
-        )),
+        _ => Err(io::Error::other(format!(
+            "Shell markers {start_marker:?} are incomplete or duplicated; leaving file unchanged"
+        ))),
     }
 }
 fn merge(original: &str, block: &str) -> io::Result<String> {
@@ -65,6 +73,7 @@ fn merge(original: &str, block: &str) -> io::Result<String> {
 pub(crate) fn apply() -> io::Result<Vec<String>> {
     let home =
         PathBuf::from(env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is required"))?);
+    let mut notices = remove_porthop(&home)?;
     let shell = env::var("SHELL").unwrap_or_default();
     let shell = Path::new(&shell)
         .file_name()
@@ -92,12 +101,12 @@ pub(crate) fn apply() -> io::Result<Vec<String>> {
             vec![dir.join("newport.fish")]
         }
         _ => {
-            return Ok(vec![format!(
+            notices.push(format!(
                 "Automatic setup is unavailable for shell {shell:?}. Configure your shell manually."
-            )])
+            ));
+            return Ok(notices);
         }
     };
-    let mut notices = Vec::new();
     for path in paths {
         match write_block(&path, shell == "fish") {
             Ok(()) => {}
@@ -111,8 +120,93 @@ pub(crate) fn apply() -> io::Result<Vec<String>> {
     Ok(notices)
 }
 
+/// Remove the old brand's startup block even when integrations aren't being
+/// installed, and from shells other than the current login shell.
+pub(crate) fn remove_porthop(home: &Path) -> io::Result<Vec<String>> {
+    let mut paths: Vec<_> = [
+        ".bashrc",
+        ".bash_profile",
+        ".bash_login",
+        ".profile",
+        ".zshrc",
+    ]
+    .into_iter()
+    .map(|name| home.join(name))
+    .collect();
+    if let Some(directory) = env::var_os("ZDOTDIR") {
+        paths.push(PathBuf::from(directory).join(".zshrc"));
+    }
+    paths.push(home.join(".config/fish/conf.d/porthop.fish"));
+    if let Some(directory) = env::var_os("XDG_CONFIG_HOME") {
+        paths.push(PathBuf::from(directory).join("fish/conf.d/porthop.fish"));
+    }
+    paths.sort();
+    paths.dedup();
+    let mut notices = Vec::new();
+    for path in paths {
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.is_file() && !metadata.is_symlink() => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+            _ => {}
+        }
+        // Reading a managed link is safe, but editing it is left to its owner.
+        // Don't report unrelated read-only files as needing legacy cleanup.
+        let original = match fs::read_to_string(&path) {
+            Ok(original) => original,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                notices.push(format!(
+                    "{} could not be checked for Porthop shell setup: {error}. Check this file through its owner or dotfile manager.",
+                    path.display()
+                ));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if !original
+            .lines()
+            .any(|line| matches!(line, "# >>> Porthop >>>" | "# <<< Porthop <<<"))
+        {
+            continue;
+        }
+        let result = edit_file(
+            &path,
+            path.file_name().is_some_and(|n| n == "porthop.fish"),
+            |original| {
+                let Some(range) = marked_range(original, "# >>> Porthop >>>", "# <<< Porthop <<<")?
+                else {
+                    return Ok(original.to_owned());
+                };
+                Ok(format!(
+                    "{}{}",
+                    &original[..range.start],
+                    &original[range.end..]
+                ))
+            },
+        );
+        match result {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => notices.push(format!(
+                "{} was left unchanged: {error}. Remove its Porthop block through its owner or dotfile manager.",
+                path.display()
+            )),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(notices)
+}
+
 /// Writes the block into one file, atomically and with its permissions.
 fn write_block(path: &Path, fish: bool) -> io::Result<()> {
+    edit_file(path, false, |original| merge(original, &block(fish)))
+}
+
+fn edit_file(
+    path: &Path,
+    remove_empty: bool,
+    update: impl FnOnce(&str) -> io::Result<String>,
+) -> io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
     let (original, mode) = match fs::symlink_metadata(path) {
@@ -135,9 +229,12 @@ fn write_block(path: &Path, fish: bool) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => (String::new(), 0o600),
         Err(error) => return Err(error),
     };
-    let updated = merge(&original, &block(fish))?;
+    let updated = update(&original)?;
     if updated == original {
         return Ok(());
+    }
+    if remove_empty && updated.trim().is_empty() {
+        return fs::remove_file(path);
     }
     let parent = path
         .parent()

@@ -1,6 +1,7 @@
 //! Release gates, signing and update manifests.
 mod macos;
 mod manifest;
+mod publish;
 mod verify;
 
 use crate::util::{self, Arch};
@@ -47,6 +48,21 @@ pub enum Action {
     },
     /// Verify resources/agents and sign the agent release.
     SignNeedle,
+    /// Verify all three signed payloads against the production signing key.
+    VerifyPackages {
+        manifest: PathBuf,
+        #[arg(long)]
+        assets: PathBuf,
+    },
+    /// Verify and upload a release to R2, then atomically promote its update feed.
+    Deploy {
+        assets: PathBuf,
+        #[arg(long, default_value = "newport-releases")]
+        bucket: String,
+        /// Verify local files and print the upload plan without credentials or network I/O.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 pub fn run(action: Action) -> Result<()> {
@@ -70,6 +86,24 @@ pub fn run(action: Action) -> Result<()> {
             output,
         } => merge(latest, fragments, &version, &output),
         Action::SignNeedle => sign_needle(),
+        Action::Deploy {
+            assets,
+            bucket,
+            dry_run,
+        } => publish::run(&assets, &bucket, dry_run),
+        Action::VerifyPackages { manifest, assets } => {
+            let manifest: manifest::Manifest = util::read_json(&manifest)?;
+            anyhow::ensure!(
+                manifest.platforms.len() == manifest::TARGETS.len()
+                    && manifest::TARGETS
+                        .iter()
+                        .all(|target| manifest.platforms.contains_key(*target)),
+                "Expected all three update targets"
+            );
+            manifest::verify_packages(&manifest, &assets, &util::updater_public_key()?)?;
+            println!("All update packages match the production signing key and release version");
+            Ok(())
+        }
     }
 }
 
@@ -167,9 +201,7 @@ mod tests {
         );
         assert_eq!(
             updater["endpoints"],
-            serde_json::json!([
-                "https://github.com/ruiyangke/newport/releases/latest/download/latest.json"
-            ])
+            serde_json::json!(["https://newport.app/updates/latest.json"])
         );
         // Installed releases trust this key; rotating it would strand their updates.
         assert_eq!(

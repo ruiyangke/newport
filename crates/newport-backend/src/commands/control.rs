@@ -421,6 +421,28 @@ pub async fn set_integration_enabled(
         enabled,
         &expected_connection,
     )?;
+    let desired = owner.permissions.snapshot().desired;
+    let was_enabled = if intent.browser {
+        desired.browser
+    } else {
+        desired.clipboard
+    };
+    if enabled && !was_enabled {
+        // Setup may have finished with both integrations off. In that case the
+        // agent exists, but tools such as Claude Code cannot find our xclip yet.
+        // Repair the idempotent shell setup before committing access; disabling
+        // never waits for this work, and the preference checks below fence it.
+        let (server, current) = state.current(id)?;
+        if !std::sync::Arc::ptr_eq(&current, &owner) {
+            return Err(
+                "The server connection changed. Review its integrations and try again.".into(),
+            );
+        }
+        if !owner.permissions.preference_is_current(intent) {
+            return Err("Integration preference was superseded by a newer choice.".into());
+        }
+        owner.acquire(&server).await?.setup_integrations().await?;
+    }
     let captured = owner.clone();
     state.edit_configuration(None, move |manager| {
         if manager.connection_scope(id)? != expected_connection
@@ -455,7 +477,7 @@ pub async fn set_integration_enabled(
         return Ok(());
     }
     // An existing bridge applies the revision over its live channel. With both
-    // permissions off it remains available for control; no SSH reconnect or install.
+    // permissions off it remains available for control; no runtime replacement.
     let start = state.prepare_integration(id).await?;
     if !std::sync::Arc::ptr_eq(&start.owner, &owner) {
         return Err("The server connection changed. Review its integrations and try again.".into());

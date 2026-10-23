@@ -10,5 +10,7 @@ installation. Do not replace signed resources during unrelated development.
 
 `updater.json` holds the release endpoint and public verification key used by
 existing installations. Keep that key compatible across releases.
+The current feed is `https://newport.app/updates/latest.json`; release tooling
+derives immutable `/updates/<version>/<filename>` payload URLs from it.
 `test-fixtures/updater/` contains inert payloads and public signatures for tests,
 not executable updates or production private keys.

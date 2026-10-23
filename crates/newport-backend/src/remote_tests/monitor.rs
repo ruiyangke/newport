@@ -148,10 +148,10 @@ async fn monitoring_requires_explicit_install_without_changing_shell_integration
     server.agent_install_approved = false;
     // Start from a server without the agent or its integration shims.
     let state = "cd ~ && for f in .bashrc .profile .zshrc; do [ -e \"$f\" ] && sha256sum \"$f\"; done; \
-                 for n in xclip wl-paste xdg-open newport-browser; do [ -L \".local/bin/$n\" ] && echo \"shim $n\"; done; true";
+                 for n in xclip xsel wl-paste xdg-open newport-browser; do [ -L \".local/bin/$n\" ] && echo \"shim $n\"; done; true";
     ssh::execute(
         &server,
-        "rm -f ~/.local/bin/newport-agent ~/.local/bin/xclip ~/.local/bin/wl-paste ~/.local/bin/xdg-open ~/.local/bin/newport-browser",
+        "rm -f ~/.local/bin/newport-agent ~/.local/bin/xclip ~/.local/bin/xsel ~/.local/bin/wl-paste ~/.local/bin/xdg-open ~/.local/bin/newport-browser",
         None,
     )
     .await

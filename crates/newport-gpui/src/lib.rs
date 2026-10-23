@@ -3,6 +3,8 @@ mod remote_apps;
 mod remote_apps_api;
 mod remote_apps_install;
 mod remote_apps_sessions;
+mod terminal_gui;
+mod terminal_setup;
 extern crate self as newport_gpui;
 
 pub use newport_client::backend;
@@ -235,6 +237,7 @@ struct Newport {
     /// Saves where the window and workspace were left, off the UI thread.
     ui_state: ui_state::Writer,
     terminal_immersive: bool,
+    terminal_setup: terminal_setup::State,
     window_state: window_state::WindowState,
     terminals: std::collections::HashMap<String, Entity<terminal_workspace::Workspace>>,
     integration_refresh_pending: std::collections::HashSet<String>,
@@ -501,6 +504,7 @@ impl Newport {
             window_state,
             terminals: Default::default(),
             terminal_immersive: false,
+            terminal_setup: Default::default(),
             integration_refresh_pending: Default::default(),
             needle_uninstall_confirmations: Default::default(),
             integration_shell: cx.new(|cx| integration::ShellCode::new(window, cx)),
@@ -701,6 +705,7 @@ impl Newport {
         changed |= self.apply_settings_effects(settings);
         let account = self.account.poll();
         changed |= self.apply_account_effects(account, cx);
+        changed |= self.poll_terminal_setup(cx);
         let mut completed_file_project = None;
         while let Ok(reply) = self.replies.try_recv() {
             let snapshot_status = |resource: Option<&state::Resource>| {
@@ -1285,6 +1290,7 @@ fn error_banner(
 impl Render for Newport {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_setup_page(cx);
+        self.sync_terminal_setup(window, cx);
         self.sync_services(window, cx);
         self.sync_containers(window, cx);
         self.sync_settings_ui(window, cx);
@@ -1894,4 +1900,26 @@ pub fn run_with_options_and_ready(
 /// Validate all bundled grammar libraries without opening a window or backend.
 pub fn check_grammars() -> Result<(), String> {
     grammars::validate_all()
+}
+
+/// Whether this build can guide GUI launch attempts from a terminal.
+pub fn supports_terminal_gui_setup() -> bool {
+    cfg!(newport_remote_apps)
+}
+
+/// Called only after a remote process requests GUI display services.
+pub fn request_terminal_gui_setup(server: &str, cx: &mut App) {
+    terminal_setup::request(server, false, cx);
+}
+
+/// A program waiting before exec. Replies carry only a validated display environment.
+pub fn request_terminal_gui_launch(
+    server: String,
+    terminal: String,
+    application: String,
+    reply: Box<dyn FnOnce(Result<newport_domain::terminal::GuiEnvironment, String>) + Send>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cx: &mut App,
+) {
+    terminal_setup::request_launch(server, terminal, application, reply, cancelled, cx);
 }
