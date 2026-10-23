@@ -241,6 +241,11 @@ mod tests {
     use serde_json::{Value, json};
     use std::time::Duration;
 
+    // Recovery does real durable file I/O, which can be slow on busy CI hosts.
+    // The stall guards below remain locked until released, so this is only a
+    // deadlock deadline, not a filesystem performance assertion.
+    const RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+
     struct Release(Option<std::sync::mpsc::Sender<()>>);
     impl Drop for Release {
         fn drop(&mut self) {
@@ -257,7 +262,9 @@ mod tests {
         operations.start_blocking(move || {
             let _guard = queue.lock().unwrap();
             let _ = started.send(());
-            let _ = wait.recv_timeout(Duration::from_secs(5));
+            // Release also runs during panic unwinding, before runtime shutdown.
+            // Never let elapsed time unlock a journal and hide a shared lock.
+            let _ = wait.recv();
         });
         ready.await.unwrap();
         release
@@ -308,7 +315,7 @@ mod tests {
         files_cancel(&operations, id);
         assert!(*cancelled.borrow());
         let download = tokio::time::timeout(
-            Duration::from_secs(1),
+            RECOVERY_TIMEOUT,
             operations.stage_download(server(), folder.path()),
         )
         .await
@@ -424,7 +431,7 @@ mod tests {
         let mut download = Box::pin(operations.stage_download(server(), folder.path()));
         poll_once(upload.as_mut()).await;
         poll_once(download.as_mut()).await;
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(RECOVERY_TIMEOUT, async {
             while !operations
                 .registry
                 .lock()
@@ -462,7 +469,7 @@ mod tests {
         let upload_gate = stall(&operations, operations.uploads.get(server()).unwrap()).await;
         let download_gate = stall(&operations, operations.downloads.get(server()).unwrap()).await;
         let other = Uuid::new_v4();
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(RECOVERY_TIMEOUT, async {
             let record = operations
                 .track_upload(
                     json!([other]),
