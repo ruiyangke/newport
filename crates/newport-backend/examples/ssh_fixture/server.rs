@@ -286,6 +286,7 @@ impl server::Handler for Client {
             self.channels.remove(&id).unwrap(),
             self.config.home.clone(),
             None,
+            None,
             self.connection_id,
         )?;
         self.session_task(id, task);
@@ -297,14 +298,7 @@ impl server::Handler for Client {
         command: &[u8],
         session: &mut Session,
     ) -> anyhow::Result<()> {
-        // Exactly the command a Newport terminal sends, for some selector.
-        if let Some(selector) = std::str::from_utf8(command)
-            .ok()
-            .and_then(|s| s.split_once("NEWPORT_SESSION=")?.1.get(..36))
-            .and_then(|s| uuid::Uuid::parse_str(s).ok())
-            .filter(|selector| {
-                command == newport_backend::ssh::terminal_command(*selector).as_bytes()
-            })
+        if let Some((selector, terminal)) = terminal_identity(command)
             && let Some(pty) = self.ptys.get_mut(&id)
         {
             session.data(id, b"early shell output\r\n".to_vec())?;
@@ -313,6 +307,7 @@ impl server::Handler for Client {
                 self.channels.remove(&id).unwrap(),
                 self.config.home.clone(),
                 Some(selector),
+                terminal,
                 self.connection_id,
             )?;
             self.session_task(id, task);
@@ -333,6 +328,21 @@ impl server::Handler for Client {
         Ok(())
     }
 }
+/// Recognize the complete terminal command, including its optional tab identity.
+fn terminal_identity(command: &[u8]) -> Option<(uuid::Uuid, Option<uuid::Uuid>)> {
+    let command = std::str::from_utf8(command).ok()?;
+    let selector =
+        uuid::Uuid::parse_str(command.split_once("NEWPORT_SESSION=")?.1.get(..36)?).ok()?;
+    let terminal = if let Some((_, value)) = command.split_once("NEWPORT_TERMINAL=") {
+        // The UUID is single-quoted inside the outer `sh -c` argument.
+        Some(uuid::Uuid::parse_str(value.strip_prefix("'\\''")?.get(..36)?).ok()?)
+    } else {
+        None
+    };
+    (command == newport_backend::ssh::terminal_command(selector, terminal))
+        .then_some((selector, terminal))
+}
+
 fn fixture_worker_socket(socket: &str, runtime: &std::path::Path) -> bool {
     let path = std::path::Path::new(socket);
     path.file_name().is_some_and(|name| name == "workers.sock")

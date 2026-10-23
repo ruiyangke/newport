@@ -455,14 +455,8 @@ impl Drop for SessionChannel<'_> {
 /// setup. The person's startup files run after it and may add to them. `sh`
 /// runs it whatever the login shell is, and the selector is a UUID from the
 /// session owner, never shell input.
-pub fn terminal_command(selector: uuid::Uuid) -> String {
-    terminal_command_with_gui(selector, None)
-}
-fn terminal_command_with_gui(
-    selector: uuid::Uuid,
-    gui: Option<&newport_domain::terminal::GuiEnvironment>,
-) -> String {
-    terminal_command_with_identity(selector, gui, None)
+pub fn terminal_command(selector: uuid::Uuid, terminal: Option<uuid::Uuid>) -> String {
+    terminal_command_with_identity(selector, None, terminal)
 }
 fn terminal_command_with_identity(
     selector: uuid::Uuid,
@@ -1251,7 +1245,7 @@ mod terminal_gui_tests {
         let id = uuid::Uuid::new_v4();
         let run = || {
             std::process::Command::new("sh")
-                .args(["-c", &terminal_command_with_gui(id, Some(&gui))])
+                .args(["-c", &terminal_command_with_identity(id, Some(&gui), None)])
                 .current_dir(home.path())
                 .env("HOME", home.path())
                 .env("SHELL", &shell)

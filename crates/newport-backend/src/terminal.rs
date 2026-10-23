@@ -559,6 +559,14 @@ mod tests {
             .await
             .unwrap();
         until(&sessions, id, &format!("session={integration}")).await;
+        sessions
+            .send(
+                id,
+                Input::Data(b"printf 'terminal=%s\\n' \"$NEWPORT_TERMINAL\"\r".to_vec()),
+            )
+            .await
+            .unwrap();
+        until(&sessions, id, &format!("terminal={id}")).await;
         sessions.send(id, Input::Resize(100, 40)).await.unwrap();
         sessions
             .send(id, Input::Data(b"stty size\r".to_vec()))

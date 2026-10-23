@@ -73,6 +73,7 @@ impl Pty {
         channel: Channel<Msg>,
         home: PathBuf,
         integration: Option<uuid::Uuid>,
+        terminal: Option<uuid::Uuid>,
         connection: uuid::Uuid,
     ) -> io::Result<JoinHandle<()>> {
         let slave = self
@@ -93,6 +94,9 @@ impl Pty {
             .stderr(slave);
         if let Some(id) = integration {
             command.env("NEWPORT_SESSION", id.to_string());
+        }
+        if let Some(id) = terminal {
+            command.env("NEWPORT_TERMINAL", id.to_string());
         }
         // SAFETY: only async-signal-safe syscalls run between fork and exec.
         unsafe {
