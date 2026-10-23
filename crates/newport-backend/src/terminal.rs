@@ -124,9 +124,16 @@ impl Sessions {
         // must not retry or replace the connection used by app services.
         let task_owner = owner.clone();
         let task = tokio::spawn(async move {
-            if let Err(error) =
-                ssh::terminal_with_session(task_owner, &server, cols, rows, rx, &tx, gui, Some(id))
-                    .await
+            if let Err(error) = ssh::terminal_with_session(
+                task_owner,
+                &server,
+                (cols, rows),
+                rx,
+                &tx,
+                gui,
+                Some(id),
+            )
+            .await
             {
                 let _ = tx.send(Event::Error(format!("{error:#}"))).await;
             }

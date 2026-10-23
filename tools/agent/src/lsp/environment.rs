@@ -440,17 +440,13 @@ mod tests {
         let bin = folder.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let direnv = bin.join("direnv");
-        std::fs::write(
+        // Do not write an executable while parallel tests are forking: a child
+        // can inherit its write descriptor and make exec fail with ETXTBSY.
+        std::os::unix::fs::symlink(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/direnv.sh"),
             &direnv,
-            r#"#!/bin/sh
-case "$1 $2" in
-  "status --json") if [ -n "$FAKE_STATUS_FAIL" ]; then echo "direnv: bad direnvrc" >&2; exit 1; fi; printf '{"config":{},"state":{"foundRC":{"path":"%s/.envrc","allowed":%s},"loadedRC":null}}' "$PWD" "$FAKE_ALLOWED" ;;
-  "export json") if [ -n "$FAKE_FAIL" ]; then echo "direnv: error boom" >&2; exit 1; fi; printf '%s' "$FAKE_EXPORT" ;;
-esac
-"#,
         )
         .unwrap();
-        std::fs::set_permissions(&direnv, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(folder.path().join(".envrc"), "use flake\n").unwrap();
         let vars = Vars::from([
             ("PATH".into(), format!("{}:/bin:/usr/bin", bin.display())),

@@ -335,14 +335,13 @@ pub async fn terminal(
 ) -> Result<()> {
     let registry = crate::server_session::Registry::default();
     let owner = registry.session(server, 0);
-    terminal_with_session(owner, server, cols, rows, input, output, None, None).await
+    terminal_with_session(owner, server, (cols, rows), input, output, None, None).await
 }
 
 pub(crate) async fn terminal_with_session(
     owner: Arc<crate::server_session::ServerSession>,
     server: &Server,
-    cols: u32,
-    rows: u32,
+    mut size: (u32, u32),
     mut input: tokio::sync::mpsc::Receiver<crate::terminal::Input>,
     output: &tokio::sync::mpsc::Sender<crate::terminal::Event>,
     gui: Option<newport_domain::terminal::GuiEnvironment>,
@@ -359,7 +358,6 @@ pub(crate) async fn terminal_with_session(
     let mut cancelled = owner.cancellation();
     let run = async {
         let selector = owner.integration_session_id();
-        let mut size = (cols, rows);
         loop {
             let acquired = tokio::select! {
                 result = transport.acquire() => result,
@@ -1197,7 +1195,7 @@ mod connection_retry_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod terminal_gui_tests {
     use super::*;
     #[test]

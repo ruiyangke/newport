@@ -310,7 +310,7 @@ fn run() -> Result<(), String> {
                             }
                             desktop::Action::Run(action) => action(),
                             desktop::Action::GuiSetup(server) => {
-                                let _ = cx.update(|cx| {
+                                cx.update(|cx| {
                                     newport_gpui::request_terminal_gui_setup(&server, cx)
                                 });
                             }
@@ -321,7 +321,7 @@ fn run() -> Result<(), String> {
                                 reply,
                                 cancelled,
                             } => {
-                                let _ = cx.update(|cx| {
+                                cx.update(|cx| {
                                     newport_gpui::request_terminal_gui_launch(
                                         server,
                                         terminal,
