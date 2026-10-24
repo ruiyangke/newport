@@ -130,12 +130,12 @@ fn extract(data: &[u8], zip: bool, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Move a verified staged compiler into place. A restored build cache can keep
-/// the library directory without the executable: the replacement is validated
-/// before that partial install is discarded, and a complete install is kept.
-/// Windows can briefly hold a handle after the staged compiler's version check
-/// (including x64 emulation on ARM64), so sharing and permission failures are
-/// retried for at most five seconds with the staged source left intact.
+/// Move a compiler from the checksum-verified archive into place before running
+/// it. Windows can retain an executable handle after `zig version` exits,
+/// preventing a directory rename (including x64 emulation on ARM64).
+/// A restored cache can keep the library without the executable: require the
+/// replacement binary before discarding that partial install, and keep complete
+/// installs. Other transient Windows locks are retried for at most five seconds.
 pub fn install_directory(
     staged: &Path,
     install: &Path,
@@ -146,8 +146,8 @@ pub fn install_directory(
     wait: &mut dyn FnMut(Duration),
 ) -> Result<()> {
     ensure!(
-        version(&staged.join(executable))? == ZIG_VERSION,
-        "Downloaded Zig version does not match the build pin"
+        staged.join(executable).is_file(),
+        "Downloaded Zig archive has no compiler"
     );
     if install.join(executable).exists() {
         ensure!(
@@ -160,14 +160,27 @@ pub fn install_directory(
     let mut attempt = 0;
     loop {
         match rename(staged, install) {
-            Ok(()) => return Ok(()),
+            Ok(()) => break,
             Err(error) if windows && attempt < 50 && transient(&error) => {
                 attempt += 1;
                 wait(Duration::from_millis(100));
             }
-            Err(error) => return Err(error).context("Cannot install Zig"),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Cannot install Zig from {} to {}",
+                        staged.display(),
+                        install.display()
+                    )
+                })
+            }
         }
     }
+    ensure!(
+        version(&install.join(executable))? == ZIG_VERSION,
+        "Downloaded Zig version does not match the build pin"
+    );
+    Ok(())
 }
 
 /// EPERM, EACCES and EBUSY, including Windows sharing and lock violations.
@@ -352,14 +365,13 @@ mod tests {
     }
 
     #[test]
-    fn an_invalid_replacement_is_rejected_before_removing_a_partial_cache() {
+    fn a_missing_replacement_is_rejected_before_removing_a_partial_cache() {
         let temp = tempfile::tempdir().unwrap();
         let staged = temp.path().join("staged");
         let target = temp.path().join("install");
         fs::create_dir(&target).unwrap();
         fs::write(target.join("sentinel"), "keep").unwrap();
         fs::create_dir(&staged).unwrap();
-        fs::write(staged.join("zig"), "wrong version").unwrap();
         let error = install(
             &staged,
             &target,
@@ -370,10 +382,41 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            error.to_string().contains("Downloaded Zig version"),
+            error
+                .to_string()
+                .contains("Downloaded Zig archive has no compiler"),
             "{error}"
         );
         assert_eq!(fs::read_to_string(target.join("sentinel")).unwrap(), "keep");
+    }
+
+    #[test]
+    fn an_incorrect_version_at_the_final_path_is_rejected() {
+        for cached in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let staged = temp.path().join("staged");
+            let target = temp.path().join("install");
+            fs::create_dir(&staged).unwrap();
+            fs::write(staged.join("zig.exe"), "wrong version").unwrap();
+            if cached {
+                fs::create_dir(&target).unwrap();
+                fs::write(target.join("zig.exe"), "wrong version").unwrap();
+            }
+            let error = install(
+                &staged,
+                &target,
+                "zig.exe",
+                true,
+                &mut |a, b| fs::rename(a, b),
+                &mut no_wait,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("version does not match"),
+                "{error}"
+            );
+            assert_eq!(staged.exists(), cached);
+        }
     }
 
     #[test]
@@ -429,6 +472,45 @@ mod tests {
             assert_eq!(read_version(&target.join("zig.exe")).unwrap(), ZIG_VERSION);
             assert!(!staged.exists());
         }
+    }
+
+    #[test]
+    fn installation_does_not_launch_the_compiler_before_moving_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let staged = temp.path().join("staged");
+        let target = temp.path().join("install");
+        fs::create_dir(&staged).unwrap();
+        fs::write(staged.join("zig.exe"), ZIG_VERSION).unwrap();
+        let staged_was_launched = Cell::new(false);
+        let probes = Cell::new(0);
+        install_directory(
+            &staged,
+            &target,
+            "zig.exe",
+            &|binary| {
+                probes.set(probes.get() + 1);
+                if binary.starts_with(&staged) {
+                    staged_was_launched.set(true);
+                }
+                read_version(binary)
+            },
+            true,
+            &mut |from, to| {
+                if staged_was_launched.get() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "the staged compiler still has an executable handle",
+                    ));
+                }
+                fs::rename(from, to)
+            },
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(!staged_was_launched.get());
+        assert_eq!(probes.get(), 1);
+        assert_eq!(read_version(&target.join("zig.exe")).unwrap(), ZIG_VERSION);
+        assert!(!staged.exists());
     }
 
     #[test]
