@@ -242,6 +242,9 @@ jobs:
       - name: Verify Windows credential storage and cleanup
         if: runner.os == 'Windows'
         run: cargo test --locked -p newport-platform --lib secrets::windows::tests::credential_manager_stores_and_isolates_profile_keys -- --exact --ignored
+      - name: Verify Windows HTTPS trust for update feeds
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p newport-platform --features updates --lib updates::tests::windows_trusts_production_and_legacy_update_feeds -- --exact --ignored
       - name: Verify native system notification delivery
         if: runner.os == 'macOS'
         run: cargo run --locked -p newport-platform --example system_events_check

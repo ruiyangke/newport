@@ -292,6 +292,8 @@ jobs:
       - name: Prepare pinned terminal build dependencies
         run: cargo xtask env --github
       - run: cargo xtask package --nsis
+      - name: Verify Windows HTTPS trust for update feeds
+        run: cargo test --locked --release -p newport-platform --features updates --lib updates::tests::windows_trusts_production_and_legacy_update_feeds -- --exact --ignored
       - name: Verify the release executable and installer preserve profiles
         shell: pwsh
         run: |
