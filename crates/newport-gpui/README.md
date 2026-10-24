@@ -16,6 +16,19 @@ Cached server data and refresh coordination belong in the
 [backend query layer](../newport-backend/src/query/README.md). OS operations belong
 in [newport-platform](../newport-platform/README.md).
 
+## Keyboard policy
+
+Application commands have no default shortcuts; use menus and visible controls.
+Keep ordinary text editing and keyboard navigation scoped to the focused widget.
+Do not add global accelerators or project bindings inherited by a terminal.
+
+The terminal reserves only Find (Cmd+Shift+F on macOS, Ctrl+Shift+F elsewhere)
+and copy/paste (Cmd+C/V on macOS, Ctrl+Shift+C/V elsewhere). Ctrl+F, other control
+keys, modified page keys, and Insert combinations belong to the remote program.
+Inherited toolkit focus/copy/inspector bindings must not consume terminal input.
+Native text composition still handles IME and AltGr input; Cmd/Super is forwarded
+when the application enables the Kitty protocol, and ignored in legacy mode.
+
 ## Shared connectivity
 
 `connectivity::Connectivity` is the application-wide GPUI global, keyed by server

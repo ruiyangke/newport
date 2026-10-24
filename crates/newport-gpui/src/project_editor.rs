@@ -4,7 +4,7 @@
 //! STORY: choose a worktree, expand folders, edit tabs, then explicitly save to its server.
 //! FIRST VIEWPORT: one repository toolbar; Files/Changes panel beside shared source/review
 //! tabs. File path and save state sit above the code.
-//! INTERACTION: lazy folder disclosure and retained tabs; visible dirty state, keyboard save,
+//! INTERACTION: lazy folder disclosure and retained tabs; visible dirty state, explicit save,
 //! and explicit discard confirmation. No ornamental animation or replacement design system.
 use super::*;
 use gpui::base::ElementExt;
@@ -52,26 +52,6 @@ gpui_kit::actions!(
         FocusExplorer
     ]
 );
-pub(super) fn install_shortcuts(cx: &mut App) {
-    let primary = if cfg!(target_os = "macos") {
-        "cmd"
-    } else {
-        "ctrl"
-    };
-    cx.bind_keys([
-        KeyBinding::new(&format!("{primary}-p"), QuickOpen, Some("ProjectEditor")),
-        KeyBinding::new(&format!("{primary}-s"), SaveFile, Some("ProjectEditor")),
-        KeyBinding::new(
-            &format!("{primary}-shift-e"),
-            FocusExplorer,
-            Some("ProjectEditor"),
-        ),
-        KeyBinding::new(&format!("{primary}-w"), CloseTab, Some("ProjectEditor")),
-        KeyBinding::new("ctrl-tab", NextTab, Some("ProjectEditor")),
-        KeyBinding::new("ctrl-shift-tab", PreviousTab, Some("ProjectEditor")),
-        KeyBinding::new("ctrl-`", ToggleTerminal, Some("ProjectEditor")),
-    ]);
-}
 pub(super) struct Saved;
 impl EventEmitter<Saved> for CodeWorkspace {}
 
@@ -2041,6 +2021,10 @@ mod interaction_tests {
     use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
     type Calls = Arc<Mutex<Vec<(String, Value)>>>;
+    fn menu_action(cx: &mut VisualTestContext, action: impl gpui::Action) {
+        cx.update(|window, cx| window.dispatch_action(Box::new(action), cx));
+        draw(cx);
+    }
     fn draw(cx: &mut VisualTestContext) {
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -2051,10 +2035,7 @@ mod interaction_tests {
             crate::theme::install(false, cx);
             // Dialogs close at once, so a loaded test run can't race their animation.
             cx.set_reduce_motion(true);
-            super::install_shortcuts(cx);
             crate::navigation::install_workspace_shortcuts(cx);
-            // The application installs this fallback after project bindings.
-            cx.bind_keys([gpui::KeyBinding::new("cmd-w", super::CloseTab, None)]);
         });
         let calls = Arc::new(Mutex::new(Vec::new()));
         let seen = calls.clone();
@@ -2207,7 +2188,7 @@ mod interaction_tests {
         draw(cx);
         eprintln!("12 MiB insertion and draw: {:?}", start.elapsed());
         assert!(view.read_with(cx, |v, cx| v.buffers[0].dirty(cx)));
-        crate::test_shortcuts(cx, "cmd-s");
+        menu_action(cx, super::SaveFile);
         draw(cx);
         assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(!view.read_with(cx, |v, cx| v.buffers[0].dirty(cx)));
@@ -2243,7 +2224,7 @@ mod interaction_tests {
         open(&view, cx, "/repo/large.log");
         let first = view.read_with(cx, |v, _| v.buffers[0].editor.entity_id());
         cx.simulate_input("must not edit");
-        crate::test_shortcuts(cx, "cmd-s");
+        menu_action(cx, super::SaveFile);
         draw(cx);
         view.read_with(cx, |v, cx| {
             assert_eq!(
@@ -2414,7 +2395,7 @@ mod interaction_tests {
                 .editor
                 .update(cx, |e, cx| e.set_value("keep edits", window, cx));
         });
-        crate::test_shortcuts(cx, "cmd-shift-e");
+        menu_action(cx, super::FocusExplorer);
         draw(cx);
         cx.update(|window, cx| assert!(view.read(cx).tree_focus.is_focused(window)));
         let cursor =
@@ -2460,7 +2441,8 @@ mod interaction_tests {
             assert_eq!(v.buffers[0].editor.read(cx).value().as_str(), "keep edits");
             assert!(v.buffers[0].dirty(cx));
         });
-        crate::test_shortcuts(cx, "cmd-shift-e home up");
+        menu_action(cx, super::FocusExplorer);
+        crate::test_shortcuts(cx, "home up");
         draw(cx);
         assert_eq!(cursor(cx), "/repo");
         crate::test_shortcuts(cx, "end down");
@@ -2485,19 +2467,19 @@ mod interaction_tests {
         let (view, cx, calls) = reveal_fixture(cx);
         // Match project entry: its mounted workspace is the initial focus owner.
         view.update_in(cx, |v, w, cx| v.focus_document(w, cx));
-        crate::test_shortcuts(cx, "cmd-shift-e");
+        menu_action(cx, super::FocusExplorer);
         draw(cx);
         cx.update(|window, cx| assert!(view.read(cx).tree_focus.is_focused(window)));
         crate::test_shortcuts(cx, "up down left right home end enter");
         draw(cx);
         assert!(view.read_with(cx, |v, _| v.buffers.is_empty()));
-        // Global explorer shortcuts must not steal focus from a modal picker.
+        // Explorer actions must not steal focus from a modal picker.
         cx.update(|w, cx| {
             use gpui::component::WindowExt as _;
             w.open_alert_dialog(cx, |d, _, _| d.title("Test modal"));
         });
         draw(cx);
-        crate::test_shortcuts(cx, "cmd-shift-e");
+        menu_action(cx, super::FocusExplorer);
         draw(cx);
         cx.update(|w, cx| assert!(!view.read(cx).tree_focus.is_focused(w)));
         crate::test_shortcuts(cx, "escape");
@@ -2725,7 +2707,7 @@ mod interaction_tests {
                 e.focus(window, cx);
             });
         });
-        crate::test_shortcuts(cx, "cmd-p");
+        menu_action(cx, super::QuickOpen);
         draw(cx);
         cx.update(|window, cx| assert!(window.has_active_dialog(cx)));
         cx.simulate_input("hidden");
@@ -2781,7 +2763,7 @@ mod interaction_tests {
         let (view, cx, calls) = fixture(cx);
         open(&view, cx, "/repo/main.rs");
         view.update_in(cx, |v, window, cx| v.focus_document(window, cx));
-        crate::test_shortcuts(cx, "cmd-p");
+        menu_action(cx, super::QuickOpen);
         draw(cx);
         cx.simulate_input("hidden");
         draw(cx);
@@ -2867,13 +2849,13 @@ mod interaction_tests {
         cx.simulate_input("// edited\n");
         draw(cx);
         assert!(view.read_with(cx, |v, cx| v.dirty(cx)));
-        crate::test_shortcuts(cx, "cmd-s");
+        menu_action(cx, super::SaveFile);
         draw(cx);
         let requests = calls.lock().unwrap().clone();
         let (_, save) = requests
             .iter()
             .find(|(m, _)| m == "files_write_text")
-            .expect("Cmd/Ctrl-S sends a save");
+            .expect("Save file action sends a save");
         assert_eq!(save["expectedConnection"], json!(["scope-a"]));
         assert_eq!(save["revision"], "original");
         assert!(save["content"].as_str().unwrap().starts_with("// edited\n"));
@@ -2892,7 +2874,7 @@ mod interaction_tests {
         assert!(view.read_with(cx, |v, cx| v.buffers[0].dirty(cx)));
     }
     #[gpui::test]
-    fn keyboard_tabs_wrap_reveal_and_preserve_dirty_buffers(cx: &mut TestAppContext) {
+    fn menu_tab_actions_wrap_reveal_and_preserve_dirty_buffers(cx: &mut TestAppContext) {
         let (view, cx, _) = fixture(cx);
         for i in 0..8 {
             open(&view, cx, &format!("/repo/long-document-name-{i}.rs"));
@@ -2902,24 +2884,24 @@ mod interaction_tests {
                 .editor
                 .update(cx, |e, cx| e.set_value("unsaved", window, cx));
         });
-        crate::test_shortcuts(cx, "ctrl-tab");
+        menu_action(cx, super::NextTab);
         draw(cx);
         assert!(view.read_with(cx, |v, cx| v.active == Some(0) && v.buffers[7].dirty(cx)));
-        crate::test_shortcuts(cx, "ctrl-shift-tab");
+        menu_action(cx, super::PreviousTab);
         draw(cx);
         assert!(view.read_with(cx, |v, _| v.active == Some(7)));
         assert!(
             view.read_with(cx, |v, _| v.tab_scroll.offset().x < px(0.)),
             "keyboard selection reveals the offscreen tab"
         );
-        crate::test_shortcuts(cx, "cmd-w");
+        menu_action(cx, super::CloseTab);
         draw(cx);
         assert!(view.read_with(cx, |v, _| v.buffers.len() == 8));
         let cancel = cx.update(|window, _| {
             gpui::base::test_support::snapshots(window)
                 .iter()
                 .find(|e| e.label() == Some("Keep editing"))
-                .expect("close shortcut uses dirty-buffer confirmation")
+                .expect("close action uses dirty-buffer confirmation")
                 .bounds()
                 .center()
         });
@@ -2929,14 +2911,14 @@ mod interaction_tests {
         );
         cx.simulate_click(cancel, Default::default());
         draw(cx);
-        // Re-focus a clean source, then close it through the production key binding.
+        // Re-focus a clean source, then close it through the menu action.
         open(&view, cx, "/repo/long-document-name-0.rs");
-        crate::test_shortcuts(cx, "cmd-w");
+        menu_action(cx, super::CloseTab);
         draw(cx);
         assert!(view.read_with(cx, |v, cx| v.buffers.len() == 7 && v.dirty(cx)));
     }
     #[gpui::test]
-    fn keyboard_reviews_and_sources_share_tab_order(cx: &mut TestAppContext) {
+    fn menu_reviews_and_sources_share_tab_order(cx: &mut TestAppContext) {
         let (view, cx, _) = fixture(cx);
         open(&view, cx, "/repo/main.rs");
         let document = project_documents::ReviewDocument {
@@ -2948,14 +2930,14 @@ mod interaction_tests {
         view.update(cx, |v, _| {
             v.navigator.documents.open(document);
         });
-        crate::test_shortcuts(cx, "ctrl-shift-tab");
+        menu_action(cx, super::PreviousTab);
         draw(cx);
         assert!(view.read_with(cx, |v, _| v.reviewing));
-        crate::test_shortcuts(cx, "ctrl-tab");
+        menu_action(cx, super::NextTab);
         draw(cx);
         assert!(view.read_with(cx, |v, _| !v.reviewing && v.active == Some(0)));
-        crate::test_shortcuts(cx, "ctrl-shift-tab");
-        crate::test_shortcuts(cx, "cmd-w");
+        menu_action(cx, super::PreviousTab);
+        menu_action(cx, super::CloseTab);
         draw(cx);
         assert!(view.read_with(cx, |v, _| !v.reviewing
             && v.buffers.len() == 1

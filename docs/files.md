@@ -1,6 +1,6 @@
 # Remote files
 
-Open **Files** (⌃⌘6) to browse a server through SFTP using its saved SSH authentication and host-key checks. The server must provide an SFTP subsystem and allow your account to access the requested paths.
+Open **Files** in the sidebar to browse a server through SFTP using its saved SSH authentication and host-key checks. The server must provide an SFTP subsystem and allow your account to access the requested paths.
 
 ## Browse and preview
 

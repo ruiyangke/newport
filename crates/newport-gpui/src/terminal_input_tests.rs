@@ -379,14 +379,102 @@ fn hidden_terminal_still_notifies_when_input_warning_clears_or_transport_fails(
 #[gpui::test]
 fn workspace_bindings_preserve_terminal_flow_control_and_history(cx: &mut TestAppContext) {
     cx.update(|cx| {
-        crate::navigation::install_workspace_shortcuts(cx);
+        crate::navigation::install_desktop_commands(cx);
         cx.on_action(|_: &crate::Quit, _| panic!("Ctrl+Q must reach the terminal"));
         cx.on_action(|_: &crate::Refresh, _| panic!("Terminal input must not refresh the app"));
+        cx.on_action(|_: &crate::FindInView, _| panic!("Ctrl+F must reach the terminal"));
     });
     let peer = Peer::new();
     let (view, cx) = connect(&peer, cx);
-    cx.simulate_keystrokes("ctrl-q ctrl-r f5");
-    let expected = b"\x11\x12\x1b[15~";
+    cx.simulate_keystrokes("ctrl-q ctrl-r ctrl-f ctrl-n ctrl-p ctrl-s ctrl-w ctrl-x ctrl-s ctrl-x ctrl-w ctrl-2 ctrl-3 ctrl-6 ctrl-7 ctrl-8 ctrl-tab ctrl-shift-tab f5 f11 ctrl-insert shift-insert ctrl-alt-f ctrl-alt-b");
+    let expected = b"\x11\x12\x06\x0e\x10\x13\x17\x18\x13\x18\x17\x00\x1b\x1e\x1f\x7f\x1b[27;5;9~\x1b[27;6;9~\x1b[15~\x1b[23~\x1b[2;5~\x1b[2;2~\x1b\x06\x1b\x02";
+    wait(&view, cx, |_| peer.written().len() >= expected.len());
+    assert_eq!(peer.written(), expected);
+}
+
+#[gpui::test]
+fn modified_page_keys_reach_fullscreen_apps_over_ipc(cx: &mut TestAppContext) {
+    let peer = Peer::new();
+    let (view, cx) = connect(&peer, cx);
+    let mut expected = Vec::new();
+    for alternate in [false, true] {
+        view.update(cx, |view, _| {
+            view.engine
+                .advance(if alternate {
+                    b"\x1b[?1049h"
+                } else {
+                    b"\x1b[?1049l"
+                })
+                .unwrap();
+        });
+        cx.simulate_keystrokes("shift-pageup shift-pagedown ctrl-shift-pageup alt-shift-pagedown");
+        expected.extend_from_slice(b"\x1b[5;2~\x1b[6;2~\x1b[5;6~\x1b[6;4~");
+        wait(&view, cx, |_| peer.written().len() >= expected.len());
+        assert_eq!(peer.written(), expected);
+    }
+}
+
+#[gpui::test]
+fn super_keys_reach_kitty_apps_but_do_not_become_legacy_text(cx: &mut TestAppContext) {
+    let peer = Peer::new();
+    let (view, cx) = connect(&peer, cx);
+    cx.simulate_keystrokes("cmd-n ctrl-a");
+    wait(&view, cx, |_| !peer.written().is_empty());
+    assert_eq!(peer.written(), b"\x01");
+    let mut expected = b"\x01".to_vec();
+    for (mode, bytes) in [
+        (b"\x1b[>1u", b"\x1b[110;9u\x1b[105;11u".as_slice()),
+        (
+            b"\x1b[>3u",
+            b"\x1b[110;9u\x1b[110;9:3u\x1b[105;11u\x1b[105;11:3u",
+        ),
+    ] {
+        view.update(cx, |view, _| view.engine.advance(mode).unwrap());
+        for key in ["cmd-n", "cmd-alt-i"] {
+            cx.simulate_event(gpui::KeyDownEvent {
+                keystroke: gpui::Keystroke::parse(key).unwrap(),
+                physical_key: None,
+                key_metadata: None,
+                is_held: false,
+                prefer_character_input: false,
+            });
+            cx.simulate_event(gpui::KeyUpEvent {
+                keystroke: gpui::Keystroke::parse(key).unwrap(),
+                physical_key: None,
+                key_metadata: None,
+            });
+        }
+        expected.extend_from_slice(bytes);
+        wait(&view, cx, |_| peer.written().len() >= expected.len());
+        assert_eq!(peer.written(), expected);
+    }
+}
+
+#[gpui::test]
+fn altgr_text_preference_bypasses_shortcuts_and_terminal_encoding(cx: &mut TestAppContext) {
+    let peer = Peer::new();
+    let (view, cx) = connect(&peer, cx);
+    view.update(cx, |view, _| view.engine.advance(b"\x1b[>31u").unwrap());
+    for is_held in [false, true] {
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                key: "e".into(),
+                key_char: Some("€".into()),
+                modifiers: gpui::Modifiers {
+                    control: true,
+                    alt: true,
+                    ..Default::default()
+                },
+            },
+            physical_key: None,
+            key_metadata: None,
+            is_held,
+            prefer_character_input: true,
+        });
+        cx.simulate_input("€");
+    }
+    // Native commits still follow the application's negotiated text protocol.
+    let expected = b"\x1b[8364;;8364u\x1b[8364;;8364u";
     wait(&view, cx, |_| peer.written().len() >= expected.len());
     assert_eq!(peer.written(), expected);
 }
@@ -431,7 +519,7 @@ fn paste_shortcuts_deliver_exact_bytes_over_owned_terminal_ipc(cx: &mut TestAppC
     let shortcuts: &[&str] = if cfg!(target_os = "macos") {
         &["cmd-v"]
     } else {
-        &["ctrl-shift-v", "shift-insert"]
+        &["ctrl-shift-v"]
     };
     let mut expected = Vec::new();
     for bracketed in [false, true] {

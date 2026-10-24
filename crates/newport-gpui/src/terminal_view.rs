@@ -8,7 +8,7 @@ use newport_gpui::{
     terminal_focus::FocusReporter,
     terminal_input::{
         KeyEvent, NativeKeyIdentity, current_modifiers, encode_key, native_key_identity,
-        native_modifiers, scroll_key,
+        native_modifiers,
     },
     terminal_mouse::{self, Action as MouseAction, Button as TerminalButton, PressedButtons},
     terminal_status::TerminalStatus,
@@ -972,19 +972,8 @@ impl TerminalView {
             return;
         }
         let key = &event.keystroke;
-        if (key.modifiers.platform || key.modifiers.control) && key.key == "f" {
-            self.open_find(window, cx);
-            window.prevent_default();
-            cx.stop_propagation();
-            return;
-        }
         if let Some(shortcut) = local_shortcut(key) {
             match shortcut {
-                LocalShortcut::SelectAll => {
-                    let result = self.engine.select_all();
-                    self.engine_result(result);
-                    cx.notify();
-                }
                 LocalShortcut::Copy => {
                     if let Ok(Some(text)) = self.engine.selected_text() {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -1005,15 +994,14 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
-        // Unhandled system shortcuts must not become remote control bytes.
-        if key.modifiers.platform {
-            return;
-        }
-        if let Some(lines) = scroll_key(&key.key, key.modifiers.shift, self.dimensions.1) {
-            self.engine.scroll(ScrollViewport::Delta(-(lines as isize)));
-            window.prevent_default();
-            cx.stop_propagation();
-            cx.notify();
+        // Legacy protocols cannot represent Super. Do not turn Cmd/Super
+        // into plain text, but let applications requesting Kitty receive it.
+        if key.modifiers.platform
+            && !self
+                .engine
+                .kitty_keyboard_flags()
+                .is_ok_and(|flags| !flags.is_empty())
+        {
             return;
         }
         if !self.ready() {
@@ -1045,7 +1033,11 @@ impl TerminalView {
             KeyEvent {
                 key: &pressed.logical,
                 native_identity: pressed.native,
-                native_modifiers: native_modifiers(event.key_metadata.as_ref()),
+                native_modifiers: native_modifiers(event.key_metadata.as_ref()).or_else(|| {
+                    key.modifiers
+                        .platform
+                        .then(|| current_modifiers(key.modifiers, false, false))
+                }),
                 text: key.key_char.as_deref(),
                 shift: key.modifiers.shift,
                 alt: key.modifiers.alt,
@@ -1098,7 +1090,11 @@ impl TerminalView {
             KeyEvent {
                 key: &pressed.logical,
                 native_identity: pressed.native,
-                native_modifiers: native_modifiers(event.key_metadata.as_ref()),
+                native_modifiers: native_modifiers(event.key_metadata.as_ref()).or_else(|| {
+                    key.modifiers
+                        .platform
+                        .then(|| current_modifiers(key.modifiers, false, false))
+                }),
                 text: None,
                 shift: key.modifiers.shift,
                 alt: key.modifiers.alt,
@@ -1122,7 +1118,6 @@ impl TerminalView {
 
 #[derive(Debug, PartialEq, Eq)]
 enum LocalShortcut {
-    SelectAll,
     Copy,
     Paste,
 }
@@ -1134,20 +1129,17 @@ fn local_shortcut(key: &Keystroke) -> Option<LocalShortcut> {
     }
     if cfg!(target_os = "macos") && modifiers.platform && !modifiers.control && !modifiers.shift {
         return match key.key.as_str() {
-            "a" => Some(LocalShortcut::SelectAll),
             "c" => Some(LocalShortcut::Copy),
             "v" => Some(LocalShortcut::Paste),
             _ => None,
         };
     }
-    if cfg!(windows) && !modifiers.platform {
+    if !cfg!(target_os = "macos") && !modifiers.platform {
         // Ctrl+C and Ctrl+V retain their shell meanings. These clipboard
         // gestures are handled before the terminal key encoder.
         return match key.key.as_str() {
             "c" if modifiers.control && modifiers.shift => Some(LocalShortcut::Copy),
             "v" if modifiers.control && modifiers.shift => Some(LocalShortcut::Paste),
-            "insert" if modifiers.control && !modifiers.shift => Some(LocalShortcut::Copy),
-            "insert" if modifiers.shift && !modifiers.control => Some(LocalShortcut::Paste),
             _ => None,
         };
     }
@@ -1244,6 +1236,11 @@ impl Render for TerminalView {
             .relative()
             .overflow_hidden()
             .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &crate::FindInTerminal, window, cx| {
+                if !window.has_active_dialog(cx) && this.composition.is_empty() {
+                    this.open_find(window, cx);
+                }
+            }))
             .on_key_down(cx.listener(Self::key))
             .on_key_up(cx.listener(Self::key_up))
             .on_modifiers_changed(

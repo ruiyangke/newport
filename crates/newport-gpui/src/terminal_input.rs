@@ -4,19 +4,6 @@ use gpui_kit as gpui;
 
 use newport_terminal::{Engine, Key, KeyAction, KeyInput, KittyKeyFlags, Modifiers, Result};
 
-/// Shift+PageUp/Down scroll the local viewport by one page.
-pub fn scroll_key(key: &str, shift: bool, rows: u16) -> Option<i32> {
-    if !shift {
-        return None;
-    }
-    let lines = i32::from(rows.saturating_sub(1));
-    match key.to_ascii_lowercase().as_str() {
-        "pageup" | "page-up" => Some(lines),
-        "pagedown" | "page-down" => Some(-lines),
-        _ => None,
-    }
-}
-
 /// The platform's logical key and optional layout-generated text. Callers must
 /// intercept app shortcuts first and pair releases only with forwarded presses.
 pub struct KeyEvent<'a> {
@@ -406,9 +393,7 @@ fn windows_physical_key(code: u32) -> Key {
 /// legacy key release, means the key was handled. No escape sequences are
 /// constructed here; Ghostty honors the modes requested by the foreground TUI.
 pub fn encode_key(engine: &mut Engine, event: KeyEvent<'_>) -> Result<Option<Vec<u8>>> {
-    if event.composing
-        || (event.action != KeyAction::Release && scroll_key(event.key, event.shift, 1).is_some())
-    {
+    if event.composing {
         return Ok(None);
     }
     let named = event.key.to_ascii_lowercase();
@@ -428,15 +413,18 @@ pub fn encode_key(engine: &mut Engine, event: KeyEvent<'_>) -> Result<Option<Vec
     let shift = modifiers.contains(Modifiers::SHIFT);
     let alt = modifiers.contains(Modifiers::ALT);
     let control = modifiers.contains(Modifiers::CTRL);
+    let control_or_super = modifiers.intersects(Modifiers::CTRL | Modifiers::SUPER);
     let is_text = printable.is_some();
-    // macOS Option (unless it is Meta) and Windows AltGr presses/repeats must
-    // reach native composition even with an enhanced keyboard protocol. A
-    // release belongs to an already-forwarded press: modifiers may have changed
-    // while held.
+    // macOS Option (unless it is Meta) composes text without Ctrl/Super.
+    // Windows AltGr is routed by KeyDownEvent::prefer_character_input;
+    // ordinary Ctrl+Alt commands must reach the remote application. Releases
+    // belong to already-forwarded presses even if modifiers changed while held.
     if event.action != KeyAction::Release
         && is_text
-        && ((cfg!(target_os = "macos") && alt && !control && !event.option_as_meta)
-            || (cfg!(windows) && alt && control))
+        && cfg!(target_os = "macos")
+        && alt
+        && !control_or_super
+        && !event.option_as_meta
     {
         return Ok(None);
     }
@@ -446,7 +434,8 @@ pub fn encode_key(engine: &mut Engine, event: KeyEvent<'_>) -> Result<Option<Vec
     let kitty_flags = engine.kitty_keyboard_flags()?;
     let protocol_text =
         kitty_flags.intersects(KittyKeyFlags::REPORT_ALL | KittyKeyFlags::REPORT_EVENTS);
-    if is_text && !control && !alt && !protocol_text {
+    // Ctrl/Super commands need encoding even in disambiguation-only Kitty mode.
+    if is_text && !control_or_super && !alt && !protocol_text {
         return Ok(None);
     }
     let fallback_text = printable.map(|ch| {
@@ -462,8 +451,8 @@ pub fn encode_key(engine: &mut Engine, event: KeyEvent<'_>) -> Result<Option<Vec
         .then_some(event.text.or(fallback_text.as_deref()))
         .flatten();
     let mut consumed = Modifiers::empty();
-    // Shift has already been applied to layout-generated text. Control and Alt
-    // remain unconsumed so Ghostty can encode control/Meta combinations.
+    // Shift has already been applied to layout-generated text. Control, Alt,
+    // and Super remain unconsumed so Ghostty can encode command combinations.
     if text.is_some() && shift {
         consumed.insert(Modifiers::SHIFT);
     }
@@ -721,8 +710,38 @@ mod tests {
         if cfg!(target_os = "macos") {
             assert!(encoded(&mut engine, "e", false, true, false).is_none());
         }
-        if cfg!(windows) {
-            assert!(encoded(&mut engine, "e", false, true, true).is_none());
+        assert_eq!(
+            encoded(&mut engine, "e", false, true, true).unwrap(),
+            b"\x1b[101;7u"
+        );
+    }
+
+    #[test]
+    fn super_printable_keys_use_kitty_disambiguation_without_text_reporting() {
+        let mut engine = Engine::new(80, 24).unwrap();
+        engine.advance(b"\x1b[>1u").unwrap();
+        assert!(encoded(&mut engine, "n", false, false, false).is_none());
+        for option_as_meta in [false, true] {
+            for (key, modifiers, expected) in [
+                ("n", Modifiers::SUPER, b"\x1b[110;9u".as_slice()),
+                ("i", Modifiers::SUPER | Modifiers::ALT, b"\x1b[105;11u"),
+            ] {
+                assert_eq!(
+                    encode_key(
+                        &mut engine,
+                        KeyEvent {
+                            native_modifiers: Some(modifiers),
+                            text: Some(key),
+                            option_as_meta,
+                            ..KeyEvent::press(key)
+                        },
+                    )
+                    .unwrap()
+                    .as_deref(),
+                    Some(expected),
+                    "{key}, option_as_meta={option_as_meta}"
+                );
+            }
         }
     }
 
@@ -774,15 +793,18 @@ mod tests {
     }
 
     #[test]
-    fn shifted_page_keys_remain_local() {
+    fn shifted_page_keys_reach_terminal_applications() {
         let mut engine = Engine::new(80, 24).unwrap();
-        assert_eq!(scroll_key("pageup", true, 24), Some(23));
-        assert_eq!(scroll_key("page-down", true, 24), Some(-23));
-        assert_eq!(scroll_key("pageup", true, 1), Some(0));
-        assert_eq!(scroll_key("pageup", false, 24), None);
-        for key in ["pageup", "page-up", "pagedown", "page-down"] {
-            assert!(encoded(&mut engine, key, true, false, false).is_none());
-            assert!(encoded(&mut engine, key, true, true, true).is_none());
+        for (key, shift, alt, control, expected) in [
+            ("pageup", true, false, false, b"\x1b[5;2~".as_slice()),
+            ("page-down", true, false, false, b"\x1b[6;2~"),
+            ("page-up", true, true, true, b"\x1b[5;8~"),
+            ("pagedown", true, true, true, b"\x1b[6;8~"),
+        ] {
+            assert_eq!(
+                encoded(&mut engine, key, shift, alt, control).unwrap(),
+                expected
+            );
         }
     }
 
@@ -820,23 +842,6 @@ mod tests {
                 release,
                 "{key}"
             );
-            if scroll_key(key, true, 24).is_some() {
-                for action in [KeyAction::Press, KeyAction::Repeat] {
-                    assert!(
-                        encode_key(
-                            &mut engine,
-                            KeyEvent {
-                                action,
-                                shift: true,
-                                ..KeyEvent::press(key)
-                            }
-                        )
-                        .unwrap()
-                        .is_none(),
-                        "{key}"
-                    );
-                }
-            }
         }
     }
 
@@ -901,7 +906,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(target_os = "macos")]
     fn native_composition_modifiers_do_not_swallow_a_forwarded_key_release() {
         let mut engine = Engine::new(80, 24).unwrap();
         engine.advance(b"\x1b[>31u").unwrap();
@@ -912,7 +917,7 @@ mod tests {
             b"\x1b[97;;97u"
         );
 
-        // Option (macOS) or AltGr (Windows) is pressed while A is held.
+        // Option is pressed while A is held.
         // New text still belongs to native composition, including repeats.
         for action in [KeyAction::Press, KeyAction::Repeat] {
             assert!(
@@ -921,7 +926,6 @@ mod tests {
                     KeyEvent {
                         action,
                         alt: true,
-                        control: cfg!(windows),
                         text: Some("é"),
                         ..KeyEvent::press("e")
                     },
@@ -938,18 +942,13 @@ mod tests {
                 KeyEvent {
                     action: KeyAction::Release,
                     alt: true,
-                    control: cfg!(windows),
                     text: Some("a"),
                     ..KeyEvent::press("a")
                 },
             )
             .unwrap()
             .unwrap(),
-            if cfg!(windows) {
-                b"\x1b[97;7:3u"
-            } else {
-                b"\x1b[97;3:3u"
-            }
+            b"\x1b[97;3:3u"
         );
     }
 

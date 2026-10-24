@@ -58,20 +58,6 @@ pub(super) struct SelectTab {
     pub number: usize,
 }
 
-/// Views by shortcut number, in sidebar order. Numbers never shift: Remote
-/// apps keeps 8 in builds without it, so Integrations is always 9.
-const SHORTCUT_VIEWS: [Page; 9] = [
-    Page::Overview,
-    Page::Ports,
-    Page::Services,
-    Page::Containers,
-    Page::Terminal,
-    Page::Files,
-    Page::Projects,
-    Page::RemoteApps,
-    Page::Integration,
-];
-
 /// Tab `number` among `count`: 1–8 by position, 9 the last, as browsers and
 /// terminals number tabs.
 pub(super) fn tab_index(number: usize, count: usize) -> Option<usize> {
@@ -95,17 +81,6 @@ pub(super) fn install_desktop_commands(cx: &mut App) {
         cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
     }
     install_workspace_shortcuts(cx);
-    #[cfg(target_os = "macos")]
-    cx.bind_keys([
-        KeyBinding::new("cmd-h", HideApp, None),
-        KeyBinding::new("cmd-alt-h", HideOthers, None),
-        KeyBinding::new("cmd-w", crate::project_editor::CloseTab, None),
-        KeyBinding::new("cmd-shift-w", CloseWindow, None),
-        KeyBinding::new("cmd-m", MinimizeWindow, None),
-        KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
-    ]);
-    #[cfg(not(target_os = "macos"))]
-    cx.bind_keys([KeyBinding::new("f11", ToggleFullScreen, None)]);
     let mut items = Vec::new();
     for (page, _) in views(cx) {
         items.push(MenuItem::action(page.title(), OpenView { page }));
@@ -205,8 +180,9 @@ pub(super) fn install_desktop_commands(cx: &mut App) {
     ]);
 }
 
-/// Keep menu accelerators and keyboard dispatch on the same platform mapping.
-/// GPUI's `cmd` means the Windows key on Windows, not Control.
+/// No application command shortcuts by default. Terminal Find is the sole
+/// exception; copy/paste is handled by the terminal's input surface. Keep
+/// ordinary control navigation and text editing scoped to their own widgets.
 pub(super) fn install_workspace_shortcuts(cx: &mut App) {
     let primary = if cfg!(target_os = "macos") {
         "cmd"
@@ -214,58 +190,25 @@ pub(super) fn install_workspace_shortcuts(cx: &mut App) {
         "ctrl"
     };
     cx.bind_keys([
-        KeyBinding::new(&format!("{primary}-f"), FindInView, None),
-        KeyBinding::new(&format!("{primary}-,"), OpenSettings, None),
-        KeyBinding::new(&format!("{primary}-n"), NewServer, None),
         KeyBinding::new(
-            &format!("{primary}-shift-e"),
-            EditServer,
-            Some("!ProjectEditor"),
+            &format!("{primary}-shift-f"),
+            FindInTerminal,
+            Some("Terminal"),
         ),
-        KeyBinding::new(&format!("{primary}-shift-t"), TestServer, None),
-        KeyBinding::new(&format!("{primary}-shift-l"), ToggleSidebar, None),
-    ]);
-    // Ctrl+Q and Ctrl+R are terminal flow-control/history keys on Windows.
-    // Refresh uses F5 there; quitting remains available through the app menu.
-    #[cfg(not(target_os = "macos"))]
-    cx.bind_keys([KeyBinding::new("f5", Refresh, Some("!Terminal"))]);
-    // Key bindings run before the terminal's key handler, and Kit's Root binds
-    // Tab to focus traversal. Inside a terminal, Tab belongs to the shell.
-    cx.bind_keys([
+        // Disable inherited Root bindings so raw input reaches the terminal,
+        // even if another view retains a text selection.
         KeyBinding::new("tab", gpui::NoAction, Some("Terminal")),
         KeyBinding::new("shift-tab", gpui::NoAction, Some("Terminal")),
+        KeyBinding::new(&format!("{primary}-c"), gpui::NoAction, Some("Terminal")),
     ]);
-    // Control+Alt is AltGr on Windows layouts. Keep these macOS-only;
-    // the focused divider supports keyboard resizing on both platforms.
-    #[cfg(target_os = "macos")]
-    cx.bind_keys([
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-r", Refresh, None),
-        KeyBinding::new("cmd-alt-right", SidebarWider, None),
-        KeyBinding::new("cmd-alt-left", SidebarNarrower, None),
-        KeyBinding::new("cmd-alt-0", ResetSidebar, None),
-    ]);
-    // Numbers select tabs, as in terminals and browsers; with Control as
-    // well they open views. Windows keeps Ctrl+Alt free: it is AltGr there.
-    let views = if cfg!(target_os = "macos") {
-        "ctrl-cmd"
+    // Kit installs a global inspector shortcut in debug builds. Newport has
+    // no default binding for it, including when a terminal owns focus.
+    let inspector = if cfg!(target_os = "macos") {
+        "cmd-alt-i"
     } else {
-        "ctrl-shift"
+        "ctrl-shift-i"
     };
-    for number in 1..=9 {
-        cx.bind_keys([KeyBinding::new(
-            &format!("{primary}-{number}"),
-            SelectTab { number },
-            None,
-        )]);
-    }
-    for (index, page) in SHORTCUT_VIEWS.into_iter().enumerate() {
-        cx.bind_keys([KeyBinding::new(
-            &format!("{views}-{}", index + 1),
-            OpenView { page },
-            None,
-        )]);
-    }
+    cx.bind_keys([KeyBinding::new(inspector, gpui::NoAction, None)]);
 }
 const VIEWS: [(Page, IconName); 8] = [
     (Page::Overview, IconName::Activity),
@@ -471,6 +414,102 @@ impl Newport {
 #[cfg(test)]
 mod tests {
     use super::destination;
+    use gpui_kit as gpui;
+
+    #[gpui::test]
+    fn terminal_contexts_only_reserve_find_in_the_keymap(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::component::init(cx);
+            super::install_desktop_commands(cx);
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            for names in [
+                vec!["Root", "Terminal"],
+                vec!["Root", "ProjectEditor", "Terminal"],
+            ] {
+                let contexts: Vec<_> = names
+                    .iter()
+                    .map(|name| gpui::KeyContext::parse(name).unwrap())
+                    .collect();
+                // Include Root's Copy, the debug inspector, project bindings,
+                // and both platform families so defaults cannot leak down.
+                for key in [
+                    "tab",
+                    "shift-tab",
+                    "ctrl-c",
+                    "cmd-c",
+                    "ctrl-f",
+                    "cmd-f",
+                    "ctrl-n",
+                    "cmd-n",
+                    "ctrl-p",
+                    "cmd-p",
+                    "ctrl-s",
+                    "cmd-s",
+                    "ctrl-w",
+                    "cmd-w",
+                    "ctrl-q",
+                    "cmd-q",
+                    "ctrl-r",
+                    "cmd-r",
+                    "ctrl-tab",
+                    "ctrl-shift-tab",
+                    "ctrl-`",
+                    "ctrl-,",
+                    "cmd-,",
+                    "ctrl-shift-e",
+                    "cmd-shift-e",
+                    "ctrl-shift-t",
+                    "cmd-shift-t",
+                    "ctrl-shift-l",
+                    "cmd-shift-l",
+                    "ctrl-shift-i",
+                    "cmd-alt-i",
+                    "f5",
+                    "f11",
+                    "cmd-h",
+                    "cmd-alt-h",
+                    "cmd-shift-w",
+                    "cmd-m",
+                    "ctrl-cmd-f",
+                    "cmd-alt-left",
+                    "cmd-alt-right",
+                    "cmd-alt-0",
+                    "shift-pageup",
+                    "shift-pagedown",
+                    "ctrl-shift-pageup",
+                    "alt-shift-pagedown",
+                    "ctrl-insert",
+                    "shift-insert",
+                    "ctrl-alt-f",
+                    "ctrl-alt-b",
+                ]
+                .into_iter()
+                .map(String::from)
+                .chain((1..=9).flat_map(|number| {
+                    ["ctrl", "cmd", "ctrl-shift", "ctrl-cmd"]
+                        .map(|modifiers| format!("{modifiers}-{number}"))
+                })) {
+                    let (bindings, pending) = keymap
+                        .bindings_for_input(&[gpui::Keystroke::parse(&key).unwrap()], &contexts);
+                    assert!(
+                        bindings.is_empty() && !pending,
+                        "{key} was intercepted in {names:?}"
+                    );
+                }
+                let find = if cfg!(target_os = "macos") {
+                    "cmd-shift-f"
+                } else {
+                    "ctrl-shift-f"
+                };
+                let (bindings, pending) =
+                    keymap.bindings_for_input(&[gpui::Keystroke::parse(find).unwrap()], &contexts);
+                assert!(!pending && bindings.len() == 1);
+                assert!(bindings[0].action().as_any().is::<crate::FindInTerminal>());
+            }
+        });
+    }
+
     #[test]
     fn vertical_navigation_wraps_and_supports_boundaries() {
         assert_eq!(destination(0, "up", 6), Some(5));

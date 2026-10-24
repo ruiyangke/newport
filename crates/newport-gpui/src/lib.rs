@@ -341,6 +341,7 @@ gpui_kit::actions!(
         ToggleSidebar,
         ToggleTerminalImmersive,
         FindInView,
+        FindInTerminal,
         OpenSettings,
         NewServer,
         EditServer,
@@ -1608,8 +1609,9 @@ impl Render for Newport {
                     && !window.has_active_dialog(cx)
                 {
                     this.open_git_find(window, cx);
-                    return;
                 }
+            }))
+            .on_action(cx.listener(|this, _: &FindInTerminal, window, cx| {
                 if this.page == Page::Terminal
                     && this.server_form.is_none()
                     && !window.has_active_dialog(cx)
@@ -1833,7 +1835,6 @@ pub fn run_with_options_and_ready(
             ),
             cx,
         );
-        project_editor::install_shortcuts(cx);
         cx.on_action(|_: &Quit, cx| {
             let _ = request_quit(cx);
         });

@@ -488,7 +488,9 @@ fn sidebar_modes_preserve_terminal_and_stay_outside_caption_drag_region(cx: &mut
 }
 
 #[gpui::test]
-fn workspace_shortcuts_follow_the_host_platform_and_respect_modals(cx: &mut TestAppContext) {
+fn workspace_commands_use_actions_without_default_shortcuts_and_respect_modals(
+    cx: &mut TestAppContext,
+) {
     use gpui_kit::component::WindowExt;
 
     cx.update(|cx| {
@@ -516,7 +518,7 @@ fn workspace_shortcuts_follow_the_host_platform_and_respect_modals(cx: &mut Test
     } else {
         ("ctrl", "ctrl-shift")
     };
-    // Views by number, in sidebar order; 8 is Remote apps, absent here.
+    // Former shortcuts do nothing; the same commands remain available to menus.
     for (number, expected) in [
         (2, Page::Ports),
         (3, Page::Services),
@@ -528,14 +530,25 @@ fn workspace_shortcuts_follow_the_host_platform_and_respect_modals(cx: &mut Test
         (9, Page::Integration),
         (1, Page::Overview),
     ] {
+        let before = workspace.read_with(visual, |view, _| view.page);
         visual.simulate_keystrokes(&format!("{views}-{number}"));
+        frame(visual);
+        assert!(workspace.read_with(visual, |view, _| view.page) == before);
+        let page = if number == 8 {
+            Page::RemoteApps
+        } else {
+            expected
+        };
+        visual.update(|window, cx| {
+            window.dispatch_action(Box::new(navigation::OpenView { page }), cx)
+        });
         frame(visual);
         assert!(
             workspace.read_with(visual, |view, _| view.page) == expected,
             "{number}"
         );
     }
-    // Numbers alone select tabs; Overview has none, so nothing changes.
+    // Other former workspace accelerators must also leave the page alone.
     visual.simulate_keystrokes(&format!("{primary}-2"));
     frame(visual);
     assert!(workspace.read_with(visual, |view, _| view.page) == Page::Overview);
@@ -544,10 +557,19 @@ fn workspace_shortcuts_follow_the_host_platform_and_respect_modals(cx: &mut Test
         frame(visual);
         assert_eq!(
             workspace.read_with(visual, |view, _| view.sidebar_visible),
+            !visible
+        );
+        visual.update(|window, cx| window.dispatch_action(Box::new(crate::ToggleSidebar), cx));
+        frame(visual);
+        assert_eq!(
+            workspace.read_with(visual, |view, _| view.sidebar_visible),
             visible
         );
     }
     visual.simulate_keystrokes(&format!("{primary}-,"));
+    frame(visual);
+    assert!(workspace.read_with(visual, |view, _| view.page) == Page::Overview);
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::OpenSettings), cx));
     frame(visual);
     assert!(workspace.read_with(visual, |view, _| view.page) == Page::Settings);
 
@@ -555,20 +577,40 @@ fn workspace_shortcuts_follow_the_host_platform_and_respect_modals(cx: &mut Test
         window.open_dialog(cx, |dialog, _, _| dialog.title("Fixture modal"));
     });
     frame(visual);
-    visual.simulate_keystrokes(&format!("{primary}-shift-l {views}-1"));
+    visual.update(|window, cx| {
+        window.dispatch_action(Box::new(crate::ToggleSidebar), cx);
+        window.dispatch_action(
+            Box::new(navigation::OpenView {
+                page: Page::Overview,
+            }),
+            cx,
+        );
+    });
     frame(visual);
     assert!(workspace.read_with(visual, |view, _| view.sidebar_visible));
     assert!(workspace.read_with(visual, |view, _| view.page) == Page::Settings);
     visual.update(|window, cx| window.close_dialog(cx));
     workspace.update_in(visual, |view, window, cx| view.focus.focus(window, cx));
     frame(visual);
-    visual.simulate_keystrokes(&format!("{views}-1"));
+    visual.update(|window, cx| {
+        window.dispatch_action(
+            Box::new(navigation::OpenView {
+                page: Page::Overview,
+            }),
+            cx,
+        )
+    });
     frame(visual);
     assert!(workspace.read_with(visual, |view, _| view.page) == Page::Overview);
     visual.simulate_keystrokes(&format!("{primary}-n"));
     frame(visual);
+    assert!(workspace.read_with(visual, |view, _| view.server_form.is_none()));
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::NewServer), cx));
+    frame(visual);
     assert!(workspace.read_with(visual, |view, _| view.server_form.is_some()));
-    visual.simulate_keystrokes(&format!("{views}-2"));
+    visual.update(|window, cx| {
+        window.dispatch_action(Box::new(navigation::OpenView { page: Page::Ports }), cx)
+    });
     frame(visual);
     assert!(workspace.read_with(visual, |view, _| view.page) == Page::Overview);
 }

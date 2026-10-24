@@ -568,7 +568,6 @@ pub fn run() -> Result<(), String> {
         gpui_kit::init(cx);
         theme::install(false, cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();

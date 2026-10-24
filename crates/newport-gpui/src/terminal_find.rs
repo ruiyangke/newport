@@ -296,6 +296,7 @@ mod tests {
         cx.update(|cx| {
             gpui::component::init(cx);
             crate::theme::install(false, cx);
+            crate::navigation::install_workspace_shortcuts(cx);
         });
         let mut view = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
@@ -319,7 +320,10 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (view, cx) = fixture(cx);
-        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_keystrokes("cmd-f ctrl-f");
+        draw(cx);
+        assert!(view.read_with(cx, |view, _| view.find.is_none()));
+        crate::test_shortcuts(cx, "cmd-shift-f");
         draw(cx);
         cx.simulate_input("Needle");
         draw(cx);
@@ -352,7 +356,7 @@ mod tests {
                 view.engine.advance(b"Needle\r\n").unwrap();
             })
         });
-        cx.simulate_keystrokes("cmd-f");
+        crate::test_shortcuts(cx, "cmd-shift-f");
         draw(cx);
         view.read_with(cx, |view, cx| {
             let find = view.find.as_ref().unwrap();

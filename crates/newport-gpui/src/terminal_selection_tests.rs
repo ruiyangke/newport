@@ -12,6 +12,7 @@ pub(super) fn fixture<'a>(
 ) -> (Entity<TerminalView>, &'a mut VisualTestContext) {
     cx.update(|cx| {
         gpui::component::init(cx);
+        crate::navigation::install_workspace_shortcuts(cx);
         crate::theme::install(false, cx);
     });
     let mut view = None;
@@ -438,47 +439,13 @@ fn word_drag_extends_by_whole_words(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn select_all_and_shift_page_navigation_stay_local(cx: &mut TestAppContext) {
-    let text = (0..80)
-        .map(|index| format!("row {index}\r\n"))
-        .collect::<String>();
-    let (view, cx) = fixture(cx, &text);
-    let page = view.read_with(cx, |view, _| usize::from(view.dimensions.1 - 1));
-    let bottom = view.read_with(cx, |view, _| view.engine.viewport_top().unwrap());
-    assert!(bottom >= page, "fixture has at least a page of history");
-    cx.simulate_keystrokes("shift-pageup");
-    assert_eq!(
-        view.read_with(cx, |view, _| view.engine.viewport_top().unwrap()),
-        bottom - page
-    );
-    cx.simulate_keystrokes("shift-pagedown");
-    assert_eq!(
-        view.read_with(cx, |view, _| view.engine.viewport_top().unwrap()),
-        bottom
-    );
-    if !cfg!(target_os = "macos") {
-        return;
-    }
-    cx.simulate_keystrokes("cmd-a cmd-c");
-    let selection = selected(&view, cx);
-    assert!(selection.starts_with("row 0\n"));
-    assert!(selection.contains("row 79\n"));
-    cx.update(|_, cx| {
-        assert_eq!(
-            cx.read_from_clipboard().and_then(|item| item.text()),
-            Some(selection)
-        )
-    });
-}
-
-#[gpui::test]
 fn platform_copy_shortcuts_use_the_terminal_selection(cx: &mut TestAppContext) {
     let (view, cx) = fixture(cx, "one Cafe\u{301} 服务");
     click(at(&view, 6.2, 0.3, cx), 2, Modifiers::default(), cx);
     let shortcuts: &[&str] = if cfg!(target_os = "macos") {
         &["cmd-c"]
     } else {
-        &["ctrl-shift-c", "ctrl-insert"]
+        &["ctrl-shift-c"]
     };
     for shortcut in shortcuts {
         cx.update(|_, cx| {
@@ -514,16 +481,13 @@ fn clipboard_shortcuts_do_not_intercept_shell_or_altgr_input() {
 
     let shortcuts = if cfg!(target_os = "macos") {
         vec![
-            ("cmd-a", LocalShortcut::SelectAll),
             ("cmd-c", LocalShortcut::Copy),
             ("cmd-v", LocalShortcut::Paste),
         ]
     } else {
         vec![
             ("ctrl-shift-c", LocalShortcut::Copy),
-            ("ctrl-insert", LocalShortcut::Copy),
             ("ctrl-shift-v", LocalShortcut::Paste),
-            ("shift-insert", LocalShortcut::Paste),
         ]
     };
     for (key, action) in shortcuts {
@@ -535,6 +499,9 @@ fn clipboard_shortcuts_do_not_intercept_shell_or_altgr_input() {
     }
     for key in [
         "ctrl-a",
+        "cmd-a",
+        "ctrl-insert",
+        "shift-insert",
         "ctrl-c",
         "ctrl-v",
         "alt-ctrl-v",
@@ -568,8 +535,6 @@ fn remote_mouse_mode_preserves_shift_selection_override(cx: &mut TestAppContext)
         },
         cx,
     );
-    assert_eq!(selected(&view, cx), "alpha");
-    cx.simulate_keystrokes("shift-pageup");
     assert_eq!(selected(&view, cx), "alpha");
 }
 

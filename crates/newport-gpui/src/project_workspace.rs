@@ -306,11 +306,7 @@ impl Newport {
                         .ghost()
                         .icon(IconName::Search)
                         .accessibility_label("Open file")
-                        .tooltip(if cfg!(target_os = "macos") {
-                            "Open file (⌘P)"
-                        } else {
-                            "Open file (Ctrl+P)"
-                        })
+                        .tooltip("Open file")
                         .disabled(!editor.read(cx).can_quick_open())
                         .on_click(move |_, window, cx| {
                             editor.update(cx, |e, cx| e.open_quick(window, cx))
