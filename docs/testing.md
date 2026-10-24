@@ -89,6 +89,15 @@ publishing or moving a version tag.
 
 ## Upgrade acceptance
 
+On Windows, check HTTPS certificate validation against both the production feed
+and the legacy GitHub redirect path before release. The loopback updater tests
+do not exercise Schannel or the Windows trust store. This opt-in check downloads
+only manifests; it does not install anything:
+
+```sh
+cargo test --locked -p newport-platform --features updates --lib updates::tests::windows_trusts_production_and_legacy_update_feeds -- --exact --ignored
+```
+
 ### Released Porthop agent regression
 
 `tests/agent-runtime/porthop-upgrade.py` exercises a real Porthop 0.2.3 agent

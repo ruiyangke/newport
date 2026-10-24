@@ -47,10 +47,13 @@ impl Api {
             .timeout_connect(Some(Duration::from_secs(15)))
             .timeout_global(Some(TIMEOUT));
         // Windows uses Schannel through native-tls; other targets use rustls.
+        // Let Schannel validate against Windows' trust store, rather than
+        // requiring its chosen root to also exist in ureq's Mozilla bundle.
         #[cfg(windows)]
         let config = config.tls_config(
             ureq::tls::TlsConfig::builder()
                 .provider(ureq::tls::TlsProvider::NativeTls)
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
                 .build(),
         );
         Ok(Self {

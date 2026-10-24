@@ -362,3 +362,29 @@ fn cancelled_checks_never_return_a_verified_update() {
     assert!(result.err().unwrap().contains("cancelled"));
     server.join().unwrap();
 }
+
+// Loopback HTTP fixtures cannot exercise Schannel's certificate-chain choice.
+// Keep the legacy redirect path covered while installed clients still use it.
+#[cfg(windows)]
+#[test]
+#[ignore = "requires HTTPS access to the production and legacy update feeds"]
+fn windows_trusts_production_and_legacy_update_feeds() {
+    let target = if cfg!(target_arch = "x86_64") {
+        Target::WindowsX64
+    } else {
+        Target::WindowsArm64
+    };
+    let updater = Updater::production("0.0.0", target).unwrap();
+    for endpoint in [
+        updater.endpoint.clone(),
+        Url::parse("https://github.com/ruiyangke/newport/releases/latest/download/latest.json")
+            .unwrap(),
+    ] {
+        let mut response = updater
+            .get(endpoint.clone(), Duration::from_secs(30), &|| false)
+            .unwrap_or_else(|error| panic!("{endpoint}: {error}"));
+        require_ok(&response).unwrap();
+        let manifest = read_body(&mut response, MANIFEST_LIMIT, &|| false, |_, _| {}).unwrap();
+        assert!(updater.select(&manifest).unwrap().is_some());
+    }
+}

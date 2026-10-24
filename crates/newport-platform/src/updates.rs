@@ -146,11 +146,14 @@ impl Updater {
             .max_redirects(0)
             .timeout_connect(Some(Duration::from_secs(15)));
         // Windows uses Schannel through native-tls; other targets use rustls.
+        // Use Windows' trust store as well: Schannel can build a valid chain to
+        // a system root absent from ureq's default Mozilla bundle.
         // Both retain certificate and hostname verification.
         #[cfg(windows)]
         let config = config.tls_config(
             ureq::tls::TlsConfig::builder()
                 .provider(ureq::tls::TlsProvider::NativeTls)
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
                 .build(),
         );
         let agent = config.build().new_agent();
