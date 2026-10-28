@@ -1,0 +1,66 @@
+//! Newport backend services, independent of the desktop UI framework.
+//! The application owns service lifetime and supplies platform adapters.
+pub mod account;
+pub mod agent_approval;
+pub mod application;
+pub mod metrics_db;
+pub mod preferences;
+pub mod profile;
+pub mod query;
+pub mod rpc;
+
+use newport_domain::model;
+pub mod agent_keys;
+mod connection_state;
+pub mod connectivity;
+pub mod credentials;
+pub mod known_hosts;
+pub mod recovery;
+#[path = "../../../tools/agent/src/serialization.rs"]
+mod serialization;
+pub mod ssh;
+pub mod ssh_config_import;
+pub mod terminal;
+
+pub mod agent;
+pub mod agent_install;
+pub mod agent_lifecycle;
+mod agent_payload;
+pub mod agent_runtime;
+pub mod clipboard;
+#[cfg(unix)]
+mod clipboard_downloads;
+pub mod clipboard_export;
+mod clipboard_files;
+pub mod clipboard_router;
+pub mod cockpit;
+pub mod commands;
+pub mod compose;
+pub mod containers;
+pub mod desktop_integration;
+pub mod files;
+pub mod git;
+pub mod graphical_session;
+mod integration_service;
+mod lifecycle_task;
+pub mod manager;
+pub mod metrics_sampler;
+pub mod monitor;
+mod monitoring;
+pub mod ports;
+pub mod service_channel;
+pub mod services;
+pub mod workers;
+
+pub mod integration_permissions;
+pub mod server_session;
+pub mod server_setup;
+pub mod session_transport;
+
+#[cfg(test)]
+mod agent_full_product_tests;
+#[cfg(test)]
+mod remote_tests;
+
+mod remote_apps;
+mod server_queries;

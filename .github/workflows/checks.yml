@@ -1,0 +1,379 @@
+name: Shared checks
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact commit to validate and build
+        required: true
+        type: string
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+# Jobs are named "Area: what (platform)". Tooling and Needle start at once;
+# the desktop builds wait only for the Needle binaries they embed.
+jobs:
+  tooling:
+    name: "Tooling: workflows and Git contracts"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      # The pre-commit hook's check, for commits made without the hooks.
+      - name: No private crates in Cargo files
+        run: sh .githooks/pre-commit
+      - name: Lint workflows
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+      - uses: ./.github/actions/rust
+        with:
+          cache-key: tooling
+          workspaces: |
+            .
+            tools/agent
+            tools/xtask
+      - name: Replay real CLI responses through native validators
+        run: cargo xtask test git-cli-contract --output target/git-contract.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: git-contract
+          path: target/git-contract.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # Each architecture builds natively; emulated arm64 builds are too slow.
+  needle-build:
+    name: "Needle: build (${{ matrix.arch }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        with:
+          cache-key: needle-build-${{ matrix.arch }}
+          workspaces: tools/xtask
+      - run: cargo xtask agents --arch ${{ matrix.arch }}
+      - run: cargo xtask test runtime --arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: needle-${{ matrix.arch }}
+          path: resources/agents/newport-agent-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # The verified pair every desktop build embeds and the release signs.
+  needle-package:
+    name: "Needle: package"
+    needs: needle-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: needle-*
+          path: resources/agents
+          merge-multiple: true
+      - run: chmod +x resources/agents/newport-agent-*
+      - uses: ./.github/actions/rust
+        with:
+          cache-key: needle-package
+          workspaces: tools/xtask
+      - run: cargo xtask artifact record resources/agents
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-agents
+          path: resources/agents/
+          if-no-files-found: error
+          retention-days: 30
+
+  needle-tests:
+    name: "Needle: tests (${{ matrix.platform }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: Linux
+          - os: macos-15
+            platform: macOS
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      # Shell setup is tested against bash, zsh and fish; the clipboard against
+      # the system xclip and wl-clipboard; Windows packaging against real NSIS.
+      - name: Install test shells, clipboard tools and NSIS
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh fish xclip wl-clipboard nsis
+      - name: Install test shells
+        if: runner.os == 'macOS'
+        run: brew install bash fish
+      - uses: ./.github/actions/rust
+        with:
+          cache-key: needle-tests-${{ matrix.platform }}
+          workspaces: |
+            tools/agent
+            tools/xtask
+      - run: cargo xtask check xtask
+      - run: cargo xtask check agent
+      - run: cargo xtask test https
+
+  # SSH, terminals and Docker services against real OpenSSH from macOS. Hosted
+  # ARM Macs can't run Linux VMs, so this is the Intel runner with colima.
+  needle-remote:
+    name: "Needle: SSH and Docker (macOS Intel)"
+    needs: needle-package
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    env:
+      NEWPORT_PREBUILT: "1"
+      NEWPORT_TEST_DOCKER_CONTEXT: colima
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-agents
+          path: resources/agents
+      - run: chmod +x resources/agents/newport-agent-*
+      - uses: ./.github/actions/rust
+        with:
+          cache-key: needle-remote
+      - name: Install colima and Docker
+        run: |
+          brew install colima docker docker-buildx
+          mkdir -p ~/.docker/cli-plugins
+          ln -sfn "$(brew --prefix)/opt/docker-buildx/bin/docker-buildx" ~/.docker/cli-plugins/docker-buildx
+      # Compile before the VM reserves host memory. Match fixtures::backend_command
+      # so the harness reuses this binary instead of spending its fixture budget
+      # on a cold Intel build.
+      - name: Compile remote backend tests
+        timeout-minutes: 40
+        run: cargo test --locked -p newport-backend --lib --no-run --target-dir target
+      - name: Start Linux VM
+        timeout-minutes: 15
+        run: colima start --cpu 3 --memory 6 --arch x86_64 --vm-type=vz --mount-type=virtiofs
+      - run: cargo xtask test remote
+      - name: Docker diagnostics
+        if: failure()
+        run: |
+          docker info
+          docker ps -a
+
+  # Interactive launch/IME/clipboard/DPI acceptance is a separate release gate;
+  # these build/test jobs do not cover it.
+  desktop-core:
+    name: "Desktop: core (${{ matrix.platform }})"
+    needs: needle-package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: macOS
+            target: aarch64-apple-darwin
+          - os: windows-2025
+            platform: Windows x64
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            platform: Windows arm64
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    # A cold macOS build includes core tests, the SSH fixture and native events.
+    timeout-minutes: ${{ matrix.platform == 'macOS' && 45 || 30 }}
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Locate LLVM for ARM64 dependencies
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (!(Test-Path "$llvm\clang.exe")) { throw 'LLVM is required for ARM64' }
+          $llvm >> $env:GITHUB_PATH
+      - uses: ./.github/actions/rust
+        with:
+          target: ${{ matrix.target }}
+          cache-key: desktop-core-${{ matrix.target }}
+      - name: Check native source formatting
+        run: cargo fmt -p newport-domain -p newport-client -p newport-platform -p newport-backend -p newport-gpui -p newport-app -p newport-grammars -p newport-release -p newport-terminal --check
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-agents
+          path: resources/agents
+      - run: cargo xtask artifact verify resources/agents
+      - run: cargo clippy --locked -p newport-domain -p newport-platform -p newport-backend -p newport-client -p newport-release --features newport-platform/updates,newport-release/signing --all-targets -- -D warnings
+      - run: cargo test --locked -p newport-domain -p newport-platform -p newport-backend -p newport-client -p newport-release --features newport-platform/updates,newport-release/signing
+      - name: Verify SSH transport and PTY fixture
+        if: runner.os == 'macOS'
+        run: env -u CARGO_BUILD_TARGET cargo xtask test ssh
+      - name: Verify native clipboard ownership and lazy reads
+        if: runner.os == 'macOS'
+        run: env -u CARGO_BUILD_TARGET cargo xtask test clipboard
+      - name: Verify Windows credential storage and cleanup
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p newport-platform --lib secrets::windows::tests::credential_manager_stores_and_isolates_profile_keys -- --exact --ignored
+      - name: Verify Windows HTTPS trust for the update feed
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p newport-platform --features updates --lib updates::tests::windows_trusts_production_update_feed -- --exact --ignored
+      - name: Verify native system notification delivery
+        if: runner.os == 'macOS'
+        run: cargo run --locked -p newport-platform --example system_events_check
+
+  desktop-ui:
+    name: "Desktop: UI (${{ matrix.platform }})"
+    needs: needle-package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: macOS
+            target: aarch64-apple-darwin
+            artifact: macos-arm64
+          - os: windows-2025
+            platform: Windows x64
+            target: x86_64-pc-windows-msvc
+            artifact: windows-x64
+          - os: windows-11-arm
+            platform: Windows arm64
+            target: aarch64-pc-windows-msvc
+            artifact: windows-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Install Metal shader compiler
+        if: runner.os == 'macOS'
+        run: xcrun --sdk macosx metal --version || { xcodebuild -downloadComponent MetalToolchain && xcrun --sdk macosx metal --version; }
+      - uses: ilammy/setup-nasm@v1
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+      - name: Locate LLVM for ARM64 dependencies
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (!(Test-Path "$llvm\clang.exe")) { throw 'LLVM is required for ARM64' }
+          $llvm >> $env:GITHUB_PATH
+      - uses: ./.github/actions/rust
+        with:
+          target: ${{ matrix.target }}
+          cache-key: desktop-ui-${{ matrix.target }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-agents
+          path: resources/agents
+      - run: cargo xtask artifact verify resources/agents
+      - run: cargo xtask grammars
+      - name: Stage Windows PDF renderer
+        if: runner.os == 'Windows'
+        run: cargo xtask pdfium
+      - run: cargo clippy --locked -p newport-domain -p newport-client -p newport-gpui -p newport-app -p newport-terminal --all-targets -- -D warnings
+      - run: cargo test --locked -p newport-client -p newport-gpui -p newport-app -p newport-terminal
+      - run: cargo test --locked -p newport-platform --features pdf pdf::tests
+      - run: cargo build --locked -p newport-gpui -p newport-app
+      - name: Verify standalone startup and profile ownership
+        run: cargo test --locked -p newport-app --test standalone_lifecycle -- --ignored --skip standalone_gui --nocapture
+      - name: Build native macOS app bundle
+        if: runner.os == 'macOS'
+        run: cargo xtask package --debug --skip-build
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'macOS'
+        with:
+          name: newport-native-${{ matrix.artifact }}-adhoc-app
+          path: target/${{ matrix.target }}/debug/native-package/Newport-macos.zip
+          if-no-files-found: error
+          retention-days: 7
+      - name: Verify native Windows executable identity
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $product = Get-Content resources/app.json -Raw | ConvertFrom-Json
+          $binary = Join-Path (Join-Path target $env:CARGO_BUILD_TARGET) 'debug/newport.exe'
+          $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $binary).Path)
+          if ($info.ProductName -ne $product.productName -or
+              $info.FileDescription -ne $product.productName -or
+              $info.ProductVersion -ne $product.version -or
+              $info.FileVersion -ne $product.version -or
+              $info.OriginalFilename -ne 'newport.exe') {
+            throw 'Native executable resources do not match the release identity'
+          }
+      - name: Locate native Windows installer compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $nsis = 'C:\Program Files (x86)\NSIS'
+          if (!(Test-Path "$nsis\makensis.exe")) {
+            choco install nsis --version=3.11 --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
+          }
+          if (!(Test-Path "$nsis\makensis.exe")) { throw 'NSIS compiler not found' }
+          $nsis >> $env:GITHUB_PATH
+      - name: Build native Windows installer candidate
+        if: runner.os == 'Windows'
+        run: cargo xtask package --debug --skip-build --nsis
+      - name: Exercise native Windows install, rollback and uninstall
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $directory = Join-Path (Join-Path target $env:CARGO_BUILD_TARGET) 'debug/native-package'
+          $installers = @(Get-ChildItem $directory -Filter '*-setup.exe')
+          if ($installers.Count -ne 1) { throw 'Expected exactly one native installer candidate' }
+          $env:NEWPORT_TEST_INSTALLER = $installers[0].FullName
+          cargo test --locked -p newport-release --test native_package_runtime -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Native installer runtime acceptance failed' }
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Windows'
+        with:
+          name: newport-native-${{ matrix.artifact }}-unsigned-installer
+          path: target/${{ matrix.target }}/debug/native-package/*-setup.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  # These checks build Newport without Remote apps. newport-remote tests its
+  # own crates in its CI; release.yml builds the full agent and the macOS app
+  # with Remote apps from the pinned newport-remote commit.
+  passed:
+    name: All checks passed
+    if: always()
+    needs: [tooling, needle-build, needle-package, needle-tests, needle-remote, desktop-core, desktop-ui]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every check
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          failed=$(jq -r 'to_entries | map(select(.value.result != "success") | .key) | join(", ")' <<< "$RESULTS")
+          if [ -n "$failed" ]; then echo "Checks did not pass: $failed" >&2; exit 1; fi

@@ -1,0 +1,60 @@
+//! Linux clipboard and browser integration for Newport.
+pub mod agent;
+pub mod browser;
+pub mod cli;
+pub mod clipboard;
+pub mod clipboard_service;
+pub mod compose;
+pub mod composition;
+pub mod containers;
+pub mod deployment;
+mod deployment_product;
+mod diagnostics;
+pub mod display;
+mod docker;
+pub mod environment;
+pub mod git;
+pub mod install;
+pub mod product;
+pub use runtime_protocol::integration as integration_control;
+mod legacy_install;
+mod local_socket;
+pub mod lsp;
+pub mod monitor;
+mod native;
+mod owned_directory;
+mod paths;
+pub mod ports;
+pub mod routing;
+pub mod runtime;
+pub mod runtime_protocol;
+mod serialization;
+pub mod services;
+mod session;
+mod snapshot;
+mod transport;
+pub mod wire;
+mod wl_protocol;
+pub mod wl_server;
+mod wl_transfer;
+mod worker_session;
+mod worker_stream;
+mod worker_stream_io;
+mod x_endpoint;
+mod x_protocol;
+pub mod x_server;
+
+mod clipboard_channel;
+mod clipboard_export_relay;
+mod clipboard_source;
+mod clipboard_wire;
+mod demand;
+
+mod shell_setup;
+
+mod file_watch;
+
+mod gui_attachment;
+pub mod gui_launch;
+mod gui_notice;
+pub mod gui_protocol;

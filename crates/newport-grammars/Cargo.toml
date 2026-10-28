@@ -1,0 +1,133 @@
+[package]
+name = "newport-grammars"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+enum-iterator = "2.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tree-sitter-language = "0.1"
+tree-sitter-astro-next = { version = "=0.1.1", optional = true }
+tree-sitter-bash = { version = "=0.23.3", optional = true }
+tree-sitter-c = { version = "=0.24.2", optional = true }
+tree-sitter-c-sharp = { version = "=0.23.5", optional = true }
+tree-sitter-cmake = { version = "=0.7.5", optional = true }
+tree-sitter-cpp = { version = "=0.23.4", optional = true }
+tree-sitter-css = { version = "=0.23.2", optional = true }
+tree-sitter-diff = { version = "=0.1.0", optional = true }
+tree-sitter-elixir = { version = "=0.3.5", optional = true }
+tree-sitter-embedded-template = { version = "=0.23.2", optional = true }
+tree-sitter-go = { version = "=0.23.4", optional = true }
+tree-sitter-graphql = { version = "=0.1.0", optional = true }
+tree-sitter-html = { version = "=0.23.2", optional = true }
+tree-sitter-java = { version = "=0.23.5", optional = true }
+tree-sitter-javascript = { version = "=0.23.1", optional = true }
+tree-sitter-jsdoc = { version = "=0.23.2", optional = true }
+tree-sitter-json = { version = "=0.24.8", optional = true }
+tree-sitter-kotlin-sg = { version = "=0.4.1", optional = true }
+tree-sitter-lua = { version = "=0.4.1", optional = true }
+tree-sitter-make = { version = "=1.1.1", optional = true }
+tree-sitter-md = { version = "=0.5.3", optional = true }
+tree-sitter-php = { version = "=0.24.2", optional = true }
+tree-sitter-proto = { version = "=0.2.0", optional = true }
+tree-sitter-python = { version = "=0.23.6", optional = true }
+tree-sitter-ruby = { version = "=0.23.1", optional = true }
+tree-sitter-rust = { version = "=0.24.2", optional = true }
+tree-sitter-scala = { version = "=0.23.4", optional = true }
+tree-sitter-sequel = { version = "=0.3.11", optional = true }
+tree-sitter-svelte-next = { version = "=0.1.1", optional = true }
+tree-sitter-swift = { version = "=0.7.4", optional = true }
+tree-sitter-toml-ng = { version = "=0.7.0", optional = true }
+tree-sitter-typescript = { version = "=0.23.2", optional = true }
+tree-sitter-yaml = { version = "=0.7.2", optional = true }
+tree-sitter-zig = { version = "=1.1.2", optional = true }
+
+[features]
+default = ["lang-json"]
+# Used only by the metadata generator; release libraries enable one lang-* feature.
+catalog = [
+    "lang-astro",
+    "lang-bash",
+    "lang-c",
+    "lang-cmake",
+    "lang-cpp",
+    "lang-csharp",
+    "lang-css",
+    "lang-diff",
+    "lang-ejs",
+    "lang-elixir",
+    "lang-erb",
+    "lang-go",
+    "lang-graphql",
+    "lang-html",
+    "lang-java",
+    "lang-javascript",
+    "lang-jsdoc",
+    "lang-json",
+    "lang-kotlin",
+    "lang-lua",
+    "lang-make",
+    "lang-markdown",
+    "lang-markdown_inline",
+    "lang-php",
+    "lang-proto",
+    "lang-python",
+    "lang-ruby",
+    "lang-rust",
+    "lang-scala",
+    "lang-sql",
+    "lang-svelte",
+    "lang-swift",
+    "lang-toml",
+    "lang-tsx",
+    "lang-typescript",
+    "lang-yaml",
+    "lang-zig",
+]
+lang-astro = ["dep:tree-sitter-astro-next"]
+lang-bash = ["dep:tree-sitter-bash"]
+lang-c = ["dep:tree-sitter-c"]
+lang-cmake = ["dep:tree-sitter-cmake"]
+lang-cpp = ["dep:tree-sitter-cpp"]
+lang-csharp = ["dep:tree-sitter-c-sharp"]
+lang-css = ["dep:tree-sitter-css"]
+lang-diff = ["dep:tree-sitter-diff"]
+lang-ejs = ["dep:tree-sitter-embedded-template"]
+lang-elixir = ["dep:tree-sitter-elixir"]
+lang-erb = ["dep:tree-sitter-embedded-template"]
+lang-go = ["dep:tree-sitter-go"]
+lang-graphql = ["dep:tree-sitter-graphql"]
+lang-html = ["dep:tree-sitter-html"]
+lang-java = ["dep:tree-sitter-java"]
+lang-javascript = ["dep:tree-sitter-javascript"]
+lang-jsdoc = ["dep:tree-sitter-jsdoc"]
+lang-json = ["dep:tree-sitter-json"]
+lang-kotlin = ["dep:tree-sitter-kotlin-sg"]
+lang-lua = ["dep:tree-sitter-lua"]
+lang-make = ["dep:tree-sitter-make"]
+lang-markdown = ["dep:tree-sitter-md"]
+lang-markdown_inline = ["dep:tree-sitter-md"]
+lang-php = ["dep:tree-sitter-php"]
+lang-proto = ["dep:tree-sitter-proto"]
+lang-python = ["dep:tree-sitter-python"]
+lang-ruby = ["dep:tree-sitter-ruby"]
+lang-rust = ["dep:tree-sitter-rust"]
+lang-scala = ["dep:tree-sitter-scala"]
+lang-sql = ["dep:tree-sitter-sequel"]
+lang-svelte = ["dep:tree-sitter-svelte-next"]
+lang-swift = ["dep:tree-sitter-swift"]
+lang-toml = ["dep:tree-sitter-toml-ng"]
+lang-tsx = ["dep:tree-sitter-typescript"]
+lang-typescript = ["dep:tree-sitter-typescript"]
+lang-yaml = ["dep:tree-sitter-yaml"]
+lang-zig = ["dep:tree-sitter-zig"]
+
+[[bin]]
+name = "newport-grammar-catalog"
+path = "src/catalog.rs"
+required-features = ["catalog"]

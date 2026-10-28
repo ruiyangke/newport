@@ -1,0 +1,28 @@
+.DS_Store
+/target/
+/.cache/newport/
+tools/agent/target/
+resources/agents/
+*.log
+.impeccable/
+
+# Machine-specific development signing
+.cargo/signing.toml
+.cargo/*.provisionprofile
+.cargo/*.entitlements
+
+# Local environment and signing material
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile
+
+tests/remote/arboard-probe/target/
+tools/xtask/target/
+tests/remote/fixture/target/
+
+# Local Claude Code instructions
+CLAUDE.local.md
