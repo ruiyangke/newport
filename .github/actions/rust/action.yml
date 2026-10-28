@@ -1,0 +1,36 @@
+name: Rust
+description: The repository's pinned Rust toolchain, an extra target if asked, and the cargo cache.
+inputs:
+  target:
+    description: Target triple to add (for example aarch64-pc-windows-msvc)
+    required: false
+    default: ""
+  cache-key:
+    description: Cache key for this job
+    required: true
+  workspaces:
+    description: Cargo workspaces to cache, as Swatinem/rust-cache takes them
+    required: false
+    default: |
+      .
+      tools/xtask
+  working-directory:
+    description: Where the repository is checked out
+    required: false
+    default: .
+runs:
+  using: composite
+  steps:
+    # rust-toolchain.toml pins the version and components.
+    - shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: rustup show
+    - if: inputs.target != ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: rustup target add "${{ inputs.target }}"
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: ${{ inputs.workspaces }}
+        key: ${{ inputs.cache-key }}
+        save-if: ${{ github.event_name != 'pull_request' }}

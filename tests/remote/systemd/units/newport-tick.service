@@ -1,0 +1,6 @@
+[Unit]
+Description=Newport tick
+
+[Service]
+Type=oneshot
+ExecStart=/bin/echo tick

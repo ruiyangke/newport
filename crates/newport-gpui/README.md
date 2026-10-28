@@ -1,0 +1,85 @@
+# Newport native UI
+
+This library renders Newport with GPUI. The [application host](../newport-app/README.md)
+owns process startup, the backend, tray, OS callbacks, and update installation.
+It opens the UI through `run_with_options_and_ready`.
+
+## Responsibilities
+
+- Page composition, navigation, dialogs, and keyboard/focus behavior.
+- Query subscriptions and presentation state; remote work runs outside rendering.
+- Bounded table/list rendering, terminal drawing, and text/image/PDF previews.
+- Theme, icons, and lazy syntax highlighting using per-language grammar libraries.
+
+Shared feature rules belong in [newport-domain](../newport-domain/README.md).
+Cached server data and refresh coordination belong in the
+[backend query layer](../newport-backend/src/query/README.md). OS operations belong
+in [newport-platform](../newport-platform/README.md).
+
+## Keyboard policy
+
+Application commands have no global shortcuts; use menus and visible controls.
+Keep ordinary text editing and keyboard navigation scoped to the focused widget.
+Do not add global accelerators or project bindings inherited by a terminal.
+
+The code editor has the usual editor shortcuts, bound to `ProjectEditor && !Terminal`
+so they never reach a terminal, including the one inside a project. On macOS:
+Cmd+S save, Cmd+W close tab, Cmd+P open file, Cmd+B show or hide files,
+Cmd+Shift+E focus the file tree, Ctrl+Tab and Ctrl+Shift+Tab switch tabs,
+Ctrl+` show or hide the terminal, F2 rename, Shift+F12 find references and
+Shift+Alt+F format. Elsewhere, Ctrl replaces Cmd. The text widget's own keys
+(find, undo, select all, code actions) are unchanged.
+
+The terminal reserves only Find (Cmd+Shift+F on macOS, Ctrl+Shift+F elsewhere)
+and copy/paste (Cmd+C/V on macOS, Ctrl+Shift+C/V elsewhere). Ctrl+F, other control
+keys, modified page keys, and Insert combinations belong to the remote program.
+Inherited toolkit focus/copy/inspector bindings must not consume terminal input.
+Native text composition still handles IME and AltGr input; Cmd/Super is forwarded
+when the application enables the Kitty protocol, and ignored in legacy mode.
+
+## Shared connectivity
+
+`connectivity::Connectivity` is the application-wide GPUI global, keyed by server
+ID. The application host subscribes once to `Application::connections()` and
+pushes updates into this store. SSH connection state and approval changes do not
+wait for page polling. Pages and retained components use `connectivity::observe`
+and read the store; they never infer server connectivity from terminal events,
+feature request errors, or cached health probes.
+
+The backend registry owns the canonical store. Its current server session
+publishes transport transitions, fenced by an owner token. The UI rejects older
+revisions and retired backend instances. Components also check the connection
+scope before refreshing a retained read after recovery. Server deletion removes
+the entry, and replacement immediately invalidates the old connection state.
+
+Service readiness remains distinct: an installed agent, an open shell, and
+acknowledged sharing permissions describe their own resources. They cannot
+declare the server connected. Enabled sharing follows the shared transport
+through explicit authentication retries; it does not cache another SSH error or
+initiate repeated consent requests. Recovery may refresh reads, but never replays
+a service action, Git mutation, or terminal command.
+
+## Run and verify
+
+Run from the repository root with an isolated development profile:
+
+```sh
+cargo xtask dev
+cargo test --locked -p newport-gpui --lib
+```
+
+On Windows, stage PDFium with `cargo xtask pdfium` before preview checks.
+
+For rendering benchmarks:
+
+```sh
+cargo xtask grammars --release
+cargo test --locked --release -p newport-gpui --lib benchmark_ -- --ignored --nocapture --test-threads=1
+```
+
+The `input_focus_probe` and `terminal_render_probe` examples are manual native
+input/rendering diagnostics. Run them through the same wrapper with
+`cargo run --locked -p newport-gpui --example NAME`.
+
+Unit tests and benchmarks do not replace native interaction checks. See the
+[testing guide](../../tools/xtask/testing.md) for lifecycle and release acceptance.

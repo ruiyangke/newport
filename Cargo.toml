@@ -1,0 +1,35 @@
+[workspace]
+members = [
+    "crates/newport-domain",
+    "crates/newport-client",
+    "crates/newport-platform",
+    "crates/newport-backend",
+    "crates/newport-gpui",
+    "crates/newport-app",
+    "crates/newport-grammars",
+    "crates/newport-release",
+    "crates/newport-terminal",
+]
+default-members = ["crates/newport-domain", "crates/newport-client", "crates/newport-platform", "crates/newport-backend", "crates/newport-gpui"]
+# Linux agent and test tooling have independent dependency graphs and lockfiles.
+exclude = ["tools/agent", "tools/xtask", "tests/remote/fixture", "tests/remote/arboard-probe"]
+resolver = "3"
+
+[profile.dev]
+debug = 1
+
+# Stronghold's key derivation (scrypt) is unusably slow unoptimized, and most
+# of its time is in Salsa20's block function, a crate of its own.
+[profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.salsa20]
+opt-level = 3
+
+# GPUI Kit 0.8.0 plus Newport's patch series: the fork's newport/v0.8.0 branch,
+# generated from its newport/patches branch. Cargo.lock pins the commit.
+[patch.crates-io]
+gpui-component = { git = "https://github.com/ruiyangke/gpui-kit", branch = "newport/v0.8.0" }
+gpui-base = { git = "https://github.com/ruiyangke/gpui-kit", branch = "newport/v0.8.0" }
+gpui-kit = { git = "https://github.com/ruiyangke/gpui-kit", branch = "newport/v0.8.0" }
+gpui-kit-assets = { git = "https://github.com/ruiyangke/gpui-kit", branch = "newport/v0.8.0" }
+gpui-component-macros = { git = "https://github.com/ruiyangke/gpui-kit", branch = "newport/v0.8.0" }

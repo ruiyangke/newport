@@ -1,0 +1,12 @@
+[package]
+name = "newport-terminal"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+alacritty_terminal = { git = "https://github.com/alacritty/alacritty", rev = "542147067dd016fc5f49120ef0ba605a98a4e3a7", default-features = false }
+bitflags = "2"
+newport-domain = { path = "../newport-domain" }
+unicode-segmentation = "1.13"
+unicode-width = "0.2.2"

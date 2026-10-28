@@ -1,0 +1,1691 @@
+use newport_agent::wire;
+use std::{
+    fs,
+    io::Write,
+    process::{Child, ChildStdin, Command, Stdio},
+    sync::mpsc,
+    time::Duration,
+};
+static WAYLAND_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+const BIN: &str = env!("CARGO_BIN_EXE_newport-agent");
+struct Agent {
+    child: Child,
+    input: Option<ChildStdin>,
+    events: mpsc::Receiver<(u8, Vec<u8>)>,
+}
+impl Drop for Agent {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+impl Agent {
+    fn start(home: &std::path::Path) -> Self {
+        Self::start_with(home, false)
+    }
+    fn start_with(home: &std::path::Path, native: bool) -> Self {
+        Self::features(home, native, &["--clipboard", "--browser"])
+    }
+    fn features(home: &std::path::Path, native: bool, features: &[&str]) -> Self {
+        let mut child = Command::new(BIN)
+            .args(["serve", "test-client"])
+            .args(features)
+            .env("HOME", home)
+            .env("NEWPORT_CLIPBOARD_NATIVE", if native { "1" } else { "0" })
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    home.join("bin").display(),
+                    std::env::var("PATH").unwrap()
+                ),
+            )
+            .env("WAYLAND_DISPLAY", "wayland-test")
+            .env_remove("DISPLAY")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take();
+        let mut output = child.stdout.take().unwrap();
+        let (tx, events) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(event) = wire::read(&mut output) {
+                if tx.send(event).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            child,
+            input,
+            events,
+        }
+    }
+    fn event(&self, expected: u8) -> Vec<u8> {
+        let (kind, data) = self
+            .events
+            .recv_timeout(Duration::from_secs(5))
+            .expect("agent event");
+        assert_eq!(kind, expected, "{}", String::from_utf8_lossy(&data));
+        data
+    }
+    fn send(&mut self, kind: u8, data: &[u8]) {
+        wire::write(self.input.as_mut().unwrap(), kind, data).unwrap();
+    }
+    fn stopped(&mut self) {
+        for _ in 0..200 {
+            if self.child.try_wait().unwrap().is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("agent did not stop");
+    }
+}
+fn archive() -> Vec<u8> {
+    let mut tar = tar::Builder::new(Vec::new());
+    for (name, data) in [
+        ("text/plain", b"hello from Mac".as_slice()),
+        ("image/png", include_bytes!("pixel.png").as_slice()),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o600);
+        header.set_cksum();
+        tar.append_data(&mut header, name, data).unwrap();
+    }
+    tar.into_inner().unwrap()
+}
+/// Run a Needle command as a shell without a desktop would. Tests set
+/// WAYLAND_DISPLAY for the whole process while they run; inheriting it would
+/// make the command hand the request to the system's clipboard instead.
+fn cmd(home: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new(BIN)
+        .args(args)
+        .env("HOME", home)
+        .env_remove("DISPLAY")
+        .env_remove("XAUTHORITY")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("WAYLAND_SOCKET")
+        .output()
+        .unwrap()
+}
+
+fn refreshed_shell(home: &std::path::Path, script: &str) -> Command {
+    let mut command = Command::new("sh");
+    command
+        .args([
+            "-eu",
+            "-c",
+            &format!("eval \"$(\"$AGENT\" env --shell sh)\"; {script}"),
+        ])
+        .env_clear()
+        .env("HOME", home)
+        .env("AGENT", BIN)
+        .env("XDG_RUNTIME_DIR", home)
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", home.join("native").display()),
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+fn install_helper_fixture(home: &std::path::Path) {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let bin = home.join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    symlink(BIN, bin.join("newport-agent")).unwrap();
+    assert!(cmd(home, &["install"]).status.success());
+    assert!(
+        !bin.join("wl-copy").exists(),
+        "wl-copy stays a native command"
+    );
+    fs::create_dir(home.join("native")).unwrap();
+    for name in ["xclip", "wl-paste", "xdg-open", "wl-copy"] {
+        let path = home.join("native").join(name);
+        fs::write(&path, format!("#!/bin/sh\nprintf 'native:{name}'\n")).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+#[test]
+fn refreshed_ordinary_shell_routes_helpers_without_a_rendering_display() {
+    for clipboard in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        install_helper_fixture(home.path());
+        let features = if clipboard {
+            &["--clipboard", "--browser"][..]
+        } else {
+            &["--browser"][..]
+        };
+        let mut agent = Agent::features(home.path(), false, features);
+        agent.event(b'R');
+        if clipboard {
+            agent.send(b'S', &archive());
+            agent.event(b'A');
+        }
+        for helper in ["xclip -selection clipboard -o", "wl-paste --no-newline"] {
+            let output = refreshed_shell(
+                home.path(),
+                &format!(
+                "test \"${{DISPLAY+x}}\" != x; test \"${{WAYLAND_DISPLAY+x}}\" != x; exec {helper}"
+            ),
+            )
+            .output()
+            .unwrap();
+            assert_eq!(output.status.success(), clipboard, "{helper}: {output:?}");
+            if clipboard {
+                assert_eq!(output.stdout, b"hello from Mac");
+            } else {
+                assert!(
+                    output.stdout.is_empty(),
+                    "revocation must not fall through to native"
+                );
+            }
+        }
+        let opener = refreshed_shell(
+            home.path(),
+            "exec xdg-open https://example.com/ordinary-shell",
+        )
+        .spawn()
+        .unwrap();
+        let (id, url) = wire::parse_browser_request(&agent.event(b'O')).unwrap();
+        assert_eq!(url, "https://example.com/ordinary-shell");
+        agent.send(b'B', &wire::browser_reply(id, true, None).unwrap());
+        let output = opener.wait_with_output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn refreshed_host_display_keeps_native_helpers_despite_a_matching_clipboard_display_number() {
+    let home = tempfile::tempdir().unwrap();
+    install_helper_fixture(home.path());
+    let agent = Agent::start(home.path());
+    agent.event(b'R');
+    let display = fs::read_to_string(home.path().join(".cache/newport/clipboard/display")).unwrap();
+    for (helper, expected) in [
+        ("xclip -selection clipboard -o", "native:xclip"),
+        ("wl-paste --no-newline", "native:wl-paste"),
+        ("xdg-open file:///host-desktop", "native:xdg-open"),
+        ("wl-copy", "native:wl-copy"),
+    ] {
+        let output = refreshed_shell(home.path(), &format!("exec {helper}"))
+            .env("DISPLAY", display.trim())
+            .env("XAUTHORITY", home.path().join("genuine-host-cookie"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{helper}: {output:?}");
+        assert_eq!(output.stdout, expected.as_bytes());
+    }
+    assert!(
+        agent.events.try_recv().is_err(),
+        "host helpers never reach Newport"
+    );
+}
+
+#[test]
+fn ordinary_terminal_without_gui_lease_gets_existing_actionable_handoff_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let program = home.path().join("fixture-gui");
+    fs::write(
+        &program,
+        "#!/bin/sh\nprintf incorrectly-launched > \"$HOME/launched\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    let agent = Agent::features(home.path(), false, &["--clipboard"]);
+    agent.event(b'R');
+    let output = refreshed_shell(
+        home.path(),
+        "test \"${DISPLAY+x}\" != x; exec \"$AGENT\" gui --program \"$HOME/fixture-gui\" --",
+    )
+    .env("NEWPORT_TERMINAL", uuid::Uuid::new_v4().to_string())
+    .env("XDG_DATA_DIRS", home.path().join("empty-desktop-catalogue"))
+    .output()
+    .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("GUI connection unavailable:"), "{error}");
+    assert!(
+        error.contains("Check the server connection in Newport and run the command again."),
+        "{error}"
+    );
+    assert!(!home.path().join("launched").exists());
+}
+
+#[test]
+fn gui_notices_require_rendering_and_keep_clipboard_permissions_separate() {
+    use newport_agent::integration_control::{self as control, Applied, Permissions};
+    use x11rb::{
+        connection::Connection,
+        protocol::xproto::*,
+        rust_connection::{DefaultStream, RustConnection},
+    };
+    let _guard = WAYLAND_ENV.lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut agent = Agent::features(home.path(), false, &["--managed"]);
+    agent.event(b'R');
+    let root = home.path().join(".cache/newport/clipboard");
+    // The GUI guard can be enabled with both sharing permissions disabled.
+    agent.send(b'G', &[]);
+    agent.event(b'A');
+    assert_eq!(
+        fs::read_to_string(root.join("features")).unwrap().trim(),
+        "gui"
+    );
+    assert!(!root.join("clipboard.sock").exists());
+    let connect = || {
+        let display = fs::read_to_string(root.join("display")).unwrap();
+        let socket = std::os::unix::net::UnixStream::connect(format!(
+            "/tmp/.X11-unix/X{}",
+            &display.trim()[1..]
+        ))
+        .unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let stream = DefaultStream::from_unix_stream(socket).unwrap().0;
+        let auth = fs::read(root.join("Xauthority")).unwrap();
+        RustConnection::connect_to_stream_with_auth_info(
+            stream,
+            0,
+            b"MIT-MAGIC-COOKIE-1".to_vec(),
+            auth[auth.len() - 16..].to_vec(),
+        )
+        .unwrap()
+    };
+    let x = connect();
+    let w = x.generate_id().unwrap();
+    x.create_window(
+        0,
+        w,
+        x.setup().roots[0].root,
+        0,
+        0,
+        1,
+        1,
+        0,
+        WindowClass::INPUT_OUTPUT,
+        0,
+        &CreateWindowAux::new(),
+    )
+    .unwrap()
+    .check()
+    .unwrap();
+    // Xlib/arboard create a hidden window and GC and query clipboard extensions.
+    let gc = x.generate_id().unwrap();
+    x.create_gc(gc, w, &CreateGCAux::new())
+        .unwrap()
+        .check()
+        .unwrap();
+    x.query_extension(b"XFIXES").unwrap().reply().unwrap();
+    let clipboard = x
+        .intern_atom(false, b"CLIPBOARD")
+        .unwrap()
+        .reply()
+        .unwrap()
+        .atom;
+    assert_eq!(
+        x.get_selection_owner(clipboard)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .owner,
+        0
+    );
+    agent.send(b'H', &[]);
+    agent.event(b'A'); // No G event from connecting or clipboard negotiation.
+    x.query_extension(b"GLX").unwrap().reply().unwrap();
+    assert!(agent.event(b'G').is_empty());
+    x.query_extension(b"RENDER").unwrap().reply().unwrap();
+    let _ = x.map_window(w).unwrap().check();
+    agent.send(b'H', &[]);
+    agent.event(b'A'); // One GUI attempt, despite several rendering requests.
+    drop(x);
+    for (revision, clipboard) in [(1, true), (2, false), (3, true), (4, false)] {
+        agent.send(
+            b'P',
+            &control::encode(&Permissions {
+                revision,
+                clipboard,
+                browser: false,
+            })
+            .unwrap(),
+        );
+        let applied: Applied = control::decode(&agent.event(b'A')).unwrap();
+        assert_eq!(applied.permissions.clipboard, clipboard);
+        assert!(applied.error.is_none());
+        assert!(root.join("wayland.sock").exists());
+        assert!(root.join("display").exists());
+        assert!(
+            fs::read_to_string(root.join("features"))
+                .unwrap()
+                .split_whitespace()
+                .any(|s| s == "gui")
+        );
+        if !clipboard {
+            assert!(!root.join("clipboard.sock").exists());
+            let x = connect();
+            let atom = x
+                .intern_atom(false, b"CLIPBOARD")
+                .unwrap()
+                .reply()
+                .unwrap()
+                .atom;
+            assert_eq!(
+                x.get_selection_owner(atom).unwrap().reply().unwrap().owner,
+                0
+            );
+        }
+    }
+    agent.send(b'Q', &[]);
+    agent.stopped();
+}
+
+#[test]
+fn managed_permissions_change_in_place_and_revocation_discards_pending_clipboard() {
+    use newport_agent::integration_control::{self as control, Applied, Hello, Permissions};
+    let _guard = WAYLAND_ENV.lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut agent = Agent::features(home.path(), false, &["--managed"]);
+    let hello: Hello = control::decode(&agent.event(b'R')).unwrap();
+    hello.validate().unwrap();
+    let pid = agent.child.id();
+    let root = home.path().join(".cache/newport/clipboard");
+    assert_eq!(
+        fs::read_to_string(root.join("features")).unwrap().trim(),
+        ""
+    );
+    assert!(!root.join("wayland.sock").exists());
+    let enable = Permissions {
+        revision: 1,
+        clipboard: true,
+        browser: true,
+    };
+    agent.send(b'P', &control::encode(&enable).unwrap());
+    let applied: Applied = control::decode(&agent.event(b'A')).unwrap();
+    assert_eq!(applied.permissions, enable);
+    assert_eq!(applied.error, None);
+    agent.send(
+        b'M',
+        &rmp_serde::to_vec(&(42i64, vec!["text/plain"])).unwrap(),
+    );
+    agent.event(b'A');
+    let mut reader = Command::new(BIN)
+        .args(["clipboard", "-o"])
+        .env("HOME", home.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pending = agent.event(b'C');
+    let (request_id, revision, _): (u64, i64, String) = rmp_serde::from_slice(&pending).unwrap();
+    let disable = Permissions {
+        revision: 2,
+        clipboard: false,
+        browser: true,
+    };
+    agent.send(b'P', &control::encode(&disable).unwrap());
+    let applied: Applied = control::decode(&agent.event(b'A')).unwrap();
+    assert_eq!(applied.permissions, disable);
+    for _ in 0..100 {
+        if reader.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        reader.try_wait().unwrap().is_some(),
+        "revocation must unblock pending readers"
+    );
+    assert!(!reader.wait().unwrap().success());
+    assert!(!root.join("clipboard.sock").exists());
+    assert!(!root.join("wayland.sock").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("features")).unwrap().trim(),
+        "browser"
+    );
+    let late = rmp_serde::to_vec(&(
+        request_id,
+        revision,
+        0u8,
+        true,
+        serde_bytes::Bytes::new(b"obsolete"),
+    ))
+    .unwrap();
+    agent.send(b'D', &late);
+    agent.send(b'H', &[]);
+    agent.event(b'A');
+    assert!(!root.join("clipboard.sock").exists());
+    // A delayed earlier permission message cannot restore access.
+    agent.send(b'P', &control::encode(&enable).unwrap());
+    let stale: Applied = control::decode(&agent.event(b'A')).unwrap();
+    assert_eq!(stale.permissions, disable);
+    let reenable = Permissions {
+        revision: 3,
+        clipboard: true,
+        browser: false,
+    };
+    agent.send(b'P', &control::encode(&reenable).unwrap());
+    let applied: Applied = control::decode(&agent.event(b'A')).unwrap();
+    assert_eq!(applied.permissions, reenable);
+    agent.send(
+        b'M',
+        &rmp_serde::to_vec(&(43i64, vec!["text/plain"])).unwrap(),
+    );
+    agent.event(b'A');
+    assert!(root.join("clipboard.sock").exists());
+    assert_eq!(agent.child.id(), pid);
+    assert!(agent.child.try_wait().unwrap().is_none());
+    assert!(
+        !home.path().join(".bashrc").exists(),
+        "permissions must not edit shell startup"
+    );
+    agent.send(b'Q', &[]);
+    agent.stopped();
+}
+
+#[test]
+fn managed_browser_revocation_rejects_pending_request_without_ending_session() {
+    use newport_agent::integration_control::{self as control, Applied, Permissions};
+    let _guard = WAYLAND_ENV.lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut agent = Agent::features(home.path(), false, &["--managed"]);
+    agent.event(b'R');
+    agent.send(
+        b'P',
+        &control::encode(&Permissions {
+            revision: 1,
+            clipboard: false,
+            browser: true,
+        })
+        .unwrap(),
+    );
+    agent.event(b'A');
+    let home_path = home.path().to_owned();
+    let open = std::thread::spawn(move || cmd(&home_path, &["open", "https://example.com"]));
+    agent.event(b'O');
+    agent.send(
+        b'P',
+        &control::encode(&Permissions {
+            revision: 2,
+            clipboard: false,
+            browser: false,
+        })
+        .unwrap(),
+    );
+    let applied: Applied = control::decode(&agent.event(b'A')).unwrap();
+    assert!(!applied.permissions.browser);
+    assert!(!open.join().unwrap().status.success());
+    agent.send(b'H', &[]);
+    agent.event(b'A');
+    agent.send(b'Q', &[]);
+    agent.stopped();
+}
+
+#[test]
+fn disabling_browser_keeps_pending_clipboard_transfer_and_socket() {
+    use newport_agent::integration_control::{self as control, Permissions};
+    use std::os::unix::fs::MetadataExt;
+    let _guard = WAYLAND_ENV.lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut agent = Agent::features(home.path(), false, &["--managed"]);
+    agent.event(b'R');
+    agent.send(
+        b'P',
+        &control::encode(&Permissions {
+            revision: 1,
+            clipboard: true,
+            browser: true,
+        })
+        .unwrap(),
+    );
+    agent.event(b'A');
+    agent.send(
+        b'M',
+        &rmp_serde::to_vec(&(42i64, vec!["text/plain"])).unwrap(),
+    );
+    agent.event(b'A');
+    let socket = home.path().join(".cache/newport/clipboard/clipboard.sock");
+    let inode = fs::metadata(&socket).unwrap().ino();
+    let read_home = home.path().to_owned();
+    let read = std::thread::spawn(move || cmd(&read_home, &["clipboard", "-o"]));
+    let (id, revision, _): (u64, i64, String) = rmp_serde::from_slice(&agent.event(b'C')).unwrap();
+    agent.send(
+        b'P',
+        &control::encode(&Permissions {
+            revision: 2,
+            clipboard: true,
+            browser: false,
+        })
+        .unwrap(),
+    );
+    agent.event(b'A');
+    assert_eq!(fs::metadata(socket).unwrap().ino(), inode);
+    agent.send(
+        b'D',
+        &rmp_serde::to_vec(&(
+            id,
+            revision,
+            0u8,
+            true,
+            serde_bytes::Bytes::new(b"uninterrupted"),
+        ))
+        .unwrap(),
+    );
+    let result = read.join().unwrap();
+    assert!(result.status.success());
+    assert_eq!(result.stdout, b"uninterrupted");
+    agent.send(b'Q', &[]);
+    agent.stopped();
+}
+#[test]
+fn single_agent_clipboard_browser_displays_and_disconnect_cleanup() {
+    let _guard = WAYLAND_ENV.lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut agent = Agent::start(home.path());
+    assert_eq!(agent.event(b'R'), wire::VERSION.as_bytes());
+    agent.send(b'S', &archive());
+    agent.event(b'A');
+    let output = cmd(home.path(), &["clipboard", "-selection", "clipboard", "-o"]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"hello from Mac");
+    let root = home.path().join(".cache/newport/clipboard");
+    assert!(root.join("Xauthority").is_file());
+    assert!(root.join("display").is_file());
+    std::env::set_var("WAYLAND_DISPLAY", root.join("wayland.sock"));
+    std::env::remove_var("WAYLAND_SOCKET");
+    let (mut png, _) = wl_clipboard_rs::paste::get_contents(
+        wl_clipboard_rs::paste::ClipboardType::Regular,
+        wl_clipboard_rs::paste::Seat::Unspecified,
+        wl_clipboard_rs::paste::MimeType::Specific("image/png"),
+    )
+    .unwrap();
+    let mut pixels = Vec::new();
+    std::io::Read::read_to_end(&mut png, &mut pixels).unwrap();
+    assert_eq!(pixels, include_bytes!("pixel.png"));
+    let mut opener = Command::new(BIN)
+        .args(["open", "https://example.com/login?code=123"])
+        .env("HOME", home.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    assert_eq!(
+        wire::parse_browser_request(&agent.event(b'O')).unwrap(),
+        (1, "https://example.com/login?code=123".into())
+    );
+    assert!(opener.try_wait().unwrap().is_none());
+    agent.send(b'B', &wire::browser_reply(1, true, None).unwrap());
+    let opened = opener.wait_with_output().unwrap();
+    assert!(
+        opened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    assert!(
+        !cmd(home.path(), &["open", "file:///tmp/private"])
+            .status
+            .success()
+    );
+    agent.send(b'H', &[]);
+    agent.event(b'A');
+    drop(agent.input.take());
+    agent.stopped();
+    assert!(!root.join("snapshot.tar").exists());
+    assert!(!root.join("agent.sock").exists());
+    assert!(!root.join("wayland.sock").exists());
+    assert!(
+        !cmd(home.path(), &["open", "https://example.com"])
+            .status
+            .success()
+    );
+    let mut restarted = Agent::start(home.path());
+    restarted.event(b'R');
+    restarted.send(b'Q', &[]);
+    restarted.stopped();
+}
+#[test]
+fn duplicate_agent_cannot_take_over_or_delete_owner_snapshot() {
+    let home = tempfile::tempdir().unwrap();
+    let mut first = Agent::start(home.path());
+    first.event(b'R');
+    first.send(b'S', &archive());
+    first.event(b'A');
+    let mut second = Agent::start(home.path());
+    second.event(b'T');
+    second.stopped();
+    assert!(cmd(home.path(), &["clipboard", "-o"]).status.success());
+    let foreign = Command::new(BIN)
+        .args(["serve", "different-client", "--clipboard"])
+        .env("HOME", home.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!foreign.status.success());
+    assert_eq!(wire::read(&mut foreign.stdout.as_slice()).unwrap().0, b'E');
+    assert!(cmd(home.path(), &["clipboard", "-o"]).status.success());
+    first.send(b'H', &[]);
+    first.event(b'A');
+}
+#[test]
+fn invalid_and_oversized_frames_stop_without_publishing() {
+    for oversized in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let mut agent = Agent::start(home.path());
+        agent.event(b'R');
+        if oversized {
+            agent
+                .input
+                .as_mut()
+                .unwrap()
+                .write_all(&[b'S', 255, 255, 255, 255])
+                .unwrap();
+        } else {
+            agent.send(b'S', b"not a tar archive");
+        }
+        agent.event(b'E');
+        agent.stopped();
+        assert!(
+            !home
+                .path()
+                .join(".cache/newport/clipboard/snapshot.tar")
+                .exists()
+        );
+    }
+}
+#[test]
+fn installer_replaces_our_shims_but_preserves_unrelated_commands() {
+    use std::os::unix::fs::symlink;
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    symlink("newport-agent", bin.join("xclip")).unwrap();
+    symlink("custom-clip", bin.join("wl-paste")).unwrap();
+    fs::write(bin.join("xdg-open"), "unrelated").unwrap();
+    for _ in 0..2 {
+        assert!(cmd(home.path(), &["install"]).status.success());
+        for name in ["xclip", "xsel", "newport-browser"] {
+            assert_eq!(
+                fs::read_link(bin.join(name)).unwrap().to_str(),
+                Some("newport-agent")
+            );
+        }
+        assert_eq!(
+            fs::read_link(bin.join("wl-paste")).unwrap().to_str(),
+            Some("custom-clip")
+        );
+        assert_eq!(
+            fs::read_to_string(bin.join("xdg-open")).unwrap(),
+            "unrelated"
+        );
+    }
+    fs::remove_file(bin.join("xsel")).unwrap();
+    fs::write(bin.join("xsel"), "their xsel").unwrap();
+    assert!(cmd(home.path(), &["install"]).status.success());
+    assert_eq!(fs::read_to_string(bin.join("xsel")).unwrap(), "their xsel");
+}
+
+#[test]
+fn xsel_reads_clipboard_without_bypassing_permissions_or_native_selections() {
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    let home = tempfile::tempdir().unwrap();
+    let native_bin = home.path().join("native-bin");
+    fs::create_dir(&native_bin).unwrap();
+    let native = native_bin.join("xsel");
+    fs::write(&native, "#!/bin/sh\nprintf 'native:%s\\n' \"$*\"\n").unwrap();
+    fs::set_permissions(&native, fs::Permissions::from_mode(0o700)).unwrap();
+    let read = |args: &[&str], desktop: bool| {
+        let mut command = Command::new(BIN);
+        command
+            .arg0("xsel")
+            .args(args)
+            .env("HOME", home.path())
+            .env("PATH", &native_bin)
+            .env_remove("NEWPORT_SESSION")
+            .env_remove("DISPLAY")
+            .env_remove("XAUTHORITY")
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("WAYLAND_SOCKET");
+        if desktop {
+            command.env("DISPLAY", ":42");
+        }
+        command.output().unwrap()
+    };
+    let mut agent = Agent::start(home.path());
+    agent.event(b'R');
+    agent.send(b'S', &archive());
+    agent.event(b'A');
+    for args in [
+        vec!["--clipboard", "--output"],
+        vec!["-b", "-o"],
+        vec!["-ob"],
+    ] {
+        let result = read(&args, false);
+        assert!(result.status.success(), "{result:?}");
+        assert_eq!(result.stdout, b"hello from Mac");
+    }
+    // Unsupported requests and a real server desktop retain xsel's native behavior.
+    for (args, desktop) in [
+        (vec!["-o"], false),
+        (vec!["--clipboard", "--input"], false),
+        (vec!["-bo"], true),
+    ] {
+        let result = read(&args, desktop);
+        assert!(result.status.success(), "{result:?}");
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            format!("native:{}\n", args.join(" "))
+        );
+    }
+    agent.send(b'Q', &[]);
+    agent.stopped();
+    // An installed native command must not turn a revoked headless read into success.
+    assert!(!read(&["--clipboard", "--output"], false).status.success());
+    fs::remove_file(native).unwrap();
+    for args in [
+        vec!["-o"],
+        vec!["-b"],
+        vec!["-bi"],
+        vec!["-bo", "--primary"],
+    ] {
+        assert!(!read(&args, false).status.success());
+    }
+}
+#[test]
+fn web_requests_reject_unsafe_schemes_and_frames_preserve_binary_data() {
+    for value in [
+        "file:///tmp/a",
+        "javascript:alert(1)",
+        "https://u:p@host",
+        "https://x\nhttps://y",
+        "",
+    ] {
+        assert!(wire::web_url(value).is_none());
+    }
+    let data = [0, 255, 13, 10, 5];
+    let frame = wire::encode(b'S', &data).unwrap();
+    assert_eq!(
+        wire::read(&mut frame.as_slice()).unwrap(),
+        (b'S', data.to_vec())
+    );
+}
+
+#[test]
+fn native_publishing_prefers_wayland_then_x11_then_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+    for (wl, x, expected) in [(true, true, "wl"), (false, true, "x"), (false, false, "")] {
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        for (name, works, label) in [("wl-copy", wl, "wl"), ("xclip", x, "x")] {
+            let script = if works {
+                format!(
+                    "#!/bin/sh\ncat > \"$HOME/published\"\nprintf {label} > \"$HOME/backend\"\n"
+                )
+            } else {
+                "#!/bin/sh\nexit 1\n".into()
+            };
+            let path = bin.join(name);
+            fs::write(&path, script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut agent = Agent::start_with(home.path(), true);
+        agent.event(b'R');
+        agent.send(b'S', &archive());
+        agent.event(b'A');
+        assert_eq!(
+            fs::read_to_string(home.path().join("backend")).unwrap_or_default(),
+            expected
+        );
+        if !expected.is_empty() {
+            assert_eq!(
+                fs::read(home.path().join("published")).unwrap(),
+                b"hello from Mac"
+            );
+        }
+        assert_eq!(
+            cmd(home.path(), &["clipboard", "-o"]).stdout,
+            b"hello from Mac"
+        );
+        agent.send(b'Q', &[]);
+        agent.stopped();
+    }
+}
+
+#[test]
+fn upload_installer_verifies_hash_and_preserves_unrelated_binary() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    // macOS lacks sha256sum; keep the production Linux installer unchanged.
+    let shim = bin.join("sha256sum");
+    fs::write(&shim, "#!/bin/sh\nexec shasum -a 256 \"$@\"\n").unwrap();
+    fs::set_permissions(shim, fs::Permissions::from_mode(0o700)).unwrap();
+    let digest = Command::new("shasum")
+        .args(["-a", "256", BIN])
+        .output()
+        .unwrap();
+    assert!(digest.status.success());
+    let hash = String::from_utf8(digest.stdout)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    let install = |hash: &str| {
+        let mut process = Command::new("sh")
+            .args([
+                "-c",
+                include_str!("../../../crates/newport-backend/src/agent-install.sh"),
+                "install",
+                hash,
+                "raw",
+            ])
+            .env("HOME", home.path())
+            .env("SHELL", "/bin/bash")
+            .env_remove("ZDOTDIR")
+            .env_remove("XDG_CONFIG_HOME")
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        process
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&fs::read(BIN).unwrap())
+            .ok();
+        process.wait().unwrap().success()
+    };
+    assert!(!install(&"0".repeat(64)));
+    assert!(!home.path().join(".local/bin/newport-agent").exists());
+    assert!(install(&hash));
+    let agent_path = home.path().join(".local/bin/newport-agent");
+    let candidate = home.path().join(format!(
+        ".local/share/newport/needle/builds/{hash}/newport-agent"
+    ));
+    assert!(
+        !agent_path.exists(),
+        "upload only stages; it must not activate"
+    );
+    assert_eq!(fs::read(&candidate).unwrap(), fs::read(BIN).unwrap());
+    let activate = || cmd(home.path(), &["deployment", "install", &hash]);
+    assert!(activate().status.success());
+    assert_eq!(fs::read_link(&agent_path).unwrap(), candidate);
+    use std::os::unix::fs::MetadataExt;
+    let before = fs::metadata(&agent_path).unwrap().ino();
+    assert!(install(&hash));
+    assert!(activate().status.success());
+    assert_eq!(
+        fs::metadata(&agent_path).unwrap().ino(),
+        before,
+        "immutable builds are reused"
+    );
+    assert!(!install(&"0".repeat(64)));
+    assert_eq!(fs::read(&agent_path).unwrap(), fs::read(BIN).unwrap());
+    fs::remove_file(&agent_path).unwrap();
+    fs::write(&agent_path, b"unrelated command").unwrap();
+    assert!(!activate().status.success());
+    assert_eq!(fs::read(&agent_path).unwrap(), b"unrelated command");
+}
+
+#[test]
+fn unrelated_socket_file_is_preserved_and_not_treated_as_reconnect() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join(".cache/newport/clipboard");
+    fs::create_dir_all(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(root.join("agent-client"), "test-client").unwrap();
+    fs::write(root.join("agent.sock"), "unrelated").unwrap();
+    let mut agent = Agent::start(home.path());
+    let error = String::from_utf8(agent.event(b'E')).unwrap();
+    assert!(!error.contains("SSH transport interrupted"));
+    agent.stopped();
+    assert_eq!(
+        fs::read_to_string(root.join("agent.sock")).unwrap(),
+        "unrelated"
+    );
+}
+
+#[test]
+fn xdg_open_without_native_desktop_uses_permitted_browser() {
+    for (display, value) in [
+        ("DISPLAY", ":99"),
+        ("DISPLAY", ""),
+        ("WAYLAND_DISPLAY", "stale-wayland"),
+        ("WAYLAND_SOCKET", "42"),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let mut agent = Agent::features(home.path(), false, &["--browser"]);
+        agent.event(b'R');
+        let mut opener = xdg_command(home.path());
+        let url = "https://example.com/login?next=/login/cli/test&keep=1#fragment";
+        let child = opener.arg(url).env(display, value).spawn().unwrap();
+        assert_eq!(
+            wire::parse_browser_request(&agent.event(b'O')).unwrap(),
+            (1, url.into())
+        );
+        agent.send(b'B', &wire::browser_reply(1, true, None).unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+fn xdg_command(home: &std::path::Path) -> Command {
+    use std::os::unix::process::CommandExt;
+    let mut command = Command::new(BIN);
+    command
+        .arg0("xdg-open")
+        .env("HOME", home)
+        .env("PATH", home.join("bin"))
+        .env_remove("NEWPORT_SESSION")
+        .env_remove("DISPLAY")
+        .env_remove("XAUTHORITY")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("WAYLAND_SOCKET")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+#[test]
+fn xdg_open_fallback_preserves_browser_permissions_and_url_validation() {
+    for enabled in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let features = if enabled {
+            &["--browser"][..]
+        } else {
+            &["--clipboard"][..]
+        };
+        let agent = Agent::features(home.path(), false, features);
+        agent.event(b'R');
+        let urls = if enabled {
+            vec![
+                "file:///etc/passwd",
+                "javascript:alert(1)",
+                "https://user:secret@example.com",
+            ]
+        } else {
+            vec!["https://example.com"]
+        };
+        for url in urls {
+            let result = xdg_command(home.path())
+                .env("DISPLAY", ":99")
+                .arg(url)
+                .output()
+                .unwrap();
+            assert!(!result.status.success());
+        }
+        assert!(
+            agent.events.try_recv().is_err(),
+            "rejected URLs must not be forwarded"
+        );
+    }
+}
+
+#[test]
+fn xdg_open_preserves_real_desktop_opener() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(home.path().join("bin")).unwrap();
+    let native = home.path().join("bin/xdg-open");
+    fs::write(&native, "#!/bin/sh\nprintf '%s' \"$1\"\n").unwrap();
+    fs::set_permissions(&native, fs::Permissions::from_mode(0o700)).unwrap();
+    let result = xdg_command(home.path())
+        .env("DISPLAY", ":0")
+        .arg("file:///desktop.txt")
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert_eq!(result.stdout, b"file:///desktop.txt");
+}
+
+#[test]
+fn clipboard_display_wrappers_route_browser_without_an_override() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    for backend in ["x11", "wayland"] {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join("bin")).unwrap();
+        fs::create_dir(home.path().join("native")).unwrap();
+        let opener = home.path().join("bin/xdg-open");
+        symlink(BIN, &opener).unwrap();
+        let native = home.path().join("native/xdg-open");
+        fs::write(&native, "#!/bin/sh\nexit 42\n").unwrap();
+        fs::set_permissions(&native, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut agent = Agent::features(home.path(), false, &["--browser"]);
+        agent.event(b'R');
+        let url = "https://example.com/login";
+        let child = Command::new(BIN)
+            .args(["display", "--backend", backend, "--"])
+            .arg(&opener)
+            .arg(url)
+            .env("HOME", home.path())
+            .env("PATH", home.path().join("native"))
+            .env_remove("NEWPORT_SESSION")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        assert_eq!(
+            wire::parse_browser_request(&agent.event(b'O')).unwrap(),
+            (1, url.into())
+        );
+        agent.send(b'B', &wire::browser_reply(1, true, None).unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn browser_only_does_not_create_clipboard_services_or_accept_snapshots() {
+    let home = tempfile::tempdir().unwrap();
+    let mut agent = Agent::features(home.path(), false, &["--browser"]);
+    agent.event(b'R');
+    let root = home.path().join(".cache/newport/clipboard");
+    for name in ["snapshot.tar", "wayland.sock", "display", "Xauthority"] {
+        assert!(!root.join(name).exists(), "{name}");
+    }
+    let mut opener = Command::new(BIN)
+        .args(["open", "https://example.com/#fragment"])
+        .env("HOME", home.path())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    assert_eq!(
+        wire::parse_browser_request(&agent.event(b'O')).unwrap(),
+        (1, "https://example.com/#fragment".into())
+    );
+    agent.send(b'B', &wire::browser_reply(999, true, None).unwrap());
+    agent.send(b'H', b"");
+    agent.event(b'A');
+    assert!(opener.try_wait().unwrap().is_none());
+    agent.send(
+        b'B',
+        &wire::browser_reply(1, false, Some("Cannot listen on callback port")).unwrap(),
+    );
+    let result = opener.wait_with_output().unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Cannot listen on callback port"));
+    let env = Command::new(BIN)
+        .arg("env")
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    let env = String::from_utf8(env.stdout).unwrap();
+    assert!(env.contains("newport-browser"));
+    assert!(!env.contains("DISPLAY"));
+    agent.send(b'S', &archive());
+    agent.event(b'E');
+    agent.stopped();
+    assert!(!root.join("snapshot.tar").exists());
+}
+
+#[test]
+fn clipboard_only_rejects_browser_requests_without_interrupting_clipboard() {
+    let home = tempfile::tempdir().unwrap();
+    let mut agent = Agent::features(home.path(), false, &["--clipboard"]);
+    agent.event(b'R');
+    let opener = Command::new(BIN)
+        .args(["open", "https://example.com"])
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(!opener.status.success());
+    agent.send(b'S', &archive());
+    agent.event(b'A');
+    let env = Command::new(BIN)
+        .arg("env")
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    let env = String::from_utf8(env.stdout).unwrap();
+    assert!(!env.contains("DISPLAY"));
+    assert!(!env.contains("BROWSER"));
+    agent.send(b'Q', &[]);
+    agent.stopped();
+}
+
+#[test]
+fn browser_warning_is_nonfatal_and_original_url_is_preserved() {
+    let home = tempfile::tempdir().unwrap();
+    let mut agent = Agent::features(home.path(), false, &["--browser"]);
+    agent.event(b'R');
+    let url =
+        "https://example.com/login?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fcallback#keep";
+    let opener = Command::new(BIN)
+        .args(["open", url])
+        .env("HOME", home.path())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    assert_eq!(
+        wire::parse_browser_request(&agent.event(b'O')).unwrap(),
+        (1, url.into())
+    );
+    agent.send(
+        b'B',
+        &wire::browser_reply(1, true, Some("Browser opened without callback forwarding.")).unwrap(),
+    );
+    let output = opener.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("without callback forwarding"));
+    agent.send(b'H', b"");
+    agent.event(b'A');
+}
+
+#[test]
+fn demand_clipboard_fetch_cache_invalidation_and_browser_interleave() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join(".cache/newport/clipboard");
+    let mut agent = Agent::start(home.path());
+    agent.event(b'R');
+    agent.send(
+        b'M',
+        &rmp_serde::to_vec(&(123i64, vec!["image/png", "text/plain"])).unwrap(),
+    );
+    agent.event(b'A');
+    assert!(!root.join("snapshot.tar").exists());
+    let listed = cmd(home.path(), &["clipboard", "-o", "-t", "TARGETS"]);
+    assert!(listed.status.success());
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("image/png"));
+    assert!(
+        agent.events.try_recv().is_err(),
+        "listing must not fetch data"
+    );
+    let path = home.path().to_owned();
+    let read = std::thread::spawn(move || cmd(&path, &["clipboard", "-o", "-t", "image/png"]));
+    let (id, revision, format): (u64, i64, String) =
+        rmp_serde::from_slice(&agent.event(b'C')).unwrap();
+    assert_eq!((revision, format.as_str()), (123, "image/png"));
+    let chunk = |done: bool, bytes: &[u8]| {
+        rmp_serde::to_vec(&(id, 123i64, 0u8, done, serde_bytes::Bytes::new(bytes))).unwrap()
+    };
+    agent.send(b'D', &chunk(false, b"PNG first"));
+    // Heartbeats and browser opens still work while a clipboard response is incomplete.
+    agent.send(b'H', &[]);
+    agent.event(b'A');
+    let mut opener = Command::new(BIN)
+        .args(["open", "https://example.com"])
+        .env("HOME", home.path())
+        .spawn()
+        .unwrap();
+    let (id, _) = wire::parse_browser_request(&agent.event(b'O')).unwrap();
+    agent.send(b'B', &wire::browser_reply(id, true, None).unwrap());
+    assert!(opener.wait().unwrap().success());
+    agent.send(b'D', &chunk(true, b" last"));
+    let output = read.join().unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"PNG first last");
+    let cached = cmd(home.path(), &["clipboard", "-o", "-t", "image/png"]);
+    assert_eq!(cached.stdout, b"PNG first last");
+    assert!(
+        agent.events.try_recv().is_err(),
+        "cached read must not fetch again"
+    );
+    assert!(!root.join("snapshot.tar").exists());
+    agent.send(
+        b'M',
+        &rmp_serde::to_vec(&(124i64, vec!["text/plain"])).unwrap(),
+    );
+    agent.event(b'A');
+    assert!(
+        !cmd(home.path(), &["clipboard", "-o", "-t", "image/png"])
+            .status
+            .success()
+    );
+    agent.send(b'Q', &[]);
+    agent.stopped();
+    assert!(!root.join("clipboard.sock").exists());
+}
+
+#[test]
+fn wayland_paste_fetches_image_without_a_gui_notice() {
+    let _guard = WAYLAND_ENV.lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut agent = Agent::features(home.path(), false, &["--managed"]);
+    agent.event(b'R');
+    agent.send(
+        b'P',
+        &newport_agent::integration_control::encode(
+            &newport_agent::integration_control::Permissions {
+                revision: 1,
+                clipboard: true,
+                browser: false,
+            },
+        )
+        .unwrap(),
+    );
+    agent.event(b'A');
+    agent.send(b'G', &[]);
+    agent.event(b'A');
+    agent.send(
+        b'M',
+        &rmp_serde::to_vec(&(45i64, vec!["image/png"])).unwrap(),
+    );
+    agent.event(b'A');
+    let root = home.path().join(".cache/newport/clipboard");
+    std::env::set_var("WAYLAND_DISPLAY", root.join("wayland.sock"));
+    std::env::remove_var("WAYLAND_SOCKET");
+    let read = std::thread::spawn(|| {
+        let (mut pipe, _) = wl_clipboard_rs::paste::get_contents(
+            wl_clipboard_rs::paste::ClipboardType::Regular,
+            wl_clipboard_rs::paste::Seat::Unspecified,
+            wl_clipboard_rs::paste::MimeType::Specific("image/png"),
+        )
+        .unwrap();
+        let mut bytes = vec![];
+        std::io::Read::read_to_end(&mut pipe, &mut bytes).unwrap();
+        bytes
+    });
+    let (id, _, _): (u64, i64, String) = rmp_serde::from_slice(&agent.event(b'C')).unwrap();
+    let response = rmp_serde::to_vec(&(
+        id,
+        45i64,
+        0u8,
+        true,
+        serde_bytes::Bytes::new(include_bytes!("pixel.png")),
+    ))
+    .unwrap();
+    agent.send(b'D', &response);
+    assert_eq!(read.join().unwrap(), include_bytes!("pixel.png"));
+    agent.send(b'Q', &[]);
+    agent.stopped();
+}
+
+mod gui_wayland {
+    use super::*;
+    use wayland_client::{
+        Connection, Dispatch, QueueHandle,
+        protocol::{wl_compositor, wl_registry},
+    };
+    struct Gui;
+    impl Dispatch<wl_registry::WlRegistry, ()> for Gui {
+        fn event(
+            _: &mut Self,
+            registry: &wl_registry::WlRegistry,
+            event: wl_registry::Event,
+            _: &(),
+            _: &Connection,
+            queue: &QueueHandle<Self>,
+        ) {
+            if let wl_registry::Event::Global {
+                name, interface, ..
+            } = event
+            {
+                if interface == "wl_compositor" {
+                    let _ = registry.bind::<wl_compositor::WlCompositor, _, _>(name, 1, queue, ());
+                }
+            }
+        }
+    }
+    wayland_client::delegate_noop!(Gui: ignore wl_compositor::WlCompositor);
+
+    #[test]
+    fn wayland_gui_binding_requests_setup_with_sharing_off() {
+        let _guard = WAYLAND_ENV.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let mut agent = Agent::features(home.path(), false, &["--managed"]);
+        agent.event(b'R');
+        agent.send(b'G', &[]);
+        agent.event(b'A');
+        let socket = std::os::unix::net::UnixStream::connect(
+            home.path().join(".cache/newport/clipboard/wayland.sock"),
+        )
+        .unwrap();
+        let connection = Connection::from_socket(socket).unwrap();
+        let mut queue = connection.new_event_queue();
+        let _registry = connection.display().get_registry(&queue.handle(), ());
+        queue.roundtrip(&mut Gui).unwrap();
+        queue.roundtrip(&mut Gui).unwrap();
+        assert!(agent.event(b'G').is_empty());
+        agent.send(b'Q', &[]);
+        agent.stopped();
+    }
+}
+
+mod demand_x11 {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+    use x11rb::{
+        COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT, CURRENT_TIME,
+        connection::Connection,
+        protocol::{Event, xproto::*},
+        rust_connection::{DefaultStream, RustConnection},
+        wrapper::ConnectionExt as _,
+    };
+    fn atom(c: &RustConnection, name: &str) -> u32 {
+        c.intern_atom(false, name.as_bytes())
+            .unwrap()
+            .reply()
+            .unwrap()
+            .atom
+    }
+    fn window(c: &RustConnection) -> u32 {
+        let id = c.generate_id().unwrap();
+        c.create_window(
+            COPY_DEPTH_FROM_PARENT,
+            id,
+            c.setup().roots[0].root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            WindowClass::COPY_FROM_PARENT,
+            COPY_FROM_PARENT,
+            &CreateWindowAux::new()
+                .event_mask(EventMask::PROPERTY_CHANGE | EventMask::STRUCTURE_NOTIFY),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        id
+    }
+    fn read(c: &RustConnection, w: u32, kind: &str) -> Option<Vec<u8>> {
+        let selection = atom(c, "CLIPBOARD");
+        let target = atom(c, kind);
+        let property = atom(c, "TEST_PROPERTY");
+        c.delete_property(w, property).unwrap();
+        c.convert_selection(w, selection, target, property, CURRENT_TIME)
+            .unwrap();
+        c.flush().unwrap();
+        loop {
+            if let Event::SelectionNotify(e) = c.wait_for_event().unwrap() {
+                if e.property == 0 {
+                    return None;
+                }
+                break;
+            }
+        }
+        let first = c
+            .get_property(false, w, property, AtomEnum::ANY, 0, u32::MAX / 4)
+            .unwrap()
+            .reply()
+            .unwrap();
+        if first.type_ != atom(c, "INCR") {
+            c.delete_property(w, property).unwrap();
+            c.flush().unwrap();
+            return Some(first.value);
+        }
+        // Drain the initial property's queued NewValue event before acknowledging INCR.
+        c.sync().unwrap();
+        while c.poll_for_event().unwrap().is_some() {}
+        c.delete_property(w, property).unwrap();
+        c.flush().unwrap();
+        let mut result = Vec::new();
+        loop {
+            if let Event::PropertyNotify(e) = c.wait_for_event().unwrap() {
+                if e.atom == property && e.state == Property::NEW_VALUE {
+                    let p = c
+                        .get_property(true, w, property, target, 0, u32::MAX / 4)
+                        .unwrap()
+                        .reply()
+                        .unwrap();
+                    if p.value.is_empty() {
+                        return Some(result);
+                    }
+                    result.extend(p.value);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn x11_fetches_and_streams_large_clipboard_on_demand() {
+        let home = tempfile::tempdir().unwrap();
+        let mut agent = Agent::start(home.path());
+        agent.event(b'R');
+        agent.send(
+            b'M',
+            &rmp_serde::to_vec(&(87i64, vec!["image/png"])).unwrap(),
+        );
+        agent.event(b'A');
+        let root = home.path().join(".cache/newport/clipboard");
+        let display = fs::read_to_string(root.join("display")).unwrap();
+        let auth = fs::read(root.join("Xauthority")).unwrap();
+        let reader = std::thread::spawn(move || {
+            let socket = UnixStream::connect(format!(
+                "/tmp/.X11-unix/X{}",
+                display.trim().trim_start_matches(':')
+            ))
+            .unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let stream = DefaultStream::from_unix_stream(socket).unwrap().0;
+            let c = RustConnection::connect_to_stream_with_auth_info(
+                stream,
+                0,
+                b"MIT-MAGIC-COOKIE-1".to_vec(),
+                auth[auth.len() - 16..].to_vec(),
+            )
+            .unwrap();
+            let w = window(&c);
+            assert!(read(&c, w, "TARGETS").is_some());
+            read(&c, w, "image/png").unwrap()
+        });
+        let (id, _, _): (u64, i64, String) = rmp_serde::from_slice(&agent.event(b'C')).unwrap();
+        let bytes: Vec<u8> = (0..300001).map(|i| (i % 251) as u8).collect();
+        let chunks: Vec<_> = bytes.chunks(65536).collect();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let response = rmp_serde::to_vec(&(
+                id,
+                87i64,
+                0u8,
+                (i + 1 == chunks.len()),
+                serde_bytes::Bytes::new(chunk),
+            ))
+            .unwrap();
+            agent.send(b'D', &response);
+        }
+        assert_eq!(reader.join().unwrap(), bytes);
+        agent.send(b'Q', &[]);
+        agent.stopped();
+    }
+}
+
+#[test]
+fn compressed_chunks_are_decoded_before_serving_and_bad_data_is_retryable() {
+    let home = tempfile::tempdir().unwrap();
+    let mut agent = Agent::start(home.path());
+    agent.event(b'R');
+    agent.send(
+        b'M',
+        &rmp_serde::to_vec(&(900i64, vec!["text/plain"])).unwrap(),
+    );
+    agent.event(b'A');
+    let path = home.path().to_owned();
+    let read = std::thread::spawn(move || cmd(&path, &["clipboard", "-o"]));
+    let (id, _, _): (u64, i64, String) = rmp_serde::from_slice(&agent.event(b'C')).unwrap();
+    let data = vec![b'a'; 131072];
+    for (index, part) in data.chunks(65536).enumerate() {
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(part).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let (status, bytes) = if index == 0 {
+            (2, compressed)
+        } else {
+            (0, part.to_vec())
+        };
+        let response = rmp_serde::to_vec(&(
+            id,
+            900i64,
+            status,
+            (index == 1),
+            serde_bytes::Bytes::new(&bytes),
+        ))
+        .unwrap();
+        agent.send(b'D', &response);
+    }
+    let result = read.join().unwrap();
+    assert!(
+        result.status.success(),
+        "stderr={} event={:?}",
+        String::from_utf8_lossy(&result.stderr),
+        agent.events.try_recv()
+    );
+    assert_eq!(result.stdout, data);
+    agent.send(
+        b'M',
+        &rmp_serde::to_vec(&(901i64, vec!["text/plain"])).unwrap(),
+    );
+    agent.event(b'A');
+    let path = home.path().to_owned();
+    let read = std::thread::spawn(move || cmd(&path, &["clipboard", "-o"]));
+    let (id, _, _): (u64, i64, String) = rmp_serde::from_slice(&agent.event(b'C')).unwrap();
+    let response =
+        rmp_serde::to_vec(&(id, 901i64, 2u8, true, serde_bytes::Bytes::new(b"bad zlib"))).unwrap();
+    agent.send(b'D', &response);
+    assert!(!read.join().unwrap().status.success());
+    agent.send(b'H', &[]);
+    agent.event(b'A');
+    agent.send(b'Q', &[]);
+    agent.stopped();
+}
+
+#[test]
+fn gui_terminal_preserves_image_paste_and_local_browser_with_native_tools_present() {
+    gui_terminal_preserves_clipboard(None);
+}
+#[test]
+fn wayland_gui_terminal_preserves_clipboard_and_recognizes_other_displays() {
+    gui_terminal_preserves_clipboard(Some("wayland-0-newport-owned"));
+}
+#[test]
+fn absolute_wayland_gui_terminal_preserves_clipboard_and_browser_with_user_runtime() {
+    gui_terminal_preserves_clipboard(Some("/run/user/1000/newport-gui/wayland-owned"));
+}
+fn gui_terminal_preserves_clipboard(wayland: Option<&str>) {
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(home.path().join("bin")).unwrap();
+    // If the GUI display is misclassified as the host desktop, these fail the test.
+    for name in ["xclip", "wl-paste", "xdg-open"] {
+        let path = home.path().join("bin").join(name);
+        fs::write(&path, "#!/bin/sh\necho wrong-native-route >&2\nexit 93\n").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut agent = Agent::start(home.path());
+    agent.event(b'R');
+    agent.send(b'S', &archive());
+    agent.event(b'A');
+    let gui = |command: &mut Command| {
+        command
+            .env("DISPLAY", ":75")
+            .env("XAUTHORITY", "/tmp/newport-display-gui/Xauthority")
+            .env("NEWPORT_GUI_DISPLAY", ":75")
+            .env(
+                "NEWPORT_GUI_AUTHORITY",
+                "/tmp/newport-display-gui/Xauthority",
+            )
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("WAYLAND_SOCKET");
+        if let Some(display) = wayland {
+            command
+                .env_remove("DISPLAY")
+                .env_remove("XAUTHORITY")
+                .env("WAYLAND_DISPLAY", display)
+                .env("XDG_RUNTIME_DIR", home.path())
+                .env("NEWPORT_GUI_WAYLAND_DISPLAY", display)
+                .env("NEWPORT_GUI_RUNTIME_DIR", home.path());
+            if display.starts_with('/') {
+                command.env_remove("NEWPORT_GUI_RUNTIME_DIR");
+            }
+        }
+    };
+    for native_installed in [true, false] {
+        let mut read = Command::new(BIN);
+        read.arg0("xclip")
+            .args(["-selection", "clipboard", "-o", "-t", "image/png"])
+            .env("HOME", home.path())
+            .env_remove("NEWPORT_SESSION")
+            .env(
+                "PATH",
+                if native_installed {
+                    home.path().join("bin")
+                } else {
+                    home.path().join("empty")
+                },
+            );
+        gui(&mut read);
+        let read = read.output().unwrap();
+        assert!(read.status.success(), "{:?}", read);
+        assert_eq!(read.stdout, include_bytes!("pixel.png"));
+    }
+    if let Some(display) = wayland {
+        // Matching display names alone are not enough: changing the runtime
+        // directory or inherited fd selects a different native compositor.
+        for (key, value) in [
+            ("XDG_RUNTIME_DIR", "/tmp/another-desktop"),
+            ("WAYLAND_DISPLAY", "wayland-other"),
+            ("NEWPORT_GUI_WAYLAND_DISPLAY", "wayland-other"),
+            ("WAYLAND_SOCKET", "99"),
+            ("DISPLAY", ":12"),
+        ] {
+            if display.starts_with('/') && key == "XDG_RUNTIME_DIR" {
+                continue; // Absolute sockets do not resolve through the user runtime.
+            }
+            let mut read = Command::new(BIN);
+            read.args(["clipboard", "-o"])
+                .env("HOME", home.path())
+                .env("PATH", home.path().join("bin"));
+            gui(&mut read);
+            let read = read.env(key, value).output().unwrap();
+            assert_eq!(read.status.code(), Some(93), "{key}: {read:?}");
+        }
+        if display.starts_with('/') {
+            for runtime in [None, Some("/tmp/another-desktop")] {
+                let mut read = Command::new(BIN);
+                read.args(["clipboard", "-o", "-t", "image/png"])
+                    .env("HOME", home.path())
+                    .env("PATH", home.path().join("bin"));
+                gui(&mut read);
+                if let Some(runtime) = runtime {
+                    read.env("XDG_RUNTIME_DIR", runtime);
+                } else {
+                    read.env_remove("XDG_RUNTIME_DIR");
+                }
+                let output = read.output().unwrap();
+                assert!(output.status.success(), "{runtime:?}: {output:?}");
+                assert_eq!(output.stdout, include_bytes!("pixel.png"));
+            }
+        }
+    }
+    let url = "https://example.com/login?redirect_uri=http%3A%2F%2Flocalhost%3A8000%2Fcallback";
+    let mut open = xdg_command(home.path());
+    gui(&mut open);
+    let child = open.arg(url).spawn().unwrap();
+    let (id, actual) = wire::parse_browser_request(&agent.event(b'O')).unwrap();
+    assert_eq!(actual, url);
+    agent.send(b'B', &wire::browser_reply(id, true, None).unwrap());
+    assert!(child.wait_with_output().unwrap().status.success());
+    agent.send(b'Q', &[]);
+    agent.stopped();
+    // No session/permission must fail rather than silently opening the native browser.
+    let mut open = xdg_command(home.path());
+    gui(&mut open);
+    assert!(!open.arg(url).output().unwrap().status.success());
+}

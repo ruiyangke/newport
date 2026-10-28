@@ -1,0 +1,492 @@
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag (for example v0.5.0)
+        required: true
+        type: string
+      publish:
+        description: Publish to Cloudflare; otherwise build, merge and verify only
+        required: false
+        type: boolean
+        default: true
+permissions:
+  contents: read
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+# Jobs are named "Area: what (platform)", as in checks.yml. A release needs
+# only its tag: everything it ships is built here, from the tagged commit.
+jobs:
+  resolve:
+    name: "Release: verify tag"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      commit: ${{ steps.version.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup show
+      - id: version
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: cargo xtask release verify
+      - name: Check release storage configuration
+        if: inputs.publish
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          test -n "$R2_ACCESS_KEY_ID" || { echo 'Missing repository secret R2_ACCESS_KEY_ID'; exit 1; }
+          test -n "$R2_SECRET_ACCESS_KEY" || { echo 'Missing repository secret R2_SECRET_ACCESS_KEY'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'Missing repository variable CLOUDFLARE_ACCOUNT_ID'; exit 1; }
+
+  # As in checks.yml: each architecture on a runner of that architecture.
+  needle-build:
+    name: "Needle: build (${{ matrix.arch }})"
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        with:
+          cache-key: needle-build-${{ matrix.arch }}
+          workspaces: tools/xtask
+      - run: cargo xtask agents --arch ${{ matrix.arch }}
+      - run: cargo xtask test runtime --arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: needle-${{ matrix.arch }}
+          path: resources/agents/newport-agent-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  needle-release:
+    name: "Needle: sign"
+    needs: [resolve, needle-build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        with:
+          cache-key: needle-release
+          workspaces: tools/xtask
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: needle-*
+          path: resources/agents
+          merge-multiple: true
+      - run: chmod +x resources/agents/newport-agent-*
+      - run: cargo xtask artifact record resources/agents
+      # Compile release tooling before any step receives signing secrets.
+      - run: cargo build --locked --manifest-path tools/xtask/Cargo.toml
+      - name: Sign exact Needle release payloads
+        env:
+          NEWPORT_SIGNING_PRIVATE_KEY: ${{ secrets.NEWPORT_SIGNING_PRIVATE_KEY }}
+          NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: tools/xtask/target/debug/xtask release sign-needle
+      - run: cargo xtask artifact record resources/agents
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-agents-signed
+          path: resources/agents
+          if-no-files-found: error
+          retention-days: 1
+
+  # Jobs that check out newport-remote, private source, while this repository
+  # and its Actions logs are public:
+  # - this workflow runs only on workflow_dispatch; the deploy key is used
+  #   only to check out newport-remote, with persist-credentials: false;
+  # - no Actions cache;
+  # - output of steps that compile newport-remote goes to a log in RUNNER_TEMP
+  #   that is never uploaded; a failure prints a short summary, never
+  #   compiler output or source;
+  # - uploads are only built and signed agent files (short retention) and the
+  #   signed release assets, never sources, staging, target directories or logs;
+  # - release tooling is compiled before any step receives signing secrets.
+  # Each full agent (core and Remote apps) on a runner of its architecture.
+  remote-apps-agent:
+    name: "Remote apps: agent (${{ matrix.arch }})"
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+            docker: amd64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            docker: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          path: newport
+          persist-credentials: false
+      - id: revision
+        run: echo "commit=$(cat newport/.github/newport-remote-revision)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: ruiyangke/newport-remote
+          ref: ${{ steps.revision.outputs.commit }}
+          path: newport-remote
+          ssh-key: ${{ secrets.NEWPORT_REMOTE_DEPLOY_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - working-directory: newport
+        run: rustup show
+      # The agent builds in Docker, but staging its source runs newport-remote's
+      # xtask on the runner, which links ALSA and Opus and runs bindgen.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libopus-dev libclang-dev nasm
+      - name: Build the full agent
+        env:
+          CORE_REVISION: ${{ needs.resolve.outputs.commit }}
+          BUILD_ARCH: ${{ matrix.docker }}
+        run: |
+          log="$RUNNER_TEMP/full-agent-build.log"
+          if ! {
+            cargo fetch --quiet --locked --manifest-path newport-remote/Cargo.toml &&
+            cargo fetch --quiet --locked --manifest-path newport/tools/agent/Cargo.toml &&
+            python3 newport-remote/scripts/build-unified-agent.py \
+              --core-dir "$GITHUB_WORKSPACE/newport" --core-revision "$CORE_REVISION" \
+              --arch "$BUILD_ARCH" --output-dir "$RUNNER_TEMP/full-builds"
+          } > "$log" 2>&1; then
+            echo "::error::The full agent build failed ($(grep -c '^error' "$log") error lines). Its output stays private; reproduce it locally."
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: full-agent-build-${{ matrix.docker }}
+          path: |
+            ${{ runner.temp }}/full-builds/${{ matrix.docker }}/newport-agent
+            ${{ runner.temp }}/full-builds/${{ matrix.docker }}/product.json
+            ${{ runner.temp }}/full-builds/${{ matrix.docker }}/build-provenance.json
+            ${{ runner.temp }}/full-builds/${{ matrix.docker }}/licenses/
+          if-no-files-found: error
+          retention-days: 1
+
+  # Export both architectures and sign them, as needle-release does the core agents.
+  remote-apps-agent-release:
+    name: "Remote apps: sign agent"
+    needs: [resolve, remote-apps-agent]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: newport
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          path: newport
+          persist-credentials: false
+      - id: revision
+        run: echo "commit=$(cat .github/newport-remote-revision)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: ruiyangke/newport-remote
+          ref: ${{ steps.revision.outputs.commit }}
+          path: newport-remote
+          ssh-key: ${{ secrets.NEWPORT_REMOTE_DEPLOY_KEY }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: full-agent-build-amd64
+          path: ${{ runner.temp }}/full-builds/amd64
+      - uses: actions/download-artifact@v8
+        with:
+          name: full-agent-build-arm64
+          path: ${{ runner.temp }}/full-builds/arm64
+      - run: rustup show
+      - name: Export only verified binaries, identities and notices
+        env:
+          CORE_REVISION: ${{ needs.resolve.outputs.commit }}
+          REMOTE_REVISION: ${{ steps.revision.outputs.commit }}
+        run: |
+          log="$RUNNER_TEMP/full-agent-export.log"
+          if ! python3 ../newport-remote/scripts/export-unified-agent.py --production \
+            --core-revision "$CORE_REVISION" --remote-revision "$REMOTE_REVISION" \
+            --build-dir "$RUNNER_TEMP/full-builds" --output "$RUNNER_TEMP/full-agent" > "$log" 2>&1; then
+            echo '::error::The full agent export failed. Its output stays private; reproduce it locally.'
+            exit 1
+          fi
+      - run: cargo xtask artifact verify "$RUNNER_TEMP/full-agent"
+      # Compile release tooling before any step receives signing secrets.
+      - run: cargo build --locked --manifest-path tools/xtask/Cargo.toml
+      - name: Sign the exact full agent release payloads
+        env:
+          NEWPORT_SIGNING_PRIVATE_KEY: ${{ secrets.NEWPORT_SIGNING_PRIVATE_KEY }}
+          NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: tools/xtask/target/debug/xtask release sign-agent "$RUNNER_TEMP/full-agent"
+      - run: cargo xtask artifact verify "$RUNNER_TEMP/full-agent"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: full-agent-signed
+          path: ${{ runner.temp }}/full-agent/
+          if-no-files-found: error
+          retention-days: 1
+
+  macos:
+    name: "Desktop: macOS (signed, notarized, Remote apps)"
+    needs: [resolve, remote-apps-agent-release]
+    env:
+      CARGO_INCREMENTAL: "0"
+      NEWPORT_REQUIRE_NEEDLE_RELEASE: "1"
+      # Remote apps: the private crates beside Newport, and this run's signed full agent.
+      NEWPORT_REMOTE_DIR: ${{ github.workspace }}/newport-remote
+      NEWPORT_AGENT_RESOURCE_DIR: ${{ github.workspace }}/newport/resources/agents
+      NEWPORT_PREBUILT: "1"
+    runs-on: macos-15
+    timeout-minutes: 150
+    defaults:
+      run:
+        working-directory: newport
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          path: newport
+          persist-credentials: false
+      - id: revision
+        run: echo "commit=$(cat .github/newport-remote-revision)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: ruiyangke/newport-remote
+          ref: ${{ steps.revision.outputs.commit }}
+          path: newport-remote
+          ssh-key: ${{ secrets.NEWPORT_REMOTE_DEPLOY_KEY }}
+          persist-credentials: false
+      # The shared Rust action would cache this build; private builds keep no cache.
+      - run: rustup show && rustup target add aarch64-apple-darwin
+      - uses: actions/download-artifact@v8
+        with:
+          name: full-agent-signed
+          path: newport/resources/agents
+      - run: xcrun --sdk macosx metal --version || { xcodebuild -downloadComponent MetalToolchain && xcrun --sdk macosx metal --version; }
+      - run: cargo xtask artifact verify resources/agents
+      # Compile release tooling before any step receives signing secrets.
+      - run: cargo build --locked --manifest-path tools/xtask/Cargo.toml
+      - name: Configure signing
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+          APPLE_ENTITLEMENTS: ${{ secrets.APPLE_ENTITLEMENTS }}
+        run: tools/xtask/target/debug/xtask release setup-signing
+      # Packaging compares the bundle with the signed full agent before signing.
+      - name: Build signed and notarized artifacts
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          NEWPORT_SIGNING_PRIVATE_KEY: ${{ secrets.NEWPORT_SIGNING_PRIVATE_KEY }}
+          NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          log="$RUNNER_TEMP/macos-release.log"
+          if ! tools/xtask/target/debug/xtask release macos --remote-apps > "$log" 2>&1; then
+            echo "::error::The macOS release failed ($(grep -c '^error' "$log") compiler error lines). Build output stays private; the release tool reported:"
+            sed -n '/^Error: /,$p' "$log" | head -n 20
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-macos
+          path: newport/target/aarch64-apple-darwin/release/native-package/distribution/update/*
+          if-no-files-found: error
+          retention-days: 1
+      - name: Remove temporary signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/release.keychain-db" || true
+
+  windows:
+    name: "Desktop: Windows (${{ matrix.arch }})"
+    needs: [resolve, needle-release]
+    env:
+      CARGO_INCREMENTAL: "0"
+      NEWPORT_REQUIRE_NEEDLE_RELEASE: "1"
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            arch: aarch64
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-agents-signed
+          path: resources/agents
+      - uses: ./.github/actions/rust
+        with:
+          target: ${{ matrix.target }}
+          cache-key: release-windows-${{ matrix.arch }}
+      - uses: ilammy/setup-nasm@v1
+        if: matrix.arch == 'x86_64'
+      - name: Locate LLVM for ARM64 dependencies
+        if: matrix.arch == 'aarch64'
+        shell: pwsh
+        run: |
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (!(Test-Path "$llvm\clang.exe")) { throw 'LLVM is required for ARM64' }
+          $llvm >> $env:GITHUB_PATH
+      - run: cargo xtask artifact verify resources/agents
+      - name: Locate native Windows installer compiler
+        shell: pwsh
+        run: |
+          $nsis = 'C:\Program Files (x86)\NSIS'
+          if (!(Test-Path "$nsis\makensis.exe")) {
+            choco install nsis --version=3.11 --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
+          }
+          if (!(Test-Path "$nsis\makensis.exe")) { throw 'NSIS compiler not found' }
+          $nsis >> $env:GITHUB_PATH
+      - run: cargo xtask package --nsis
+      - name: Verify Windows HTTPS trust for the update feed
+        run: cargo test --locked --release -p newport-platform --features updates --lib updates::tests::windows_trusts_production_update_feed -- --exact --ignored
+      - name: Verify the release executable and installer preserve profiles
+        shell: pwsh
+        run: |
+          $directory = Join-Path (Join-Path target $env:CARGO_BUILD_TARGET) 'release/native-package'
+          $env:NEWPORT_TEST_APP = (Resolve-Path (Join-Path $directory 'Newport/newport.exe')).Path
+          cargo test --locked --release -p newport-app --test standalone_lifecycle -- --ignored --skip standalone_gui --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged release startup acceptance failed' }
+          $installers = @(Get-ChildItem $directory -Filter '*-setup.exe')
+          if ($installers.Count -ne 1) { throw 'Expected exactly one native release installer' }
+          $env:NEWPORT_TEST_INSTALLER = $installers[0].FullName
+          cargo test --locked --release -p newport-release --test native_package_runtime -- --ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'Release installer runtime acceptance failed' }
+      # Compile release tooling before any step receives signing secrets.
+      - run: cargo build --locked --manifest-path tools/xtask/Cargo.toml
+      - name: Sign updater package
+        shell: pwsh
+        env:
+          NEWPORT_SIGNING_PRIVATE_KEY: ${{ secrets.NEWPORT_SIGNING_PRIVATE_KEY }}
+          NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.NEWPORT_SIGNING_PRIVATE_KEY_PASSWORD }}
+          UPDATE_ARCH: ${{ matrix.arch }}
+        run: |
+          $directory = Join-Path (Join-Path target $env:CARGO_BUILD_TARGET) 'release/native-package'
+          $installers = @(Get-ChildItem $directory -Filter '*-setup.exe')
+          if ($installers.Count -ne 1) { throw 'Expected exactly one NSIS installer' }
+          $xtask = Join-Path (Join-Path 'tools/xtask/target' $env:CARGO_BUILD_TARGET) 'debug/xtask.exe'
+          & $xtask release windows-update $installers[0].FullName --arch $env:UPDATE_ARCH --app-executable (Join-Path $directory 'Newport/newport.exe') --output (Join-Path $directory 'update')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/native-package/update/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Merging and verifying needs no approval or credentials, so a run with
+  # publish unchecked ends here.
+  distribution:
+    name: "Release: merge and verify"
+    needs: [resolve, macos, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-macos
+          path: release
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-windows-*
+          path: release
+          merge-multiple: true
+      - run: rustup show
+      - name: Merge and verify all update targets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          cargo test --locked --manifest-path tools/xtask/Cargo.toml release::
+          cargo xtask release merge release/latest.json release/windows-*.json --version "${RELEASE_TAG#v}" --output release/latest.json
+          rm release/windows-*.json
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$RELEASE_COMMIT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ inputs.tag }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 90
+      - name: Verify the release without publishing it
+        run: cargo xtask release deploy release --dry-run
+
+  # A failed upload can be retried by re-running this job; it publishes the
+  # artifact the run already verified.
+  publish:
+    name: "Release: publish to Cloudflare"
+    if: inputs.publish
+    needs: [resolve, distribution]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: cloudflare-production
+      url: https://newport.app/updates/latest.json
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-${{ inputs.tag }}
+          path: release
+      - name: Check the tag still names the verified commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$RELEASE_COMMIT"
+      - run: rustup show
+      - name: Build the release publisher before loading credentials
+        run: cargo build --locked --manifest-path tools/xtask/Cargo.toml
+      - name: Publish verified release to R2
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: tools/xtask/target/debug/xtask release deploy release

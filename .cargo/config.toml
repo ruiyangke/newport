@@ -1,0 +1,6 @@
+[alias]
+xtask = "run --quiet --locked --manifest-path tools/xtask/Cargo.toml --"
+
+# Bundles, signs and launches `newport` on macOS; other binaries run directly.
+[target.'cfg(target_os = "macos")']
+runner = "tools/xtask/runner.sh"

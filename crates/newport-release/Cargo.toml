@@ -1,0 +1,39 @@
+[package]
+name = "newport-release"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = []
+# Release tooling only. Desktop consumers compile verification without signing.
+signing = ["dep:anyhow", "dep:minisign", "dep:tempfile", "dep:zeroize", "dep:sha2", "dep:flate2"]
+
+[[bin]]
+name = "newport-release"
+path = "src/main.rs"
+required-features = ["signing"]
+
+[[test]]
+name = "cli"
+required-features = ["signing"]
+
+[dependencies]
+base64 = "0.23.1"
+minisign-verify = "0.2.5"
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = { version = "1", optional = true }
+minisign = { version = "0.10", optional = true }
+tempfile = { version = "3", optional = true }
+zeroize = { version = "1", optional = true }
+sha2 = { version = "0.11", optional = true }
+flate2 = { version = "1", optional = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+anyhow = "1"
+tempfile = "3"
+sha2 = "0.11"
+winreg = "0.56"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell"] }

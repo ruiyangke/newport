@@ -1,0 +1,519 @@
+{
+  "schema": 1,
+  "packages": [
+    {
+      "name": "tree-sitter-astro-next",
+      "version": "0.1.1",
+      "repository": "https://github.com/PRRPCHT/tree-sitter-astro-next",
+      "revision": "15a3b95bf444b68b698dfb2ae6921d33e464b9f8",
+      "crate_sha256": "794a4a59fc2d88e49b4bc41fef9522d77184a36f4e68bbaf545cd1eb2364c46e",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://crates.io/api/v1/crates/tree-sitter-astro-next/0.1.1/download",
+          "archive_path": "tree-sitter-astro-next-0.1.1/LICENSE",
+          "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-bash",
+      "version": "0.23.3",
+      "repository": "https://github.com/tree-sitter/tree-sitter-bash",
+      "revision": "487734f87fd87118028a65a4599352fa99c9cde8",
+      "crate_sha256": "329a4d48623ac337d42b1df84e81a1c9dbb2946907c102ca72db158c1964a52e",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter/tree-sitter-bash/blob/487734f87fd87118028a65a4599352fa99c9cde8/LICENSE",
+          "sha256": "49bf33cf78ef5897e4e161ce1517df7de1ae5042a65b6bcfd44401e0fc606559"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-c",
+      "version": "0.24.2",
+      "repository": "https://github.com/tree-sitter/tree-sitter-c",
+      "revision": "b780e47fc780ddc8da13afa35a3f4ed5c157823d",
+      "crate_sha256": "a9b2eb57a55fed6b00812912e730b7a275cf4fe98bfd6a5d76263d4438371728",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://crates.io/api/v1/crates/tree-sitter-c/0.24.2/download",
+          "archive_path": "tree-sitter-c-0.24.2/LICENSE",
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-c-sharp",
+      "version": "0.23.5",
+      "repository": "https://github.com/tree-sitter/tree-sitter-c-sharp",
+      "revision": "cac6d5fb595f5811a076336682d5d595ac1c9e85",
+      "crate_sha256": "c1aac67f1ad71de1d6d39708d34811081c26dfa495658de6c14c34200849357c",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://crates.io/api/v1/crates/tree-sitter-c-sharp/0.23.5/download",
+          "archive_path": "tree-sitter-c-sharp-0.23.5/LICENSE",
+          "sha256": "778fb7d63b8c1844da315648c02f325c4713a6f4a5d19644fd413421422776d3"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-cmake",
+      "version": "0.7.5",
+      "repository": "https://github.com/uyha/tree-sitter-cmake",
+      "revision": "e997bd0b275ca525ce9befecedf5299031183661",
+      "crate_sha256": "d22893fac54133fdb93497efc45713d53a96d93b035288c7a8ab0c2af77c0ddd",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://crates.io/api/v1/crates/tree-sitter-cmake/0.7.5/download",
+          "archive_path": "tree-sitter-cmake-0.7.5/LICENSE",
+          "sha256": "97334c0f9c0962b33cbe03223f584b8ed64c2d14419ce80cc2e945eb8d367d28"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-cpp",
+      "version": "0.23.4",
+      "repository": "https://github.com/tree-sitter/tree-sitter-cpp",
+      "revision": "f41e1a044c8a84ea9fa8577fdd2eab92ec96de02",
+      "crate_sha256": "df2196ea9d47b4ab4a31b9297eaa5a5d19a0b121dceb9f118f6790ad0ab94743",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter/tree-sitter-cpp/blob/f41e1a044c8a84ea9fa8577fdd2eab92ec96de02/LICENSE",
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-css",
+      "version": "0.23.2",
+      "repository": "https://github.com/tree-sitter/tree-sitter-css",
+      "revision": "c0d581e32d183a536731ed6c3a72758b27e20411",
+      "crate_sha256": "5ad6489794d41350d12a7fbe520e5199f688618f43aace5443980d1ddcf1b29e",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter/tree-sitter-css/blob/c0d581e32d183a536731ed6c3a72758b27e20411/LICENSE",
+          "sha256": "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-diff",
+      "version": "0.1.0",
+      "repository": "https://github.com/tree-sitter-grammars/tree-sitter-diff",
+      "revision": "4867e8470e1b0ad7364c4e3ffab762c361bbb635",
+      "crate_sha256": "dfe1e5ca280a65dfe5ba4205c1bcc84edf486464fed315db53dee6da9a335889",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter-grammars/tree-sitter-diff/blob/4867e8470e1b0ad7364c4e3ffab762c361bbb635/LICENSE",
+          "sha256": "bb98faf5a86e9458536a6c745e02b53775d01066f1e51dda4ae220a3c0b050f4"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-elixir",
+      "version": "0.3.5",
+      "repository": "https://github.com/elixir-lang/tree-sitter-elixir",
+      "revision": "e2d9e6e0e76b0c436fa48a0b8c32a031d0cbdf49",
+      "crate_sha256": "66dd064a762ed95bfc29857fa3cb7403bb1e5cb88112de0f6341b7e47284ba40",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://crates.io/api/v1/crates/tree-sitter-elixir/0.3.5/download",
+          "archive_path": "tree-sitter-elixir-0.3.5/LICENSE",
+          "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
+        },
+        {
+          "file": "NOTICE",
+          "source": "https://github.com/elixir-lang/tree-sitter-elixir/blob/e2d9e6e0e76b0c436fa48a0b8c32a031d0cbdf49/NOTICE",
+          "sha256": "119588423fbaa46a6955a044fee5a23338c7de190d8c4651a94c6d0b98ca2cda"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-embedded-template",
+      "version": "0.23.2",
+      "repository": "https://github.com/tree-sitter/tree-sitter-embedded-template",
+      "revision": "332262529bc51abf5746317b2255ccc2fff778f8",
+      "crate_sha256": "790063ef14e5b67556abc0b3be0ed863fb41d65ee791cf8c0b20eb42a1fa46af",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter/tree-sitter-embedded-template/blob/332262529bc51abf5746317b2255ccc2fff778f8/LICENSE",
+          "sha256": "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-go",
+      "version": "0.23.4",
+      "repository": "https://github.com/tree-sitter/tree-sitter-go",
+      "revision": "3c3775faa968158a8b4ac190a7fda867fd5fb748",
+      "crate_sha256": "b13d476345220dbe600147dd444165c5791bf85ef53e28acbedd46112ee18431",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter/tree-sitter-go/blob/3c3775faa968158a8b4ac190a7fda867fd5fb748/LICENSE",
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-graphql",
+      "version": "0.1.0",
+      "repository": "https://github.com/joowani/tree-sitter-graphql",
+      "revision": "46ccd8e114739a158e3e38e7e372803b17a9e7da",
+      "crate_sha256": "efedc4cac157161cc23a0adc4553a2cedc908e1cd754b6cd033a919bb81ce5d6",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://crates.io/api/v1/crates/tree-sitter-graphql/0.1.0/download",
+          "archive_path": "tree-sitter-graphql-0.1.0/LICENSE",
+          "sha256": "5ea7d9ec06cb21ca0a800b69cd954e346bafba94620eb115c4b1fead3f3b30f8"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-html",
+      "version": "0.23.2",
+      "repository": "https://github.com/tree-sitter/tree-sitter-html",
+      "revision": "5a5ca8551a179998360b4a4ca2c0f366a35acc03",
+      "crate_sha256": "261b708e5d92061ede329babaaa427b819329a9d427a1d710abb0f67bbef63ee",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter/tree-sitter-html/blob/5a5ca8551a179998360b4a4ca2c0f366a35acc03/LICENSE",
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-java",
+      "version": "0.23.5",
+      "repository": "https://github.com/tree-sitter/tree-sitter-java",
+      "revision": "94703d5a6bed02b98e438d7cad1136c01a60ba2c",
+      "crate_sha256": "0aa6cbcdc8c679b214e616fd3300da67da0e492e066df01bcf5a5921a71e90d6",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter/tree-sitter-java/blob/94703d5a6bed02b98e438d7cad1136c01a60ba2c/LICENSE",
+          "sha256": "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-javascript",
+      "version": "0.23.1",
+      "repository": "https://github.com/tree-sitter/tree-sitter-javascript",
+      "revision": "3a837b6f3658ca3618f2022f8707e29739c91364",
+      "crate_sha256": "bf40bf599e0416c16c125c3cec10ee5ddc7d1bb8b0c60fa5c4de249ad34dc1b1",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter/tree-sitter-javascript/blob/3a837b6f3658ca3618f2022f8707e29739c91364/LICENSE",
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-jsdoc",
+      "version": "0.23.2",
+      "repository": "https://github.com/tree-sitter/tree-sitter-jsdoc",
+      "revision": "b253abf68a73217b7a52c0ec254f4b6a7bb86665",
+      "crate_sha256": "a3862dfcb1038fc5e7812d7df14190afdeb7e1415288fd5f51f58395f8cb0faf",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter/tree-sitter-jsdoc/blob/b253abf68a73217b7a52c0ec254f4b6a7bb86665/LICENSE",
+          "sha256": "ffaefecad68467134f8c701120a2410a2384ffff7a605b63638cf0b51e7d16cc"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-json",
+      "version": "0.24.8",
+      "repository": "https://github.com/tree-sitter/tree-sitter-json",
+      "revision": "ee35a6ebefcef0c5c416c0d1ccec7370cfca5a24",
+      "crate_sha256": "4d727acca406c0020cffc6cf35516764f36c8e3dc4408e5ebe2cb35a947ec471",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter/tree-sitter-json/blob/ee35a6ebefcef0c5c416c0d1ccec7370cfca5a24/LICENSE",
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-kotlin-sg",
+      "version": "0.4.1",
+      "repository": "https://github.com/ast-grep/tree-sitter-kotlin",
+      "revision": "1a6f9b1ee1125a7357493eeb95da48d16ac302b4",
+      "crate_sha256": "c06ec43ae3c12165d4ac08afe4e1f5fc6757ffe274fa7bd5af9007ef11ba4319",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://crates.io/api/v1/crates/tree-sitter-kotlin-sg/0.4.1/download",
+          "archive_path": "tree-sitter-kotlin-sg-0.4.1/LICENSE",
+          "sha256": "948495f61768f7de26bcc61113d8cd95f50bbc15adb678c28c941c6c8fcd5903"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-language",
+      "version": "0.1.9",
+      "repository": "https://github.com/tree-sitter/tree-sitter",
+      "revision": "10eb5ac119eec9cb4267a8e035066473983f5f3a",
+      "crate_sha256": "d0af592be68c579aa78a16846bd19422978c3c52e438523d45ff5d1bff1f9d4a",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://crates.io/api/v1/crates/tree-sitter-language/0.1.9/download",
+          "archive_path": "tree-sitter-language-0.1.9/LICENSE",
+          "sha256": "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-lua",
+      "version": "0.4.1",
+      "repository": "https://github.com/tree-sitter-grammars/tree-sitter-lua",
+      "revision": "816840c592ab973500ae9750763c707b447e7fef",
+      "crate_sha256": "ea992f4164d83f371ef1239ae178c4d4596c296c09055e9a48bb02a2760403af",
+      "notices": [
+        {
+          "file": "LICENSE.md",
+          "source": "https://github.com/tree-sitter-grammars/tree-sitter-lua/blob/816840c592ab973500ae9750763c707b447e7fef/LICENSE.md",
+          "sha256": "9a32b02e4c917b1ce6b5e79d8ea81e25cefd7f27d89c7235f2afb262c06cf32e"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-make",
+      "version": "1.1.1",
+      "repository": "https://github.com/tree-sitter-grammars/tree-sitter-make",
+      "revision": "5e9e8f8ff3387b0edcaa90f46ddf3629f4cfeb1d",
+      "crate_sha256": "c5998dc7cbcbdab19fae8aefef982bf2d6544513d8d2e69cc44aec4c63810104",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter-grammars/tree-sitter-make/blob/5e9e8f8ff3387b0edcaa90f46ddf3629f4cfeb1d/LICENSE",
+          "sha256": "28eecdb75b6de2d9020603531461444bf54db827ee2fb345a8fcf4dbee7c2ad1"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-md",
+      "version": "0.5.3",
+      "repository": "https://github.com/tree-sitter-grammars/tree-sitter-markdown",
+      "revision": "f969cd3ae3f9fbd4e43205431d0ae286014c05b5",
+      "crate_sha256": "2efd398be546456c814598ee56c0f51769a77241511b4a58077815d120afa882",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter-grammars/tree-sitter-markdown/blob/f969cd3ae3f9fbd4e43205431d0ae286014c05b5/LICENSE",
+          "sha256": "52ec8a1bf8256511e2a92613e0bb41ffefba3897f16fa958d7bb28c466dd4804"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-php",
+      "version": "0.24.2",
+      "repository": "https://github.com/tree-sitter/tree-sitter-php",
+      "revision": "5b5627faaa290d89eb3d01b9bf47c3bb9e797dea",
+      "crate_sha256": "0d8c17c3ab69052c5eeaa7ff5cd972dd1bc25d1b97ee779fec391ad3b5df5592",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://crates.io/api/v1/crates/tree-sitter-php/0.24.2/download",
+          "archive_path": "tree-sitter-php-0.24.2/LICENSE",
+          "sha256": "664764fabf40c0b318e06324a5a12379092a2df25b8cbf2415f71bc0bb352346"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-proto",
+      "version": "0.2.0",
+      "repository": "https://github.com/coder3101/tree-sitter-proto",
+      "revision": "9182a99d99b1c6e144e22e7defdbdbc97366e9d5",
+      "crate_sha256": "8e4360b434b5980fc397137ef29e1988619fef4159ac86fa7ac5777d459d3924",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/coder3101/tree-sitter-proto/blob/d4aefd27a0f1f021ede6239b870a2e2a0119450d/LICENSE",
+          "sha256": "1cc17f880ff4fa68079a72b98b89d42e8ce16b1bdbb1ec7b6f33465241e41003"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-python",
+      "version": "0.23.6",
+      "repository": "https://github.com/tree-sitter/tree-sitter-python",
+      "revision": "bffb65a8cfe4e46290331dfef0dbf0ef3679de11",
+      "crate_sha256": "3d065aaa27f3aaceaf60c1f0e0ac09e1cb9eb8ed28e7bcdaa52129cffc7f4b04",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter/tree-sitter-python/blob/bffb65a8cfe4e46290331dfef0dbf0ef3679de11/LICENSE",
+          "sha256": "d724405ce238a22c0d35769c5a36b386ad5958192efe8bbb304fb2896254575f"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-ruby",
+      "version": "0.23.1",
+      "repository": "https://github.com/tree-sitter/tree-sitter-ruby",
+      "revision": "71bd32fb7607035768799732addba884a37a6210",
+      "crate_sha256": "be0484ea4ef6bb9c575b4fdabde7e31340a8d2dbc7d52b321ac83da703249f95",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter/tree-sitter-ruby/blob/71bd32fb7607035768799732addba884a37a6210/LICENSE",
+          "sha256": "ee006f02a3d856df282e409be2a86e24a65bb573a98b9c28343771141351bb6b"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-rust",
+      "version": "0.24.2",
+      "repository": "https://github.com/tree-sitter/tree-sitter-rust",
+      "revision": "e2bee853694a1d3e0f6ef308fe3674542fec95d7",
+      "crate_sha256": "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://crates.io/api/v1/crates/tree-sitter-rust/0.24.2/download",
+          "archive_path": "tree-sitter-rust-0.24.2/LICENSE",
+          "sha256": "31d5b6f4243d5c7c6e1c4ebbbb9f6407bd1457a08bcc4f706521710341acba36"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-scala",
+      "version": "0.23.4",
+      "repository": "https://github.com/tree-sitter/tree-sitter-scala",
+      "revision": "d3b9553b47d7ab413a146c4b6498e527265b966e",
+      "crate_sha256": "efde5e68b4736e9eac17bfa296c6f104a26bffab363b365eb898c40a63c15d2f",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter/tree-sitter-scala/blob/d3b9553b47d7ab413a146c4b6498e527265b966e/LICENSE",
+          "sha256": "1f95ed26e1f4074074c9c7083e61c0a9e4c3b9f435745044995f3beb4ed28575"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-sequel",
+      "version": "0.3.11",
+      "repository": "https://github.com/derekstride/tree-sitter-sql",
+      "revision": "7b51ecda191d36b92f5a90a8d1bc3faef1c7b8b8",
+      "crate_sha256": "9d198ad3c319c02e43c21efa1ec796b837afcb96ffaef1a40c1978fbdcec7d17",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/derekstride/tree-sitter-sql/blob/7b51ecda191d36b92f5a90a8d1bc3faef1c7b8b8/LICENSE",
+          "sha256": "3b3e4e4252d5d7d1c18e1257005f23242bf0580ad619204fd093c99b8c56748d"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-svelte-next",
+      "version": "0.1.1",
+      "repository": "https://github.com/PRRPCHT/tree-sitter-svelte-next",
+      "revision": "bdea454a8ae7272498b8fe9d4b6b24fbd3dfe7b6",
+      "crate_sha256": "56f88190d0743e897c3e148a7e241aba0a8844b8afe816943851426e3f7b9753",
+      "notices": [
+        {
+          "file": "LICENSE-APACHE",
+          "source": "https://crates.io/api/v1/crates/tree-sitter-svelte-next/0.1.1/download",
+          "archive_path": "tree-sitter-svelte-next-0.1.1/LICENSE-APACHE",
+          "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+        },
+        {
+          "file": "LICENSE-MIT",
+          "source": "https://crates.io/api/v1/crates/tree-sitter-svelte-next/0.1.1/download",
+          "archive_path": "tree-sitter-svelte-next-0.1.1/LICENSE-MIT",
+          "sha256": "0eea8dc45e89deeb03c7799bbbc7b4688f365fb274562f4540ecfebdea82e727"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-swift",
+      "version": "0.7.4",
+      "repository": "https://github.com/alex-pinkus/tree-sitter-swift",
+      "revision": "171fa3bc343233fe07f5e17205aaada33d778825",
+      "crate_sha256": "2688c06564afa397313e0db17d140a73e2c6a47f3884794614246167c9dd5dfd",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://crates.io/api/v1/crates/tree-sitter-swift/0.7.4/download",
+          "archive_path": "tree-sitter-swift-0.7.4/LICENSE",
+          "sha256": "3533cec129bb4bba015c0d61d86dd7c3b7e82110e4d2ff7837a01eff5bad5ccc"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-toml-ng",
+      "version": "0.7.0",
+      "repository": "https://github.com/tree-sitter-grammars/tree-sitter-toml",
+      "revision": "64b56832c2cffe41758f28e05c756a3a98d16f41",
+      "crate_sha256": "e9adc2c898ae49730e857d75be403da3f92bb81d8e37a2f918a08dd10de5ebb1",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter-grammars/tree-sitter-toml/blob/64b56832c2cffe41758f28e05c756a3a98d16f41/LICENSE",
+          "sha256": "b727eee929bee836e8102cecf749a795b199f291b58c885bcd81cae727ac5a46"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-typescript",
+      "version": "0.23.2",
+      "repository": "https://github.com/tree-sitter/tree-sitter-typescript",
+      "revision": "f975a621f4e7f532fe322e13c4f79495e0a7b2e7",
+      "crate_sha256": "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter/tree-sitter-typescript/blob/f975a621f4e7f532fe322e13c4f79495e0a7b2e7/LICENSE",
+          "sha256": "49bf33cf78ef5897e4e161ce1517df7de1ae5042a65b6bcfd44401e0fc606559"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-yaml",
+      "version": "0.7.2",
+      "repository": "https://github.com/tree-sitter-grammars/tree-sitter-yaml",
+      "revision": "7708026449bed86239b1cd5bce6e3c34dbca6415",
+      "crate_sha256": "53c223db85f05e34794f065454843b0668ebc15d240ada63e2b5939f43ce7c97",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://crates.io/api/v1/crates/tree-sitter-yaml/0.7.2/download",
+          "archive_path": "tree-sitter-yaml-0.7.2/LICENSE",
+          "sha256": "2d181298822a124f6d106118dcc69c8d4d26ac668559be29682c452e712b0947"
+        }
+      ]
+    },
+    {
+      "name": "tree-sitter-zig",
+      "version": "1.1.2",
+      "repository": "https://github.com/tree-sitter-grammars/tree-sitter-zig",
+      "revision": "b670c8df85a1568f498aa5c8cae42f51a90473c0",
+      "crate_sha256": "ab11fc124851b0db4dd5e55983bbd9631192e93238389dcd44521715e5d53e28",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "source": "https://github.com/tree-sitter-grammars/tree-sitter-zig/blob/b670c8df85a1568f498aa5c8cae42f51a90473c0/LICENSE",
+          "sha256": "0eea8dc45e89deeb03c7799bbbc7b4688f365fb274562f4540ecfebdea82e727"
+        }
+      ]
+    }
+  ]
+}
