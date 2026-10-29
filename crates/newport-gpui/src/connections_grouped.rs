@@ -333,19 +333,6 @@ impl RenderOnce for ConnectionsPage {
 pub(super) fn string<'a>(v: &'a Value, key: &str) -> &'a str {
     v[key].as_str().unwrap_or("")
 }
-fn project_location(key: &str, entries: &[Entry]) -> String {
-    if !key.starts_with('/') {
-        return String::new();
-    }
-    newport_domain::port_context::tildify(
-        key,
-        &entries
-            .iter()
-            .filter(|e| !e.saved)
-            .map(|e| e.port["user"].as_str())
-            .collect::<Vec<_>>(),
-    )
-}
 pub(super) fn trouble(runtime: &Value, t: &Value) -> bool {
     trouble_for(runtime, t, None)
 }
@@ -1072,13 +1059,6 @@ impl Newport {
         let click_key = key.clone();
         let click_server = self.server.clone();
         let name = project.name.clone();
-        let location = if project.path.is_none()
-            && project.source == newport_domain::port_grouping::Source::Compose
-        {
-            "Docker Compose".into()
-        } else {
-            project_location(&key, full)
-        };
         let single_branch = if project.worktrees.len() == 1 && project.worktrees[0].main {
             project.worktrees[0].branch.clone()
         } else {
@@ -1324,7 +1304,6 @@ impl Newport {
                             )
                             .flex_1()
                             .min_w_0()
-                            .hover_path(name.clone(), location.clone())
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
                                     if this.server != click_server {
