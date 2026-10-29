@@ -536,6 +536,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn zenity_or_kdialog_meets_the_dialogs_check() {
         use newport_domain::requirements::{Gap, Requirement};
