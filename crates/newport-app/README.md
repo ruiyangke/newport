@@ -78,7 +78,8 @@ installer; use `--target` to select the matching architecture explicitly.
 Production packages use [.github/workflows/release.yml](../../.github/workflows/release.yml):
 macOS Apple Silicon and Windows ARM64/x64, signed agent/update payloads, macOS
 Developer ID signing and notarization, a combined update manifest, checksums,
-and automatic R2 publication, with a retained `release-<tag>` workflow artifact.
+automatic R2 publication, and a GitHub release carrying `latest.json` for
+older installs, with a retained `release-<tag>` workflow artifact.
 Website deployment is managed separately.
 See [release publishing](../../tools/xtask/releases.md). Packaging success does not certify upgrades.
 

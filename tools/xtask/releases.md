@@ -25,7 +25,12 @@ the ZIP. Windows uses the same signed EXE for both.
 3. The publisher verifies all three update targets, signed versions and
    filenames, the macOS installer, and the complete `SHA256SUMS`. It uploads
    immutable files to R2 and reads them back before updating the latest feed.
-   It does not create a GitHub release.
+4. **Release: publish to GitHub** then creates the GitHub release, marked
+   latest, with the notes from `docs/releases/<version>.md` and only
+   `latest.json` attached. Newport 0.5.0 and earlier look for updates there;
+   the packages it names download from newport.app. Re-running the job updates
+   the existing release and marks it latest, so re-run it only for the newest
+   version.
 
 CI retains `release-<tag>` (installers, update payloads, signatures,
 `latest.json`, `SHA256SUMS`) for 90 days. R2 objects remain available

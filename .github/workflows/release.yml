@@ -490,3 +490,43 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: tools/xtask/target/debug/xtask release deploy release
+
+  # Newport 0.5.0 and earlier find updates in the latest GitHub release's
+  # latest.json, whose packages download from newport.app.
+  github:
+    name: "Release: publish to GitHub"
+    needs: [resolve, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-${{ inputs.tag }}
+          path: release
+      - name: Create or update the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          notes="docs/releases/$version.md"
+          title="Newport $version"
+          if [ -f "$notes" ]; then
+            heading="$(sed -n 's/^title: "\(.*\)"$/\1/p' "$notes")"
+            title="$title${heading:+: $heading}"
+            awk '/^---$/ { n++; next } n >= 2' "$notes" > github-notes.md
+          fi
+          printf '\n### Downloads\n\nDownload Newport from [newport.app](https://newport.app). Installed copies update on their own.\n' >> github-notes.md
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --latest --title "$title" --notes-file github-notes.md
+            gh release upload "$RELEASE_TAG" release/latest.json --clobber
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --latest --title "$title" --notes-file github-notes.md release/latest.json
+          fi
