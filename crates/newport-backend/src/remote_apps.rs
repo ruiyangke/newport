@@ -214,8 +214,7 @@ fn parse_status(output: &str) -> Value {
         user_services: field("userServices").is_some(),
     };
     // The display starts XWayland when an app asks for X11.
-    let (xwayland, dependency) = display::status(field("xwayland"));
-    if let Some(gap) = dependency {
+    if let Some(gap) = display::gap(field("xwayland")) {
         gaps.insert(0, gap);
     }
     json!({
@@ -227,7 +226,6 @@ fn parse_status(output: &str) -> Value {
         "architecture": field("architecture"),
         "gaps": gaps,
         "host": host,
-        "displayPrerequisites": {"xwayland":xwayland},
         "osRelease": release.trim(),
     })
 }
@@ -243,10 +241,8 @@ mod xwayland_tests {
             );
             let status = parse_status(&report);
             let usable = version == "24.1.6";
-            let state = &status["displayPrerequisites"]["xwayland"]["state"];
-            assert_eq!(*state == "available", usable, "{version}");
             let gaps: Vec<Gap> = serde_json::from_value(status["gaps"].clone()).unwrap();
-            assert_eq!(gaps.len(), if usable { 1 } else { 2 });
+            assert_eq!(gaps.len(), if usable { 1 } else { 2 }, "{version}");
             if !usable {
                 assert_eq!(gaps[0].requirement, Requirement::Xwayland);
                 assert!(gaps[0].optional());

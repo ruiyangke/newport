@@ -351,17 +351,17 @@ mod tests {
         assert_eq!(sudo("ID=nixos", &names), None);
         assert_eq!(sudo("ID=alpine", &names), None);
         assert_eq!(install_command(None, &names, Elevation::Sudo, None), None);
-        let xvfb = PackageNames::new()
-            .with(PackageManager::Xbps, "xorg-server-xvfb")
-            .with(PackageManager::Emerge, "x11-base/xorg-server[xvfb]");
+        let flagged = PackageNames::new()
+            .with(PackageManager::Xbps, "example-flagged")
+            .with(PackageManager::Emerge, "app-misc/example[flag]");
         assert_eq!(
-            sudo("ID=void", &xvfb).as_deref(),
-            Some("sudo xbps-install -S xorg-server-xvfb")
+            sudo("ID=void", &flagged).as_deref(),
+            Some("sudo xbps-install -S example-flagged")
         );
         assert_eq!(
-            sudo("ID=gentoo", &xvfb).as_deref(),
+            sudo("ID=gentoo", &flagged).as_deref(),
             Some(
-                "f=/etc/portage/package.use; [ -f \"$f\" ] || { sudo mkdir -p \"$f\" && f=\"$f/newport-remote\"; }; echo 'x11-base/xorg-server xvfb' | sudo tee -a \"$f\" >/dev/null && sudo emerge --update --changed-use x11-base/xorg-server"
+                "f=/etc/portage/package.use; [ -f \"$f\" ] || { sudo mkdir -p \"$f\" && f=\"$f/newport-remote\"; }; echo 'app-misc/example flag' | sudo tee -a \"$f\" >/dev/null && sudo emerge --update --changed-use app-misc/example"
             )
         );
         assert_eq!(

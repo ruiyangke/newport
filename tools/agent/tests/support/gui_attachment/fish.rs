@@ -135,7 +135,7 @@ fn retained(f: &Fixture) {
 
 #[test]
 #[ignore = "Requires actual Fish; selected local Linux lane must provide it"]
-fn current_mixed_and_native_checks_refresh_then_revalidate_each_execution_once() {
+fn current_checks_with_and_without_x11_refresh_then_revalidate_each_execution_once() {
     for native in [false, true] {
         let mut f = Fixture::new(true);
         let child = command(&f, native, "check-then-gui").spawn().unwrap();

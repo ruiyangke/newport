@@ -5,9 +5,10 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SharedGuiEnvironment {
     pub session: uuid::Uuid,
-    /// Both X11 fields are present strings for a mixed display, or explicit
-    /// nulls for a native Wayland display. Only version-four helpers accept
-    /// the latter; missing fields never mean “inherit the caller's display”.
+    /// Both X11 fields are present strings when the display has an X11
+    /// endpoint, or explicit nulls when it has none. Only version-four
+    /// helpers accept the latter; missing fields never mean “inherit the
+    /// caller's display”.
     #[serde(deserialize_with = "explicit_option")]
     pub display: Option<String>,
     #[serde(deserialize_with = "explicit_option")]
@@ -89,7 +90,8 @@ impl SharedGuiEnvironment {
         values.insert("NEWPORT_GUI_RUNTIME_DIR".into(), None);
         // SSH logins report a tty session. Like a desktop Wayland session,
         // declare Wayland so Chromium, Electron and Qt choose it themselves;
-        // a mixed display still offers X11 to applications that need it.
+        // a display with an X11 endpoint still offers it to applications that
+        // need it.
         values.insert("XDG_SESSION_TYPE".into(), Some("wayland".into()));
         Ok(values)
     }

@@ -264,7 +264,11 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
         } else {
             terminal::display::Display::None
         };
-        let handoff = shared.then(|| source(terminal::display::handoff_source));
+        let handoff = shared.then(|| {
+            source(|_, account, preferences, desktop| {
+                terminal::display::handoff_source(account, preferences, desktop)
+            })
+        });
         self.state.terminals.open_bound_with_handoff(
             request.session,
             server,

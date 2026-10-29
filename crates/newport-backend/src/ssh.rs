@@ -729,8 +729,8 @@ fn terminal_command_preflight(
                     available.join(" && ")
                 ));
                 // Recheck every owned endpoint immediately before acknowledgment,
-                // after the agent environment command has completed. A native-only
-                // display has no X11 listener or authority file to check.
+                // after the agent environment command has completed. A display
+                // without X11 has no X11 listener or authority file to check.
                 let mut checks = vec![format!("[ -S {} ]", shell_quote(socket))];
                 if let Some(display) = assignments.get("DISPLAY").and_then(Option::as_deref) {
                     let display = display

@@ -17,9 +17,7 @@ pub(crate) const JOIN_WAIT: Duration = Duration::from_millis(500);
 /// Captures local account/settings access only. Calling it is deferred until an
 /// explicit GUI request has completed the desktop's setup guidance.
 pub(crate) type Source = Arc<dyn Fn() -> graphical_session::FactoryFuture + Send + Sync>;
-/// Takes the server only to match [`join_source`].
 pub(crate) fn handoff_source(
-    _server: uuid::Uuid,
     account: Account,
     preferences: Preferences,
     desktop: Desktop,

@@ -508,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_opens_with_one_request_that_names_no_display_mode() {
+    fn a_terminal_opens_with_one_request_carrying_only_its_identity_and_size() {
         let (tx, rx) = mpsc::sync_channel(8);
         let (closed, closed_rx) = mpsc::sync_channel(2);
         let rpc = Arc::new(Fake {

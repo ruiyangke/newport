@@ -280,7 +280,7 @@ fn existing_tmux_pane_keeps_old_identity_and_only_explicit_validation_refuses_it
 }
 
 #[test]
-fn current_mixed_and_native_claims_execute_once_with_literal_process_state() {
+fn current_claims_with_and_without_x11_execute_once_with_literal_process_state() {
     for native in [false, true] {
         let mut f = Fixture::new(true);
         let process = f.command(native, false).spawn().unwrap();
