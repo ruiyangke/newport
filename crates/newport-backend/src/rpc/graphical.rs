@@ -26,9 +26,6 @@ struct Launch {
     server_id: Uuid,
     expected_connection: Value,
     target: launch::Target,
-    /// Explicit Run-command preference, not inferred from opaque argv/scripts.
-    #[serde(default)]
-    requires_x11: bool,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -92,19 +89,6 @@ impl Command {
                     &request.expected_connection,
                 )
                 .map_err(not_submitted)?;
-                let mode = crate::preferences::remote_apps::remote_apps_display_mode(
-                    services.preferences,
-                    request.server_id,
-                )
-                .await
-                .map_err(|message| not_submitted(error(message)))?;
-                if request.requires_x11
-                    && mode == crate::graphical_session::SharedDisplayMode::Wayland
-                {
-                    return Err(not_submitted(error(
-                        "X11 is unavailable with Wayland-only application support. Choose Automatic or Wayland, or enable X11 + Wayland for this server.",
-                    )));
-                }
                 // Account authorization and settings precede any SSH demand.
                 let license = services.account.remote_license().await.map_err(|refusal| {
                     json!({"code":format!("APPLICATION_REFUSED:{}", refusal.reason),"message":refusal.message})
@@ -115,14 +99,9 @@ impl Command {
                         .map_err(|message| not_submitted(error(message)))?;
                 let factory = services
                     .desktop
-                    .graphical_factory_for_mode(license, settings, mode)
+                    .graphical_factory(license, settings)
                     .await
                     .map_err(|message| not_submitted(error(message)))?;
-                if factory.display_mode() != mode {
-                    return Err(not_submitted(error(
-                        "Graphical factory does not support the selected display mode",
-                    )));
-                }
                 let started = owner
                     .launch_application(request.target, factory)
                     .await
@@ -196,17 +175,16 @@ impl Command {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{desktop_integration::DesktopIntegration, graphical_session::SharedDisplayMode};
+    use crate::desktop_integration::DesktopIntegration;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Default)]
     struct DesktopProbe(AtomicUsize);
     impl DesktopIntegration for DesktopProbe {
-        fn graphical_factory_for_mode(
+        fn graphical_factory(
             &self,
             _: crate::account::RemoteLicense,
             _: crate::preferences::remote_apps::Settings,
-            _: SharedDisplayMode,
         ) -> crate::graphical_session::FactoryFuture {
             self.0.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Err("Unexpected graphical acquisition".into()) })
@@ -229,7 +207,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_mode_refuses_stale_x11_before_any_display_or_ssh_demand() {
+    async fn a_refused_account_stops_a_launch_before_any_display_or_ssh_demand() {
         let directory = tempfile::tempdir().unwrap();
         let mut manager =
             crate::manager::Manager::new(crate::profile::Store::for_test(directory.path().into()));
@@ -258,62 +236,27 @@ mod tests {
         };
         let args = json!({
             "serverId":server.id, "expectedConnection":scope,
-            "target":{"kind":"command", "argv":["env","-u","WAYLAND_DISPLAY","--","GDK_BACKEND=x11","viewer"]},
-            "requiresX11":true
+            "target":{"kind":"command", "argv":["env","-u","WAYLAND_DISPLAY","--","GDK_BACKEND=x11","viewer"]}
         });
-        // The same saved request is eligible in mixed mode, then refused when
-        // the server setting changes. The signed-out account prevents actual
-        // acquisition even for eligible requests, so this test is local only.
-        let eligible = Command::RemoteAppsLaunch
-            .dispatch(&services, &args)
-            .await
-            .unwrap_err();
-        assert!(
-            eligible["code"]
-                .as_str()
-                .unwrap()
-                .starts_with("APPLICATION_REFUSED:"),
-            "{eligible}"
-        );
-        crate::preferences::remote_apps::remote_apps_display_mode_save(
-            &preferences,
-            server.id,
-            SharedDisplayMode::Wayland,
-        )
-        .await
-        .unwrap();
+        // The signed-out account refuses the launch, so this test is local.
         let refused = Command::RemoteAppsLaunch
             .dispatch(&services, &args)
             .await
             .unwrap_err();
-        assert_eq!(refused["code"], "APPLICATION_NOT_SUBMITTED");
         assert!(
-            refused["message"]
+            refused["code"]
                 .as_str()
                 .unwrap()
-                .contains("enable X11 + Wayland")
+                .starts_with("APPLICATION_REFUSED:"),
+            "{refused}"
         );
         let (_, owner) = manager.current(server.id).unwrap();
         assert!(owner.connected_lease().await.is_none());
         assert!(owner.graphical_sessions().is_empty());
         assert_eq!(desktop.0.load(Ordering::SeqCst), 0);
-
-        let mut automatic = args.clone();
-        automatic.as_object_mut().unwrap().remove("requiresX11");
-        let legacy = Command::RemoteAppsLaunch
-            .dispatch(&services, &automatic)
-            .await
-            .unwrap_err();
-        assert!(
-            legacy["code"]
-                .as_str()
-                .unwrap()
-                .starts_with("APPLICATION_REFUSED:"),
-            "{legacy}"
-        );
-        // Local RPC remains strict; this is an explicit supported field, not
-        // permission to ignore future or misspelled launch requirements.
-        automatic["requiresUnknownDisplay"] = json!(true);
-        assert!(decode::<Launch>(&automatic).is_err());
+        // Local RPC remains strict about unknown launch requirements.
+        let mut unknown = args.clone();
+        unknown["requiresUnknownDisplay"] = json!(true);
+        assert!(decode::<Launch>(&unknown).is_err());
     }
 }

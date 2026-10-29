@@ -6,7 +6,7 @@ use newport_backend::{
     graphical_session::{self as backend, Driver as _, transport},
     preferences::remote_apps::{Codec, Settings},
 };
-use newport_domain::terminal::{SharedDisplayMode, SharedGuiEnvironment, gui_protocol};
+use newport_domain::terminal::{SharedGuiEnvironment, gui_protocol};
 use newport_remote_client::{
     RemoteSession, SessionLicense, SessionOptions, SessionOutcome, SessionState,
     diagnostics::Transport,
@@ -87,20 +87,11 @@ impl Registry {
             async move { account.remote_license().await }
         })
     }
-    #[cfg(test)]
     pub fn factory(
         &self,
         license: RemoteLicense,
         settings: Settings,
-    ) -> Result<Arc<dyn backend::Factory>, String> {
-        self.factory_for_mode(license, settings, None, SharedDisplayMode::Mixed)
-    }
-    pub fn factory_for_mode(
-        &self,
-        license: RemoteLicense,
-        settings: Settings,
         display: Option<newport_remote_protocol::display::DisplayProfile>,
-        mode: SharedDisplayMode,
     ) -> Result<Arc<dyn backend::Factory>, String> {
         let license = SessionLicense {
             token: license.token.to_string(),
@@ -123,7 +114,8 @@ impl Registry {
         }
         let options = SessionOptions {
             shared_display: true,
-            shared_display_mode: private_mode(mode),
+            // Wayland first; the agent starts XWayland when an app asks for X11.
+            shared_display_mode: newport_remote_client::SharedDisplayMode::Wayland,
             terminal_owned_bus: cfg!(feature = "experimental-terminal-owned-bus"),
             track_applications: true,
             native_sizing: true,
@@ -253,12 +245,6 @@ impl backend::Factory for Factory {
             backend::terminal_bus::Policy::PreserveInherited
         }
     }
-    fn display_mode(&self) -> SharedDisplayMode {
-        match self.options.shared_display_mode {
-            newport_remote_client::SharedDisplayMode::Mixed => SharedDisplayMode::Mixed,
-            newport_remote_client::SharedDisplayMode::Wayland => SharedDisplayMode::Wayland,
-        }
-    }
     fn validate(&self) -> Result<(), String> {
         license::validate(self.account.as_ref())?;
         if self.registry.is_closed() {
@@ -273,7 +259,6 @@ impl backend::Factory for Factory {
     ) -> backend::AttachFuture {
         let registry = self.registry.clone();
         let options = self.options.clone();
-        let mode = self.display_mode();
         let bus_policy = self.terminal_bus_policy();
         let hud = self.hud;
         let account = self.account.clone();
@@ -334,7 +319,7 @@ impl backend::Factory for Factory {
                         let environment = control
                             .shared_environment()
                             .ok_or("Shared graphical environment is unavailable")?;
-                        break project_environment(&environment, &identity, mode)?;
+                        break project_environment(&environment, &identity)?;
                     }
                     Startup::Failed(error) => return Err(error),
                 }
@@ -720,21 +705,14 @@ impl Drop for Driver {
     }
 }
 
-fn private_mode(mode: SharedDisplayMode) -> newport_remote_client::SharedDisplayMode {
-    match mode {
-        SharedDisplayMode::Mixed => newport_remote_client::SharedDisplayMode::Mixed,
-        SharedDisplayMode::Wayland => newport_remote_client::SharedDisplayMode::Wayland,
-    }
-}
-
 fn project_environment(
     environment: &SharedEnvironment,
     identity: &backend::Identity,
-    mode: SharedDisplayMode,
 ) -> Result<SharedGuiEnvironment, String> {
     // The client accepts the application policy only after its negotiation;
     // without it this map has no policy names and projects as before.
-    private_mode(mode).validate_application_environment(environment)?;
+    newport_remote_client::SharedDisplayMode::Wayland
+        .validate_application_environment(environment)?;
     let (environment, application) = environment.split_application();
     let environment = &environment;
     let get = |name: &str| {
@@ -767,7 +745,7 @@ fn project_environment(
             .collect(),
         application,
     };
-    mode.validate_environment(&result)?;
+    result.validate()?;
     Ok(result)
 }
 

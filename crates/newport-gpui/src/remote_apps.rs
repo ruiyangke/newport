@@ -10,7 +10,6 @@ use crate::remote_apps_install as install;
 use crate::remote_apps_sessions::{Launch, Sessions};
 use crate::terminal_status::ExitPolicy;
 use gpui_kit::component::{button::ButtonGroup, input::InputEvent};
-use newport_domain::terminal::SharedDisplayMode;
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
@@ -397,9 +396,6 @@ impl State {
 const SETTINGS_KEY: &str = "remote-apps-settings";
 /// The servers last seen with the agent, from the backend's preferences.
 const INSTALLED_KEY: &str = "remote-apps-installed";
-fn display_mode_key(server: &str) -> String {
-    format!("remote-apps-display-mode:{server}")
-}
 
 pub(crate) fn decode_settings(value: &Value) -> api::StreamingSettings {
     let defaults = api::StreamingSettings::default();
@@ -457,10 +453,6 @@ pub(crate) enum LaunchpadEvent {
     Recheck { replace: bool },
     /// Save streaming settings in the backend's preferences.
     SaveSettings(Value),
-    SaveDisplayMode {
-        server: String,
-        mode: SharedDisplayMode,
-    },
 }
 
 /// What this computer may do with Remote apps, decided from the account
@@ -668,7 +660,6 @@ pub(crate) struct Launchpad {
     terminals_opened: u64,
     status: QueryRead,
     settings: QueryRead,
-    display_mode: QueryRead,
     /// The servers last seen with the agent.
     installed_record: QueryRead,
     catalogue: QueryRead,
@@ -737,7 +728,6 @@ impl Launchpad {
             terminals_opened: 0,
             status: QueryRead::default(),
             settings: QueryRead::default(),
-            display_mode: QueryRead::default(),
             installed_record: QueryRead::default(),
             catalogue: QueryRead::default(),
             decoded: Default::default(),
@@ -979,7 +969,6 @@ impl Launchpad {
         cx: &mut Context<Self>,
     ) {
         if self.server != server {
-            self.display_mode = QueryRead::default();
             // A shell, which may still be installing, belongs to its server;
             // it stays open while other pages are shown.
             if let Some(terminal) = self.terminal.take() {
@@ -1285,15 +1274,7 @@ impl Launchpad {
                 }
             },
             requirement(Requirement::Dbus, Requirement::Dbus.purpose()),
-            if value["displayPrerequisites"]["mode"] == "wayland" {
-                passed(
-                    "Wayland",
-                    "Provided by Newport; XWayland is not needed",
-                    None,
-                )
-            } else {
-                requirement(Requirement::Xwayland, Requirement::Xwayland.purpose())
-            },
+            requirement(Requirement::Xwayland, Requirement::Xwayland.purpose()),
             requirement(Requirement::Audio, Requirement::Audio.purpose()),
         ];
         // Whatever else is missing follows the rows every server gets.
@@ -1477,8 +1458,6 @@ impl Launchpad {
     /// The newest readings of this server's queries, from Newport's resources.
     fn observe(&mut self, resources: &state::Resources) {
         self.settings.observe(resources.get(SETTINGS_KEY));
-        self.display_mode
-            .observe(resources.get(&display_mode_key(&self.server)));
         self.installed_record.observe(resources.get(INSTALLED_KEY));
         self.status
             .observe(resources.get(&status_key(&self.server)));
@@ -1530,96 +1509,7 @@ impl Launchpad {
 
     /// A verified full agent; the backend chooses its admitted runtime build.
     fn launch_agent(&self) -> Result<String, String> {
-        if self.display_mode_pending() {
-            return Err(
-                "Application support is being updated. Wait for the server check, then try again."
-                    .into(),
-            );
-        }
         launch_agent(&self.status.value)
-    }
-
-    fn display_mode_pending(&self) -> bool {
-        self.display_mode.edited
-            || self
-                .display_mode
-                .value
-                .as_str()
-                .zip(self.status.value["displayPrerequisites"]["mode"].as_str())
-                .is_some_and(|(selected, checked)| selected != checked)
-    }
-
-    fn display_mode_control(&self, cx: &mut Context<Self>) -> Div {
-        let current =
-            serde_json::from_value::<SharedDisplayMode>(self.display_mode.value.clone()).ok();
-        let saving = self.display_mode.edited || self.display_mode.pending;
-        let options = ButtonGroup::new("remote-apps-display-mode").children(
-            [
-                (SharedDisplayMode::Mixed, "X11 + Wayland", "mixed"),
-                (SharedDisplayMode::Wayland, "Wayland only", "wayland"),
-            ]
-            .into_iter()
-            .map(|(mode, label, key)| {
-                crate::controls::compact_button(format!("remote-apps-mode-{key}"))
-                    .label(label)
-                    .selected(current == Some(mode))
-                    .disabled(current.is_none() || saving)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.display_mode.value == json!(mode) {
-                            return;
-                        }
-                        Self::edit(&mut this.display_mode, json!(mode));
-                        cx.emit(LaunchpadEvent::SaveDisplayMode {
-                            server: this.server.clone(),
-                            mode,
-                        });
-                        cx.notify();
-                    }))
-            }),
-        );
-        let note = if self.display_mode.edited {
-            "Saving…"
-        } else {
-            match current {
-                Some(SharedDisplayMode::Mixed) => {
-                    "Runs X11 and Wayland apps. Requires XWayland 23.1 or newer."
-                }
-                Some(SharedDisplayMode::Wayland) => {
-                    "Runs native Wayland apps without XWayland. X11 apps cannot open."
-                }
-                None => "Loading this server’s application support setting…",
-            }
-        };
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(
-                div()
-                    .text_size(px(crate::ui::FONT_SIZE))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Application support"),
-            )
-            .child(
-                div()
-                    .debug_selector(|| "remote-apps-display-mode".into())
-                    .child(options),
-            )
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .line_height(px(16.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(note),
-            )
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .line_height(px(16.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Changes apply after this server’s apps and graphical terminals close."),
-            )
     }
 
     fn os(&self) -> Option<api::ServerOs> {
@@ -1693,6 +1583,14 @@ impl Launchpad {
             .map(|app| app.name)
             .unwrap_or_else(|| app.to_owned());
         let title = format!("Couldn’t open {name}");
+        // A new attempt replaces what the last one reported.
+        for ended in sessions.list().iter().filter(|s| {
+            s.server == self.server
+                && s.app_id == app
+                && matches!(s.state, api::SessionState::Ended { .. })
+        }) {
+            sessions.forget(ended.id);
+        }
         let request = api::LaunchRequest {
             app_id: app.to_owned(),
             name,
@@ -2079,7 +1977,7 @@ impl Launchpad {
         } else {
             0
         };
-        let done = diagnosis.arrived && shown >= checks.len() && !self.display_mode_pending();
+        let done = diagnosis.arrived && shown >= checks.len();
         let blocked = checks
             .iter()
             .filter(|c| c.outcome == CheckOutcome::Blocked)
@@ -2315,15 +2213,54 @@ impl Launchpad {
                             .text_color(cx.theme().muted_foreground)
                             .child(subtitle),
                     )
-                    .child(
-                        div()
-                            .w_full()
-                            .pb(px(12.))
-                            .child(self.display_mode_control(cx)),
-                    )
                     .child(div().w_full().flex().flex_col().children(rows))
                     .child(div().pt(px(18.)).child(action)),
             )
+    }
+
+    /// Why `app` couldn't open, in at most two lines, and what fixes it.
+    fn failure(&self, reason: &str, app: &str) -> (String, Option<api::Fix>) {
+        let server = self.server_name.as_str();
+        // Chromium and Electron apps print this and exit when run as root.
+        if reason.contains("as root without --no-sandbox") {
+            return (
+                format!(
+                    "{app} won’t run as root. Connect to {server} as a regular user to open it."
+                ),
+                None,
+            );
+        }
+        // An app that needed X11, on a server without the XWayland that
+        // would have given it.
+        let xwayland = gaps(&self.status.value)
+            .into_iter()
+            .find(|gap| gap.requirement == api::Requirement::Xwayland && gap.installs());
+        if let Some(gap) = xwayland
+            && reason.lines().any(no_x11_display)
+        {
+            let os = self.os();
+            let host = host(&self.status.value);
+            let found = match &gap.finding {
+                api::Finding::Outdated { version } => format!(
+                    "{server} has XWayland {version}, and Newport needs {} or newer",
+                    newport_domain::requirements::XWAYLAND_MINIMUM
+                ),
+                _ => format!("{server} has no XWayland"),
+            };
+            let advice = newport_domain::requirements::install_advice(
+                "XWayland",
+                os.as_ref(),
+                &host,
+                "then open it again.",
+            );
+            let fix = match gap.remedy(os.as_ref(), &host) {
+                api::Remedy::Command(command) => Some(api::Fix::Command(command)),
+                api::Remedy::Configure(settings) => Some(api::Fix::Configure(settings)),
+                api::Remedy::Manual => None,
+            };
+            return (format!("{app} needs X11, and {found}. {advice}"), fix);
+        }
+        (first_lines(reason), None)
     }
 
     /// Everything wrong on this server, most severe first, with whether the
@@ -2337,6 +2274,13 @@ impl Launchpad {
         let mut alerts = Vec::new();
         let os = self.os();
         if let api::ServerStatus::Gaps(gaps) = status {
+            // XWayland for Wayland apps' X11 parts is offered where an app
+            // needed it, and in the setup checks.
+            let gaps: Vec<_> = gaps
+                .iter()
+                .filter(|gap| gap.requirement != api::Requirement::Xwayland)
+                .cloned()
+                .collect();
             let host = host(&self.status.value);
             let fix = |remedy| match remedy {
                 api::Remedy::Command(command) => api::Fix::Command(command),
@@ -2391,6 +2335,7 @@ impl Launchpad {
                             os.as_ref(),
                             &host,
                         ))),
+                        output: None,
                     },
                     optional,
                 ));
@@ -2407,15 +2352,13 @@ impl Launchpad {
                         title: gap.title(),
                         detail: gap.detail(server, os.as_ref(), &host),
                         fix: Some(fix(gap.remedy(os.as_ref(), &host))),
+                        output: None,
                     },
                     gap.optional(),
                 ));
             }
         }
-        for (read, what) in [
-            (&self.settings, "preferences"),
-            (&self.display_mode, "application support"),
-        ] {
+        for (read, what) in [(&self.settings, "preferences")] {
             if let Some(error) = read.error.as_ref().filter(|_| !read.pending) {
                 alerts.push((
                     api::Alert {
@@ -2424,6 +2367,7 @@ impl Launchpad {
                         title: format!("Couldn’t save or read Remote apps {what}"),
                         detail: error.clone(),
                         fix: None,
+                        output: None,
                     },
                     true,
                 ));
@@ -2437,6 +2381,7 @@ impl Launchpad {
                     title: format!("Couldn’t install Newport Remote on {server}"),
                     detail: error.clone(),
                     fix: None,
+                    output: None,
                 },
                 true,
             )),
@@ -2454,6 +2399,7 @@ impl Launchpad {
                     },
                     detail: "Apps that are open keep running.".into(),
                     fix: None,
+                    output: None,
                 },
                 false,
             )),
@@ -2495,6 +2441,7 @@ impl Launchpad {
                             title,
                             detail,
                             fix: (update != Update::Older).then_some(api::Fix::UpdateAgent),
+                            output: None,
                         },
                         true,
                     ));
@@ -2509,6 +2456,7 @@ impl Launchpad {
                     title: title.clone(),
                     detail: error.clone(),
                     fix: None,
+                    output: None,
                 },
                 true,
             ));
@@ -2524,6 +2472,7 @@ impl Launchpad {
                             "{message} Check its open windows before repeating the launch."
                         ),
                         fix: None,
+                        output: None,
                     },
                     true,
                 ));
@@ -2555,6 +2504,7 @@ impl Launchpad {
                         title,
                         detail,
                         fix: None,
+                        output: None,
                     },
                     true,
                 ));
@@ -2567,6 +2517,7 @@ impl Launchpad {
                         title: format!("{} is running without a window", session.app_name),
                         detail: "It may run in the background, such as in the system tray, which Remote apps can’t show.".into(),
                         fix: Some(api::Fix::Quit(session.id)),
+                        output: None,
                     },
                     true,
                 ));
@@ -2591,31 +2542,44 @@ impl Launchpad {
                         "The connection to {server} dropped or Needle stopped there, and the app’s windows closed with it. Open it again."
                     ),
                     fix: None,
+                    output: None,
                 },
-                api::Ending::Failed(reason) => api::Alert {
-                    id,
-                    severity: api::Severity::Error,
-                    title: format!("Couldn’t open {}", session.app_name),
-                    detail: failure(reason, &session.app_name, server),
-                    fix: None,
-                },
+                api::Ending::Failed(reason) => {
+                    let (detail, fix) = self.failure(reason, &session.app_name);
+                    api::Alert {
+                        id,
+                        severity: api::Severity::Error,
+                        title: format!("Couldn’t open {}", session.app_name),
+                        output: full_output(&detail, reason),
+                        detail,
+                        fix,
+                    }
+                }
                 // Tray apps and daemons start fine but never show a window.
-                api::Ending::NoWindow(output) => api::Alert {
-                    id,
-                    severity: api::Severity::Warning,
-                    title: format!("{} closed without opening a window", session.app_name),
-                    detail: match output {
-                        Some(output) => format!("It reported: {output}"),
+                api::Ending::NoWindow(output) => {
+                    let detail = match output {
+                        Some(output) => format!("It reported: {}", first_lines(output)),
                         None => "It may run in the background, such as in the system tray, which Remote apps can’t show.".into(),
-                    },
-                    fix: None,
-                },
+                    };
+                    api::Alert {
+                        id,
+                        severity: api::Severity::Warning,
+                        title: format!("{} closed without opening a window", session.app_name),
+                        output: output
+                            .as_deref()
+                            .filter(|output| first_lines(output) != *output || fills_alert(&detail))
+                            .map(str::to_owned),
+                        detail,
+                        fix: None,
+                    }
+                }
                 api::Ending::Refused { message, action } => api::Alert {
                     id,
                     severity: api::Severity::Error,
                     title: format!("Couldn’t open {}", session.app_name),
                     detail: message.clone(),
                     fix: action.map(api::Fix::Account),
+                    output: None,
                 },
                 api::Ending::Unavailable(error) => api::Alert {
                     id,
@@ -2623,6 +2587,7 @@ impl Launchpad {
                     title: format!("Can’t control {}", session.app_name),
                     detail: format!("{error} The app may still be running on the server."),
                     fix: None,
+                    output: None,
                 },
             };
             alerts.push((alert, true));
@@ -2752,6 +2717,20 @@ impl Launchpad {
             }
             None => {}
         }
+        if let Some(output) = alert.output.clone() {
+            let title = alert.title.clone();
+            actions = actions.child(
+                div()
+                    .debug_selector(move || format!("remote-apps-alert-output-{index}"))
+                    .child(
+                        crate::controls::compact_button(("remote-apps-alert-output", index))
+                            .label("Show full error")
+                            .on_click(move |_, window, cx| {
+                                full_error(title.clone(), output.clone(), window, cx)
+                            }),
+                    ),
+            );
+        }
         if dismissible {
             let id = alert.id.clone();
             actions = actions.child(
@@ -2802,10 +2781,17 @@ impl Launchpad {
                     .flex_col()
                     .gap(px(2.))
                     .text_size(px(crate::ui::FONT_SIZE))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(alert.title))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(alert.title.clone()),
+                    )
                     .child(
                         div()
                             .text_color(cx.theme().muted_foreground)
+                            // Only an app's own report is cut short, and
+                            // Show full error then has all of it.
+                            .when(alert.output.is_some(), |detail| detail.line_clamp(2))
                             .child(alert.detail),
                     )
                     .when_some(command_line, |text, command| {
@@ -2931,7 +2917,6 @@ impl Launchpad {
                             })),
                     ),
             )
-            .child(self.display_mode_control(cx))
             .child(section(
                 "Sound",
                 "Hear remote apps on this Mac.",
@@ -3093,16 +3078,112 @@ impl Launchpad {
     }
 }
 
-/// Fallback icon: the first letter on a colour derived from the name.
-/// What a failed launch reported, or what to do when it is a known refusal.
-fn failure(reason: &str, app: &str, server: &str) -> String {
-    // Chromium and Electron apps print this and exit when run as root.
-    if reason.contains("as root without --no-sandbox") {
-        return format!(
-            "{app} won’t run as root. Connect to {server} as a regular user to open it."
-        );
-    }
-    reason.to_owned()
+/// The first two lines of what an app reported: usually its own words for
+/// what went wrong, before what failed because of it.
+fn first_lines(reason: &str) -> String {
+    reason
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(2)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Everything an app reported, when its alert shows less of it: other
+/// words, fewer lines, or more text than the alert's two lines hold.
+fn full_output(shown: &str, reported: &str) -> Option<String> {
+    (shown != reported || fills_alert(shown)).then(|| reported.to_owned())
+}
+
+/// Whether an alert's text may not fit in the two lines it is clamped to.
+fn fills_alert(shown: &str) -> bool {
+    shown.chars().count() > CLAMPED_CHARS
+}
+
+/// About as much text as two lines of an alert hold at the narrowest
+/// window width.
+const CLAMPED_CHARS: usize = 120;
+
+/// Everything an app reported, to read, select and copy.
+fn full_error(title: String, output: String, window: &mut Window, cx: &mut App) {
+    let text = cx.new(|cx| {
+        crate::controls::code_editor(window, cx)
+            .soft_wrap(true)
+            .default_value(output.clone())
+    });
+    let title: SharedString = title.into();
+    window.open_dialog(cx, move |dialog, window, cx| {
+        let copy = output.clone();
+        dialog
+            .title(crate::controls::dialog_title(title.clone()))
+            .w(px(640.))
+            .max_w((window.viewport_size().width - px(32.)).max(px(240.)))
+            .p(px(24.))
+            .rounded(px(crate::ui::RADIUS))
+            .border_0()
+            .centered(true)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .pt_3()
+                    .child(
+                        div()
+                            .h(px(320.))
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .rounded(px(crate::ui::RADIUS))
+                            .child(
+                                gpui_kit::component::input::Editor::new(&text)
+                                    .readonly(true)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .aria_label(format!("{title}: what the app reported"))
+                                    .h_full()
+                                    .text_size(px(12.))
+                                    .p(px(10.)),
+                            ),
+                    )
+                    .child(
+                        crate::project_dialog::actions()
+                            .child(
+                                crate::controls::form_button("remote-apps-full-error-copy")
+                                    .icon(IconName::Copy)
+                                    .label("Copy")
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            copy.clone(),
+                                        ))
+                                    }),
+                            )
+                            .child(
+                                crate::controls::form_button("remote-apps-full-error-done")
+                                    .primary()
+                                    .label("Done")
+                                    .on_click(|_, window, cx| window.close_dialog(cx)),
+                            ),
+                    ),
+            )
+    });
+}
+
+/// Toolkits' and runtimes' own words for having no X11 display to open.
+fn no_x11_display(line: &str) -> bool {
+    let line = line.to_ascii_lowercase();
+    [
+        "can't open display",
+        "cannot open display",
+        "unable to open display",
+        "could not connect to display",
+        "can't connect to x11 window server",
+        "no x11 display variable",
+        "missing x server or $display",
+        "no display name and no $display",
+    ]
+    .iter()
+    .any(|words| line.contains(words))
 }
 
 fn monogram(name: &str, cx: &App) -> AnyElement {
@@ -3369,13 +3450,6 @@ impl Newport {
                             args: json!({"settings": settings}),
                         })
                     }
-                    LaunchpadEvent::SaveDisplayMode { server, mode } => {
-                        this.queue_remote_mutation(Mutation {
-                            key: display_mode_key(server),
-                            method: "remote_apps_display_mode_save",
-                            args: json!({"serverId": server, "mode": mode}),
-                        })
-                    }
                 })
                 .detach();
                 self.remote_apps = Some(view.clone());
@@ -3435,23 +3509,6 @@ impl Newport {
     }
 
     pub(crate) fn send_remote_mutations(&mut self) {
-        let changed_modes: Vec<_> = self
-            .remote_apps_mutating
-            .iter()
-            .filter(|key| self.resources.get(key).is_some_and(|read| !read.pending))
-            .filter_map(|key| {
-                key.strip_prefix("remote-apps-display-mode:")
-                    .map(str::to_owned)
-            })
-            .collect();
-        for server in changed_modes {
-            // Keep the catalogue visible while replacing the previous mode's
-            // dependency reading. Its mode mismatch blocks new launches.
-            self.resources.fence(&status_key(&server));
-            if self.server == server {
-                self.remote_apps_recheck = Some(true);
-            }
-        }
         let resources = &self.resources;
         self.remote_apps_mutating
             .retain(|key| resources.get(key).is_some_and(|read| read.pending));
@@ -3536,18 +3593,6 @@ impl Newport {
                 INSTALLED_KEY,
                 "remote_apps_installed",
                 json!({}),
-                generation,
-            );
-        }
-        let mode = display_mode_key(&server);
-        if (returned || self.resources.get(&mode).is_none())
-            && !self.remote_apps_mutating.contains(&mode)
-        {
-            let generation = self.resources.begin_refresh(&mode, false);
-            self.dispatch_request(
-                &mode,
-                "remote_apps_display_mode",
-                json!({"serverId": server}),
                 generation,
             );
         }
@@ -4590,7 +4635,6 @@ mod tests {
             v.poll_remote_apps(cx);
             for key in [
                 super::SETTINGS_KEY.to_owned(),
-                super::display_mode_key(&v.server),
                 super::status_key(&v.server),
                 super::catalogue_key(&v.server),
             ] {
@@ -4825,15 +4869,15 @@ mod tests {
     fn a_change_is_sent_even_while_a_read_is_in_flight(cx: &mut TestAppContext) {
         let (view, visual) = launchpad_with(json!({}), cx);
         view.update(visual, |v, _| {
-            let key = super::display_mode_key(&v.server);
-            let save = |mode: &str, server: &str| super::Mutation {
-                key: super::display_mode_key(server),
-                method: "remote_apps_display_mode_save",
-                args: json!({"serverId": server, "mode": mode}),
+            let key = super::INSTALLED_KEY.to_owned();
+            let save = |installed: bool, server: &str| super::Mutation {
+                key: super::INSTALLED_KEY.to_owned(),
+                method: "remote_apps_installed_save",
+                args: json!({"serverId": server, "installed": installed}),
             };
             assert!(v.resources.begin_refresh(&key, false).is_some());
             let server = v.server.clone();
-            v.queue_remote_mutation(save("wayland", &server));
+            v.queue_remote_mutation(save(true, &server));
             // The read gave way and the change went out; the test backend
             // refuses it at once.
             assert!(
@@ -4844,9 +4888,9 @@ mod tests {
             // While a change to the key is in flight, the next one waits.
             let generation = v.resources.begin_refresh(&key, true).unwrap();
             v.remote_apps_mutating.insert(key.clone());
-            v.queue_remote_mutation(save("mixed", &server));
+            v.queue_remote_mutation(save(false, &server));
             assert_eq!(v.remote_apps_mutations.len(), 1);
-            v.resources.complete(&key, generation, Ok(json!("wayland")));
+            v.resources.complete(&key, generation, Ok(json!([server])));
             v.send_remote_mutations();
             assert!(v.remote_apps_mutations.is_empty());
         });
@@ -5039,7 +5083,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn incompatible_display_dependencies_stay_unavailable_until_rechecked(cx: &mut TestAppContext) {
+    fn an_unusable_xwayland_shows_in_the_checklist_until_rechecked(cx: &mut TestAppContext) {
         let (view, visual) = launchpad_with(json!({}), cx);
         for (gap, title, installable) in [
             (
@@ -5060,25 +5104,14 @@ mod tests {
             view.read_with(visual, |v, cx| {
                 let launchpad = v.remote_apps.as_ref().unwrap().read(cx);
                 let status = launchpad.status();
-                assert!(matches!(status, api::ServerStatus::Gaps(_)));
-                let alerts = launchpad.alerts(&status, &[]);
-                let (alert, dismissible) = &alerts[0];
-                assert!(!dismissible);
-                assert_eq!(alert.severity, api::Severity::Error);
-                assert_eq!(alert.title, title);
-                assert_eq!(matches!(alert.fix, Some(api::Fix::Command(_))), installable);
-                assert_eq!(matches!(alert.fix, Some(api::Fix::Refresh)), !installable);
+                assert!(launchpad.alerts(&status, &[]).is_empty());
+                assert!(launchpad.launch_agent().is_ok());
                 let checks = launchpad.checks();
                 assert_eq!(checks[3].label, title);
                 assert!(checks[3].outcome == super::CheckOutcome::Gap);
-                assert_eq!(checks[3].detail, alert.detail);
                 assert_eq!(checks[3].fix.is_some(), installable);
             });
-            assert!(visual.debug_bounds("remote-apps-alert-dismiss-0").is_none());
-            assert_eq!(
-                visual.debug_bounds("remote-apps-alert-run-0").is_some(),
-                installable
-            );
+            assert!(visual.debug_bounds("remote-apps-alert-0").is_none());
         }
         answer(&view, visual, ready());
         view.read_with(visual, |v, cx| {
@@ -5087,6 +5120,128 @@ mod tests {
             assert!(launchpad.checks()[3].outcome == super::CheckOutcome::Passed);
         });
         assert!(visual.debug_bounds("remote-apps-alert-0").is_none());
+    }
+
+    #[gpui::test]
+    fn failures_show_two_lines_and_keep_everything_reported(cx: &mut TestAppContext) {
+        let reported = "The profile appears to be in use by another Chromium process (3746) on another computer (amd-halo).\nError: Can't open display:\nFailed sending zygote boot message: Broken pipe (32)\nwrite: Broken pipe (32)";
+        let failed = |app: &str| api::SessionSummary {
+            id: api::SessionId(1),
+            server: "server".into(),
+            app_id: format!("{app}.desktop"),
+            app_name: app.into(),
+            state: api::SessionState::Ended {
+                ending: Some(api::Ending::Failed(reported.into())),
+            },
+            notice: None,
+        };
+        // A server with XWayland: the app's own first two lines, and all of it on request.
+        let (view, visual) = launchpad_with(json!({}), cx);
+        view.read_with(visual, |v, cx| {
+            let launchpad = v.remote_apps.as_ref().unwrap().read(cx);
+            let alerts = launchpad.alerts(&launchpad.status(), &[failed("Chromium")]);
+            let (alert, _) = &alerts[0];
+            assert_eq!(
+                alert.detail,
+                "The profile appears to be in use by another Chromium process (3746) on another computer (amd-halo).\nError: Can't open display:"
+            );
+            assert_eq!(alert.output.as_deref(), Some(reported));
+            assert!(alert.fix.is_none());
+        });
+        // Without XWayland, the missing X11 is the reason, and installing it the fix.
+        let (view, visual) = launchpad_with(
+            json!({"gaps": [{"requirement": "xwayland", "state": "missing"}]}),
+            cx,
+        );
+        view.read_with(visual, |v, cx| {
+            let launchpad = v.remote_apps.as_ref().unwrap().read(cx);
+            let alerts = launchpad.alerts(&launchpad.status(), &[failed("Chromium")]);
+            // Only the app that needed it raises it.
+            assert_eq!(alerts.len(), 1);
+            let (alert, dismissible) = &alerts[0];
+            assert!(dismissible);
+            assert!(
+                alert.detail.starts_with("Chromium needs X11, and"),
+                "{}",
+                alert.detail
+            );
+            assert!(alert.detail.contains("has no XWayland. Install XWayland"), "{}", alert.detail);
+            assert!(matches!(&alert.fix, Some(api::Fix::Command(command)) if command.contains("xwayland")));
+            assert_eq!(alert.output.as_deref(), Some(reported));
+        });
+        let (view, visual) = launchpad_with(
+            json!({"gaps": [{"requirement": "xwayland", "state": "missing"}]}),
+            cx,
+        );
+        view.update(visual, |v, cx| {
+            v.remote_apps.as_ref().unwrap().update(cx, |launchpad, cx| {
+                let short = api::SessionSummary {
+                    state: api::SessionState::Ended {
+                        ending: Some(api::Ending::Failed("kate: not found".into())),
+                    },
+                    ..failed("Kate")
+                };
+                let alerts = launchpad.alerts(&launchpad.status(), &[short]);
+                // Nothing more to read than the banner shows.
+                assert_eq!(alerts[0].0.detail, "kate: not found");
+                assert!(alerts[0].0.output.is_none());
+                cx.notify();
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn alerts_offer_the_full_output_only_when_their_text_is_cut(cx: &mut TestAppContext) {
+        let ended = |ending| api::SessionSummary {
+            id: api::SessionId(1),
+            server: "server".into(),
+            app_id: "kate.desktop".into(),
+            app_name: "Kate".into(),
+            state: api::SessionState::Ended {
+                ending: Some(ending),
+            },
+            notice: None,
+        };
+        let long = "x".repeat(super::CLAMPED_CHARS + 1);
+        let fits = "y".repeat(super::CLAMPED_CHARS);
+        let (view, visual) = launchpad_with(json!({}), cx);
+        view.read_with(visual, |v, cx| {
+            let launchpad = v.remote_apps.as_ref().unwrap().read(cx);
+            let alerts = |ending| {
+                let mut alerts = launchpad.alerts(&launchpad.status(), &[ended(ending)]);
+                alerts.remove(0).0
+            };
+            // One line too long for two lines of the alert.
+            let alert = alerts(api::Ending::Failed(long.clone()));
+            assert_eq!(alert.detail, long);
+            assert_eq!(alert.output.as_deref(), Some(long.as_str()));
+            // One short line is shown whole.
+            let alert = alerts(api::Ending::Failed(fits.clone()));
+            assert_eq!(alert.detail, fits);
+            assert!(alert.output.is_none());
+            // The wording "It reported: " counts towards what the alert holds.
+            let alert = alerts(api::Ending::NoWindow(Some(fits.clone())));
+            assert_eq!(alert.detail, format!("It reported: {fits}"));
+            assert_eq!(alert.output.as_deref(), Some(fits.as_str()));
+            let alert = alerts(api::Ending::NoWindow(Some("Started in the tray".into())));
+            assert!(alert.output.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn alerts_without_output_are_not_cut(cx: &mut TestAppContext) {
+        let (view, visual) = launchpad_with(
+            json!({"gaps": [{"requirement": "dialogs", "state": "missing"}],
+                "host": {"elevation": "sudo", "updater": null}, "osRelease": "ID=alpine"}),
+            cx,
+        );
+        view.read_with(visual, |v, cx| {
+            let launchpad = v.remote_apps.as_ref().unwrap().read(cx);
+            let alerts = launchpad.alerts(&launchpad.status(), &[]);
+            // Nothing offers more to read, so the text must show whole.
+            assert!(!alerts.is_empty());
+            assert!(alerts.iter().all(|(alert, _)| alert.output.is_none()));
+        });
     }
 
     #[gpui::test]
@@ -5258,83 +5413,26 @@ mod tests {
     }
 
     #[gpui::test]
-    fn display_mode_waits_for_matching_status_and_rejected_saves_restore_the_value(
-        cx: &mut TestAppContext,
-    ) {
-        let (view, visual) = launchpad_with(json!({"displayPrerequisites":{"mode":"mixed"}}), cx);
-        let key = super::display_mode_key("fixture");
-        confirm(&view, visual, &key, json!("mixed"));
-        view.update(visual, |v, cx| {
-            v.remote_apps.as_ref().unwrap().update(cx, |pad, _| {
-                assert!(pad.launch_agent().is_ok());
-                super::Launchpad::edit(&mut pad.display_mode, json!("wayland"));
-                assert!(pad.launch_agent().is_err());
-            });
-            let generation = v.resources.begin_refresh(&key, true).unwrap();
-            v.resources
-                .complete(&key, generation, Err("Save failed".into()));
-        });
-        frame(visual);
-        view.read_with(visual, |v, cx| {
-            let pad = v.remote_apps.as_ref().unwrap().read(cx);
-            assert_eq!(pad.display_mode.value, json!("mixed"));
-            assert!(pad.display_mode.error.is_some());
-            assert!(pad.launch_agent().is_ok());
-        });
-        confirm(&view, visual, &key, json!("wayland"));
-        view.read_with(visual, |v, cx| {
-            assert!(
-                v.remote_apps
-                    .as_ref()
-                    .unwrap()
-                    .read(cx)
-                    .launch_agent()
-                    .is_err()
-            );
-        });
-        let mut native = ready();
-        native["displayPrerequisites"] = json!({"mode":"wayland", "xwayland":null});
-        answer(&view, visual, native);
+    fn xwayland_is_offered_never_required(cx: &mut TestAppContext) {
+        let mut status = ready();
+        status["gaps"] = json!([{"requirement": "xwayland", "state": "missing"}]);
+        let (view, visual) = launchpad_with(status, cx);
         view.read_with(visual, |v, cx| {
             let pad = v.remote_apps.as_ref().unwrap().read(cx);
             assert!(pad.launch_agent().is_ok());
-            assert_eq!(pad.checks()[3].label, "Wayland");
-            assert!(pad.checks()[3].fix.is_none());
+            let row = &pad.checks()[3];
+            assert_eq!(row.label, "XWayland is missing");
+            assert!(row.outcome == super::CheckOutcome::Gap);
+            assert!(row.fix.is_some());
+            // The page raises no alert for it; an app that needed it does.
+            assert!(pad.alerts(&pad.status(), &[]).is_empty());
         });
         click(visual, "remote-apps-preferences");
-        assert!(visual.debug_bounds("remote-apps-display-mode").is_some());
-    }
-
-    #[gpui::test]
-    fn completed_display_mode_save_rechecks_only_its_server(cx: &mut TestAppContext) {
-        let (view, visual) = launchpad_with(json!({"displayPrerequisites":{"mode":"mixed"}}), cx);
-        confirm(
-            &view,
-            visual,
-            &super::status_key("other"),
-            json!({"unchanged":true}),
+        assert!(
+            visual
+                .debug_bounds("remote-apps-preferences-panel")
+                .is_some()
         );
-        view.update(visual, |v, _| {
-            let status = super::status_key(&v.server);
-            let stale = v.resources.begin_refresh(&status, false).unwrap();
-            let key = super::display_mode_key(&v.server);
-            let saved = v.resources.begin_refresh(&key, true).unwrap();
-            v.remote_apps_mutating.insert(key.clone());
-            v.resources.complete(&key, saved, Ok(json!("wayland")));
-            v.send_remote_mutations();
-            assert_eq!(v.remote_apps_recheck, Some(true));
-            assert!(!v.remote_apps_mutating.contains(&key));
-            v.resources
-                .complete(&status, stale, Ok(json!({"stale":true})));
-            assert_eq!(
-                v.resources.get(&status).unwrap().value["displayPrerequisites"]["mode"],
-                "mixed"
-            );
-            assert_eq!(
-                v.resources.get(&super::status_key("other")).unwrap().value,
-                json!({"unchanged":true})
-            );
-        });
     }
 
     #[gpui::test]

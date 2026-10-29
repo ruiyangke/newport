@@ -42,7 +42,7 @@ pub(crate) enum Read {
     Inspect(String),
     Disk(DiskPart),
     Compose(String),
-    RemoteAppsStatus(crate::graphical_session::SharedDisplayMode),
+    RemoteAppsStatus,
     RemoteAppsCatalogue,
 }
 impl Read {
@@ -51,7 +51,7 @@ impl Read {
     }
     /// The Remote apps agent and distribution, and the agent's applications.
     fn remote_apps(&self) -> bool {
-        matches!(self, Self::RemoteAppsStatus(_) | Self::RemoteAppsCatalogue)
+        matches!(self, Self::RemoteAppsStatus | Self::RemoteAppsCatalogue)
     }
     fn policy(&self) -> Policy {
         let seconds = match self {
@@ -59,7 +59,7 @@ impl Read {
             Self::UnitFile { .. } => 10,
             // Measuring volumes walks them on disk; reuse a recent reading.
             Self::Disk(DiskPart::Volumes) => 60,
-            Self::RemoteAppsStatus(_) => 30,
+            Self::RemoteAppsStatus => 30,
             // Installed applications change rarely; Refresh reads them again.
             Self::RemoteAppsCatalogue => 300,
             _ => 5,
@@ -86,7 +86,7 @@ impl Read {
             Self::Inspect(id) => crate::containers::inspect(owner, id).await,
             Self::Disk(part) => crate::containers::disk(owner, *part).await,
             Self::Compose(project) => crate::compose::project(owner, project).await,
-            Self::RemoteAppsStatus(mode) => crate::remote_apps::status(owner, *mode).await,
+            Self::RemoteAppsStatus => crate::remote_apps::status(owner).await,
             Self::RemoteAppsCatalogue => crate::remote_apps::catalogue(owner).await,
         }
     }

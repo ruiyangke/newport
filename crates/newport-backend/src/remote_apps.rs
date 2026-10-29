@@ -1,6 +1,5 @@
 //! Read models for Remote Apps: the shared agent product and the
 //! server's applications. Sessions are live resources and stay out of here.
-use crate::graphical_session::SharedDisplayMode;
 use crate::server_session::ServerSession;
 use crate::ssh::shell_quote as quote;
 use newport_domain::requirements::{Finding, Gap, Host, Inactive, Requirement};
@@ -76,6 +75,8 @@ if command -v snap >/dev/null 2>&1 || command -v flatpak >/dev/null 2>&1; then
     done
     [ -n "$portal" ] || echo 'gap=portal missing'
 fi
+# Apps such as Chromium show prompts with zenity, or kdialog on KDE.
+command -v zenity >/dev/null 2>&1 || command -v kdialog >/dev/null 2>&1 || echo 'gap=dialogs missing'
 # Sound needs the account's pulse server on its standard socket, or a
 # pulseaudio Needle starts itself. PipeWire's user services refuse root.
 if [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/pulse/native" ] || command -v pulseaudio >/dev/null 2>&1; then
@@ -103,29 +104,19 @@ const CATALOGUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60
 
 /// Verified shared product, legacy migration evidence, and host dependencies.
 /// The agent marker only becomes present for a compatible full installation.
-pub(crate) async fn status(
-    owner: &Arc<ServerSession>,
-    mode: SharedDisplayMode,
-) -> Result<Value, String> {
+pub(crate) async fn status(owner: &Arc<ServerSession>) -> Result<Value, String> {
     let server = owner.server().clone();
     let lease = owner.acquire(&server).await?;
     let output = lease
         .execute(
             &format!(
                 "sh -c {}",
-                quote(&format!(
-                    "{}\n{FIND_AGENT}{REPORT}",
-                    if mode == SharedDisplayMode::Mixed {
-                        display::PROBE
-                    } else {
-                        ""
-                    }
-                ))
+                quote(&format!("{}\n{FIND_AGENT}{REPORT}", display::PROBE))
             ),
             None,
         )
         .await?;
-    let mut value = parse_status_mode(&output, mode);
+    let mut value = parse_status(&output);
     value["expectedConnection"] = json!(server);
     value["bundledVariant"] = json!(crate::agent_payload::variant());
     let architecture = value["architecture"].as_str().unwrap_or_default();
@@ -152,11 +143,10 @@ pub(crate) async fn status(
             .services
             .get("remote-apps")
             .is_some_and(|versions| versions.contains(&1))
-            && (mode == SharedDisplayMode::Mixed
-                || product
-                    .services
-                    .get("gui-launch")
-                    .is_some_and(|versions| versions.contains(&4)))
+            && product
+                .services
+                .get("gui-launch")
+                .is_some_and(|versions| versions.contains(&4))
     } else {
         false
     };
@@ -164,11 +154,7 @@ pub(crate) async fn status(
     Ok(value)
 }
 
-#[cfg(test)]
 fn parse_status(output: &str) -> Value {
-    parse_status_mode(output, SharedDisplayMode::Mixed)
-}
-fn parse_status_mode(output: &str, mode: SharedDisplayMode) -> Value {
     let (head, release) = output.split_once("--os-release--").unwrap_or((output, ""));
     let field = |name: &str| {
         head.lines()
@@ -227,11 +213,8 @@ fn parse_status_mode(output: &str, mode: SharedDisplayMode) -> Value {
         },
         user_services: field("userServices").is_some(),
     };
-    let (xwayland, dependency) = if mode == SharedDisplayMode::Mixed {
-        display::status(field("xwayland"))
-    } else {
-        (Value::Null, None)
-    };
+    // The display starts XWayland when an app asks for X11.
+    let (xwayland, dependency) = display::status(field("xwayland"));
     if let Some(gap) = dependency {
         gaps.insert(0, gap);
     }
@@ -244,31 +227,31 @@ fn parse_status_mode(output: &str, mode: SharedDisplayMode) -> Value {
         "architecture": field("architecture"),
         "gaps": gaps,
         "host": host,
-        "displayPrerequisites": {"mode":mode, "xwayland":xwayland},
+        "displayPrerequisites": {"xwayland":xwayland},
         "osRelease": release.trim(),
     })
 }
 
 #[cfg(test)]
-mod mode_tests {
+mod xwayland_tests {
     use super::*;
     #[test]
-    fn native_only_dependencies_do_not_require_or_claim_xwayland() {
+    fn xwayland_is_offered_never_required() {
         for version in ["missing", "22.1.9", "24.1.6", "unverified"] {
             let report = format!(
                 "system=Linux\narchitecture=aarch64\nxwayland={version}\ngap=dbus missing\n--os-release--\nID=debian\n"
             );
-            let native = parse_status_mode(&report, SharedDisplayMode::Wayland);
-            assert_eq!(native["displayPrerequisites"]["mode"], "wayland");
-            assert!(native["displayPrerequisites"]["xwayland"].is_null());
-            assert_eq!(native["gaps"].as_array().unwrap().len(), 1);
-            assert_eq!(native["gaps"][0]["requirement"], "dbus");
-            let mixed = parse_status_mode(&report, SharedDisplayMode::Mixed);
-            assert_eq!(mixed["displayPrerequisites"]["mode"], "mixed");
-            assert_eq!(
-                mixed["gaps"].as_array().unwrap().len(),
-                if version == "24.1.6" { 1 } else { 2 }
-            );
+            let status = parse_status(&report);
+            let usable = version == "24.1.6";
+            let state = &status["displayPrerequisites"]["xwayland"]["state"];
+            assert_eq!(*state == "available", usable, "{version}");
+            let gaps: Vec<Gap> = serde_json::from_value(status["gaps"].clone()).unwrap();
+            assert_eq!(gaps.len(), if usable { 1 } else { 2 });
+            if !usable {
+                assert_eq!(gaps[0].requirement, Requirement::Xwayland);
+                assert!(gaps[0].optional());
+            }
+            assert_eq!(gaps.last().unwrap().requirement, Requirement::Dbus);
         }
     }
 }
@@ -311,6 +294,7 @@ fn parse_gap(line: &str) -> Option<Gap> {
         "fonts" => Requirement::Fonts,
         "gles" => Requirement::Gles,
         "portal" => Requirement::Portal,
+        "dialogs" => Requirement::Dialogs,
         "audio" => Requirement::Audio,
         _ => return None,
     };
@@ -531,7 +515,7 @@ mod tests {
         let parsed = super::parse_status(
             "xwayland=24.1.6\nagent=\nelevation=root\nupdater=rpmOstree\nuserServices=1\n\
              gap=audio root\ngap=dbus failed\ngap=fonts missing\ngap=gles missing\n\
-             gap=portal missing\ngap=tar missing\ngap=audio loud\n--os-release--\nID=fedora\n",
+             gap=portal missing\ngap=dialogs missing\ngap=tar missing\ngap=audio loud\n--os-release--\nID=fedora\n",
         );
         assert_eq!(
             parsed["gaps"],
@@ -541,6 +525,7 @@ mod tests {
                 {"requirement": "fonts", "state": "missing"},
                 {"requirement": "gles", "state": "missing"},
                 {"requirement": "portal", "state": "missing"},
+                {"requirement": "dialogs", "state": "missing"},
             ])
         );
         assert_eq!(
@@ -553,6 +538,34 @@ mod tests {
             older["host"],
             serde_json::json!({"elevation": "sudo", "updater": null, "userServices": false})
         );
+    }
+
+    #[test]
+    fn zenity_or_kdialog_meets_the_dialogs_check() {
+        use newport_domain::requirements::{Gap, Requirement};
+        use std::os::unix::fs::PermissionsExt;
+        let gaps = |programs: &[&str]| {
+            let bin = tempfile::tempdir().unwrap();
+            for program in programs {
+                let path = bin.path().join(program);
+                std::fs::write(&path, "#!/bin/sh\n").unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let output = std::process::Command::new("/bin/sh")
+                .args(["-c", &format!("agent=\nset --\n{}", super::REPORT)])
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.path().display()))
+                .output()
+                .unwrap();
+            let report = String::from_utf8(output.stdout).unwrap();
+            serde_json::from_value::<Vec<Gap>>(super::parse_status(&report)["gaps"].clone())
+                .unwrap()
+                .into_iter()
+                .map(|gap| gap.requirement)
+                .collect::<Vec<_>>()
+        };
+        assert!(gaps(&[]).contains(&Requirement::Dialogs));
+        assert!(!gaps(&["zenity"]).contains(&Requirement::Dialogs));
+        assert!(!gaps(&["kdialog"]).contains(&Requirement::Dialogs));
     }
 
     #[test]

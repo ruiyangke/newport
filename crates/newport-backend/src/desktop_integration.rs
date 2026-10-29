@@ -67,21 +67,6 @@ pub trait DesktopIntegration: Send + Sync + 'static {
     ) -> crate::graphical_session::FactoryFuture {
         Box::pin(async { Err("Shared graphical sessions are unavailable in this build".into()) })
     }
-    fn graphical_factory_for_mode(
-        &self,
-        license: crate::account::RemoteLicense,
-        settings: crate::preferences::remote_apps::Settings,
-        mode: crate::graphical_session::SharedDisplayMode,
-    ) -> crate::graphical_session::FactoryFuture {
-        match mode {
-            crate::graphical_session::SharedDisplayMode::Mixed => {
-                self.graphical_factory(license, settings)
-            }
-            crate::graphical_session::SharedDisplayMode::Wayland => Box::pin(async {
-                Err("Native Wayland sessions are unavailable in this build".into())
-            }),
-        }
-    }
     /// Shared asynchronous native owner, when available. Failure of this owner
     /// must not fall back to UI-thread access. Dropped futures cancel reads.
     fn clipboard_access(&self) -> Option<Arc<dyn ClipboardAccess>> {

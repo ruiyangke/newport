@@ -226,10 +226,42 @@ fn an_old_xwayland_names_its_version() {
         },
     );
     assert_eq!(outdated.title(), "XWayland is too old");
-    assert!(outdated.installs() && !outdated.optional());
+    assert!(outdated.installs() && outdated.optional());
     assert_eq!(
         outdated.detail("box", os("ID=ubuntu").as_ref(), &Host::default()),
         "box has XWayland 22.1.9; Newport needs 23.1 or newer. Install XWayland, then check again."
+    );
+}
+
+#[test]
+fn xwayland_is_offered_never_required() {
+    let missing = missing(Requirement::Xwayland);
+    assert!(missing.installs() && missing.optional());
+    assert_eq!(missing.title(), "XWayland is missing");
+    assert_eq!(
+        missing.detail("box", os("ID=ubuntu").as_ref(), &Host::default()),
+        "Some apps use X11, and box has no XWayland for them. Install XWayland, then check again."
+    );
+}
+
+#[test]
+fn zenity_is_offered_never_required() {
+    let missing = missing(Requirement::Dialogs);
+    assert!(missing.installs() && missing.optional());
+    assert_eq!(missing.title(), "Zenity is missing");
+    assert_eq!(
+        missing.detail("box", os("ID=debian").as_ref(), &Host::default()),
+        "Apps such as Chromium show prompts with Zenity, and box has none, so they appear in a plain X11 window or not at all. Install Zenity, then check again."
+    );
+    assert_eq!(
+        missing.remedy(os("ID=debian").as_ref(), &Host::default()),
+        Remedy::Command(
+            "sudo apt update && sudo apt install --no-install-recommends zenity".into()
+        )
+    );
+    assert_eq!(
+        serde_json::to_value(&missing).unwrap(),
+        json!({"requirement": "dialogs", "state": "missing"})
     );
 }
 
@@ -273,6 +305,7 @@ fn every_requirement_has_a_package_for_every_manager() {
         Requirement::Fonts,
         Requirement::Gles,
         Requirement::Portal,
+        Requirement::Dialogs,
         Requirement::Audio,
     ] {
         for user_services in [false, true] {

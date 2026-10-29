@@ -1,19 +1,14 @@
-//! Remote apps preferences: streaming settings for every server, each
-//! server's display mode, and the servers last seen with the agent installed.
+//! Remote apps preferences: streaming settings for every server, and the
+//! servers last seen with the agent installed.
 //! Nothing here is secret.
 use super::Preferences;
-pub use newport_domain::terminal::SharedDisplayMode;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use uuid::Uuid;
 
 const SETTINGS: &str = "remoteAppsSettings";
 /// Servers last seen with the agent installed, so a first visit after
 /// starting Newport can show their apps loading instead of the welcome screen.
 const INSTALLED: &str = "remoteAppsInstalled";
-const DISPLAY_MODES: &str = "remoteAppsDisplayModes";
-/// The most servers with a display mode other than the default.
-const MAX_SERVERS: usize = 500;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -63,17 +58,11 @@ fn decode_settings(value: Option<serde_json::Value>) -> Result<Settings, String>
     Ok(settings)
 }
 
-/// Drops a deleted server's display mode and its installed-agent record.
+/// Drops a deleted server's installed-agent record.
 pub(super) fn forget_server(
     values: &mut serde_json::Map<String, serde_json::Value>,
     server_id: Uuid,
 ) -> Result<(), String> {
-    let mut modes = decode_modes(values.get(DISPLAY_MODES).cloned())?;
-    modes.remove(&server_id);
-    values.insert(
-        DISPLAY_MODES.into(),
-        serde_json::to_value(modes).map_err(|e| e.to_string())?,
-    );
     let mut installed = decode_installed(values.get(INSTALLED).cloned())?;
     installed.retain(|server| *server != server_id);
     values.insert(
@@ -94,66 +83,6 @@ async fn blocking<T: Send + 'static>(
 pub async fn remote_apps_settings(state: &Preferences) -> Result<Settings, String> {
     let state = state.clone();
     blocking(move || decode_settings(state.get(SETTINGS)?)).await
-}
-
-fn decode_modes(
-    value: Option<serde_json::Value>,
-) -> Result<BTreeMap<Uuid, SharedDisplayMode>, String> {
-    let modes: BTreeMap<Uuid, SharedDisplayMode> = value
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|e| format!("Remote apps display modes could not be read: {e}"))?
-        .unwrap_or_default();
-    if modes.len() > MAX_SERVERS || modes.keys().any(Uuid::is_nil) {
-        return Err("Invalid remote apps server display modes".into());
-    }
-    Ok(modes)
-}
-
-pub async fn remote_apps_display_mode(
-    state: &Preferences,
-    server: Uuid,
-) -> Result<SharedDisplayMode, String> {
-    let state = state.clone();
-    blocking(move || {
-        Ok(decode_modes(state.get(DISPLAY_MODES)?)?
-            .get(&server)
-            .copied()
-            .unwrap_or_default())
-    })
-    .await
-}
-
-/// Applies to the next shared session. Existing leases remain pinned; the
-/// display owner refuses opposite-mode admission until those leases/apps drain.
-pub async fn remote_apps_display_mode_save(
-    state: &Preferences,
-    server: Uuid,
-    mode: SharedDisplayMode,
-) -> Result<SharedDisplayMode, String> {
-    if server.is_nil() {
-        return Err("A saved server is required".into());
-    }
-    let state = state.clone();
-    blocking(move || {
-        state.update(|values| {
-            let mut modes = decode_modes(values.get(DISPLAY_MODES).cloned())?;
-            if mode == SharedDisplayMode::Mixed {
-                modes.remove(&server);
-            } else {
-                modes.insert(server, mode);
-            }
-            if modes.len() > MAX_SERVERS {
-                return Err("Remote apps display mode limit exceeded".into());
-            }
-            values.insert(
-                DISPLAY_MODES.into(),
-                serde_json::to_value(modes).map_err(|e| e.to_string())?,
-            );
-            Ok(mode)
-        })
-    })
-    .await
 }
 
 pub async fn remote_apps_settings_save(
@@ -214,51 +143,6 @@ pub async fn remote_apps_installed_save(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn display_modes_are_per_server_persistent_and_removed_with_server() {
-        let directory = tempfile::tempdir().unwrap();
-        let state = Preferences::open(directory.path()).unwrap();
-        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
-        assert_eq!(
-            remote_apps_display_mode(&state, a).await.unwrap(),
-            SharedDisplayMode::Mixed
-        );
-        remote_apps_display_mode_save(&state, a, SharedDisplayMode::Wayland)
-            .await
-            .unwrap();
-        assert_eq!(
-            remote_apps_display_mode(&state, b).await.unwrap(),
-            SharedDisplayMode::Mixed
-        );
-        let reopened = Preferences::open(directory.path()).unwrap();
-        assert_eq!(
-            remote_apps_display_mode(&reopened, a).await.unwrap(),
-            SharedDisplayMode::Wayland
-        );
-        state.update(|values| forget_server(values, a)).unwrap();
-        assert_eq!(
-            remote_apps_display_mode(&state, a).await.unwrap(),
-            SharedDisplayMode::Mixed
-        );
-        assert!(
-            remote_apps_display_mode_save(&state, Uuid::nil(), SharedDisplayMode::Wayland)
-                .await
-                .is_err()
-        );
-        assert!(decode_modes(Some(serde_json::json!({a.to_string(): "x11"}))).is_err());
-        remote_apps_display_mode_save(&state, b, SharedDisplayMode::Wayland)
-            .await
-            .unwrap();
-        remote_apps_display_mode_save(&state, b, SharedDisplayMode::Mixed)
-            .await
-            .unwrap();
-        assert!(
-            decode_modes(state.get(DISPLAY_MODES).unwrap())
-                .unwrap()
-                .is_empty()
-        );
-    }
 
     #[test]
     fn values_from_another_build_still_read() {

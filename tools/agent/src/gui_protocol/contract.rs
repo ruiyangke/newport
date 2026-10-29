@@ -68,7 +68,8 @@ pub mod legacy_x11_v1 {
 }
 
 /// Owned shared terminal map. Native-only mode requires separately negotiated
-/// terminal-wayland-v1 and explicit null X11 endpoint/marker entries.
+/// terminal-wayland-v1, and either explicit null X11 endpoint/marker entries or
+/// the display's own X11 endpoint, which XWayland serves on demand.
 pub mod shared_terminal_v2 {
     use super::Values;
     /// Each owned endpoint and the marker that must carry the same value.
@@ -124,21 +125,20 @@ pub mod shared_terminal_v2 {
                 .is_some_and(|v| v.split('/').all(component))
         };
         let display = get("DISPLAY");
-        let x11_valid = if native_only {
-            [
-                "DISPLAY",
-                "XAUTHORITY",
-                "NEWPORT_GUI_DISPLAY",
-                "NEWPORT_GUI_AUTHORITY",
-            ]
-            .iter()
-            .all(|name| values.get(*name) == Some(&None))
-        } else {
-            display
-                .strip_prefix(':')
-                .is_some_and(|v| !v.is_empty() && v.bytes().all(|c| c.is_ascii_digit()))
-                && path(get("XAUTHORITY"))
-        };
+        let owned_x11 = display
+            .strip_prefix(':')
+            .is_some_and(|v| !v.is_empty() && v.bytes().all(|c| c.is_ascii_digit()))
+            && path(get("XAUTHORITY"));
+        let x11_valid = owned_x11
+            || native_only
+                && [
+                    "DISPLAY",
+                    "XAUTHORITY",
+                    "NEWPORT_GUI_DISPLAY",
+                    "NEWPORT_GUI_AUTHORITY",
+                ]
+                .iter()
+                .all(|name| values.get(*name) == Some(&None));
         if !x11_valid || !path(get("XDG_RUNTIME_DIR")) || !component(get("WAYLAND_DISPLAY")) {
             return Err(bad());
         }
@@ -587,9 +587,10 @@ mod tests {
     }
 
     #[test]
-    fn native_only_requires_explicit_null_pairs_not_missing_or_empty() {
+    fn native_only_takes_owned_or_explicit_null_pairs_not_missing_or_empty() {
         let mut values = shared();
-        assert!(shared_terminal_v2::validate(&values, true).is_err());
+        // The display's own X11 endpoint, served by XWayland on demand.
+        assert!(shared_terminal_v2::validate(&values, true).is_ok());
         let x11 = [
             "DISPLAY",
             "XAUTHORITY",

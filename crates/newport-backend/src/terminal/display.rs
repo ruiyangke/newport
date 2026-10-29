@@ -17,20 +17,14 @@ pub(crate) const JOIN_WAIT: Duration = Duration::from_millis(500);
 /// Captures local account/settings access only. Calling it is deferred until an
 /// explicit GUI request has completed the desktop's setup guidance.
 pub(crate) type Source = Arc<dyn Fn() -> graphical_session::FactoryFuture + Send + Sync>;
+/// Takes the server only to match [`join_source`].
 pub(crate) fn handoff_source(
-    server: uuid::Uuid,
+    _server: uuid::Uuid,
     account: Account,
     preferences: Preferences,
     desktop: Desktop,
 ) -> Source {
-    Arc::new(move || {
-        shared_factory(
-            server,
-            account.clone(),
-            preferences.clone(),
-            desktop.clone(),
-        )
-    })
+    Arc::new(move || shared_factory(account.clone(), preferences.clone(), desktop.clone()))
 }
 /// The display a new shell may join: only for a server set up for Remote apps
 /// and an eligible account. These checks are local and do not open a
@@ -56,7 +50,7 @@ pub(crate) fn join_source(
             if !account.allows_remote_sessions().await {
                 return Err("This computer has no Remote apps access".into());
             }
-            shared_factory(server, account, preferences, desktop).await
+            shared_factory(account, preferences, desktop).await
         })
     })
 }
@@ -114,7 +108,6 @@ pub(crate) async fn join(owner: &Arc<ServerSession>, source: Source, wait: Durat
     }
 }
 pub(crate) fn shared_factory(
-    server: uuid::Uuid,
     account: Account,
     preferences: Preferences,
     desktop: Desktop,
@@ -125,14 +118,7 @@ pub(crate) fn shared_factory(
             .await
             .map_err(|error| error.message)?;
         let settings = remote_apps::remote_apps_settings(&preferences).await?;
-        let mode = remote_apps::remote_apps_display_mode(&preferences, server).await?;
-        let factory = desktop
-            .graphical_factory_for_mode(license, settings, mode)
-            .await?;
-        if factory.display_mode() != mode {
-            return Err("Graphical factory does not support the selected display mode".into());
-        }
-        Ok(factory)
+        desktop.graphical_factory(license, settings).await
     })
 }
 /// A shared display failed while its shell started. The shell starts again

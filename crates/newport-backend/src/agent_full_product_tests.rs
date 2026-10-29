@@ -40,10 +40,7 @@ touch "$legacy/.validated-v1"
         )
         .await
         .unwrap();
-    let before =
-        crate::remote_apps::status(&owner, crate::graphical_session::SharedDisplayMode::Mixed)
-            .await
-            .unwrap();
+    let before = crate::remote_apps::status(&owner).await.unwrap();
     assert!(before["agent"].is_null());
     assert!(before["legacyAgent"].is_string());
     assert_eq!(before["bundledVariant"], "full");
@@ -57,10 +54,7 @@ touch "$legacy/.validated-v1"
     assert!(!configured.setup_complete);
     assert!(!owner.permissions.browser_enabled());
     assert!(!owner.permissions.clipboard_enabled());
-    let gui_status =
-        crate::remote_apps::status(&owner, crate::graphical_session::SharedDisplayMode::Mixed)
-            .await
-            .unwrap();
+    let gui_status = crate::remote_apps::status(&owner).await.unwrap();
     assert_eq!(gui_status["agent"], "newport-agent");
     assert_eq!(gui_status["installedVariant"], "full");
     assert_eq!(

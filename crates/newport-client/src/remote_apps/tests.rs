@@ -54,41 +54,18 @@ fn existing(scope: Scope, request: u64) -> Application {
 }
 
 #[test]
-fn explicit_x11_requirement_reaches_backend_without_changing_automatic_requests() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let seen = calls.clone();
-    let controller = Controller::with_exchange(Arc::new(move |method, args, _| {
-        assert_eq!(method, "remote_apps_launch");
-        seen.lock().unwrap().push(args);
-        Ok(json!(Launched {
-            application: handle(1),
-            outcome: Outcome::Accepted
-        }))
-    }));
-    let automatic = controller.launch(scope(), target()).unwrap();
-    wait(|| automatic.0.state.lock().unwrap().handle.is_some());
-    let x11 = controller.launch_requiring_x11(scope(), target()).unwrap();
-    wait(|| x11.0.state.lock().unwrap().handle.is_some());
-    let calls = calls.lock().unwrap();
-    assert!(!calls[0].as_object().unwrap().contains_key("requiresX11"));
-    assert_eq!(calls[1]["requiresX11"], true);
-    assert_eq!(calls[0]["target"], calls[1]["target"]);
-}
-
-#[test]
-fn stale_x11_request_refusal_never_replays_or_claims_a_running_app() {
+fn a_refused_launch_never_replays_or_claims_a_running_app() {
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
-    let mut controller = Controller::with_exchange(Arc::new(move |method, args, _| {
+    let mut controller = Controller::with_exchange(Arc::new(move |method, _, _| {
         assert_eq!(method, "remote_apps_launch");
-        assert_eq!(args["requiresX11"], true);
         seen.fetch_add(1, Ordering::SeqCst);
         Err(RequestError {
             code: Some("APPLICATION_NOT_SUBMITTED".into()),
-            message: "X11 is unavailable with Wayland-only application support.".into(),
+            message: "Remote apps isn’t set up for this server".into(),
         })
     }));
-    let application = controller.launch_requiring_x11(scope(), target()).unwrap();
+    let application = controller.launch(scope(), target()).unwrap();
     wait(|| matches!(application.status(), Status::Refused { .. }));
     assert!(application.0.state.lock().unwrap().handle.is_none());
     application.stop();

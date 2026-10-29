@@ -9,10 +9,15 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub enum Requirement {
     Dbus,
+    /// For X11-only apps and the X11 parts of Wayland apps, such as a
+    /// browser's profile dialog. The display starts it on demand.
     Xwayland,
     Fonts,
     Gles,
     Portal,
+    /// A program apps show their prompts with: zenity, or kdialog on KDE.
+    /// Chromium falls back to xmessage, an X11 window with bitmap text.
+    Dialogs,
     Audio,
 }
 
@@ -86,6 +91,7 @@ impl Requirement {
             Self::Fonts => "Fonts",
             Self::Gles => "OpenGL ES",
             Self::Portal => "GTK portal",
+            Self::Dialogs => "Zenity",
             Self::Audio => "Sound",
         }
     }
@@ -94,10 +100,11 @@ impl Requirement {
     pub fn purpose(self) -> &'static str {
         match self {
             Self::Dbus => "Starting apps",
-            Self::Xwayland => "X11 apps",
+            Self::Xwayland => "X11 apps and dialogs",
             Self::Fonts => "Text in apps",
             Self::Gles => "GTK 4 apps",
             Self::Portal => "File dialogs in Snap and Flatpak apps",
+            Self::Dialogs => "Prompts from apps, such as Chromium’s",
             Self::Audio => "Sound from apps",
         }
     }
@@ -110,6 +117,7 @@ impl Requirement {
             Self::Fonts => "a font",
             Self::Gles => "OpenGL ES",
             Self::Portal => "the GTK portal",
+            Self::Dialogs => "Zenity",
             Self::Audio => "a sound server",
         }
     }
@@ -117,19 +125,25 @@ impl Requirement {
     /// Why a server without it falls short.
     fn without(self, server: &str) -> String {
         match self {
-            Self::Dbus | Self::Xwayland => format!("Remote apps need {} on {server}.", self.name()),
+            Self::Dbus => format!("Remote apps need {} on {server}.", self.name()),
+            Self::Xwayland => {
+                format!("Some apps use X11, and {server} has no XWayland for them.")
+            }
             Self::Fonts => format!("{server} has no fonts, so apps can’t show text."),
             Self::Gles => format!("GTK 4 apps need OpenGL ES on {server}."),
             Self::Portal => {
                 format!("Snap and Flatpak apps need the GTK portal on {server} for file dialogs.")
             }
+            Self::Dialogs => format!(
+                "Apps such as Chromium show prompts with Zenity, and {server} has none, so they appear in a plain X11 window or not at all."
+            ),
             Self::Audio => format!("{server} has no sound server, so apps are silent."),
         }
     }
 
     /// Without it apps don't start or can't show text.
     pub fn blocks(self) -> bool {
-        matches!(self, Self::Dbus | Self::Xwayland | Self::Fonts)
+        matches!(self, Self::Dbus | Self::Fonts)
     }
 
     /// The package that provides it on `host`, in each package manager.
@@ -187,6 +201,16 @@ impl Requirement {
                 (Emerge, "sys-apps/xdg-desktop-portal-gtk"),
                 (Nix, "xdg-desktop-portal-gtk"),
             ],
+            Self::Dialogs => [
+                (Apt, "zenity"),
+                (Dnf, "zenity"),
+                (Zypper, "zenity"),
+                (Pacman, "zenity"),
+                (Apk, "zenity"),
+                (Xbps, "zenity"),
+                (Emerge, "gnome-extra/zenity"),
+                (Nix, "zenity"),
+            ],
             // Without a systemd user manager nothing starts PipeWire's pulse
             // server, so Needle starts a PulseAudio of its own instead.
             Self::Audio if !host.user_services => [
@@ -227,6 +251,7 @@ impl Requirement {
             Self::Portal => {
                 "xdg.portal = { enable = true; extraPortals = [ pkgs.xdg-desktop-portal-gtk ]; };"
             }
+            Self::Dialogs => "environment.systemPackages = [ pkgs.zenity ];",
             Self::Audio => "services.pipewire = { enable = true; pulse.enable = true; };",
         }
     }
@@ -261,7 +286,9 @@ impl Gap {
             Finding::Missing => match r {
                 Requirement::Fonts => "No fonts are installed".into(),
                 Requirement::Audio => "No sound".into(),
-                Requirement::Dbus | Requirement::Xwayland => format!("{} is missing", r.name()),
+                Requirement::Dbus | Requirement::Xwayland | Requirement::Dialogs => {
+                    format!("{} is missing", r.name())
+                }
                 Requirement::Gles => "GTK 4 apps can’t start".into(),
                 Requirement::Portal => "No file dialogs in Snap and Flatpak apps".into(),
             },

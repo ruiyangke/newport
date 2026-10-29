@@ -1,5 +1,5 @@
 //! Plain data for the Remote apps page and its session engine.
-pub use newport_domain::requirements::{Gap, Host, Remedy, Requirement};
+pub use newport_domain::requirements::{Finding, Gap, Host, Remedy, Requirement};
 pub use newport_domain::server_os::ServerOs;
 use std::sync::Arc;
 
@@ -29,6 +29,8 @@ pub struct Alert {
     /// What to do about it.
     pub detail: String,
     pub fix: Option<Fix>,
+    /// Everything the app reported, when the detail shows only part of it.
+    pub output: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

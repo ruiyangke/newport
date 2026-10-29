@@ -189,9 +189,10 @@ impl Fixture {
             fence: Box::new(Validity(self.valid.clone())),
         }
     }
-    fn prepared_mode(&self, generation: u64, mode: SharedDisplayMode) -> Prepared {
+    /// A display with its own X11, or without, on a server with no XWayland.
+    fn prepared_x11(&self, generation: u64, x11: bool) -> Prepared {
         let mut prepared = self.prepared(generation);
-        if mode == SharedDisplayMode::Wayland {
+        if !x11 {
             prepared.attached.environment.display = None;
             prepared.attached.environment.authority = None;
         }
@@ -239,98 +240,27 @@ fn command() -> launch::Target {
 }
 
 #[tokio::test]
-async fn changing_display_mode_cannot_reuse_a_live_opposite_display() {
-    for mode in [SharedDisplayMode::Mixed, SharedDisplayMode::Wayland] {
-        let opposite = if mode == SharedDisplayMode::Mixed {
-            SharedDisplayMode::Wayland
-        } else {
-            SharedDisplayMode::Mixed
-        };
+async fn a_display_offers_its_own_x11_or_none() {
+    // XWayland serves the display's X11 endpoint on demand; a server without
+    // XWayland has none.
+    for x11 in [true, false] {
         let slot = Slot::default();
         let fixture = Fixture::new(&slot);
         let preparing = fixture.clone();
-        let current = slot
-            .acquire_mode(
+        let lease = slot
+            .acquire(
                 fixture.runtime.clone(),
-                mode,
                 Demand::Terminal,
-                move |generation| async move { Ok(preparing.prepared_mode(generation, mode)) },
+                move |generation| async move { Ok(preparing.prepared_x11(generation, x11)) },
             )
             .await
             .unwrap();
-        fixture.driver.publish(3, 3);
-        for runtime in [
-            fixture.runtime.clone(),
-            Runtime {
-                build_sha256: "b".repeat(64),
-                ..fixture.runtime.clone()
-            },
-        ] {
-            let attempt = slot
-                .acquire_mode(runtime, opposite, Demand::Launch, |_| async {
-                    panic!("conflicting mode must not start another worker")
-                })
-                .await;
-            assert!(attempt.is_err(), "opposite mode reused the live display");
-        }
-        current.environment().unwrap();
-        assert_eq!(slot.snapshot()[0].mode, mode);
-        assert_eq!(fixture.driver.stops.load(Ordering::SeqCst), 0);
-        drop(current);
-        changed_until(&slot, |state| state[0].terminals == 0).await;
-        assert_eq!(
-            fixture.driver.stops.load(Ordering::SeqCst),
-            0,
-            "windows retain their display"
-        );
-        fixture.driver.publish(0, 0);
-        slot.drained().await;
-        let mut replacement = Fixture::new(&slot);
-        replacement.runtime = fixture.runtime.clone();
-        let preparing = replacement.clone();
-        let next = slot
-            .acquire_mode(
-                replacement.runtime.clone(),
-                opposite,
-                Demand::Terminal,
-                move |generation| async move { Ok(preparing.prepared_mode(generation, opposite)) },
-            )
-            .await
-            .unwrap();
-        opposite
-            .validate_environment(&next.environment().unwrap())
-            .unwrap();
-        assert_eq!(slot.snapshot()[0].mode, opposite);
+        assert_eq!(lease.environment().unwrap().display.is_some(), x11);
     }
 }
 
 #[tokio::test]
-async fn prepared_environment_must_match_the_selected_mode() {
-    for mode in [SharedDisplayMode::Mixed, SharedDisplayMode::Wayland] {
-        let opposite = if mode == SharedDisplayMode::Mixed {
-            SharedDisplayMode::Wayland
-        } else {
-            SharedDisplayMode::Mixed
-        };
-        let slot = Slot::default();
-        let fixture = Fixture::new(&slot);
-        let preparing = fixture.clone();
-        let attempt = slot
-            .acquire_mode(
-                fixture.runtime.clone(),
-                mode,
-                Demand::Terminal,
-                move |generation| async move { Ok(preparing.prepared_mode(generation, opposite)) },
-            )
-            .await;
-        assert!(attempt.is_err());
-        slot.drained().await;
-        assert_eq!(fixture.driver.stops.load(Ordering::SeqCst), 1);
-    }
-}
-
-#[tokio::test]
-async fn native_requests_coalesce_and_opposite_mode_cannot_join_pending_startup() {
+async fn requests_coalesce_on_one_pending_startup() {
     let slot = Arc::new(Slot::default());
     let fixture = Fixture::new(&slot);
     let gate = Arc::new(Semaphore::new(0));
@@ -339,13 +269,12 @@ async fn native_requests_coalesce_and_opposite_mode_cannot_join_pending_startup(
     let release = gate.clone();
     let task = tokio::spawn(async move {
         waiting
-            .acquire_mode(
+            .acquire(
                 preparing.runtime.clone(),
-                SharedDisplayMode::Wayland,
                 Demand::Terminal,
                 move |generation| async move {
                     let _permit = release.acquire().await.unwrap();
-                    Ok(preparing.prepared_mode(generation, SharedDisplayMode::Wayland))
+                    Ok(preparing.prepared(generation))
                 },
             )
             .await
@@ -355,27 +284,14 @@ async fn native_requests_coalesce_and_opposite_mode_cannot_join_pending_startup(
         state.len() == 1 && state[0].phase == Phase::Preparing
     })
     .await;
-    assert!(
-        slot.acquire_mode(
-            fixture.runtime.clone(),
-            SharedDisplayMode::Mixed,
-            Demand::Launch,
-            |_| async { panic!("opposite mode cannot join pending startup") }
-        )
-        .await
-        .is_err()
-    );
     gate.add_permits(1);
     let first = task.await.unwrap();
     let mut leases = vec![first];
     for _ in 0..15 {
         leases.push(
-            slot.acquire_mode(
-                fixture.runtime.clone(),
-                SharedDisplayMode::Wayland,
-                Demand::Launch,
-                |_| async { panic!("same mode must reuse the ready display") },
-            )
+            slot.acquire(fixture.runtime.clone(), Demand::Launch, |_| async {
+                panic!("a request must reuse the ready display")
+            })
             .await
             .unwrap(),
         );

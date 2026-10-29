@@ -15,8 +15,7 @@ Remote apps is available on macOS with Apple silicon; Windows does not currently
 1. Select your Linux server and open **Remote apps**.
 2. Follow the account prompt if access is needed. You can also open your account from the sign-in or account button at the bottom of the sidebar. Start an available trial or activate Pro on this computer.
 3. Follow the server checks to install or update Needle and any required packages.
-4. Choose **Application support**, then finish setup.
-5. Select an installed application to launch it. If you have just installed an app on the server, refresh the list.
+4. Select an installed application to launch it. If you have just installed an app on the server, refresh the list.
 
 Package installation may need administrative permissions on the server. The setup screen shows missing dependencies and available installation actions.
 
@@ -24,20 +23,15 @@ Package installation may need administrative permissions on the server. The setu
 
 After setup, the list shows applications installed on this server. Use the circular-arrow button to refresh it and the sliders button to open Preferences.
 
-### Choose application support
+### X11 apps
 
-| Mode | Use it for | Requirement |
-| --- | --- | --- |
-| **X11 + Wayland** | The widest range of supported Linux apps; this is the default | XWayland 23.1 or newer on the server |
-| **Wayland only** | Apps that can run with native Wayland | Needle installed or updated through Remote apps setup; XWayland is not required |
+Apps run as Wayland apps. When an app needs X11, Newport starts XWayland for it: X11-only apps such as xterm, and X11 parts of Wayland apps such as Chromium's profile dialog. This needs XWayland 23.1 or newer on the server. It is optional: setup offers to install it, and an app that needs it says so, with an Install button.
 
-X11-only applications cannot run in Wayland-only mode. The selection applies to both Remote apps and graphical applications launched from terminals.
-
-After changing the mode, close that server's remote-app windows, and the terminals you launched graphical apps from, before launching again. Existing sessions keep their original mode until closed. Wait for the server check to finish before retrying.
+This applies to both Remote apps and graphical applications launched from terminals.
 
 ### Adjust sound and display quality
 
-After setup, open the sliders button at the top right of **Remote apps** to show **Preferences**. This is also where you can change **Application support** later.
+After setup, open the sliders button at the top right of **Remote apps** to show **Preferences**.
 
 - **Play sound** controls whether remote apps play audio on your computer.
 - **Quality** offers Balanced, Lossless, and Low latency. Start with Balanced; try Low latency for responsiveness or Lossless when image fidelity matters more than bandwidth.
@@ -46,9 +40,7 @@ After setup, open the sliders button at the top right of **Remote apps** to show
 
 These preferences apply when a new graphical session starts. Close and relaunch that server's graphical apps, and open new terminals, to use the new settings.
 
-![Remote apps Preferences showing application support, sound, quality, frame rate, and statistics](assets/remote-app-preferences.png)
-
-Application support determines which Linux apps can launch; the controls below it adjust playback and connection quality.
+![Remote apps Preferences showing sound, quality, frame rate, and statistics](assets/remote-app-preferences.png)
 
 ## Launch from a terminal
 
@@ -106,7 +98,7 @@ If the shared graphical connection is lost, existing applications cannot move to
 | Remote apps is missing from the sidebar | On macOS with Apple silicon, update to the current download from [newport.app](https://newport.app/#download); if it remains missing, [report your version and OS](troubleshooting.md#report-a-problem). Remote apps is unavailable on Windows. |
 | You are signed in but cannot launch apps | Check that this computer has an active trial or Pro access; follow the account prompt |
 | A server dependency is missing | Install the package shown by setup, then run the check again |
-| An X11 app fails in Wayland-only mode | Switch to **X11 + Wayland**, close existing graphical sessions, and relaunch |
+| An app says it needs X11 | Install XWayland with the app's Install button or from setup, then open the app again |
 | Launch fails after a connection interruption | Use **Retry**; rerun the command if its original process has already exited |
 | An app is missing from the list | Install it on the server and refresh; use an explicit terminal launch if it has no desktop entry |
 | A Snap or Flatpak app fails | Check the package's display and sandbox requirements; compatibility varies by application |

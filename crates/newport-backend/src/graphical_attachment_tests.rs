@@ -19,16 +19,16 @@ fn request(
 }
 #[tokio::test]
 async fn attachment_checks_match_exact_retained_endpoints_without_launch_or_acquisition() {
-    for mode in [SharedDisplayMode::Mixed, SharedDisplayMode::Wayland] {
+    // With X11 on the display, and without XWayland on the server.
+    for x11 in [true, false] {
         let slot = Slot::default();
         let fixture = Fixture::new(&slot);
         let producer = fixture.clone();
         let lease = slot
-            .acquire_mode(
+            .acquire(
                 fixture.runtime.clone(),
-                mode,
                 Demand::Terminal,
-                move |generation| async move { Ok(producer.prepared_mode(generation, mode)) },
+                move |generation| async move { Ok(producer.prepared_x11(generation, x11)) },
             )
             .await
             .unwrap();
@@ -74,11 +74,11 @@ async fn attachment_checks_match_exact_retained_endpoints_without_launch_or_acqu
                     changed.endpoints.wayland_socket = "/tmp/different".into();
                     Reason::EndpointMismatch
                 }
-                "authority" if mode == SharedDisplayMode::Mixed => {
+                "authority" if x11 => {
                     changed.endpoints.authority = Some("/tmp/other-auth".into());
                     Reason::EndpointMismatch
                 }
-                "display" if mode == SharedDisplayMode::Mixed => {
+                "display" if x11 => {
                     changed.endpoints.display = Some(":78".into());
                     Reason::EndpointMismatch
                 }

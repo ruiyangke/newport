@@ -153,23 +153,6 @@ impl Controller {
         }
     }
     pub fn launch(&self, scope: Scope, target: Target) -> Result<Application, String> {
-        self.launch_with_display_requirement(scope, target, false)
-    }
-    /// Preserve an explicit X11 choice until the backend checks the current
-    /// server mode. Page state can become stale before the request arrives.
-    pub fn launch_requiring_x11(
-        &self,
-        scope: Scope,
-        target: Target,
-    ) -> Result<Application, String> {
-        self.launch_with_display_requirement(scope, target, true)
-    }
-    fn launch_with_display_requirement(
-        &self,
-        scope: Scope,
-        target: Target,
-        requires_x11: bool,
-    ) -> Result<Application, String> {
         target.validate()?;
         self.launches
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
@@ -201,9 +184,6 @@ impl Controller {
             }
             let mut args = work.0.scope.args();
             args["target"] = serde_json::to_value(target).unwrap();
-            if requires_x11 {
-                args["requiresX11"] = json!(true);
-            }
             // Includes account/installation/admission; intermediate agent
             // consent frames have the backend client's normal liveness bounds.
             let result = exchange("remote_apps_launch", args, Duration::from_secs(600));

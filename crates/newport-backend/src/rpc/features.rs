@@ -214,13 +214,7 @@ impl Command {
             Self::RemoteAppsStatus | Self::RemoteAppsCatalogue => {
                 let id = argument(args, "id")?;
                 let key = if matches!(self, Self::RemoteAppsStatus) {
-                    let mode = crate::preferences::remote_apps::remote_apps_display_mode(
-                        services.preferences,
-                        id,
-                    )
-                    .await
-                    .map_err(error)?;
-                    crate::server_queries::Read::RemoteAppsStatus(mode)
+                    crate::server_queries::Read::RemoteAppsStatus
                 } else {
                     crate::server_queries::Read::RemoteAppsCatalogue
                 };

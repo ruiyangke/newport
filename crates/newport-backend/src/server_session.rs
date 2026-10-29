@@ -360,13 +360,10 @@ impl ServerSession {
             transport_generation: lease.generation,
         };
         let session = self.session_id;
-        let mode = factory.display_mode();
         let bus_policy = factory.terminal_bus_policy();
-        if mode == crate::graphical_session::SharedDisplayMode::Wayland {
-            hello
-                .require("gui-launch", 4)
-                .map_err(|error| error.to_string())?;
-        }
+        hello
+            .require("gui-launch", 4)
+            .map_err(|error| error.to_string())?;
         let expected = runtime.clone();
         let attaching = factory.clone();
         let owner = self.clone();
@@ -374,7 +371,6 @@ impl ServerSession {
             .graphical
             .acquire_policy(
                 runtime,
-                mode,
                 bus_policy,
                 demand,
                 move |display_generation| async move {
@@ -404,7 +400,7 @@ impl ServerSession {
                             identity.clone(),
                         )
                         .await?;
-                    mode.validate_environment(&attached.environment)?;
+                    attached.environment.validate()?;
                     attached
                         .terminal_bus
                         .validate(bus_policy, &attached.environment)?;

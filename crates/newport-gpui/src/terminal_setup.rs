@@ -1402,7 +1402,9 @@ mod tests {
         let mut status = json!({"agent":"newport-agent", "installedVariant":"full",
             "gaps": [{"requirement": "audio", "state": "missing"}]});
         assert!(super::setup_ready(&status), "only some apps need sound");
-        for requirement in ["dbus", "xwayland", "fonts"] {
+        status["gaps"] = json!([{"requirement": "xwayland", "state": "missing"}]);
+        assert!(super::setup_ready(&status), "only X11 apps need XWayland");
+        for requirement in ["dbus", "fonts"] {
             status["gaps"] = json!([{"requirement": requirement, "state": "missing"}]);
             assert!(!super::setup_ready(&status), "{requirement}");
         }

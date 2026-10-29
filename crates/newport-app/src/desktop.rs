@@ -207,28 +207,13 @@ impl DesktopIntegration for Integration {
         license: newport_backend::account::RemoteLicense,
         settings: newport_backend::preferences::remote_apps::Settings,
     ) -> newport_backend::graphical_session::FactoryFuture {
-        self.graphical_factory_for_mode(
-            license,
-            settings,
-            newport_backend::graphical_session::SharedDisplayMode::Mixed,
-        )
-    }
-    #[cfg(newport_remote_apps)]
-    fn graphical_factory_for_mode(
-        &self,
-        license: newport_backend::account::RemoteLicense,
-        settings: newport_backend::preferences::remote_apps::Settings,
-        mode: newport_backend::graphical_session::SharedDisplayMode,
-    ) -> newport_backend::graphical_session::FactoryFuture {
         let desktop = self.clone();
         Box::pin(async move {
             let display = desktop
                 .display_profile(newport_remote_provider_gpui::platform::launch_display_metrics)
                 .await?;
             tokio::task::spawn_blocking(move || {
-                desktop
-                    .graphical
-                    .factory_for_mode(license, settings, display, mode)
+                desktop.graphical.factory(license, settings, display)
             })
             .await
             .map_err(|_| "Graphical factory preparation stopped".to_owned())?

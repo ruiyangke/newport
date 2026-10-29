@@ -13,8 +13,6 @@ pub enum Command {
     GitProjectsRemove,
     RemoteAppsSettings,
     RemoteAppsSettingsSave,
-    RemoteAppsDisplayMode,
-    RemoteAppsDisplayModeSave,
     RemoteAppsInstalled,
     RemoteAppsInstalledSave,
 }
@@ -25,20 +23,6 @@ impl Command {
     }
     pub async fn dispatch(self, state: &Preferences, args: &Value) -> Result<Value, Value> {
         match self {
-            Self::RemoteAppsDisplayMode => encode(
-                remote_apps::remote_apps_display_mode(state, argument(args, "serverId")?)
-                    .await
-                    .map_err(error)?,
-            ),
-            Self::RemoteAppsDisplayModeSave => encode(
-                remote_apps::remote_apps_display_mode_save(
-                    state,
-                    argument(args, "serverId")?,
-                    argument(args, "mode")?,
-                )
-                .await
-                .map_err(error)?,
-            ),
             Self::SetWindowPreferences => encode(
                 preferences::set_window_preferences(state, argument(args, "preferences")?)
                     .await

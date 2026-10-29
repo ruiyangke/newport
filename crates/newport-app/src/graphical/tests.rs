@@ -30,7 +30,7 @@ pub(super) fn environment(session: &str) -> SharedEnvironment {
 fn shared_projection_preserves_user_bus_and_runtime_and_requires_exact_session() {
     let identity = identity();
     let env = environment(&identity.session.to_string());
-    let projection = project_environment(&env, &identity, SharedDisplayMode::Mixed).unwrap();
+    let projection = project_environment(&env, &identity).unwrap();
     assert_eq!(projection.wayland_socket, "/run/user/1000/wayland-owned");
     assert_eq!(
         projection.fallback_bus.as_deref(),
@@ -41,25 +41,18 @@ fn shared_projection_preserves_user_bus_and_runtime_and_requires_exact_session()
     assert!(!assignments.contains_key("XDG_RUNTIME_DIR"));
     assert_eq!(assignments["GTK_IM_MODULE"], None);
     assert_eq!(assignments["NEWPORT_GUI_RUNTIME_DIR"], None);
-    assert!(
-        project_environment(
-            &environment(&identity.worker.to_string()),
-            &identity,
-            SharedDisplayMode::Mixed
-        )
-        .is_err()
-    );
+    assert!(project_environment(&environment(&identity.worker.to_string()), &identity).is_err());
     let mut malformed = env;
     malformed
         .0
         .insert("NEWPORT_GUI_DISPLAY".into(), Some(":76".into()));
-    assert!(project_environment(&malformed, &identity, SharedDisplayMode::Mixed).is_err());
+    assert!(project_environment(&malformed, &identity).is_err());
 }
 #[test]
 fn application_policy_projects_apart_from_toolkit_settings() {
     let identity = identity();
     let mut env = environment(&identity.session.to_string());
-    let plain = project_environment(&env, &identity, SharedDisplayMode::Mixed).unwrap();
+    let plain = project_environment(&env, &identity).unwrap();
     assert!(plain.application.is_empty());
     for (name, value) in [
         ("XDG_CURRENT_DESKTOP", Some("X-Newport")),
@@ -69,7 +62,7 @@ fn application_policy_projects_apart_from_toolkit_settings() {
     ] {
         env.0.insert(name.into(), value.map(str::to_owned));
     }
-    let projected = project_environment(&env, &identity, SharedDisplayMode::Mixed).unwrap();
+    let projected = project_environment(&env, &identity).unwrap();
     assert_eq!(projected.application.len(), 4);
     assert!(!projected.toolkit.contains_key("XDG_CURRENT_DESKTOP"));
     assert_eq!(projected.toolkit, plain.toolkit);
@@ -82,7 +75,7 @@ fn application_policy_projects_apart_from_toolkit_settings() {
     assert!(!assignments.contains_key("DBUS_SESSION_BUS_ADDRESS"));
     env.0
         .insert("XDG_DATA_DIRS".into(), Some("relative".into()));
-    assert!(project_environment(&env, &identity, SharedDisplayMode::Mixed).is_err());
+    assert!(project_environment(&env, &identity).is_err());
 }
 #[test]
 fn pending_launches_retain_demand_and_late_activity_cannot_revive_stopped_driver() {
@@ -111,10 +104,13 @@ fn pending_launches_retain_demand_and_late_activity_cannot_revive_stopped_driver
 }
 
 #[test]
-fn native_projection_requires_explicit_mode_and_clears_x11() {
+fn projection_keeps_the_displays_x11_or_clears_it_explicitly() {
     let identity = identity();
     let mut env = environment(&identity.session.to_string());
-    assert!(project_environment(&env, &identity, SharedDisplayMode::Wayland).is_err());
+    // The display's own X11, which XWayland serves on demand.
+    let with_x11 = project_environment(&env, &identity).unwrap();
+    assert_eq!(with_x11.display.as_deref(), Some(":75"));
+    // A server without XWayland: explicit nulls, never a missing variable.
     for name in [
         "DISPLAY",
         "XAUTHORITY",
@@ -123,14 +119,13 @@ fn native_projection_requires_explicit_mode_and_clears_x11() {
     ] {
         env.0.insert(name.into(), None);
     }
-    let projected = project_environment(&env, &identity, SharedDisplayMode::Wayland).unwrap();
+    let projected = project_environment(&env, &identity).unwrap();
     assert!(projected.native_wayland());
-    assert!(project_environment(&env, &identity, SharedDisplayMode::Mixed).is_err());
     let assignments = projected.shell_assignments().unwrap();
     assert_eq!(assignments["DISPLAY"], None);
     assert_eq!(assignments["XAUTHORITY"], None);
     env.0.remove("DISPLAY");
-    assert!(project_environment(&env, &identity, SharedDisplayMode::Wayland).is_err());
+    assert!(project_environment(&env, &identity).is_err());
 }
 
 #[test]
@@ -216,6 +211,10 @@ fn invalid_license_is_rejected_before_a_factory_can_admit_remote_work() {
         trusted_time: 0,
         expires_at: 0,
     };
-    assert!(registry.factory(license, Settings::default()).is_err());
+    assert!(
+        registry
+            .factory(license, Settings::default(), None)
+            .is_err()
+    );
     assert!(registry.0.clients.lock().unwrap().is_empty());
 }

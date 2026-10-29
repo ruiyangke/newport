@@ -5,7 +5,7 @@ use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
 #[tokio::test]
 async fn owned_terminal_bus_is_explicit_retained_and_precedes_user_overrides() {
-    for mode in [SharedDisplayMode::Wayland, SharedDisplayMode::Mixed] {
+    for x11 in [false, true] {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let socket = home.path().join("wayland owned");
         let bus = home.path().join("bus");
@@ -39,14 +39,13 @@ exec "$HOME/child"
         let lease = slot
             .acquire_policy(
                 fixture.runtime.clone(),
-                mode,
                 terminal_bus::Policy::OwnedNative,
                 Demand::Terminal,
                 move |generation| async move {
-                    let mut prepared = prepared.prepared_mode(generation, mode);
+                    let mut prepared = prepared.prepared_x11(generation, x11);
                     let environment = &mut prepared.attached.environment;
                     environment.wayland_socket = moved_socket;
-                    if mode == SharedDisplayMode::Mixed {
+                    if x11 {
                         environment.authority = Some(moved_authority);
                     }
                     environment.fallback_bus = Some(moved_address);
@@ -57,7 +56,7 @@ exec "$HOME/child"
             .await
             .unwrap();
         assert!(
-            slot.acquire_mode(fixture.runtime.clone(), mode, Demand::Terminal, |_| async {
+            slot.acquire(fixture.runtime.clone(), Demand::Terminal, |_| async {
                 panic!("must not attach another policy")
             })
             .await
@@ -102,11 +101,7 @@ exec "$HOME/child"
                     "unset",
                     "unset",
                     socket.to_str().unwrap(),
-                    if mode == SharedDisplayMode::Mixed {
-                        ":77"
-                    } else {
-                        "unset"
-                    },
+                    if x11 { ":77" } else { "unset" },
                     "wayland",
                     "/user/runtime",
                     "C",
@@ -147,7 +142,6 @@ async fn owned_terminal_bus_rejects_unacknowledged_or_changed_attachment() {
         let result = slot
             .acquire_policy(
                 runtime,
-                SharedDisplayMode::Mixed,
                 terminal_bus::Policy::OwnedNative,
                 Demand::Terminal,
                 move |generation| async move {
@@ -199,9 +193,8 @@ printf '%s\n' "${DISPLAY-unset}" "${XAUTHORITY-unset}" "${NEWPORT_GUI_DISPLAY-un
     let address = format!("unix:path={}", bus.display());
     let moved_bus = address.clone();
     let lease = slot
-        .acquire_mode(
+        .acquire(
             fixture.runtime.clone(),
-            SharedDisplayMode::Wayland,
             Demand::Terminal,
             move |generation| async move {
                 let mut prepared = prepared.prepared(generation);
@@ -294,12 +287,11 @@ printf '%s\n' "$XDG_CURRENT_DESKTOP" "$XDG_DATA_DIRS" "$MOZ_ENABLE_WAYLAND" "${E
     let moved_socket = socket.to_str().unwrap().to_owned();
     let address = format!("unix:path={}", bus.display());
     let lease = slot
-        .acquire_mode(
+        .acquire(
             fixture.runtime.clone(),
-            SharedDisplayMode::Wayland,
             Demand::Terminal,
             move |generation| async move {
-                let mut prepared = prepared.prepared_mode(generation, SharedDisplayMode::Wayland);
+                let mut prepared = prepared.prepared_x11(generation, false);
                 let environment = &mut prepared.attached.environment;
                 environment.wayland_socket = moved_socket;
                 environment.fallback_bus = Some(address);

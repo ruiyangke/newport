@@ -3,7 +3,6 @@
 pub mod launch;
 pub mod terminal_bus;
 pub mod transport;
-pub use newport_domain::terminal::SharedDisplayMode;
 use newport_domain::terminal::SharedGuiEnvironment;
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -117,11 +116,6 @@ pub trait Factory: Send + Sync + 'static {
     fn terminal_bus_policy(&self) -> terminal_bus::Policy {
         terminal_bus::Policy::PreserveInherited
     }
-    /// Immutable for this attachment candidate and checked even when a display
-    /// is reused. Existing callers retain mixed-mode behavior.
-    fn display_mode(&self) -> SharedDisplayMode {
-        SharedDisplayMode::Mixed
-    }
     /// Check current admission even when an already-running display is reused
     /// and attach is never called. This must not perform IO or block.
     fn validate(&self) -> Result<(), String>;
@@ -145,11 +139,10 @@ impl Prepared {
         &self,
         runtime: &Runtime,
         generation: u64,
-        mode: SharedDisplayMode,
         bus_policy: terminal_bus::Policy,
     ) -> Result<(), String> {
         self.fence.validate()?;
-        mode.validate_environment(&self.attached.environment)?;
+        self.attached.environment.validate()?;
         self.attached
             .terminal_bus
             .validate(bus_policy, &self.attached.environment)?;
@@ -174,7 +167,6 @@ pub enum Phase {
 pub struct Snapshot {
     pub generation: u64,
     pub runtime: Runtime,
-    pub mode: SharedDisplayMode,
     pub phase: Phase,
     pub terminals: u32,
     pub clipboard: u32,
@@ -184,7 +176,6 @@ pub struct Snapshot {
 }
 struct Entry {
     runtime: Runtime,
-    mode: SharedDisplayMode,
     bus_policy: terminal_bus::Policy,
     phase: Phase,
     demand: [u32; 3],
@@ -219,7 +210,7 @@ impl Entry {
             .prepared
             .as_ref()
             .ok_or("Graphical session is still preparing")?;
-        prepared.validate(&self.runtime, generation, self.mode, self.bus_policy)?;
+        prepared.validate(&self.runtime, generation, self.bus_policy)?;
         self.activity()?;
         Ok(prepared)
     }
@@ -508,7 +499,6 @@ impl Slot {
             .map(|(&generation, entry)| Snapshot {
                 generation,
                 runtime: entry.runtime.clone(),
-                mode: entry.mode,
                 phase: entry.phase.clone(),
                 terminals: entry.demand[0],
                 clipboard: entry.demand[1],
@@ -553,24 +543,8 @@ impl Slot {
         F: FnOnce(u64) -> Fut + Send + 'static,
         Fut: Future<Output = Result<Prepared, String>> + Send + 'static,
     {
-        self.acquire_mode(runtime, SharedDisplayMode::Mixed, kind, start)
-            .await
-    }
-    #[cfg(test)]
-    pub(crate) async fn acquire_mode<F, Fut>(
-        &self,
-        runtime: Runtime,
-        mode: SharedDisplayMode,
-        kind: Demand,
-        start: F,
-    ) -> Result<Lease, String>
-    where
-        F: FnOnce(u64) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<Prepared, String>> + Send + 'static,
-    {
         self.acquire_policy(
             runtime,
-            mode,
             terminal_bus::Policy::PreserveInherited,
             kind,
             start,
@@ -580,7 +554,6 @@ impl Slot {
     pub(crate) async fn acquire_policy<F, Fut>(
         &self,
         runtime: Runtime,
-        mode: SharedDisplayMode,
         bus_policy: terminal_bus::Policy,
         kind: Demand,
         start: F,
@@ -596,26 +569,16 @@ impl Slot {
             if state.closed {
                 return Err(ENDED.into());
             }
-            // A setting change must neither adopt the opposite display nor
-            // create another clipboard/display owner beside existing apps.
-            // Old build generations are included until all their demand drains.
-            if state
-                .entries
-                .values()
-                .any(|entry| entry.mode != mode && !matches!(entry.phase, Phase::Failed(_)))
-            {
-                return Err("Close this server's Remote Apps and graphical terminals before switching the shared display mode. Existing applications remain running.".into());
-            }
+            // A policy change must not create another clipboard/display owner
+            // beside existing apps. Old build generations are included until
+            // all their demand drains.
             if state.entries.values().any(|entry| {
                 entry.bus_policy != bus_policy && !matches!(entry.phase, Phase::Failed(_))
             }) {
                 return Err("Close this server's Remote Apps and graphical terminals before switching the terminal bus policy. Existing applications remain running.".into());
             }
             let found = state.entries.iter().find_map(|(&id, entry)| {
-                (entry.runtime == runtime
-                    && entry.mode == mode
-                    && !matches!(entry.phase, Phase::Failed(_)))
-                .then_some(id)
+                (entry.runtime == runtime && !matches!(entry.phase, Phase::Failed(_))).then_some(id)
             });
             let generation = if let Some(id) = found {
                 id
@@ -632,7 +595,6 @@ impl Slot {
                     id,
                     Entry {
                         runtime: runtime.clone(),
-                        mode,
                         bus_policy,
                         phase: Phase::Preparing,
                         demand: [0; 3],
@@ -671,7 +633,7 @@ impl Slot {
                     .map_err(|_| "Graphical session preparation timed out".to_owned())
                     .and_then(|result| result)
                     .and_then(|prepared| {
-                        prepared.validate(&runtime, generation, mode, bus_policy)?;
+                        prepared.validate(&runtime, generation, bus_policy)?;
                         Ok(prepared)
                     });
                 let Some(shared) = weak.upgrade() else { return };
