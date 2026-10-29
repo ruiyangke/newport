@@ -102,6 +102,12 @@ impl Pty {
         // SAFETY: only async-signal-safe syscalls run between fork and exec.
         unsafe {
             command.pre_exec(|| {
+                // The fixture may run with these ignored (for example when
+                // started in the background); the shell and its jobs inherit
+                // that, so ^C would no longer interrupt them.
+                for signal in [libc::SIGINT, libc::SIGQUIT, libc::SIGTSTP] {
+                    libc::signal(signal, libc::SIG_DFL);
+                }
                 if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
                     return Err(io::Error::last_os_error());
                 }
