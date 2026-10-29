@@ -99,7 +99,7 @@ pub fn run(skip_build: bool, remote_apps: bool) -> Result<()> {
     let submission = distribution.join("notarization.zip");
     ditto_zip(app, &submission)?;
     submit_notarization(&submission, &auth)?;
-    util::run(clean("xcrun").args(["stapler", "staple"]).arg(app))?;
+    stapler("staple", app)?;
     // Revalidates notarization, Gatekeeper and architecture before signing the update.
     let update = distribution.join("update");
     package_update(app, &update, &public_key, &key)?;
@@ -251,6 +251,23 @@ fn submit_notarization(archive: &Path, auth: &NotaryAuth) -> Result<()> {
     Ok(())
 }
 
+/// Stapler fetches the ticket from Apple, which can be briefly unreachable or
+/// not yet serving a ticket that notarization has just accepted.
+fn stapler(action: &str, app: &Path) -> Result<()> {
+    const ATTEMPTS: u32 = 5;
+    for attempt in 1.. {
+        match util::run(clean("xcrun").args(["stapler", action]).arg(app)) {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt == ATTEMPTS => return Err(error),
+            Err(error) => {
+                eprintln!("{error:#}; trying again in 30 seconds");
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+        }
+    }
+    unreachable!()
+}
+
 fn verify_code_signature(app: &Path) -> Result<()> {
     util::run(
         clean("codesign")
@@ -288,7 +305,7 @@ pub fn package_update(app: &Path, output: &Path, public_key: &str, key: &SecretK
         "App version/identifier does not match the release source"
     );
     verify_code_signature(app)?;
-    util::run(clean("xcrun").args(["stapler", "validate"]).arg(app))?;
+    stapler("validate", app)?;
     util::run(
         clean("spctl")
             .args(["--assess", "--type", "execute"])
