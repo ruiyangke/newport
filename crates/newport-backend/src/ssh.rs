@@ -114,6 +114,21 @@ impl Drop for Connection {
         self.abort();
     }
 }
+
+/// What to tell someone about a failed connection. A failure they resolve in
+/// their SSH agent says only what to do there; its cause, such as the agent
+/// closing the request, goes to the log.
+pub fn connection_failure(error: &anyhow::Error) -> String {
+    let message = if error.is::<auth::AgentApprovalRequired>() {
+        auth::AgentApprovalRequired.to_string()
+    } else if error.is::<auth::SelectedAgentUnavailable>() {
+        auth::SelectedAgentUnavailable.to_string()
+    } else {
+        return format!("{error:#}");
+    };
+    log::info!("{message} Cause: {error:#}");
+    message
+}
 pub fn is_transient_connection_error(error: &anyhow::Error) -> bool {
     if error.is::<auth::AgentApprovalRequired>() {
         return false;
@@ -486,7 +501,7 @@ pub(crate) async fn terminal_with_session(
                     output
                         .send(Event::Reconnecting {
                             attempt: snapshot.attempt.max(1),
-                            message: format!("{error:#}"),
+                            message: connection_failure(&error),
                         })
                         .await?;
                     tokio::select! {
@@ -1433,6 +1448,23 @@ mod connection_retry_tests {
         .await;
         assert!(result.is_err());
         assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn agent_failures_say_what_to_do_without_their_cause() {
+        let eof = || anyhow::Error::msg("early eof");
+        assert_eq!(
+            connection_failure(&eof().context(auth::AgentApprovalRequired)),
+            "SSH key approval was not completed. Retry and approve the request in your SSH agent."
+        );
+        assert_eq!(
+            connection_failure(&eof().context(auth::SelectedAgentUnavailable)),
+            auth::SelectedAgentUnavailable.to_string()
+        );
+        assert_eq!(
+            connection_failure(&eof().context("Connecting failed")),
+            "Connecting failed: early eof"
+        );
     }
 
     #[test]

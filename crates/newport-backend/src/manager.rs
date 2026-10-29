@@ -619,7 +619,7 @@ fn spawn(
                     (message, true)
                 }
                 Err(error) => (
-                    format!("{error:#}"),
+                    ssh::connection_failure(&error),
                     ssh::is_transient_connection_error(&error),
                 ),
             };
