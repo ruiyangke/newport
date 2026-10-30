@@ -75,8 +75,6 @@ if command -v snap >/dev/null 2>&1 || command -v flatpak >/dev/null 2>&1; then
     done
     [ -n "$portal" ] || echo 'gap=portal missing'
 fi
-# Apps such as Chromium show prompts with zenity, or kdialog on KDE.
-command -v zenity >/dev/null 2>&1 || command -v kdialog >/dev/null 2>&1 || echo 'gap=dialogs missing'
 # Sound needs the account's pulse server on its standard socket, or a
 # pulseaudio Needle starts itself. PipeWire's user services refuse root.
 if [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/pulse/native" ] || command -v pulseaudio >/dev/null 2>&1; then
@@ -290,7 +288,6 @@ fn parse_gap(line: &str) -> Option<Gap> {
         "fonts" => Requirement::Fonts,
         "gles" => Requirement::Gles,
         "portal" => Requirement::Portal,
-        "dialogs" => Requirement::Dialogs,
         "audio" => Requirement::Audio,
         _ => return None,
     };
@@ -510,7 +507,7 @@ mod tests {
         let parsed = super::parse_status(
             "xwayland=24.1.6\nagent=\nelevation=root\nupdater=rpmOstree\nuserServices=1\n\
              gap=audio root\ngap=dbus failed\ngap=fonts missing\ngap=gles missing\n\
-             gap=portal missing\ngap=dialogs missing\ngap=tar missing\ngap=audio loud\n--os-release--\nID=fedora\n",
+             gap=portal missing\ngap=tar missing\ngap=audio loud\n--os-release--\nID=fedora\n",
         );
         assert_eq!(
             parsed["gaps"],
@@ -520,7 +517,6 @@ mod tests {
                 {"requirement": "fonts", "state": "missing"},
                 {"requirement": "gles", "state": "missing"},
                 {"requirement": "portal", "state": "missing"},
-                {"requirement": "dialogs", "state": "missing"},
             ])
         );
         assert_eq!(
@@ -533,35 +529,6 @@ mod tests {
             older["host"],
             serde_json::json!({"elevation": "sudo", "updater": null, "userServices": false})
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn zenity_or_kdialog_meets_the_dialogs_check() {
-        use newport_domain::requirements::{Gap, Requirement};
-        use std::os::unix::fs::PermissionsExt;
-        let gaps = |programs: &[&str]| {
-            let bin = tempfile::tempdir().unwrap();
-            for program in programs {
-                let path = bin.path().join(program);
-                std::fs::write(&path, "#!/bin/sh\n").unwrap();
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
-            let output = std::process::Command::new("/bin/sh")
-                .args(["-c", &format!("agent=\nset --\n{}", super::REPORT)])
-                .env("PATH", format!("{}:/usr/bin:/bin", bin.path().display()))
-                .output()
-                .unwrap();
-            let report = String::from_utf8(output.stdout).unwrap();
-            serde_json::from_value::<Vec<Gap>>(super::parse_status(&report)["gaps"].clone())
-                .unwrap()
-                .into_iter()
-                .map(|gap| gap.requirement)
-                .collect::<Vec<_>>()
-        };
-        assert!(gaps(&[]).contains(&Requirement::Dialogs));
-        assert!(!gaps(&["zenity"]).contains(&Requirement::Dialogs));
-        assert!(!gaps(&["kdialog"]).contains(&Requirement::Dialogs));
     }
 
     #[test]

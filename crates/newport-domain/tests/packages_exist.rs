@@ -4,13 +4,12 @@ use newport_domain::requirements::{Host, Requirement};
 use newport_domain::server_os::{PackageManager, ServerOs};
 use std::process::Command;
 
-const REQUIREMENTS: [Requirement; 7] = [
+const REQUIREMENTS: [Requirement; 6] = [
     Requirement::Dbus,
     Requirement::Xwayland,
     Requirement::Fonts,
     Requirement::Gles,
     Requirement::Portal,
-    Requirement::Dialogs,
     Requirement::Audio,
 ];
 

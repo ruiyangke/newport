@@ -5231,7 +5231,7 @@ mod tests {
     #[gpui::test]
     fn alerts_without_output_are_not_cut(cx: &mut TestAppContext) {
         let (view, visual) = launchpad_with(
-            json!({"gaps": [{"requirement": "dialogs", "state": "missing"}],
+            json!({"gaps": [{"requirement": "portal", "state": "missing"}],
                 "host": {"elevation": "sudo", "updater": null}, "osRelease": "ID=alpine"}),
             cx,
         );

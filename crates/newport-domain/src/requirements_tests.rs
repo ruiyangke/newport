@@ -245,27 +245,6 @@ fn xwayland_is_offered_never_required() {
 }
 
 #[test]
-fn zenity_is_offered_never_required() {
-    let missing = missing(Requirement::Dialogs);
-    assert!(missing.installs() && missing.optional());
-    assert_eq!(missing.title(), "Zenity is missing");
-    assert_eq!(
-        missing.detail("box", os("ID=debian").as_ref(), &Host::default()),
-        "Apps such as Chromium show prompts with Zenity, and box has none, so they appear in a plain X11 window or not at all. Install Zenity, then check again."
-    );
-    assert_eq!(
-        missing.remedy(os("ID=debian").as_ref(), &Host::default()),
-        Remedy::Command(
-            "sudo apt update && sudo apt install --no-install-recommends zenity".into()
-        )
-    );
-    assert_eq!(
-        serde_json::to_value(&missing).unwrap(),
-        json!({"requirement": "dialogs", "state": "missing"})
-    );
-}
-
-#[test]
 fn gaps_cross_from_the_backend_as_tagged_json() {
     let gaps = vec![
         missing(Requirement::Fonts),
@@ -305,7 +284,6 @@ fn every_requirement_has_a_package_for_every_manager() {
         Requirement::Fonts,
         Requirement::Gles,
         Requirement::Portal,
-        Requirement::Dialogs,
         Requirement::Audio,
     ] {
         for user_services in [false, true] {
