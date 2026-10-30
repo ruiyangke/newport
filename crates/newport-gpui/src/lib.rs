@@ -1475,6 +1475,12 @@ impl Render for Newport {
                 },
             )
             .child(self.shell_actions(cx));
+        // Newport's header is the title bar: caption buttons sit flush right.
+        #[cfg(target_os = "windows")]
+        let header = header.pr_0().children(
+            window_controls::caption_buttons(window, cx)
+                .map(|buttons| div().h_full().ml(px(6.)).child(buttons)),
+        );
         let content = div()
             .bg(cx.theme().background)
             .w_full()
@@ -1812,6 +1818,8 @@ pub fn ensure_editors_saved(cx: &mut App) -> Result<(), String> {
 }
 
 mod window_activation;
+#[cfg(target_os = "windows")]
+mod window_controls;
 
 /// Application-owned entry points (for example, the tray) use the same Settings
 /// action as the app menu, preserving draft and navigation behavior.
@@ -1889,10 +1897,9 @@ pub fn run_with_options_and_ready(
                 window_background: WindowBackgroundAppearance::Opaque,
                 titlebar: Some(TitlebarOptions {
                     title: Some("Newport".into()),
-                    // On Windows transparency removes the system caption and
-                    // its controls. Keep native minimize/maximize/close until
-                    // the shell explicitly provides a replacement title bar.
-                    appears_transparent: !cfg!(target_os = "windows"),
+                    // Newport draws the title bar; on Windows its header
+                    // carries the caption buttons (`window_controls`).
+                    appears_transparent: true,
                     traffic_light_position: cfg!(target_os = "macos")
                         .then(|| point(px(12.), px(12.))),
                 }),

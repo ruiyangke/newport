@@ -713,6 +713,237 @@ impl Render for Workspace {
         // Only windowed immersive mode shares this row with the native Mac
         // window controls. Fullscreen hides those controls.
         let inset = self.immersive && cfg!(target_os = "macos") && !window.is_fullscreen();
+        let tab_row = div()
+            .debug_selector(|| "terminal-tab-row".into())
+            .flex()
+            .h(px(crate::ui::HEADER_HEIGHT))
+            .flex_shrink_0()
+            .px_0()
+            .when(inset, |bar| bar.pl(px(96.)))
+            .items_center()
+            .relative()
+            .bg(cx.theme().muted)
+            .child(crate::ui::header_rule(cx))
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, _| {
+                if event.button == MouseButton::Right {
+                    this.context_tab = None;
+                }
+            }))
+            .child(
+                div()
+                    .id("terminal-tabs")
+                    .debug_selector(|| "terminal-tab-bar".into())
+                    .role(Role::TabList)
+                    .aria_label("Terminal sessions")
+                    .flex()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.tab_scroll)
+                    .children(self.tabs.iter().enumerate().map(|(index, tab)| {
+                        let id = tab.id;
+                        let number = tab.number;
+                        if let Some(rename) =
+                            self.rename.as_ref().filter(|rename| rename.id == id)
+                        {
+                            return session_tab(id, index == self.active, cx)
+                                .unfocusable()
+                                .when(index == 0 && inset, |tab| tab.border_l_1())
+                                .set_position(index + 1, self.tabs.len())
+                                .accessibility_label(format!("Rename Terminal {}", number + 1))
+                                .debug_selector(move || format!("terminal-tab-{id}"))
+                                .child(
+                                    Styled::h(crate::controls::input(&rename.input), px(26.))
+                                        .min_h(px(26.))
+                                        .max_h(px(26.))
+                                        .w(px(132.))
+                                        .px(px(8.))
+                                        .py_0()
+                                        .appearance(false)
+                                        .bordered(false)
+                                        .aria_label(format!("Rename Terminal {}", number + 1)),
+                                )
+                                .on_action(cx.listener(
+                                    |this,
+                                     _: &gpui_kit::component::input::Escape,
+                                     window,
+                                     cx| {
+                                        this.finish_rename(false, true, window, cx);
+                                    },
+                                ));
+                        }
+                        let remote_title = tab.view.read(cx).title.clone();
+                        let title = tab.custom.clone()
+                            .unwrap_or_else(|| automatic_tab_title(&remote_title, number));
+                        let startup_exit = {
+                            let status = &tab.view.read(cx).status;
+                            (!tab.exit.should_close(&status.phase) && matches!(status.phase, Phase::Exited(_)))
+                                .then(|| status.label())
+                        };
+                        let hint = startup_exit.clone().or_else(|| {
+                            (tab.custom.is_none() && title != remote_title && remote_title.contains('@') && remote_title.contains(':'))
+                                .then(|| remote_title.clone())
+                        });
+                        session_tab(id, index == self.active, cx)
+                            // Inset beside the window controls, the first tab
+                            // needs its own leading edge.
+                            .when(index == 0 && inset, |tab| tab.border_l_1())
+                            .set_position(index + 1, self.tabs.len())
+                            .accessibility_label(match &startup_exit {
+                                Some(exit) => format!("{title}, {exit}"),
+                                None => title.clone(),
+                            })
+                            .when_some(hint, |tab, hint| tab.hover_hint(hint))
+                            .debug_selector(move || format!("terminal-tab-{id}"))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.context_tab = Some(id);
+                                    cx.notify();
+                                }),
+                            )
+                            .focus_handle(tab.focus.clone().tab_stop(index == self.active))
+                            .on_key_down(cx.listener(
+                                move |this, event: &KeyDownEvent, window, cx| {
+                                    this.tab_key(id, event, window, cx)
+                                },
+                            ))
+                            .on_click(cx.listener(
+                                move |this, event: &ClickEvent, window, cx| {
+                                    if matches!(event, ClickEvent::Mouse(event) if event.down.click_count == 2) {
+                                        this.rename(id, window, cx);
+                                        return;
+                                    }
+                                    if this
+                                        .rename
+                                        .as_ref()
+                                        .is_some_and(|rename| rename.id == id)
+                                    {
+                                        return;
+                                    }
+                                    // Commit before replacing the active terminal tree;
+                                    // its focus transition can remove the old input's path.
+                                    this.finish_rename(true, false, window, cx);
+                                    if let Some(index) =
+                                        this.tabs.iter().position(|tab| tab.id == id)
+                                    {
+                                        let tab = &this.tabs[index];
+                                        this.active = index;
+                                        let focus =
+                                            if matches!(event, ClickEvent::Keyboard(_)) {
+                                                tab.focus.clone()
+                                            } else {
+                                                tab.view.read(cx).focus.clone()
+                                            };
+                                        focus.focus(window, cx);
+                                        cx.notify();
+                                    }
+                                },
+                            ))
+                            .child(crate::project_workspace::document_tab_title(title.clone()))
+                            .when_some(startup_exit, |tab, exit| {
+                                tab.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(exit),
+                                )
+                            })
+                            .when(self.tabs.len() > 1, |tab| {
+                                let owner = cx.entity().downgrade();
+                                tab.on_close(("close-terminal", id), format!("Close {title}"), true, move |keyboard, window, cx| {
+                                    let _ = owner.update(cx, |this, cx| this.close(id, keyboard, window, cx));
+                                })
+                            })
+                    })),
+            )
+            .child(
+                crate::controls::icon_button("new-terminal")
+                    .icon(Icon::new(IconName::Plus).size(px(16.)).text_color(cx.theme().muted_foreground))
+                    .ghost()
+                    .w(px(crate::ui::HEADER_HEIGHT)).min_w(px(crate::ui::HEADER_HEIGHT)).max_w(px(crate::ui::HEADER_HEIGHT))
+                    .h(px(crate::ui::HEADER_HEIGHT)).min_h(px(crate::ui::HEADER_HEIGHT)).max_h(px(crate::ui::HEADER_HEIGHT))
+                    .rounded_none()
+                    .border_b_1().border_color(cx.theme().border)
+                    .accessibility_label("New terminal")
+                    .tooltip("New terminal")
+                    .disabled(self.tabs.len() >= MAX_TERMINALS)
+                    .on_click(cx.listener(|this, _, window, cx| this.new_tab(window, cx))),
+            )
+            .child(
+                // Native title-bar hit testing runs before button clicks on
+                // Windows. Only empty space may drag the window; marking the
+                // whole toolbar also captures the restore and tab controls.
+                div()
+                    .debug_selector(|| "terminal-drag-region".into())
+                    .flex_1()
+                    .h_full()
+                    .when(self.immersive, |spacer| {
+                        spacer.window_control_area(WindowControlArea::Drag)
+                    }),
+            )
+            .when_some(state.as_ref(), |bar, state| {
+                bar.child(
+                    div()
+                        .id("terminal-state")
+                        .role(Role::Status)
+                        .aria_label(transport_wait.as_ref().map(|connection| connection.phase.label().to_owned()).unwrap_or_else(|| state.label()))
+                        .text_size(px(crate::ui::FONT_SIZE))
+                        .text_color(if error.is_some() {
+                            cx.theme().danger
+                        } else {
+                            cx.theme().muted_foreground
+                        })
+                        .when(transport_wait.is_none() && (state.steady() || state.cancel_label().is_some()), |status| {
+                            status.w_0().h_0().overflow_hidden()
+                        })
+                        .child(transport_wait.as_ref().map(|connection| connection.phase.label().to_owned()).unwrap_or_else(|| state.label())),
+                )
+            })
+            .when(self.project_root.is_none(), |bar| bar.child(
+                crate::controls::icon_button("terminal-immersive")
+                    .icon(Icon::new(if self.immersive {
+                        gpui_kit::assets::IconName::Minimize2
+                    } else {
+                        gpui_kit::assets::IconName::Maximize2
+                    }).size(px(crate::controls::ICON_SIZE)).text_color(cx.theme().muted_foreground))
+                    .ghost()
+                    .accessibility_label(if self.immersive {
+                        "Exit immersive mode"
+                    } else {
+                        "Enter immersive mode"
+                    })
+                    .tooltip(if self.immersive {
+                        "Exit immersive mode"
+                    } else {
+                        "Enter immersive mode"
+                    })
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(ToggleTerminalImmersive), cx);
+                    }),
+            ))
+            .context_menu(move |menu, _, cx| {
+                let id = menu_view
+                    .upgrade()
+                    .and_then(|view| view.read(cx).context_tab);
+                if let Some(id) = id {
+                    crate::terminal_session_menu::menu_for_tab(
+                        menu,
+                        menu_view.clone(),
+                        id,
+                        cx,
+                    )
+                } else {
+                    crate::terminal_session_menu::menu(menu, menu_view.clone(), cx)
+                }
+            });
+        // In immersive mode the tab row is the title bar.
+        #[cfg(target_os = "windows")]
+        let tab_row = tab_row.children(
+            self.immersive
+                .then(|| crate::window_controls::caption_buttons(window, cx))
+                .flatten(),
+        );
         div()
             .size_full()
             .relative()
@@ -720,232 +951,7 @@ impl Render for Workspace {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .debug_selector(|| "terminal-tab-row".into())
-                    .flex()
-                    .h(px(crate::ui::HEADER_HEIGHT))
-                    .flex_shrink_0()
-                    .px_0()
-                    .when(inset, |bar| bar.pl(px(96.)))
-                    .items_center()
-                    .relative()
-                    .bg(cx.theme().muted)
-                    .child(crate::ui::header_rule(cx))
-                    .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, _| {
-                        if event.button == MouseButton::Right {
-                            this.context_tab = None;
-                        }
-                    }))
-                    .child(
-                        div()
-                            .id("terminal-tabs")
-                            .debug_selector(|| "terminal-tab-bar".into())
-                            .role(Role::TabList)
-                            .aria_label("Terminal sessions")
-                            .flex()
-                            .min_w_0()
-                            .h_full()
-                            .overflow_x_scroll()
-                            .track_scroll(&self.tab_scroll)
-                            .children(self.tabs.iter().enumerate().map(|(index, tab)| {
-                                let id = tab.id;
-                                let number = tab.number;
-                                if let Some(rename) =
-                                    self.rename.as_ref().filter(|rename| rename.id == id)
-                                {
-                                    return session_tab(id, index == self.active, cx)
-                                        .unfocusable()
-                                        .when(index == 0 && inset, |tab| tab.border_l_1())
-                                        .set_position(index + 1, self.tabs.len())
-                                        .accessibility_label(format!("Rename Terminal {}", number + 1))
-                                        .debug_selector(move || format!("terminal-tab-{id}"))
-                                        .child(
-                                            Styled::h(crate::controls::input(&rename.input), px(26.))
-                                                .min_h(px(26.))
-                                                .max_h(px(26.))
-                                                .w(px(132.))
-                                                .px(px(8.))
-                                                .py_0()
-                                                .appearance(false)
-                                                .bordered(false)
-                                                .aria_label(format!("Rename Terminal {}", number + 1)),
-                                        )
-                                        .on_action(cx.listener(
-                                            |this,
-                                             _: &gpui_kit::component::input::Escape,
-                                             window,
-                                             cx| {
-                                                this.finish_rename(false, true, window, cx);
-                                            },
-                                        ));
-                                }
-                                let remote_title = tab.view.read(cx).title.clone();
-                                let title = tab.custom.clone()
-                                    .unwrap_or_else(|| automatic_tab_title(&remote_title, number));
-                                let startup_exit = {
-                                    let status = &tab.view.read(cx).status;
-                                    (!tab.exit.should_close(&status.phase) && matches!(status.phase, Phase::Exited(_)))
-                                        .then(|| status.label())
-                                };
-                                let hint = startup_exit.clone().or_else(|| {
-                                    (tab.custom.is_none() && title != remote_title && remote_title.contains('@') && remote_title.contains(':'))
-                                        .then(|| remote_title.clone())
-                                });
-                                session_tab(id, index == self.active, cx)
-                                    // Inset beside the window controls, the first tab
-                                    // needs its own leading edge.
-                                    .when(index == 0 && inset, |tab| tab.border_l_1())
-                                    .set_position(index + 1, self.tabs.len())
-                                    .accessibility_label(match &startup_exit {
-                                        Some(exit) => format!("{title}, {exit}"),
-                                        None => title.clone(),
-                                    })
-                                    .when_some(hint, |tab, hint| tab.hover_hint(hint))
-                                    .debug_selector(move || format!("terminal-tab-{id}"))
-                                    .on_mouse_down(
-                                        MouseButton::Right,
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.context_tab = Some(id);
-                                            cx.notify();
-                                        }),
-                                    )
-                                    .focus_handle(tab.focus.clone().tab_stop(index == self.active))
-                                    .on_key_down(cx.listener(
-                                        move |this, event: &KeyDownEvent, window, cx| {
-                                            this.tab_key(id, event, window, cx)
-                                        },
-                                    ))
-                                    .on_click(cx.listener(
-                                        move |this, event: &ClickEvent, window, cx| {
-                                            if matches!(event, ClickEvent::Mouse(event) if event.down.click_count == 2) {
-                                                this.rename(id, window, cx);
-                                                return;
-                                            }
-                                            if this
-                                                .rename
-                                                .as_ref()
-                                                .is_some_and(|rename| rename.id == id)
-                                            {
-                                                return;
-                                            }
-                                            // Commit before replacing the active terminal tree;
-                                            // its focus transition can remove the old input's path.
-                                            this.finish_rename(true, false, window, cx);
-                                            if let Some(index) =
-                                                this.tabs.iter().position(|tab| tab.id == id)
-                                            {
-                                                let tab = &this.tabs[index];
-                                                this.active = index;
-                                                let focus =
-                                                    if matches!(event, ClickEvent::Keyboard(_)) {
-                                                        tab.focus.clone()
-                                                    } else {
-                                                        tab.view.read(cx).focus.clone()
-                                                    };
-                                                focus.focus(window, cx);
-                                                cx.notify();
-                                            }
-                                        },
-                                    ))
-                                    .child(crate::project_workspace::document_tab_title(title.clone()))
-                                    .when_some(startup_exit, |tab, exit| {
-                                        tab.child(
-                                            div()
-                                                .flex_shrink_0()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(exit),
-                                        )
-                                    })
-                                    .when(self.tabs.len() > 1, |tab| {
-                                        let owner = cx.entity().downgrade();
-                                        tab.on_close(("close-terminal", id), format!("Close {title}"), true, move |keyboard, window, cx| {
-                                            let _ = owner.update(cx, |this, cx| this.close(id, keyboard, window, cx));
-                                        })
-                                    })
-                            })),
-                    )
-                    .child(
-                        crate::controls::icon_button("new-terminal")
-                            .icon(Icon::new(IconName::Plus).size(px(16.)).text_color(cx.theme().muted_foreground))
-                            .ghost()
-                            .w(px(crate::ui::HEADER_HEIGHT)).min_w(px(crate::ui::HEADER_HEIGHT)).max_w(px(crate::ui::HEADER_HEIGHT))
-                            .h(px(crate::ui::HEADER_HEIGHT)).min_h(px(crate::ui::HEADER_HEIGHT)).max_h(px(crate::ui::HEADER_HEIGHT))
-                            .rounded_none()
-                            .border_b_1().border_color(cx.theme().border)
-                            .accessibility_label("New terminal")
-                            .tooltip("New terminal")
-                            .disabled(self.tabs.len() >= MAX_TERMINALS)
-                            .on_click(cx.listener(|this, _, window, cx| this.new_tab(window, cx))),
-                    )
-                    .child(
-                        // Native title-bar hit testing runs before button clicks on
-                        // Windows. Only empty space may drag the window; marking the
-                        // whole toolbar also captures the restore and tab controls.
-                        div()
-                            .debug_selector(|| "terminal-drag-region".into())
-                            .flex_1()
-                            .h_full()
-                            .when(self.immersive, |spacer| {
-                                spacer.window_control_area(WindowControlArea::Drag)
-                            }),
-                    )
-                    .when_some(state.as_ref(), |bar, state| {
-                        bar.child(
-                            div()
-                                .id("terminal-state")
-                                .role(Role::Status)
-                                .aria_label(transport_wait.as_ref().map(|connection| connection.phase.label().to_owned()).unwrap_or_else(|| state.label()))
-                                .text_size(px(crate::ui::FONT_SIZE))
-                                .text_color(if error.is_some() {
-                                    cx.theme().danger
-                                } else {
-                                    cx.theme().muted_foreground
-                                })
-                                .when(transport_wait.is_none() && (state.steady() || state.cancel_label().is_some()), |status| {
-                                    status.w_0().h_0().overflow_hidden()
-                                })
-                                .child(transport_wait.as_ref().map(|connection| connection.phase.label().to_owned()).unwrap_or_else(|| state.label())),
-                        )
-                    })
-                    .when(self.project_root.is_none(), |bar| bar.child(
-                        crate::controls::icon_button("terminal-immersive")
-                            .icon(Icon::new(if self.immersive {
-                                gpui_kit::assets::IconName::Minimize2
-                            } else {
-                                gpui_kit::assets::IconName::Maximize2
-                            }).size(px(crate::controls::ICON_SIZE)).text_color(cx.theme().muted_foreground))
-                            .ghost()
-                            .accessibility_label(if self.immersive {
-                                "Exit immersive mode"
-                            } else {
-                                "Enter immersive mode"
-                            })
-                            .tooltip(if self.immersive {
-                                "Exit immersive mode"
-                            } else {
-                                "Enter immersive mode"
-                            })
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ToggleTerminalImmersive), cx);
-                            }),
-                    ))
-                    .context_menu(move |menu, _, cx| {
-                        let id = menu_view
-                            .upgrade()
-                            .and_then(|view| view.read(cx).context_tab);
-                        if let Some(id) = id {
-                            crate::terminal_session_menu::menu_for_tab(
-                                menu,
-                                menu_view.clone(),
-                                id,
-                                cx,
-                            )
-                        } else {
-                            crate::terminal_session_menu::menu(menu, menu_view.clone(), cx)
-                        }
-                    }),
-            )
+            .child(tab_row)
             .when_some(error, |root, error| {
                 root.child(
                     crate::controls::alert("terminal-error", error, cx)
@@ -954,48 +960,35 @@ impl Render for Workspace {
                 )
             })
             .when_some(current.clone(), |root, current| {
-                root.child(
-                    div()
-                        .relative()
-                        .flex_1()
-                        .min_h_0()
-                        .child(current)
-                        .when(
-                            state.as_ref().is_some_and(|state| !state.started),
-                            |frame| {
-                                let connecting = state
-                                    .as_ref()
-                                    .is_some_and(|state| state.cancel_label().is_some());
-                                let failed =
-                                    state.as_ref().is_some_and(|state| state.error().is_some());
-                                let exited = state
-                                    .as_ref()
-                                    .filter(|state| matches!(state.phase, Phase::Exited(_)));
-                                let title: SharedString = if connecting {
-                                    "Connecting…".into()
-                                } else if failed {
-                                    "Connection failed".into()
-                                } else if let Some(state) = exited {
-                                    state.label().into()
-                                } else {
-                                    "Open a remote shell".into()
-                                };
-                                frame.child(
-                                    // The endpoint reads as the description: it is
-                                    // the shell this tab is about to open.
-                                    empty::pane(
-                                        IconName::Terminal,
-                                        title,
-                                        self.endpoint.clone(),
-                                        cx,
-                                    )
-                                    .absolute()
-                                    .inset_0()
-                                    .bg(cx.theme().background),
-                                )
-                            },
-                        ),
-                )
+                root.child(div().relative().flex_1().min_h_0().child(current).when(
+                    state.as_ref().is_some_and(|state| !state.started),
+                    |frame| {
+                        let connecting = state
+                            .as_ref()
+                            .is_some_and(|state| state.cancel_label().is_some());
+                        let failed = state.as_ref().is_some_and(|state| state.error().is_some());
+                        let exited = state
+                            .as_ref()
+                            .filter(|state| matches!(state.phase, Phase::Exited(_)));
+                        let title: SharedString = if connecting {
+                            "Connecting…".into()
+                        } else if failed {
+                            "Connection failed".into()
+                        } else if let Some(state) = exited {
+                            state.label().into()
+                        } else {
+                            "Open a remote shell".into()
+                        };
+                        frame.child(
+                            // The endpoint reads as the description: it is
+                            // the shell this tab is about to open.
+                            empty::pane(IconName::Terminal, title, self.endpoint.clone(), cx)
+                                .absolute()
+                                .inset_0()
+                                .bg(cx.theme().background),
+                        )
+                    },
+                ))
             })
             .when(current.is_none(), |root| {
                 root.child(empty::pane(
