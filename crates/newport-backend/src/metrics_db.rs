@@ -39,9 +39,16 @@ pub fn now_ms() -> i64 {
         .unwrap_or_default()
         .as_millis() as i64
 }
+/// Which machine a history belongs to. Behind another jump host or proxy,
+/// the same address can be another machine; a direct server keeps the key
+/// its history was always saved under.
 fn endpoint(server: &Server) -> String {
-    serde_json::to_string(&(&server.ssh_host, server.ssh_port, &server.ssh_user))
-        .expect("Endpoint contains only JSON-serializable strings and a port")
+    let address = (&server.ssh_host, server.ssh_port, &server.ssh_user);
+    match &server.proxy {
+        None => serde_json::to_string(&address),
+        Some(proxy) => serde_json::to_string(&(address.0, address.1, address.2, proxy)),
+    }
+    .expect("Endpoint contains only JSON-serializable values")
 }
 
 fn migrations() -> sqlx::migrate::Migrator {
@@ -349,6 +356,18 @@ mod tests {
 
     fn server() -> Server {
         serde_json::from_value(serde_json::json!({"id":uuid::Uuid::new_v4(),"name":"Test","sshHost":"host","sshPort":22,"sshUser":"user","identityFile":null,"authMethod":"publicKey"})).unwrap()
+    }
+    #[test]
+    fn a_route_through_another_machine_is_another_endpoint() {
+        let direct = server();
+        // Earlier releases saved every history under this key.
+        assert_eq!(super::endpoint(&direct), r#"["host",22,"user"]"#);
+        let mut behind = direct.clone();
+        behind.proxy = Some(crate::model::Proxy::Jump(uuid::Uuid::new_v4()));
+        let mut other = behind.clone();
+        other.proxy = Some(crate::model::Proxy::Jump(uuid::Uuid::new_v4()));
+        let keys = [&direct, &behind, &other].map(super::endpoint);
+        assert!(keys[0] != keys[1] && keys[1] != keys[2] && keys[0] != keys[2]);
     }
     fn sample() -> Value {
         serde_json::json!({"cpu":12.0,"memoryUsed":4,"memoryTotal":8,"load":[1,2,3],"uptime":120,"network":[],"processes":["secret-command"],"password":"secret"})

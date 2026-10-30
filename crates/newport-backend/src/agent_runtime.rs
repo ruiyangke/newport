@@ -1,5 +1,8 @@
-//! Session-owned runtime control channel, separate from feature traffic.
-use crate::ssh::ExecSession;
+//! Session-owned runtime control channel, separate from feature traffic. The
+//! runtime runs on a session channel of its own, so losing that channel's
+//! connection ends the runtime and fences everything that ran on it.
+use crate::remote::command;
+use newport_ssh::{Fate, Link};
 use serde::Serialize;
 use std::{
     sync::{
@@ -23,10 +26,60 @@ pub(crate) use worker::{Handle, Worker};
 pub(crate) const BUSY: &str = "Needle services are busy. Retry shortly.";
 pub(crate) const UPGRADED: &str = "Needle runtime upgraded";
 const MAX_RETIRING: usize = 4;
+/// How long a runtime may take to say hello once its channel is open.
+const HANDSHAKE: Duration = Duration::from_secs(15);
 
 #[allow(dead_code)]
 #[path = "../../../tools/agent/src/runtime_protocol.rs"]
 pub mod protocol;
+
+/// Why Needle couldn't serve a request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// The link couldn't open a channel, or lost the connection under one.
+    Link(newport_ssh::Error),
+    /// The server session changed; nothing more runs on it.
+    Stale,
+    /// Needle isn't installed on the server.
+    NotInstalled,
+    /// Needle is busy, restarting or was cut off; trying again soon can work.
+    Interrupted(String),
+    /// Needle can't serve this until something on the server changes, such
+    /// as an update.
+    Unavailable(String),
+}
+impl Error {
+    /// Whether trying again can work without anything changing on the
+    /// server: the link recovers on its own or on Retry, and an interrupted
+    /// runtime restarts.
+    pub(crate) fn transient(&self) -> bool {
+        matches!(self, Error::Link(_) | Error::Interrupted(_))
+    }
+}
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Link(error) => error.fmt(f),
+            Error::Stale => f.write_str(crate::server_session::STALE),
+            Error::NotInstalled => f.write_str(crate::agent::NOT_INSTALLED),
+            Error::Interrupted(message) | Error::Unavailable(message) => f.write_str(message),
+        }
+    }
+}
+impl std::error::Error for Error {}
+impl From<Error> for String {
+    fn from(error: Error) -> Self {
+        error.to_string()
+    }
+}
+impl From<command::Error> for Error {
+    fn from(error: command::Error) -> Self {
+        match error {
+            command::Error::Link(error) => Error::Link(error),
+            other => Error::Interrupted(other.to_string()),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ClipboardRoute {
@@ -38,14 +91,20 @@ pub(crate) enum ClipboardRoute {
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     pub status: &'static str,
-    pub transport_generation: u64,
+    /// Which runtime start this is.
+    pub generation: u64,
     pub hello: Option<protocol::Hello>,
     pub error: Option<String>,
     pub retryable: bool,
     pub failures: u32,
     pub instances: Vec<RuntimeInstance>,
     #[serde(skip)]
+    cause: Option<Error>,
+    #[serde(skip)]
     retry_at: Option<Instant>,
+    /// The failure was the connection's loss, not Needle's.
+    #[serde(skip)]
+    lost: bool,
     #[serde(skip)]
     startup_epoch: u64,
 }
@@ -53,13 +112,15 @@ impl Default for Snapshot {
     fn default() -> Self {
         Self {
             status: "unknown",
-            transport_generation: 0,
+            generation: 0,
             hello: None,
             error: None,
             retryable: false,
             failures: 0,
             instances: Vec::new(),
+            cause: None,
             retry_at: None,
+            lost: false,
             startup_epoch: 0,
         }
     }
@@ -69,7 +130,7 @@ impl Default for Snapshot {
 pub struct RuntimeInstance {
     pub instance_id: String,
     pub build_sha256: String,
-    pub transport_generation: u64,
+    pub generation: u64,
     pub retiring: bool,
     pub draining: bool,
     pub connected: bool,
@@ -87,13 +148,14 @@ impl Drop for Starting {
     fn drop(&mut self) {
         let mut current = self.snapshot.lock().unwrap();
         if current.status == "starting"
-            && current.transport_generation == self.generation
+            && current.generation == self.generation
             && current.startup_epoch == self.epoch
         {
             record_failure(
                 &mut current,
-                "Needle runtime startup was interrupted. Reconnecting…".into(),
+                Error::Interrupted("Needle runtime startup was interrupted. Reconnecting…".into()),
                 true,
+                false,
             );
         }
         drop(current);
@@ -143,11 +205,46 @@ impl Drop for Startup {
         }
     }
 }
+/// A caller waiting in [`Slot::ensure_with`]. When the last one leaves, a
+/// start in progress is cancelled, so nothing keeps the link logging in for
+/// a runtime nobody needs.
+struct Waiting<'a>(&'a Slot);
+impl<'a> Waiting<'a> {
+    fn new(slot: &'a Slot) -> Self {
+        slot.connection.lock().unwrap().waiters += 1;
+        Self(slot)
+    }
+}
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        let mut state = self.0.connection.lock().unwrap();
+        state.waiters -= 1;
+        if state.waiters > 0
+            || state
+                .startup
+                .as_ref()
+                .is_none_or(|s| s.task.as_ref().is_none_or(|task| task.is_finished()))
+        {
+            return;
+        }
+        // Fence the start's publication first: cancelling it is no failure.
+        let failures = self.0.current_snapshot().failures;
+        *self.0.snapshot.lock().unwrap() = Snapshot {
+            startup_epoch: self.0.sequence.fetch_add(1, Ordering::AcqRel) + 1,
+            failures,
+            ..Snapshot::default()
+        };
+        state.startup = None;
+        self.0.changes.send_modify(|v| *v = v.wrapping_add(1));
+    }
+}
 #[derive(Default)]
 struct Connection {
     control: Option<Arc<Control>>,
     retiring: Vec<Weak<Control>>,
     startup: Option<Startup>,
+    /// Callers waiting for the runtime to start.
+    waiters: usize,
 }
 impl Connection {
     fn drain_other_builds(&self, hash: &str) {
@@ -185,6 +282,7 @@ pub struct Slot {
     connection: Arc<StdMutex<Connection>>,
     changes: watch::Sender<u64>,
     sequence: AtomicU64,
+    generations: AtomicU64,
     snapshot: Arc<StdMutex<Snapshot>>,
     permissions: Arc<crate::integration_permissions::Gate>,
 }
@@ -194,6 +292,7 @@ impl Slot {
             connection: Arc::default(),
             changes: watch::channel(0).0,
             sequence: AtomicU64::new(0),
+            generations: AtomicU64::new(0),
             snapshot: Arc::default(),
             permissions,
         }
@@ -220,6 +319,17 @@ impl Slot {
                 .request(&hello.instance_id, protocol::Operation::Ping)
                 .await;
         }
+    }
+    fn next_generation(&self) -> u64 {
+        self.generations.fetch_add(1, Ordering::AcqRel) + 1
+    }
+    /// Which start of the runtime `instance` is, while it runs.
+    pub(crate) fn generation_of(&self, instance: &str) -> Option<u64> {
+        self.connection
+            .lock()
+            .unwrap()
+            .find(instance)
+            .map(|control| control.generation)
     }
     pub async fn wait_for_retry(&self) -> Result<(), String> {
         let snapshot = self.current_snapshot();
@@ -257,7 +367,7 @@ impl Slot {
             .map(|(c, retiring)| RuntimeInstance {
                 instance_id: c.hello.instance_id.clone(),
                 build_sha256: c.hello.build_sha256.clone(),
-                transport_generation: c.generation,
+                generation: c.generation,
                 retiring,
                 draining: *c.drain.borrow(),
                 connected: !c.is_closed(),
@@ -306,21 +416,22 @@ impl Slot {
     /// admitted operations. Candidate startup leaves the old owner untouched.
     pub(crate) async fn adopt(
         &self,
-        connection: &ExecSession,
+        link: &Link,
         session: uuid::Uuid,
-        generation: u64,
         hash: &str,
-        validate: impl Fn() -> Result<(), String>,
-    ) -> Result<(), String> {
+        validate: impl Fn() -> Result<(), Error>,
+    ) -> Result<(), Error> {
         if !protocol::valid_build(hash) {
-            return Err("Invalid candidate hash".into());
+            return Err(Error::Unavailable("Invalid candidate hash".into()));
         }
         validate()?;
         {
             let state = self.connection.lock().unwrap();
-            if state.control.as_ref().is_some_and(|c| {
-                !c.is_closed() && c.generation == generation && c.hello.build_sha256 == hash
-            }) {
+            if state
+                .control
+                .as_ref()
+                .is_some_and(|c| !c.is_closed() && c.hello.build_sha256 == hash)
+            {
                 state.drain_other_builds(hash);
                 return Ok(());
             }
@@ -328,21 +439,22 @@ impl Slot {
         let command = format!(
             "exec \"$HOME/.local/share/newport/needle/builds/{hash}/newport-agent\" runtime --stdio"
         );
-        let (mut stream, hello) = tokio::time::timeout(
-            Duration::from_secs(15),
-            start_at(connection, session, generation, &command),
-        )
-        .await
-        .map_err(|_| "Needle upgrade handoff timed out")?
-        .map_err(|e| e.message)?;
+        let generation = self.next_generation();
+        let (mut stream, fate, hello) = start_at(link, session, generation, &command)
+            .await
+            .map_err(|failure| failure.error)?;
         if hello.build_sha256 != hash {
-            return Err("Needle upgrade candidate identity changed".into());
+            return Err(Error::Unavailable(
+                "Needle upgrade candidate identity changed".into(),
+            ));
         }
         exchange(&mut stream, &hello.instance_id, protocol::Operation::Ping)
             .await
-            .and_then(accepted)?;
+            .and_then(accepted)
+            .map_err(Error::Interrupted)?;
         let candidate = Control::run(
             stream,
+            fate,
             hello,
             generation,
             self.snapshot.clone(),
@@ -353,16 +465,16 @@ impl Slot {
     fn publish_candidate(
         &self,
         candidate: Control,
-        validate: impl Fn() -> Result<(), String>,
-    ) -> Result<(), String> {
+        validate: impl Fn() -> Result<(), Error>,
+    ) -> Result<(), Error> {
         let mut state = self.connection.lock().unwrap();
         validate()?;
         state.prune();
-        if state.control.as_ref().is_some_and(|c| {
-            !c.is_closed()
-                && c.generation == candidate.generation
-                && c.hello.build_sha256 == candidate.hello.build_sha256
-        }) {
+        if state
+            .control
+            .as_ref()
+            .is_some_and(|c| !c.is_closed() && c.hello.build_sha256 == candidate.hello.build_sha256)
+        {
             state.drain_other_builds(&candidate.hello.build_sha256);
             return Ok(());
         }
@@ -372,10 +484,12 @@ impl Slot {
                 .as_ref()
                 .is_some_and(|c| Arc::strong_count(c) > 1)
         {
-            return Err(BUSY.into());
+            return Err(Error::Interrupted(BUSY.into()));
         }
         if candidate.is_closed() {
-            return Err("Needle upgrade candidate disconnected".into());
+            return Err(Error::Interrupted(
+                "Needle upgrade candidate disconnected".into(),
+            ));
         }
         // Fence any old owned startup before aborting it. The new control is
         // published before consumers observe their handoff notification.
@@ -390,7 +504,7 @@ impl Slot {
         }
         *self.snapshot.lock().unwrap() = Snapshot {
             status: "ready",
-            transport_generation: candidate.generation,
+            generation: candidate.generation,
             hello: Some(candidate.hello.clone()),
             startup_epoch: epoch,
             ..Snapshot::default()
@@ -401,24 +515,21 @@ impl Slot {
     }
     pub(crate) async fn worker(
         &self,
-        connection: &ExecSession,
+        link: &Link,
         session: uuid::Uuid,
-        generation: u64,
         service: &str,
         version: u32,
-        validate: impl Fn() -> Result<(), String>,
-    ) -> Result<Worker, String> {
+        validate: impl Fn() -> Result<(), Error>,
+    ) -> Result<Worker, Error> {
         loop {
-            let hello = self
-                .ensure(connection, session, generation, &validate)
-                .await?;
+            let hello = self.ensure(link, session, &validate).await?;
             // Needle itself checks for Git installed since it started.
             if service == "git" {
                 hello.require_compatible(service, version).map(|_| ())
             } else {
                 hello.require(service, version)
             }
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| Error::Unavailable(e.to_string()))?;
             let mut worker = {
                 let mut state = self.connection.lock().unwrap();
                 validate()?;
@@ -434,12 +545,11 @@ impl Slot {
                     // Bound overlap without killing admitted work. The current
                     // slot and this local reference account for two strong refs.
                     if state.retiring.len() >= MAX_RETIRING && Arc::strong_count(&control) > 2 {
-                        return Err(BUSY.into());
+                        return Err(Error::Interrupted(BUSY.into()));
                     }
                     state.control = None;
                     state.retiring.push(Arc::downgrade(&control));
                     *self.snapshot.lock().unwrap() = Snapshot {
-                        transport_generation: generation,
                         startup_epoch: self.sequence.fetch_add(1, Ordering::AcqRel) + 1,
                         ..Snapshot::default()
                     };
@@ -449,7 +559,7 @@ impl Slot {
                     .workers
                     .clone()
                     .try_acquire_owned()
-                    .map_err(|_| BUSY)?;
+                    .map_err(|_| Error::Interrupted(BUSY.into()))?;
                 // Count before sending: cancelled or lost registration replies
                 // may still have consumed a one-use ticket on the server.
                 control.registrations.fetch_add(1, Ordering::AcqRel);
@@ -490,7 +600,8 @@ impl Slot {
         worker: uuid::Uuid,
         service: &str,
         version: u32,
-    ) -> Result<Option<protocol::worker_stream::Endpoint>, String> {
+    ) -> Result<Option<protocol::worker_stream::Endpoint>, Error> {
+        let unavailable = |message: &str| Error::Unavailable(message.into());
         if hello
             .require(
                 protocol::worker_stream::CAPABILITY,
@@ -510,15 +621,17 @@ impl Slot {
                 .await?;
             let endpoint = reply
                 .worker_stream
-                .ok_or("Runtime omitted its worker stream endpoint")?;
+                .ok_or_else(|| unavailable("Runtime omitted its worker stream endpoint"))?;
             endpoint
                 .validate()
-                .map_err(|_| "Invalid worker stream endpoint")?;
+                .map_err(|_| unavailable("Invalid worker stream endpoint"))?;
             if std::path::Path::new(&endpoint.path).parent()
                 != std::path::Path::new(&hello.worker_socket).parent()
                 || endpoint.path == hello.worker_socket
             {
-                return Err("Worker stream endpoint belongs to a different runtime".into());
+                return Err(unavailable(
+                    "Worker stream endpoint belongs to a different runtime",
+                ));
             }
             Ok(Some(endpoint))
         } else {
@@ -540,13 +653,13 @@ impl Slot {
         worker: uuid::Uuid,
         epoch: u64,
         permissions: protocol::integration::Permissions,
-    ) -> Result<protocol::integration::Applied, String> {
+    ) -> Result<protocol::integration::Applied, Error> {
         let control = self
             .connection
             .lock()
             .unwrap()
             .find(runtime)
-            .ok_or("Needle runtime is not connected")?;
+            .ok_or_else(|| Error::Interrupted("Needle runtime is not connected".into()))?;
         control.permission_epoch.fetch_max(epoch, Ordering::AcqRel);
         self.request(
             runtime,
@@ -557,7 +670,7 @@ impl Slot {
         )
         .await?
         .applied
-        .ok_or_else(|| "Needle did not acknowledge applied permissions".into())
+        .ok_or_else(|| Error::Unavailable("Needle did not acknowledge applied permissions".into()))
     }
     /// Only the owner of an admitted graphical worker calls this. Revisions
     /// belong to that exact runtime, including an old build still draining.
@@ -655,35 +768,33 @@ impl Slot {
         &self,
         runtime: &str,
         operation: protocol::Operation,
-    ) -> Result<protocol::Reply, String> {
+    ) -> Result<protocol::Reply, Error> {
         let control = {
             let state = self.connection.lock().unwrap();
-            state
-                .find(runtime)
-                .ok_or("Needle runtime changed before worker registration")?
+            state.find(runtime).ok_or_else(|| {
+                Error::Interrupted("Needle runtime changed before worker registration".into())
+            })?
         };
         control_response(control.enqueue(operation)?).await
     }
+    /// The running runtime's hello, starting the runtime when none runs.
+    /// Callers share one start; a temporary failure is retried after a
+    /// growing pause while anyone waits.
     pub async fn ensure(
         &self,
-        connection: &ExecSession,
+        link: &Link,
         session_id: uuid::Uuid,
-        generation: u64,
-        validate: impl Fn() -> Result<(), String>,
-    ) -> Result<protocol::Hello, String> {
-        self.ensure_with(generation, validate, || {
-            let connection = connection.with_server(connection.server().clone());
+        validate: impl Fn() -> Result<(), Error>,
+    ) -> Result<protocol::Hello, Error> {
+        self.ensure_with(Some(link.status()), validate, |generation| {
+            let link = link.clone();
             let snapshot = self.snapshot.clone();
             let permissions = self.permissions.clone();
             async move {
-                let (stream, hello) = tokio::time::timeout(
-                    Duration::from_secs(15),
-                    start(&connection, session_id, generation),
-                )
-                .await
-                .map_err(|_| StartupFailure::temporary("Needle runtime handshake timed out."))??;
+                let (stream, fate, hello) = start(&link, session_id, generation).await?;
                 Ok(Control::run(
                     stream,
+                    fate,
                     hello,
                     generation,
                     snapshot,
@@ -693,53 +804,54 @@ impl Slot {
         })
         .await
     }
+    /// Starts the runtime with `create`, or waits for the start in progress.
+    /// A failure from losing the connection doesn't hold the next start once
+    /// `link` is ready again.
     async fn ensure_with<F, Fut>(
         &self,
-        generation: u64,
-        validate: impl Fn() -> Result<(), String>,
+        mut link: Option<watch::Receiver<newport_ssh::Status>>,
+        validate: impl Fn() -> Result<(), Error>,
         create: F,
-    ) -> Result<protocol::Hello, String>
+    ) -> Result<protocol::Hello, Error>
     where
-        F: Fn() -> Fut,
+        F: Fn(u64) -> Fut,
         Fut: std::future::Future<Output = Result<Control, StartupFailure>> + Send + 'static,
     {
         let mut changes = self.changes.subscribe();
+        let _waiting = Waiting::new(self);
+        let ready =
+            |status: &newport_ssh::Status| matches!(status.reach, newport_ssh::Reach::Ready { .. });
         loop {
             changes.borrow_and_update();
             let mut retry_at = None;
+            let mut lost = false;
             {
                 let mut state = self.connection.lock().unwrap();
                 validate()?;
                 if let Some(control) = &state.control
-                    && control.generation == generation
                     && !control.is_closed()
                     && self.current_snapshot().status == "ready"
                 {
                     return Ok(control.hello.clone());
                 }
-                if state
-                    .control
-                    .as_ref()
-                    .is_some_and(|c| c.generation != generation)
-                {
-                    self.clear(&mut state);
-                }
                 state.control = None;
-                if state
-                    .startup
-                    .as_ref()
-                    .is_some_and(|s| s.generation != generation)
-                {
-                    self.clear(&mut state);
-                }
-                let previous = self.current_snapshot();
-                if previous.transport_generation == generation && previous.status == "failed" {
+                let mut previous = self.current_snapshot();
+                if previous.status == "failed" {
                     if !previous.retryable {
-                        return Err(previous
-                            .error
-                            .unwrap_or_else(|| "Needle runtime unavailable".into()));
+                        return Err(previous.cause.unwrap_or_else(|| {
+                            Error::Unavailable(
+                                previous
+                                    .error
+                                    .unwrap_or_else(|| "Needle runtime unavailable".into()),
+                            )
+                        }));
                     }
-                    retry_at = previous.retry_at.filter(|at| *at > Instant::now());
+                    lost = previous.lost;
+                    if lost && link.as_ref().is_some_and(|link| ready(&link.borrow())) {
+                        previous.failures = 0;
+                    } else {
+                        retry_at = previous.retry_at.filter(|at| *at > Instant::now());
+                    }
                 }
                 if state
                     .startup
@@ -750,15 +862,12 @@ impl Slot {
                 }
                 if state.startup.is_none() && retry_at.is_none() {
                     let epoch = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
+                    let generation = self.next_generation();
                     *self.snapshot.lock().unwrap() = Snapshot {
                         status: "starting",
-                        transport_generation: generation,
+                        generation,
                         startup_epoch: epoch,
-                        failures: if previous.transport_generation == generation {
-                            previous.failures
-                        } else {
-                            0
-                        },
+                        failures: previous.failures,
                         ..Snapshot::default()
                     };
                     let owner = Arc::downgrade(&self.connection);
@@ -769,7 +878,7 @@ impl Slot {
                         epoch,
                         changes: self.changes.clone(),
                     };
-                    let start = create();
+                    let start = create(generation);
                     let task = tokio::spawn(async move {
                         let _guard = guard;
                         let result = start.await;
@@ -791,13 +900,19 @@ impl Slot {
                                 snapshot.status = "ready";
                                 snapshot.hello = Some(control.hello.clone());
                                 snapshot.error = None;
+                                snapshot.cause = None;
                                 snapshot.retryable = false;
                                 snapshot.retry_at = None;
                                 state.control = Some(Arc::new(control));
                             }
-                            Err(error) => {
+                            Err(failure) => {
                                 snapshot.hello = None;
-                                record_failure(&mut snapshot, error.message, error.retryable);
+                                record_failure(
+                                    &mut snapshot,
+                                    failure.error,
+                                    failure.retryable,
+                                    failure.lost,
+                                );
                             }
                         }
                     });
@@ -809,42 +924,58 @@ impl Slot {
                 }
             }
             // All feature callers share the same retry deadline and startup.
-            // Never hold a lock while backing off; reset/retirement wakes us early.
+            // Never hold a lock while backing off; reset/retirement wakes us
+            // early, and so does the link's return after a lost connection.
             if let Some(at) = retry_at {
+                let reconnected = async {
+                    match link.as_mut().filter(|_| lost) {
+                        Some(link) => {
+                            if link.wait_for(ready).await.is_err() {
+                                std::future::pending::<()>().await;
+                            }
+                        }
+                        None => std::future::pending().await,
+                    }
+                };
                 tokio::select! {
                     _ = tokio::time::sleep_until(at) => {},
+                    () = reconnected => {},
                     result = changes.changed() => {
-                        result.map_err(|_| "Needle session closed".to_owned())?;
+                        result.map_err(|_| closed())?;
                     }
                 }
             } else {
-                changes
-                    .changed()
-                    .await
-                    .map_err(|_| "Needle session closed".to_owned())?;
+                changes.changed().await.map_err(|_| closed())?;
             }
         }
     }
+}
+fn closed() -> Error {
+    Error::Interrupted("Needle session closed".into())
 }
 impl Control {
     fn enqueue(
         &self,
         operation: protocol::Operation,
-    ) -> Result<oneshot::Receiver<Result<protocol::Reply, String>>, String> {
+    ) -> Result<oneshot::Receiver<Result<protocol::Reply, String>>, Error> {
+        let disconnected = || Error::Interrupted("Needle runtime disconnected".into());
         if self.is_closed() {
-            return Err("Needle runtime disconnected".into());
+            return Err(disconnected());
         }
         let (reply, response) = oneshot::channel();
         self.commands
             .try_send(Call { operation, reply })
             .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => BUSY.to_owned(),
-                mpsc::error::TrySendError::Closed(_) => "Needle runtime disconnected".into(),
+                mpsc::error::TrySendError::Full(_) => Error::Interrupted(BUSY.into()),
+                mpsc::error::TrySendError::Closed(_) => disconnected(),
             })?;
         Ok(response)
     }
+    /// Serves the runtime's control channel until it fails, or the
+    /// connection under it is lost.
     fn run(
         mut stream: Stream,
+        fate: Fate,
         hello: protocol::Hello,
         generation: u64,
         snapshot: Arc<StdMutex<Snapshot>>,
@@ -858,10 +989,10 @@ impl Control {
         let bound_epoch = permission_epoch.clone();
         let (commands, mut calls) = mpsc::channel::<Call>(16);
         let heartbeat = tokio::spawn(async move {
-            let fail = |error: String| {
+            let fail = |failure: (String, bool)| {
                 if !failure_state.swap(true, Ordering::AcqRel) {
                     permissions.disconnect_if(bound_epoch.load(Ordering::Acquire));
-                    record_control_failure(&snapshot, generation, &runtime_id, error, started);
+                    record_control_failure(&snapshot, generation, &runtime_id, failure, started);
                 }
             };
             let mut timer = tokio::time::interval_at(
@@ -869,25 +1000,26 @@ impl Control {
                 Duration::from_secs(15),
             );
             timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let error = loop {
+            let failure = loop {
                 tokio::select! {
                     biased;
+                    lost = fate.lost() => break (format!("Needle runtime disconnected: {lost}"), true),
                     _ = timer.tick() => {
-                        if let Err(error) = exchange(&mut stream, &runtime_id, protocol::Operation::Ping).await.and_then(accepted) { break error; }
+                        if let Err(error) = exchange(&mut stream, &runtime_id, protocol::Operation::Ping).await.and_then(accepted) { break (error, false); }
                     }
                     call = calls.recv() => {
-                        let Some(call) = call else { break "Needle control closed".into() };
+                        let Some(call) = call else { break ("Needle control closed".into(), false) };
                         let result = exchange(&mut stream, &runtime_id, call.operation).await;
                         let failure = result.as_ref().err().cloned();
                         if let Some(error) = &failure {
-                            fail(error.clone());
+                            fail((error.clone(), false));
                         }
                         let _ = call.reply.send(result);
-                        if let Some(error) = failure { break error; }
+                        if let Some(error) = failure { break (error, false); }
                     }
                 }
             };
-            fail(error);
+            fail(failure);
         });
         Control {
             commands,
@@ -906,44 +1038,51 @@ impl Control {
 
 async fn control_response(
     response: oneshot::Receiver<Result<protocol::Reply, String>>,
-) -> Result<protocol::Reply, String> {
+) -> Result<protocol::Reply, Error> {
+    let interrupted = |message: &str| Error::Interrupted(message.into());
     let reply = tokio::time::timeout(Duration::from_secs(10), response)
         .await
-        .map_err(|_| "Needle control request timed out")?
-        .map_err(|_| "Needle runtime disconnected during control request")??;
+        .map_err(|_| interrupted("Needle control request timed out"))?
+        .map_err(|_| interrupted("Needle runtime disconnected during control request"))?
+        .map_err(Error::Interrupted)?;
     if let Some(error) = &reply.error {
         return Err(if error == "Needle worker registration limit reached" {
-            BUSY.into()
+            interrupted(BUSY)
         } else {
-            error.clone()
+            Error::Unavailable(error.clone())
         });
     }
     Ok(reply)
 }
 
-fn record_failure(snapshot: &mut Snapshot, error: String, retryable: bool) {
+fn record_failure(snapshot: &mut Snapshot, error: Error, retryable: bool, lost: bool) {
     snapshot.status = "failed";
-    snapshot.error = Some(error);
+    snapshot.error = Some(error.to_string());
+    snapshot.cause = Some(error);
     snapshot.retryable = retryable;
+    snapshot.lost = lost;
     snapshot.failures = snapshot.failures.saturating_add(1);
     snapshot.retry_at = retryable.then(|| {
-        Instant::now()
-            + crate::session_transport::backoff(
-                snapshot.failures,
-                uuid::Uuid::new_v4().as_u128() as u64,
-            )
+        Instant::now() + backoff(snapshot.failures, uuid::Uuid::new_v4().as_u128() as u64)
     });
+}
+/// How long to wait before the `attempt`th retry: doubling from 2 s to 30 s,
+/// with jitter from `random`.
+fn backoff(attempt: u32, random: u64) -> Duration {
+    let base = 2_000u64.saturating_mul(1u64 << attempt.saturating_sub(1).min(4));
+    // 80–120% jitter, bounded even at the maximum backoff.
+    Duration::from_millis((base * (800 + random % 401) / 1000).min(30_000))
 }
 fn record_control_failure(
     snapshot: &StdMutex<Snapshot>,
     generation: u64,
     runtime: &str,
-    error: String,
+    (error, lost): (String, bool),
     started: Instant,
 ) {
     let mut current = snapshot.lock().unwrap();
     if current.status == "ready"
-        && current.transport_generation == generation
+        && current.generation == generation
         && current
             .hello
             .as_ref()
@@ -952,41 +1091,67 @@ fn record_control_failure(
         if started.elapsed() >= Duration::from_secs(60) {
             current.failures = 0;
         }
-        record_failure(&mut current, error, true);
+        record_failure(&mut current, Error::Interrupted(error), true, lost);
     }
 }
 #[derive(Debug)]
 struct StartupFailure {
-    message: String,
+    error: Error,
     retryable: bool,
+    /// The connection was lost under the start.
+    lost: bool,
 }
 impl StartupFailure {
     fn temporary(message: impl Into<String>) -> Self {
         Self {
-            message: message.into(),
+            error: Error::Interrupted(message.into()),
             retryable: true,
+            lost: false,
         }
     }
     fn permanent(message: impl Into<String>) -> Self {
         Self {
-            message: message.into(),
+            error: Error::Unavailable(message.into()),
             retryable: false,
+            lost: false,
+        }
+    }
+    /// The link recovers by itself unless it was closed or the server takes
+    /// no sessions at all.
+    fn link(error: newport_ssh::Error) -> Self {
+        Self {
+            retryable: !matches!(
+                error,
+                newport_ssh::Error::SessionsDisabled | newport_ssh::Error::Closed
+            ),
+            lost: matches!(error, newport_ssh::Error::Lost(_)),
+            error: Error::Link(error),
+        }
+    }
+    fn command(error: command::Error) -> Self {
+        match error {
+            command::Error::Link(error) => Self::link(error),
+            other => Self::temporary(other.to_string()),
         }
     }
 }
 type Stream = russh::ChannelStream<russh::client::Msg>;
 async fn start(
-    connection: &ExecSession,
+    link: &Link,
     session_id: uuid::Uuid,
     generation: u64,
-) -> Result<(Stream, protocol::Hello), StartupFailure> {
-    if !crate::agent::is_installed(connection)
+) -> Result<(Stream, Fate, protocol::Hello), StartupFailure> {
+    if !crate::agent::is_installed(link)
         .await
-        .map_err(StartupFailure::temporary)?
+        .map_err(StartupFailure::command)?
     {
-        return Err(StartupFailure::permanent(crate::agent::NOT_INSTALLED));
+        return Err(StartupFailure {
+            error: Error::NotInstalled,
+            retryable: false,
+            lost: false,
+        });
     }
-    start_at(connection, session_id, generation, &runtime_command()).await
+    start_at(link, session_id, generation, &runtime_command()).await
 }
 /// Starts this Newport's own build where it's on the server, so one desktop's
 /// sessions never depend on which build another desktop made the entry
@@ -1004,42 +1169,56 @@ fn runtime_command() -> String {
         build("aarch64"),
     )
 }
+/// Starts a runtime on a session channel of its own and says hello. The
+/// handshake's deadline starts once the channel is open: opening may wait
+/// for a login.
 async fn start_at(
-    connection: &ExecSession,
+    link: &Link,
     session_id: uuid::Uuid,
     generation: u64,
     command: &str,
-) -> Result<(Stream, protocol::Hello), StartupFailure> {
-    let mut stream = connection
-        .stream(command)
+) -> Result<(Stream, Fate, protocol::Hello), StartupFailure> {
+    let channel = command::stream(link, command)
         .await
+        .map_err(StartupFailure::command)?;
+    let fate = channel.fate();
+    let mut stream = channel.into_stream();
+    let handshake = async {
+        let hello: protocol::Hello = read(&mut stream).await?;
+        hello
+            .validate()
+            .map_err(|e| StartupFailure::permanent(e.to_string()))?;
+        exchange(
+            &mut stream,
+            &hello.instance_id,
+            protocol::Operation::Initialize {
+                version: protocol::VERSION,
+                session_id: session_id.to_string(),
+                transport_generation: generation,
+            },
+        )
+        .await
+        .and_then(accepted)
         .map_err(StartupFailure::temporary)?;
-    let hello: protocol::Hello = read(&mut stream).await?;
-    hello
-        .validate()
-        .map_err(|e| StartupFailure::permanent(e.to_string()))?;
-    exchange(
-        &mut stream,
-        &hello.instance_id,
-        protocol::Operation::Initialize {
-            version: protocol::VERSION,
-            session_id: session_id.to_string(),
-            transport_generation: generation,
-        },
-    )
-    .await
-    .and_then(accepted)
-    .map_err(StartupFailure::temporary)?;
-    Ok((stream, hello))
+        Ok(hello)
+    };
+    let hello = tokio::time::timeout(HANDSHAKE, handshake)
+        .await
+        .map_err(|_| StartupFailure::temporary("Needle runtime handshake timed out."))
+        .and_then(|result| result)
+        // A handshake cut off by the connection's loss is the link's to
+        // report.
+        .map_err(|failure| fate.error().map_or(failure, StartupFailure::link))?;
+    Ok((stream, fate, hello))
 }
 /// Verify a staged build using the desktop's actual control protocol before
 /// activation. This temporary runtime never replaces the session's live slot.
 pub(crate) async fn verify_candidate(
-    connection: &ExecSession,
+    link: &Link,
     hash: &str,
 ) -> Result<newport_release::agent_product::Product, String> {
     verify_product_at(
-        connection,
+        link,
         hash,
         &format!(
             "exec \"$HOME/.local/share/newport/needle/builds/{hash}/newport-agent\" runtime --stdio"
@@ -1052,12 +1231,12 @@ pub(crate) async fn verify_candidate(
 /// each is started once to ask: every start shows the build as in use,
 /// which would hold back its replacement and cost a runtime per check.
 pub(crate) async fn inspect_product(
-    connection: &ExecSession,
+    link: &Link,
     hash: &str,
 ) -> Result<newport_release::agent_product::Product, String> {
     once_per_build(hash, || {
         verify_product_at(
-            connection,
+            link,
             hash,
             "exec \"$HOME/.local/bin/newport-agent\" runtime --stdio",
         )
@@ -1090,7 +1269,7 @@ where
 }
 
 async fn verify_product_at(
-    connection: &ExecSession,
+    link: &Link,
     hash: &str,
     command: &str,
 ) -> Result<newport_release::agent_product::Product, String> {
@@ -1098,9 +1277,9 @@ async fn verify_product_at(
         return Err("Invalid candidate hash".into());
     }
     tokio::time::timeout(Duration::from_secs(15), async {
-        let (mut stream, hello) = start_at(connection, uuid::Uuid::new_v4(), 1, command)
+        let (mut stream, _, hello) = start_at(link, uuid::Uuid::new_v4(), 1, command)
             .await
-            .map_err(|e| e.message)?;
+            .map_err(|failure| failure.error.to_string())?;
         if hello.build_sha256 != hash {
             return Err("Candidate runtime has an unexpected executable identity".into());
         }
@@ -1194,7 +1373,9 @@ async fn exchange(
             .map_err(|e| e.to_string())?;
         stream.write_all(&bytes).await.map_err(|e| e.to_string())?;
         stream.flush().await.map_err(|e| e.to_string())?;
-        let reply: protocol::Reply = read(stream).await.map_err(|error| error.message)?;
+        let reply: protocol::Reply = read(stream)
+            .await
+            .map_err(|failure| failure.error.to_string())?;
         if reply.id != request.id || reply.runtime_id != runtime_id {
             return Err("Obsolete or mismatched runtime response".into());
         }
@@ -1214,6 +1395,15 @@ fn accepted(reply: protocol::Reply) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retries_back_off_within_bounds() {
+        assert!(backoff(1, 0) >= Duration::from_millis(1600));
+        for attempt in 1..=40 {
+            assert!(backoff(attempt, 400) <= Duration::from_secs(30));
+            assert!(backoff(attempt + 1, 0) >= backoff(attempt, 0));
+        }
+    }
 
     #[tokio::test]
     async fn each_build_is_started_once_to_learn_its_product() {
@@ -1581,9 +1771,9 @@ mod tests {
             let control = StdMutex::new(Some(control));
             let hello = slot
                 .ensure_with(
-                    1,
+                    None,
                     || Ok(()),
-                    || {
+                    |_| {
                         let control = control.lock().unwrap().take().unwrap();
                         async move { Ok(control) }
                     },
@@ -1634,16 +1824,20 @@ mod tests {
     #[tokio::test]
     async fn upgrade_handoff_preserves_admitted_owners_and_rejects_stale_or_full_publication() {
         let slot = test_slot();
-        slot.ensure_with(1, || Ok(()), || async { Ok(fake_control(1)) })
-            .await
-            .unwrap();
+        slot.ensure_with(
+            None,
+            || Ok(()),
+            |generation| async move { Ok(fake_control(generation)) },
+        )
+        .await
+        .unwrap();
         let original = slot.connection.lock().unwrap().control.clone().unwrap();
         let mut rejected = fake_control(1);
         rejected.hello.build_sha256 = "1".repeat(64);
         assert_eq!(
-            slot.publish_candidate(rejected, || Err("retired owner".into()))
+            slot.publish_candidate(rejected, || Err(Error::Stale))
                 .unwrap_err(),
-            "retired owner"
+            Error::Stale
         );
         assert!(!*original.drain.borrow());
         let same_build = fake_control(1);
@@ -1674,7 +1868,7 @@ mod tests {
         blocked.hello.build_sha256 = "5".repeat(64);
         assert_eq!(
             slot.publish_candidate(blocked, || Ok(())).unwrap_err(),
-            BUSY
+            Error::Interrupted(BUSY.into())
         );
         assert_eq!(slot.snapshot().hello.unwrap().instance_id, current);
         assert!(!*held.last().unwrap().drain.borrow());
@@ -1696,9 +1890,9 @@ mod tests {
         let control = StdMutex::new(Some(control));
         let hello = slot
             .ensure_with(
-                1,
+                None,
                 || Ok(()),
-                || {
+                |_| {
                     let control = control.lock().unwrap().take().unwrap();
                     async move { Ok(control) }
                 },
@@ -1719,7 +1913,7 @@ mod tests {
                 .await
                 .err()
                 .unwrap(),
-            BUSY
+            Error::Interrupted(BUSY.into())
         );
         assert_eq!(slot.snapshot().status, "ready");
         pending.recv().await.unwrap();
@@ -1751,7 +1945,7 @@ mod tests {
                 .await
                 .err()
                 .unwrap(),
-            "Needle runtime disconnected"
+            Error::Interrupted("Needle runtime disconnected".into())
         );
         slot.reset().await;
     }
@@ -1768,16 +1962,16 @@ mod tests {
             let calls = calls.clone();
             tokio::spawn(async move {
                 slot.ensure_with(
-                    1,
+                    None,
                     || Ok(()),
-                    || {
+                    |generation| {
                         calls.fetch_add(1, Ordering::SeqCst);
                         let started = started.clone();
                         let release = release.clone();
                         async move {
                             started.notify_one();
                             release.notified().await;
-                            Ok(fake_control(1))
+                            Ok(fake_control(generation))
                         }
                     },
                 )
@@ -1810,19 +2004,19 @@ mod tests {
         let slot = test_slot();
         let calls = AtomicU64::new(0);
         let began = Instant::now();
-        let create = || {
+        let create = |generation| {
             let attempt = calls.fetch_add(1, Ordering::SeqCst);
             async move {
                 if attempt < 12 {
                     Err(StartupFailure::temporary("connection interrupted"))
                 } else {
-                    Ok(fake_control(1))
+                    Ok(fake_control(generation))
                 }
             }
         };
         let (first, second) = tokio::join!(
-            slot.ensure_with(1, || Ok(()), &create),
-            slot.ensure_with(1, || Ok(()), &create),
+            slot.ensure_with(None, || Ok(()), &create),
+            slot.ensure_with(None, || Ok(()), &create),
         );
         assert_eq!(first.unwrap().instance_id, second.unwrap().instance_id);
         assert_eq!(calls.load(Ordering::SeqCst), 13);
@@ -1831,14 +2025,95 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_lost_connection_does_not_hold_the_next_start_once_the_link_is_ready() {
+        let slot = test_slot();
+        let reaching = |reach| newport_ssh::Status {
+            reach,
+            ..Default::default()
+        };
+        let (link, status) = watch::channel(reaching(newport_ssh::Reach::Reconnecting {
+            attempt: 1,
+            next: None,
+        }));
+        let (attempted, mut attempts) = mpsc::unbounded_channel();
+        let calls = AtomicU64::new(0);
+        let ensure = slot.ensure_with(
+            Some(status),
+            || Ok(()),
+            |generation| {
+                attempted.send(Instant::now()).unwrap();
+                let lost = calls.fetch_add(1, Ordering::SeqCst) < 2;
+                async move {
+                    if lost {
+                        Err(StartupFailure::link(newport_ssh::Error::Lost(
+                            "connection reset".into(),
+                        )))
+                    } else {
+                        Ok(fake_control(generation))
+                    }
+                }
+            },
+        );
+        let reconnect = async {
+            let mut times = Vec::new();
+            for _ in 0..3 {
+                times.push(attempts.recv().await.unwrap());
+                if times.len() == 2 {
+                    // The second loss, then the link logs in again.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    link.send_replace(reaching(newport_ssh::Reach::Ready { connections: 1 }));
+                }
+            }
+            times
+        };
+        let (result, times) = tokio::join!(ensure, reconnect);
+        result.unwrap();
+        assert!(
+            times[2] - times[1] < Duration::from_secs(1),
+            "the start after the link's return waits for no backoff: {:?}",
+            times[2] - times[1]
+        );
+        assert_eq!(slot.snapshot().failures, 0);
+    }
+
+    #[tokio::test]
+    async fn a_start_nobody_waits_for_is_cancelled_without_counting_as_a_failure() {
+        let slot = test_slot();
+        let started = tokio::sync::Notify::new();
+        let released = Arc::new(tokio::sync::Notify::new());
+        let create = |_| {
+            started.notify_one();
+            let released = Released(released.clone());
+            async move {
+                let _released = released;
+                std::future::pending::<Result<Control, StartupFailure>>().await
+            }
+        };
+        let cancelled = released.notified();
+        tokio::select! {
+            result = slot.ensure_with(None, || Ok(()), &create) => {
+                panic!("the start can't finish: {:?}", result.err())
+            }
+            () = started.notified() => {}
+        }
+        tokio::time::timeout(Duration::from_secs(5), cancelled)
+            .await
+            .expect("the start to be cancelled");
+        let snapshot = slot.snapshot();
+        assert_ne!(snapshot.status, "failed");
+        assert_eq!(snapshot.failures, 0);
+        assert!(slot.connection.lock().unwrap().startup.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn cancelled_retry_waiter_leaves_no_background_retry_loop() {
         let slot = test_slot();
         let calls = AtomicU64::new(0);
         let mut changes = slot.changes.subscribe();
         let retry = slot.ensure_with(
-            1,
+            None,
             || Ok(()),
-            || {
+            |_| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 async { Err(StartupFailure::temporary("connection interrupted")) }
             },
@@ -1860,15 +2135,15 @@ mod tests {
         let valid = AtomicBool::new(true);
         let mut changes = slot.changes.subscribe();
         let retry = slot.ensure_with(
-            1,
+            None,
             || {
                 if valid.load(Ordering::SeqCst) {
                     Ok(())
                 } else {
-                    Err("retired".into())
+                    Err(Error::Stale)
                 }
             },
-            || {
+            |_| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 async { Err(StartupFailure::temporary("connection interrupted")) }
             },
@@ -1879,7 +2154,7 @@ mod tests {
             slot.reset().await;
         };
         let (result, ()) = tokio::join!(retry, retire);
-        assert_eq!(result.unwrap_err(), "retired");
+        assert_eq!(result.unwrap_err(), Error::Stale);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(slot.snapshot().status, "unknown");
     }
@@ -1890,7 +2165,7 @@ mod tests {
             let failure = read::<protocol::Hello>(&mut bytes.as_slice())
                 .await
                 .unwrap_err();
-            assert!(failure.retryable, "{}", failure.message);
+            assert!(failure.retryable, "{}", failure.error);
         }
         for bytes in [
             vec![0, 0, 0, 0],
@@ -1900,7 +2175,7 @@ mod tests {
             let failure = read::<protocol::Hello>(&mut bytes.as_slice())
                 .await
                 .unwrap_err();
-            assert!(!failure.retryable, "{}", failure.message);
+            assert!(!failure.retryable, "{}", failure.error);
         }
     }
 
@@ -1917,9 +2192,9 @@ mod tests {
             let calls = calls.clone();
             tokio::spawn(async move {
                 slot.ensure_with(
-                    1,
+                    None,
                     || Ok(()),
-                    || {
+                    |_| {
                         calls.fetch_add(1, Ordering::SeqCst);
                         let started = started.clone();
                         let release = release.clone();
@@ -1944,22 +2219,32 @@ mod tests {
                     .await
                     .expect("all waiters must observe startup failure")
                     .unwrap()
-                    .unwrap_err(),
+                    .unwrap_err()
+                    .to_string(),
                 "incompatible"
             );
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(slot.snapshot().failures, 1);
         assert_eq!(
-            slot.ensure_with(1, || Ok(()), || async { Ok(fake_control(1)) })
-                .await
-                .unwrap_err(),
+            slot.ensure_with(
+                None,
+                || Ok(()),
+                |generation| async move { Ok(fake_control(generation)) }
+            )
+            .await
+            .unwrap_err()
+            .to_string(),
             "incompatible"
         );
         slot.retry_failed().await;
-        slot.ensure_with(1, || Ok(()), || async { Ok(fake_control(1)) })
-            .await
-            .unwrap();
+        slot.ensure_with(
+            None,
+            || Ok(()),
+            |generation| async move { Ok(fake_control(generation)) },
+        )
+        .await
+        .unwrap();
         assert_eq!(slot.snapshot().status, "ready");
         slot.reset().await;
     }
@@ -1976,15 +2261,15 @@ mod tests {
             let valid = valid.clone();
             tokio::spawn(async move {
                 slot.ensure_with(
-                    1,
+                    None,
                     || {
                         if valid.load(Ordering::Acquire) {
                             Ok(())
                         } else {
-                            Err("retired".into())
+                            Err(Error::Stale)
                         }
                     },
-                    || {
+                    |_| {
                         let started = started.clone();
                         let released = released.clone();
                         async move {
@@ -2003,10 +2288,14 @@ mod tests {
             .await
             .expect("reset cannot wait for handshake");
         let next = slot
-            .ensure_with(1, || Ok(()), || async { Ok(fake_control(1)) })
+            .ensure_with(
+                None,
+                || Ok(()),
+                |generation| async move { Ok(fake_control(generation)) },
+            )
             .await
             .unwrap();
-        assert_eq!(waiter.await.unwrap().unwrap_err(), "retired");
+        assert_eq!(waiter.await.unwrap().unwrap_err(), Error::Stale);
         tokio::time::timeout(Duration::from_secs(1), released.notified())
             .await
             .unwrap();
@@ -2014,46 +2303,11 @@ mod tests {
         assert_eq!(slot.snapshot().hello.unwrap().instance_id, next.instance_id);
         slot.reset().await;
     }
-    #[tokio::test]
-    async fn dropping_owner_aborts_startup_even_after_all_waiters_cancel() {
-        let slot = test_slot();
-        let started = Arc::new(tokio::sync::Notify::new());
-        let released = Arc::new(tokio::sync::Notify::new());
-        let waiter = {
-            let slot = slot.clone();
-            let started = started.clone();
-            let released = released.clone();
-            tokio::spawn(async move {
-                slot.ensure_with(
-                    1,
-                    || Ok(()),
-                    || {
-                        let started = started.clone();
-                        let released = released.clone();
-                        async move {
-                            let _released = Released(released);
-                            started.notify_one();
-                            std::future::pending::<Result<Control, StartupFailure>>().await
-                        }
-                    },
-                )
-                .await
-            })
-        };
-        started.notified().await;
-        waiter.abort();
-        let _ = waiter.await;
-        assert_eq!(slot.snapshot().status, "starting");
-        drop(slot);
-        tokio::time::timeout(Duration::from_secs(1), released.notified())
-            .await
-            .expect("owner drop must not detach startup");
-    }
     #[test]
     fn interrupted_startup_clears_busy_state_without_overwriting_a_new_generation() {
         let snapshot = Arc::new(StdMutex::new(Snapshot {
             status: "starting",
-            transport_generation: 1,
+            generation: 1,
             ..Snapshot::default()
         }));
         let old = Starting {
@@ -2062,7 +2316,7 @@ mod tests {
             epoch: 0,
             changes: watch::channel(0).0,
         };
-        snapshot.lock().unwrap().transport_generation = 2;
+        snapshot.lock().unwrap().generation = 2;
         drop(old);
         assert_eq!(snapshot.lock().unwrap().status, "starting");
         drop(Starting {
@@ -2081,7 +2335,12 @@ mod tests {
         )));
         {
             let mut snapshot = slot.snapshot.lock().unwrap();
-            record_failure(&mut snapshot, "incompatible".into(), false);
+            record_failure(
+                &mut snapshot,
+                Error::Unavailable("incompatible".into()),
+                false,
+                false,
+            );
             assert!(snapshot.retry_at.is_none());
         }
         assert_eq!(slot.wait_for_retry().await.unwrap_err(), "incompatible");
@@ -2089,7 +2348,12 @@ mod tests {
         assert_eq!(slot.snapshot().status, "unknown");
         for attempt in 1..=8 {
             let mut snapshot = slot.snapshot.lock().unwrap();
-            record_failure(&mut snapshot, "control EOF".into(), true);
+            record_failure(
+                &mut snapshot,
+                Error::Interrupted("control EOF".into()),
+                true,
+                false,
+            );
             assert_eq!(snapshot.failures, attempt);
             let delay = snapshot
                 .retry_at

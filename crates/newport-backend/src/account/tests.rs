@@ -686,8 +686,7 @@ async fn terminal_display_eligibility_is_local_and_refusal_leaves_an_ordinary_sh
         );
         assert!(fixture.browser.urls.lock().unwrap().is_empty());
         assert!(portal.seen.lock().unwrap().is_empty());
-        assert_eq!(owner.transport_snapshot().demand, 0);
-        assert_eq!(owner.transport_snapshot().generation, 0);
+        assert!(!owner.has_link());
         assert!(owner.graphical_sessions().is_empty());
         assert_eq!(
             std::fs::read(fixture._dir.path().join("preferences.json")).unwrap(),

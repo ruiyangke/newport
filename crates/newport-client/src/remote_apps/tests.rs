@@ -4,13 +4,12 @@ use std::{collections::BTreeSet, sync::Condvar, thread};
 
 fn scope() -> Scope {
     let id = uuid::Uuid::new_v4().to_string();
-    Scope::new(
-        &id,
-        json!([
-            id, "host", "user", 22, "key", null, null, null, 1, "backend"
-        ]),
-    )
-    .unwrap()
+    // As the app makes it, including a server reached through a jump host.
+    let server =
+        json!({"id":id,"sshHost":"host","sshUser":"user","sshPort":22,"proxy":{"jump":"bastion"}});
+    let expected =
+        newport_domain::connection_scope::connection(&server, &json!({"instanceId":"backend"}));
+    Scope::new(&id, expected).unwrap()
 }
 fn handle(request: u64) -> Handle {
     Handle {

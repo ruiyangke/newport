@@ -1,7 +1,8 @@
 //! One observable connectivity store per application profile. Only the current
 //! server owner can publish; pages, probes and PTYs cannot overwrite its state.
-use crate::session_transport;
 use newport_domain::connectivity::{Phase, ServerState, Snapshot};
+use newport_ssh::{Login, Reach, Retry, Status};
+use serde::Serialize;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -11,12 +12,10 @@ use uuid::Uuid;
 
 struct Entry {
     owner: Uuid,
-    revision: u64,
-    transport: session_transport::Snapshot,
+    state: ServerState,
 }
 struct State {
     entries: HashMap<Uuid, Entry>,
-    approvals: HashMap<Uuid, usize>,
     snapshot: Snapshot,
 }
 #[derive(Clone)]
@@ -38,7 +37,6 @@ impl Store {
         Self {
             state: Arc::new(Mutex::new(State {
                 entries: HashMap::new(),
-                approvals: HashMap::new(),
                 snapshot: snapshot.clone(),
             })),
             updates: watch::channel(snapshot).0,
@@ -54,8 +52,10 @@ impl Store {
             server,
             Entry {
                 owner,
-                revision,
-                transport: Default::default(),
+                state: ServerState {
+                    connection_revision: revision,
+                    ..Default::default()
+                },
             },
         );
         self.publish(&mut state);
@@ -79,53 +79,12 @@ impl Store {
         let servers = state
             .entries
             .iter()
-            .map(|(id, entry)| {
-                let t = &entry.transport;
-                let phase = match t.status {
-                    "connected" => Phase::Connected,
-                    _ if t.error.is_some() && !t.retryable => Phase::Failed,
-                    "connecting" | "recovering" if state.approvals.contains_key(id) => {
-                        Phase::AwaitingApproval
-                    }
-                    "connecting" => Phase::Connecting,
-                    // Never connected: its retries aren't a reconnection.
-                    "recovering" if t.generation == 0 => Phase::Failed,
-                    "recovering" => Phase::Reconnecting,
-                    "failed" if t.error.is_none() => Phase::Connecting,
-                    "failed" => Phase::Failed,
-                    _ => Phase::Disconnected,
-                };
-                (
-                    *id,
-                    ServerState {
-                        connection_revision: entry.revision,
-                        generation: t.generation,
-                        phase,
-                        attempt: t.attempt,
-                        error: t.error.clone(),
-                        retryable: t.retryable,
-                    },
-                )
-            })
+            .map(|(id, entry)| (*id, entry.state.clone()))
             .collect();
         if state.snapshot.servers != servers {
             state.snapshot.servers = servers;
             state.snapshot.revision += 1;
             self.updates.send_replace(state.snapshot.clone());
-        }
-    }
-    fn approvals(&self, approvals: HashMap<Uuid, usize>) {
-        let mut state = self.state.lock().unwrap();
-        state.approvals = approvals;
-        self.publish(&mut state);
-    }
-    pub async fn observe_approvals(self) {
-        let mut approvals = crate::agent_approval::subscribe();
-        loop {
-            self.approvals(approvals.borrow_and_update().clone());
-            if approvals.changed().await.is_err() {
-                break;
-            }
         }
     }
 }
@@ -137,7 +96,9 @@ pub(crate) struct Publisher {
     owner: Uuid,
 }
 impl Publisher {
-    pub fn transport(&self, snapshot: session_transport::Snapshot) {
+    /// Publishes the server's link status; `generation` counts how many
+    /// times the link has become ready.
+    pub fn status(&self, status: &Status, generation: u64) {
         let mut state = self.store.state.lock().unwrap();
         let Some(entry) = state
             .entries
@@ -146,37 +107,106 @@ impl Publisher {
         else {
             return;
         };
-        entry.transport = snapshot;
+        entry.state = ServerState {
+            connection_revision: entry.state.connection_revision,
+            ..server_state(status, generation)
+        };
         self.store.publish(&mut state);
+    }
+}
+
+/// How every surface shows a link's status.
+fn server_state(status: &Status, generation: u64) -> ServerState {
+    let approval = matches!(status.login, Some(Login::WaitingForApproval));
+    let login_error = match &status.login {
+        Some(Login::Failed(error)) => Some(error),
+        _ => None,
+    };
+    let (phase, attempt, error) = match &status.reach {
+        Reach::Ready { .. } => (Phase::Connected, 0, None),
+        Reach::Failed(error) => (Phase::Failed, 0, Some(error)),
+        _ if approval => (Phase::AwaitingApproval, 0, None),
+        Reach::Idle => (Phase::Disconnected, 0, None),
+        Reach::Connecting => (Phase::Connecting, 0, None),
+        // Never connected: its retries aren't a reconnection.
+        Reach::Reconnecting { attempt, .. } if generation == 0 => match login_error {
+            Some(error) => (Phase::Failed, *attempt, Some(error)),
+            None => (Phase::Connecting, *attempt, None),
+        },
+        Reach::Reconnecting { attempt, .. } => (Phase::Reconnecting, *attempt, login_error),
+    };
+    ServerState {
+        connection_revision: 0,
+        generation,
+        phase,
+        attempt,
+        error: error.map(ToString::to_string),
+        retryable: error.is_some_and(|error| error.retry() == Retry::Backoff),
+    }
+}
+
+/// A server's link as the app's pages read it from the snapshot.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Transport {
+    pub status: &'static str,
+    /// How many times the link has become ready.
+    pub generation: u64,
+    /// Requests waiting for a connection or a free session.
+    pub waiting: usize,
+}
+impl Transport {
+    pub(crate) fn new(status: &Status, generation: u64) -> Self {
+        let status_text = match server_state(status, generation).phase {
+            Phase::Connected => "connected",
+            Phase::Connecting | Phase::AwaitingApproval => "connecting",
+            Phase::Reconnecting => "recovering",
+            Phase::Failed => "failed",
+            Phase::Disconnected => "disconnected",
+        };
+        Self {
+            status: status_text,
+            generation,
+            waiting: status.waiting,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use newport_ssh::Error;
+
+    fn status(reach: Reach, login: Option<Login>) -> Status {
+        Status {
+            reach,
+            login,
+            waiting: 0,
+        }
+    }
+    fn ready() -> Status {
+        status(Reach::Ready { connections: 1 }, None)
+    }
+
     #[test]
-    fn replacement_and_removal_fence_late_transport_publications() {
+    fn replacement_and_removal_fence_late_publications() {
         let store = Store::default();
         let updates = store.subscribe();
         let id = Uuid::new_v4();
         let old = store.register(id, 1);
         let next = store.register(id, 2);
-        let connected = session_transport::Snapshot {
-            status: "connected",
-            generation: 1,
-            ..Default::default()
-        };
-        old.transport(connected.clone());
+        old.status(&ready(), 1);
         assert_eq!(updates.borrow().servers[&id].phase, Phase::Disconnected);
-        next.transport(connected.clone());
+        next.status(&ready(), 1);
         assert_eq!(updates.borrow().servers[&id].phase, Phase::Connected);
         assert_eq!(updates.borrow().servers[&id].connection_revision, 2);
         store.remove(id);
-        next.transport(connected);
+        next.status(&ready(), 1);
         assert!(updates.borrow().servers.is_empty());
     }
+
     #[test]
-    fn approval_and_retry_publish_once_for_all_subscribers_without_changing_other_servers() {
+    fn approval_publishes_once_for_all_subscribers_without_changing_other_servers() {
         let store = Store::default();
         let a = store.subscribe();
         let b = store.subscribe();
@@ -184,22 +214,19 @@ mod tests {
         let other = Uuid::new_v4();
         let owner = store.register(id, 0);
         store.register(other, 0);
-        owner.transport(session_transport::Snapshot {
-            status: "connecting",
-            ..Default::default()
-        });
-        store.approvals(HashMap::from([(id, 1)]));
+        owner.status(&status(Reach::Connecting, Some(Login::InProgress)), 0);
+        assert_eq!(a.borrow().servers[&id].phase, Phase::Connecting);
+        owner.status(
+            &status(Reach::Connecting, Some(Login::WaitingForApproval)),
+            0,
+        );
         assert_eq!(a.borrow().servers[&id].phase, Phase::AwaitingApproval);
         assert_eq!(a.borrow().servers[&other].phase, Phase::Disconnected);
-        owner.transport(session_transport::Snapshot {
-            status: "connected",
-            generation: 1,
-            ..Default::default()
-        });
+        owner.status(&ready(), 1);
         assert_eq!(*a.borrow(), *b.borrow());
         assert_eq!(a.borrow().servers[&id].phase, Phase::Connected);
         let revision = a.borrow().revision;
-        store.approvals(HashMap::new());
+        owner.status(&ready(), 1);
         assert_eq!(
             a.borrow().revision,
             revision,
@@ -213,44 +240,73 @@ mod tests {
         let updates = store.subscribe();
         let id = Uuid::new_v4();
         let owner = store.register(id, 0);
-        let refused = |generation| session_transport::Snapshot {
-            status: "recovering",
-            generation,
-            error: Some("Connection refused".into()),
-            retryable: true,
-            ..Default::default()
-        };
-        owner.transport(refused(0));
-        assert_eq!(updates.borrow().servers[&id].phase, Phase::Failed);
-        owner.transport(refused(1));
+        let refused = status(
+            Reach::Reconnecting {
+                attempt: 2,
+                next: None,
+            },
+            Some(Login::Failed(Error::Unreachable(
+                "Connection refused".into(),
+            ))),
+        );
+        owner.status(&refused, 0);
+        let state = updates.borrow().servers[&id].clone();
+        assert_eq!(state.phase, Phase::Failed);
+        assert_eq!(state.attempt, 2);
+        assert!(state.retryable);
+        assert!(state.error.unwrap().contains("Connection refused"));
+        owner.status(&refused, 1);
         assert_eq!(updates.borrow().servers[&id].phase, Phase::Reconnecting);
+        assert_eq!(updates.borrow().servers[&id].attempt, 2);
     }
 
     #[test]
-    fn blocked_authentication_stays_failed_until_explicit_retry() {
+    fn a_link_that_stopped_trying_stays_failed_until_retry() {
         let store = Store::default();
         let updates = store.subscribe();
         let id = Uuid::new_v4();
         let owner = store.register(id, 0);
-        // The last request may release demand after receiving the auth error.
-        // This must not make the server appear merely idle or hide its error.
-        owner.transport(session_transport::Snapshot {
-            status: "disconnected",
-            error: Some("SSH approval required".into()),
-            ..Default::default()
-        });
-        store.approvals(HashMap::from([(id, 1)]));
-        assert_eq!(updates.borrow().servers[&id].phase, Phase::Failed);
-        owner.transport(session_transport::Snapshot {
-            status: "failed",
-            ..Default::default()
-        });
-        assert_eq!(updates.borrow().servers[&id].phase, Phase::Connecting);
-        assert!(updates.borrow().servers[&id].error.is_none());
-        owner.transport(session_transport::Snapshot {
-            status: "connecting",
-            ..Default::default()
-        });
+        // The last request may leave after the error; the server must not
+        // look merely idle, or lose its error.
+        owner.status(
+            &status(
+                Reach::Failed(Error::ApprovalRequired),
+                Some(Login::Failed(Error::ApprovalRequired)),
+            ),
+            0,
+        );
+        let state = updates.borrow().servers[&id].clone();
+        assert_eq!(state.phase, Phase::Failed);
+        assert!(!state.retryable);
+        assert_eq!(
+            state.error.as_deref(),
+            Some(Error::ApprovalRequired.to_string().as_str())
+        );
+        owner.status(
+            &status(Reach::Connecting, Some(Login::WaitingForApproval)),
+            0,
+        );
         assert_eq!(updates.borrow().servers[&id].phase, Phase::AwaitingApproval);
+        assert!(updates.borrow().servers[&id].error.is_none());
+        owner.status(&status(Reach::Idle, None), 0);
+        assert_eq!(updates.borrow().servers[&id].phase, Phase::Disconnected);
+    }
+
+    #[test]
+    fn the_snapshot_transport_names_its_status_and_counts_readiness() {
+        let transport = Transport::new(&ready(), 3);
+        assert_eq!((transport.status, transport.generation), ("connected", 3));
+        let lost = status(
+            Reach::Reconnecting {
+                attempt: 1,
+                next: None,
+            },
+            Some(Login::InProgress),
+        );
+        assert_eq!(Transport::new(&lost, 3).status, "recovering");
+        assert_eq!(
+            Transport::new(&status(Reach::Idle, None), 0).status,
+            "disconnected"
+        );
     }
 }

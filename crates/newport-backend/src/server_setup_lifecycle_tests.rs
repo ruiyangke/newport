@@ -70,15 +70,15 @@ async fn enabling_clipboard_after_setup_supports_image_paste_without_system_xcli
         .sessions
         .session(&server, manager.connection_revision(server.id));
     let state = crate::manager::share(manager);
-    let ssh = owner.acquire(&server).await.unwrap();
-    ssh.install(false).await.unwrap();
+    let ssh = crate::remote::Shell(owner.link().clone());
+    owner.install(&server, false).await.unwrap();
     finish(&state, Arc::new(ImageDesktop), server.clone(), false, false)
         .await
         .unwrap();
     ssh.execute("test ! -e \"$HOME/.local/bin/xclip\" && mkdir -p \"$HOME/paste-bin\" && ln -s /usr/bin/grep \"$HOME/paste-bin/grep\"", None).await.unwrap();
     crate::monitor::snapshot(&owner).await.unwrap();
     let runtime = owner.agent_runtime.snapshot().hello.unwrap().instance_id;
-    let generation = owner.transport_snapshot().generation;
+    let generation = owner.reached();
     let access = state.lock().await.integration_access();
     let expected_connection = state.lock().await.connection_scope(server.id).unwrap();
     crate::commands::set_integration_enabled(
@@ -131,7 +131,7 @@ async fn enabling_clipboard_after_setup_supports_image_paste_without_system_xcli
         owner.agent_runtime.snapshot().hello.unwrap().instance_id,
         runtime
     );
-    assert_eq!(owner.transport_snapshot().generation, generation);
+    assert_eq!(owner.reached(), generation);
     let setup = ssh.execute(SHELL_SETUP, None).await.unwrap();
     assert!(setup.contains(">>> Newport >>>"), "{setup}");
     crate::commands::set_integration_enabled(
@@ -231,14 +231,14 @@ async fn setup_completion_cannot_overwrite_revocation_and_toggles_preserve_servi
         .sessions
         .session(&server, manager.connection_revision(server.id));
     let state = crate::manager::share(manager);
-    let ssh = owner.acquire(&server).await.unwrap();
+    let ssh = crate::remote::Shell(owner.link().clone());
     ssh.execute(
         "rm -rf \"$HOME/.local/share/newport/needle\"; rm -f \"$HOME/.local/bin/newport-agent\"",
         None,
     )
     .await
     .unwrap();
-    ssh.install(false).await.unwrap();
+    owner.install(&server, false).await.unwrap();
     finish(&state, Arc::new(Desktop), server.clone(), true, true)
         .await
         .unwrap();
@@ -250,7 +250,7 @@ async fn setup_completion_cannot_overwrite_revocation_and_toggles_preserve_servi
     .await
     .unwrap();
     crate::monitor::snapshot(&owner).await.unwrap();
-    let generation = owner.transport_snapshot().generation;
+    let generation = owner.reached();
     let runtime = owner.agent_runtime.snapshot().hello.unwrap().instance_id;
     let epoch = owner.permissions.snapshot().session_epoch;
     let shell_setup = ssh.execute(SHELL_SETUP, None).await.unwrap();
@@ -320,7 +320,7 @@ async fn setup_completion_cannot_overwrite_revocation_and_toggles_preserve_servi
         owner.agent_runtime.snapshot().hello.unwrap().instance_id,
         runtime
     );
-    assert_eq!(owner.transport_snapshot().generation, generation);
+    assert_eq!(owner.reached(), generation);
     assert_eq!(owner.permissions.snapshot().session_epoch, epoch);
     assert_eq!(ssh.execute(SHELL_SETUP, None).await.unwrap(), shell_setup);
     crate::commands::set_integration_enabled(
@@ -343,7 +343,7 @@ async fn setup_completion_cannot_overwrite_revocation_and_toggles_preserve_servi
     .unwrap();
     assert!(!owner.permissions.clipboard_enabled());
     assert_eq!(owner.permissions.snapshot().session_epoch, epoch);
-    assert_eq!(owner.transport_snapshot().generation, generation);
+    assert_eq!(owner.reached(), generation);
     crate::manager::shutdown(&state).await;
 }
 
@@ -369,7 +369,7 @@ async fn managed_shell_setup_finishes_and_reinstall_never_rewrites_shell_files()
         .sessions
         .session(&server, manager.connection_revision(server.id));
     let state = crate::manager::share(manager);
-    let ssh = owner.acquire(&server).await.unwrap();
+    let ssh = crate::remote::Shell(owner.link().clone());
     // This is the disposable fixture's HOME, never a configured user server.
     ssh.execute("rm -rf \"$HOME/.local/share/newport/needle\"; rm -f \"$HOME/.local/bin/newport-agent\" \"$HOME/.local/bin/newport-browser\"; printf '# managed by fixture\\n' > \"$HOME/managed-rc\"; rm -f \"$HOME/.bashrc\"; ln -s \"$HOME/managed-rc\" \"$HOME/.bashrc\"", None).await.unwrap();
     install(&state, server.clone()).await.unwrap();
@@ -419,7 +419,7 @@ async fn uninstalling_leaves_nothing_of_needle_and_installing_again_works() {
         .sessions
         .session(&server, manager.connection_revision(server.id));
     let state = crate::manager::share(manager);
-    let ssh = owner.acquire(&server).await.unwrap();
+    let ssh = crate::remote::Shell(owner.link().clone());
     // The disposable fixture's HOME: someone's own startup line, an xclip of
     // their own, and journals an older Needle left behind.
     ssh.execute(
@@ -511,7 +511,7 @@ async fn uninstalling_also_removes_a_needle_installed_as_a_plain_file() {
         .sessions
         .session(&server, manager.connection_revision(server.id));
     let state = crate::manager::share(manager);
-    let ssh = owner.acquire(&server).await.unwrap();
+    let ssh = crate::remote::Shell(owner.link().clone());
     install(&state, server.clone()).await.unwrap();
     // As installed by hand: the executable itself at the entry point, running.
     ssh.execute(
@@ -568,7 +568,7 @@ async fn a_zsh_account_finds_needle_missing_after_uninstall_and_sets_it_up_again
         .sessions
         .session(&server, manager.connection_revision(server.id));
     let state = crate::manager::share(manager);
-    let ssh = owner.acquire(&server).await.unwrap();
+    let ssh = crate::remote::Shell(owner.link().clone());
     assert!(
         ssh.execute("getent passwd \"$(id -un)\"", None)
             .await

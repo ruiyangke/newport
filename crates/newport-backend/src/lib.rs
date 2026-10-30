@@ -1,18 +1,17 @@
 //! Newport backend services, independent of the desktop UI framework.
 //! The application owns service lifetime and supplies platform adapters.
 pub mod account;
-pub mod agent_approval;
 pub mod application;
 pub mod metrics_db;
 pub mod preferences;
 pub mod profile;
 pub mod query;
+pub mod remote;
 pub mod rpc;
 
 use newport_domain::model;
 pub mod agent_keys;
 mod connection_state;
-pub mod connectivity;
 pub mod credentials;
 pub mod known_hosts;
 pub mod recovery;
@@ -47,6 +46,7 @@ pub mod manager;
 pub mod metrics_sampler;
 pub mod monitor;
 mod monitoring;
+pub mod needle;
 pub mod ports;
 pub mod service_channel;
 pub mod services;
@@ -55,7 +55,6 @@ pub mod workers;
 pub mod integration_permissions;
 pub mod server_session;
 pub mod server_setup;
-pub mod session_transport;
 
 #[cfg(test)]
 mod agent_full_product_tests;

@@ -1,0 +1,2021 @@
+diff --git a/src/channels/channel_ref.rs b/src/channels/channel_ref.rs
+index d7f937cd..0b8e11e9 100644
+--- a/src/channels/channel_ref.rs
++++ b/src/channels/channel_ref.rs
+@@ -9,6 +9,9 @@ use crate::ChannelMsg;
+ pub struct ChannelRef {
+     pub(super) sender: Sender<ChannelMsg>,
+     pub(super) window_size: WindowSizeRef,
++    /// The receive window reopens as the reader takes data
++    /// ([`super::WindowCredit`]), not as data arrives.
++    pub(crate) credited: bool,
+ }
+ 
+ impl ChannelRef {
+@@ -16,6 +19,16 @@ impl ChannelRef {
+         Self {
+             sender,
+             window_size: WindowSizeRef::new(0),
++            credited: false,
++        }
++    }
++
++    /// A channel whose queue never fills: the peer can't send more than the
++    /// window, and the window reopens only as the reader takes data.
++    pub(crate) fn credited(sender: Sender<ChannelMsg>) -> Self {
++        Self {
++            credited: true,
++            ..Self::new(sender)
+         }
+     }
+ 
+diff --git a/src/channels/io/rx.rs b/src/channels/io/rx.rs
+index 57080db5..9b7cc037 100644
+--- a/src/channels/io/rx.rs
++++ b/src/channels/io/rx.rs
+@@ -37,7 +37,10 @@ where
+         let (msg, mut idx) = match self.buffer.take() {
+             Some(msg) => msg,
+             None => match ready!(self.channel.borrow_mut().receiver.poll_recv(cx)) {
+-                Some(msg) => (msg, 0),
++                Some(msg) => {
++                    self.channel.borrow_mut().taken(&msg);
++                    (msg, 0)
++                }
+                 None => return Poll::Ready(Ok(())),
+             },
+         };
+diff --git a/src/channels/mod.rs b/src/channels/mod.rs
+index 03e9ed22..55c5fe24 100644
+--- a/src/channels/mod.rs
++++ b/src/channels/mod.rs
+@@ -2,7 +2,7 @@ use std::sync::Arc;
+ 
+ use bytes::Bytes;
+ use tokio::io::{AsyncRead, AsyncWrite};
+-use tokio::sync::mpsc::{Receiver, Sender};
++use tokio::sync::mpsc::{Receiver, Sender, UnboundedSender};
+ use tokio::sync::{Mutex, Notify};
+ 
+ use crate::{ChannelId, ChannelOpenFailure, Error, Pty, Sig};
+@@ -145,6 +145,45 @@ impl WindowSizeRef {
+ /// Allows you to read from a channel without borrowing the session
+ pub struct ChannelReadHalf {
+     pub(crate) receiver: Receiver<ChannelMsg>,
++    pub(crate) credit: Option<Credit>,
++}
++
++/// Data a channel's reader has taken and not yet given back to the peer as
++/// window. The receive window reopens only as the reader takes data, so a
++/// reader that stops pauses its own channel instead of the connection.
++pub(crate) struct Credit {
++    channel: ChannelId,
++    pending: u32,
++    threshold: u32,
++    sender: UnboundedSender<WindowCredit>,
++}
++
++impl Credit {
++    pub(crate) fn new(
++        channel: ChannelId,
++        window: u32,
++        sender: UnboundedSender<WindowCredit>,
++    ) -> Self {
++        Self {
++            channel,
++            pending: 0,
++            threshold: (window / 2).max(1),
++            sender,
++        }
++    }
++}
++
++/// Window a reader gives back: it took `bytes` of `channel`'s data.
++///
++/// Credits go to the session on their own unbounded queue, never behind
++/// outbound messages, so a reader's window reopens even while the session
++/// takes no output. The queue stays tiny: a credit is sent once the reader
++/// has taken half a window, and the peer can't send more until it's applied,
++/// so a channel never has more than two waiting.
++#[derive(Debug)]
++pub(crate) struct WindowCredit {
++    pub(crate) channel: ChannelId,
++    pub(crate) bytes: u32,
+ }
+ 
+ impl std::fmt::Debug for ChannelReadHalf {
+@@ -156,7 +195,31 @@ impl std::fmt::Debug for ChannelReadHalf {
+ impl ChannelReadHalf {
+     /// Awaits an incoming [`ChannelMsg`], this method returns [`None`] if the channel has been closed.
+     pub async fn wait(&mut self) -> Option<ChannelMsg> {
+-        self.receiver.recv().await
++        let msg = self.receiver.recv().await;
++        if let Some(msg) = &msg {
++            self.taken(msg);
++        }
++        msg
++    }
++
++    /// Count data the reader has taken, and give it back to the peer as
++    /// window once half a window has been taken.
++    pub(crate) fn taken(&mut self, msg: &ChannelMsg) {
++        let Some(credit) = self.credit.as_mut() else {
++            return;
++        };
++        let bytes = match msg {
++            ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => data.len() as u32,
++            _ => return,
++        };
++        credit.pending = credit.pending.saturating_add(bytes);
++        if credit.pending >= credit.threshold {
++            // Fails only once the session has ended.
++            let _ = credit.sender.send(WindowCredit {
++                channel: credit.channel,
++                bytes: std::mem::take(&mut credit.pending),
++            });
++        }
+     }
+ 
+     /// Make a reader for the [`Channel`] to receive [`ChannelMsg::Data`]
+@@ -470,7 +533,10 @@ impl<S: From<(ChannelId, ChannelMsg)> + Send + Sync + 'static> Channel<S> {
+     ) -> (Self, ChannelRef) {
+         let (tx, rx) = tokio::sync::mpsc::channel(channel_buffer_size);
+         let window_size = WindowSizeRef::new(window_size);
+-        let read_half = ChannelReadHalf { receiver: rx };
++        let read_half = ChannelReadHalf {
++            receiver: rx,
++            credit: None,
++        };
+         let write_half = ChannelWriteHalf {
+             id,
+             sender,
+@@ -486,6 +552,7 @@ impl<S: From<(ChannelId, ChannelMsg)> + Send + Sync + 'static> Channel<S> {
+             ChannelRef {
+                 sender: tx,
+                 window_size,
++                credited: false,
+             },
+         )
+     }
+diff --git a/src/client/encrypted.rs b/src/client/encrypted.rs
+index bd00b128..3249881d 100644
+--- a/src/client/encrypted.rs
++++ b/src/client/encrypted.rs
+@@ -526,13 +526,26 @@ impl Session {
+                 debug!("channel_close");
+                 let channel_num = map_err!(ChannelId::decode(&mut r))?;
+                 map_err!(ensure_end(&r))?;
+-                if !self.common.is_established_channel(channel_num) {
++                // A close this side sent (or deferred) means this is the
++                // server's reply, or the server's own close crossing ours.
++                let ours = self
++                    .common
++                    .encrypted
++                    .as_ref()
++                    .is_some_and(|enc| enc.closing.contains(&channel_num));
++                if !ours && !self.common.is_established_channel(channel_num) {
+                     return Ok(());
+                 }
+                 if let Some(ref mut enc) = self.common.encrypted {
+                     // The CHANNEL_CLOSE message must be sent to the server at this point or the session
+                     // will not be released.
+-                    enc.close(channel_num)?;
++                    enc.peer_closed(channel_num)?;
++                }
++                if ours {
++                    // The server has freed the channel, and only now does it
++                    // stop counting against the server's limits.
++                    self.channels.remove(&channel_num);
++                    return client.channel_close(channel_num, self).await;
+                 }
+                 // Forward the close to the channel before removing it, so that
+                 // consumers waiting on `Channel::wait()` receive an explicit
+@@ -596,9 +609,12 @@ impl Session {
+                     return Ok(());
+                 }
+                 let target = self.common.config.window_size;
++                let credited = self.channels.get(&channel_num).is_some_and(|c| c.credited);
+                 #[allow(clippy::collapsible_if)]
+                 if let Some(ref mut enc) = self.common.encrypted {
+-                    if enc.adjust_window_size(channel_num, &data, target)? {
++                    if credited {
++                        enc.consume_window(channel_num, &data)?;
++                    } else if enc.adjust_window_size(channel_num, &data, target)? {
+                         let next_window =
+                             client.adjust_window(channel_num, self.target_window_size);
+                         if next_window > 0 {
+@@ -623,9 +639,12 @@ impl Session {
+                     return Ok(());
+                 }
+                 let target = self.common.config.window_size;
++                let credited = self.channels.get(&channel_num).is_some_and(|c| c.credited);
+                 #[allow(clippy::collapsible_if)]
+                 if let Some(ref mut enc) = self.common.encrypted {
+-                    if enc.adjust_window_size(channel_num, &data, target)? {
++                    if credited {
++                        enc.consume_window(channel_num, &data)?;
++                    } else if enc.adjust_window_size(channel_num, &data, target)? {
+                         let next_window =
+                             client.adjust_window(channel_num, self.target_window_size);
+                         if next_window > 0 {
+@@ -857,13 +876,19 @@ impl Session {
+                     pending_close: false,
+                 };
+ 
+-                let (channel, channel_ref) = Channel::new(
++                let (mut channel, mut channel_ref) = Channel::new(
+                     id,
+                     self.inbound_channel_sender.clone(),
+                     channel_params.recipient_maximum_packet_size,
+                     channel_params.recipient_window_size,
+-                    self.common.config.channel_buffer_size,
++                    super::CREDITED_QUEUE,
+                 );
++                channel_ref.credited = true;
++                channel.read_half.credit = Some(crate::channels::Credit::new(
++                    id,
++                    self.common.config.window_size,
++                    self.credit_sender.clone(),
++                ));
+ 
+                 let pending = crate::PendingChannelOpen {
+                     recipient_channel: msg.recipient_channel,
+@@ -1146,6 +1171,7 @@ mod tests {
+             server_mac: crate::mac::NONE,
+             session_id: CryptoVec::from(&b"session-id"[..]),
+             channels: HashMap::new(),
++            closing: Default::default(),
+             last_channel_id: Wrapping(0),
+             write: Vec::new(),
+             write_cursor: 0,
+diff --git a/src/client/mod.rs b/src/client/mod.rs
+index 59989448..644dc9f5 100644
+--- a/src/client/mod.rs
++++ b/src/client/mod.rs
+@@ -59,7 +59,8 @@ use tokio::sync::oneshot;
+ pub use crate::auth::AuthResult;
+ use crate::cert::PublicKeyOrCertificate;
+ use crate::channels::{
+-    Channel, ChannelMsg, ChannelReadHalf, ChannelRef, ChannelWriteHalf, WindowSizeRef,
++    Channel, ChannelMsg, ChannelReadHalf, ChannelRef, ChannelWriteHalf, Credit, WindowCredit,
++    WindowSizeRef,
+ };
+ use crate::cipher::{self, OpeningKey, clear};
+ use crate::kex::{KexAlgorithmImplementor, KexCause, KexProgress, SessionKexState};
+@@ -99,10 +100,17 @@ pub struct Session {
+     priority_receiver: UnboundedReceiver<Msg>,
+     inbound_channel_sender: Sender<Msg>,
+     inbound_channel_receiver: Receiver<Msg>,
++    /// Window readers give back; read even while the session takes no
++    /// output.
++    credit_sender: UnboundedSender<WindowCredit>,
++    credit_receiver: UnboundedReceiver<WindowCredit>,
+     open_global_requests: VecDeque<GlobalRequestResponse>,
+     server_sig_algs: Option<Vec<Algorithm>>,
+     /// Number of EXT_INFO messages received (RFC 8308 allows at most two).
+     ext_info_count: u8,
++    /// Outbound messages for channels whose earlier output still waits on
++    /// the server's window.
++    deferred: crate::deferred::Deferred<Msg>,
+ }
+ 
+ impl Drop for Session {
+@@ -317,10 +325,16 @@ pub struct Handle<H: Handler> {
+     sender: Sender<Msg>,
+     receiver: UnboundedReceiver<Reply>,
+     join: russh_util::runtime::JoinHandle<Result<(), H::Error>>,
+-    channel_buffer_size: usize,
++    /// The receive window each channel starts with.
++    window_size: u32,
++    credit_sender: UnboundedSender<WindowCredit>,
+     agent_session_binding: Option<crate::keys::agent::AgentSessionBinding>,
+ }
+ 
++/// Channels never block the session on a full queue; their windows bound
++/// what can be queued.
++const CREDITED_QUEUE: usize = tokio::sync::Semaphore::MAX_PERMITS;
++
+ impl<H: Handler> Drop for Handle<H> {
+     fn drop(&mut self) {
+         debug!("drop handle")
+@@ -751,6 +765,7 @@ impl<H: Handler> Handle<H> {
+                     window_size,
+                 }) => {
+                     window_size_ref.grow(window_size).await;
++                    let credit = Credit::new(id, self.window_size, self.credit_sender.clone());
+ 
+                     return Ok(Channel {
+                         write_half: ChannelWriteHalf {
+@@ -759,7 +774,10 @@ impl<H: Handler> Handle<H> {
+                             max_packet_size,
+                             window_size: window_size_ref,
+                         },
+-                        read_half: ChannelReadHalf { receiver },
++                        read_half: ChannelReadHalf {
++                            receiver,
++                            credit: Some(credit),
++                        },
+                     });
+                 }
+                 Some(ChannelMsg::OpenFailure(reason)) => {
+@@ -842,8 +860,8 @@ impl<H: Handler> Handle<H> {
+     /// usable when it's confirmed by the server, as indicated by the
+     /// `confirmed` field of the corresponding `Channel`.
+     pub async fn channel_open_session(&self) -> Result<Channel<Msg>, crate::Error> {
+-        let (sender, receiver) = channel(self.channel_buffer_size);
+-        let channel_ref = ChannelRef::new(sender);
++        let (sender, receiver) = channel(CREDITED_QUEUE);
++        let channel_ref = ChannelRef::credited(sender);
+         let window_size_ref = channel_ref.window_size().clone();
+ 
+         self.sender
+@@ -860,8 +878,8 @@ impl<H: Handler> Handle<H> {
+         originator_address: A,
+         originator_port: u32,
+     ) -> Result<Channel<Msg>, crate::Error> {
+-        let (sender, receiver) = channel(self.channel_buffer_size);
+-        let channel_ref = ChannelRef::new(sender);
++        let (sender, receiver) = channel(CREDITED_QUEUE);
++        let channel_ref = ChannelRef::credited(sender);
+         let window_size_ref = channel_ref.window_size().clone();
+ 
+         self.sender
+@@ -891,8 +909,8 @@ impl<H: Handler> Handle<H> {
+         originator_address: B,
+         originator_port: u32,
+     ) -> Result<Channel<Msg>, crate::Error> {
+-        let (sender, receiver) = channel(self.channel_buffer_size);
+-        let channel_ref = ChannelRef::new(sender);
++        let (sender, receiver) = channel(CREDITED_QUEUE);
++        let channel_ref = ChannelRef::credited(sender);
+         let window_size_ref = channel_ref.window_size().clone();
+ 
+         self.sender
+@@ -913,8 +931,8 @@ impl<H: Handler> Handle<H> {
+         &self,
+         socket_path: S,
+     ) -> Result<Channel<Msg>, crate::Error> {
+-        let (sender, receiver) = channel(self.channel_buffer_size);
+-        let channel_ref = ChannelRef::new(sender);
++        let (sender, receiver) = channel(CREDITED_QUEUE);
++        let channel_ref = ChannelRef::credited(sender);
+         let window_size_ref = channel_ref.window_size().clone();
+ 
+         self.sender
+@@ -1234,7 +1252,7 @@ where
+             config.maximum_packet_size
+         );
+     }
+-    let channel_buffer_size = config.channel_buffer_size;
++    let window_size = config.window_size;
+     let mut session = Session::new(
+         config.window_size,
+         CommonSession {
+@@ -1257,6 +1275,7 @@ where
+         session_sender,
+     );
+     session.begin_rekey()?;
++    let credit_sender = session.credit_sender.clone();
+     let (kex_done_signal, kex_done_signal_rx) = oneshot::channel();
+     let join = russh_util::runtime::spawn(session.run(stream, handler, Some(kex_done_signal)));
+ 
+@@ -1275,7 +1294,8 @@ where
+         sender: handle_sender,
+         receiver: handle_receiver,
+         join,
+-        channel_buffer_size,
++        window_size,
++        credit_sender,
+         agent_session_binding,
+     })
+ }
+@@ -1319,6 +1339,7 @@ impl Session {
+     ) -> Self {
+         let (priority_sender, priority_receiver) = unbounded_channel();
+         let (inbound_channel_sender, inbound_channel_receiver) = channel(10);
++        let (credit_sender, credit_receiver) = unbounded_channel();
+         Self {
+             common,
+             receiver,
+@@ -1329,12 +1350,15 @@ impl Session {
+             priority_receiver,
+             inbound_channel_sender,
+             inbound_channel_receiver,
++            credit_sender,
++            credit_receiver,
+             channels: HashMap::new(),
+             pending_reads: Vec::new(),
+             pending_len: 0,
+             open_global_requests: VecDeque::new(),
+             server_sig_algs: None,
+             ext_info_count: 0,
++            deferred: Default::default(),
+         }
+     }
+ 
+@@ -1359,6 +1383,7 @@ impl Session {
+         self.receiver.close();
+         self.priority_receiver.close();
+         self.inbound_channel_receiver.close();
++        self.credit_receiver.close();
+         map_err!(stream_write.shutdown().await)?;
+         match result {
+             Ok(v) => {
+@@ -1423,10 +1448,11 @@ impl Session {
+             // Set whenever the keepalive timer elapses, even if no keepalive
+             // could be sent yet, so that the timer is always re-armed below.
+             let mut keepalive_elapsed = false;
+-            // Keep reading the network for window adjustments, but leave
+-            // application output in its bounded receivers while a channel is
+-            // window-blocked.
+-            let can_receive_outbound = !self.kex.active() && !self.common.has_any_pending_data();
++            // Output for a channel the server's window holds back waits in
++            // `deferred`; everything else keeps going out. Only a channel
++            // holding too much leaves application output in its bounded
++            // receivers.
++            let can_receive_outbound = !self.kex.active() && !self.deferred.full();
+             let rekey_timer =
+                 crate::future_or_pending(self.rekey_time_remaining(), tokio::time::sleep);
+             pin!(rekey_timer);
+@@ -1496,7 +1522,7 @@ impl Session {
+                 msg = self.receiver.recv(), if can_receive_outbound => {
+                     self.drain_priority_msgs()?;
+                     match msg {
+-                        Some(msg) => self.handle_msg(msg)?,
++                        Some(msg) => self.take_outbound(msg)?,
+                         None => {
+                             self.common.disconnected = true;
+                             break
+@@ -1504,10 +1530,10 @@ impl Session {
+                     };
+ 
+                     // eagerly take all outgoing messages so writes are batched
+-                    while !self.kex.active() && !self.common.has_any_pending_data() {
++                    while !self.kex.active() && !self.deferred.full() {
+                         self.drain_priority_msgs()?;
+                         match self.receiver.try_recv() {
+-                            Ok(next) => self.handle_msg(next)?,
++                            Ok(next) => self.take_outbound(next)?,
+                             Err(_) => break
+                         }
+                     }
+@@ -1521,24 +1547,32 @@ impl Session {
+                     // eagerly take all outgoing messages so writes are batched
+                     self.drain_priority_msgs()?;
+                 }
++                // Credits only grant window, so they're taken even while
++                // output is held back. During kex the WINDOW_ADJUST waits in
++                // `write` with the other connection-layer messages.
++                Some(credit) = self.credit_receiver.recv() => {
++                    self.apply_credit(credit)?;
++                    self.drain_credits()?;
++                }
+                 msg = self.inbound_channel_receiver.recv(), if can_receive_outbound => {
+                     self.drain_priority_msgs()?;
+                     match msg {
+-                        Some(msg) => self.handle_msg(msg)?,
++                        Some(msg) => self.take_outbound(msg)?,
+                         None => (),
+                     }
+ 
+                     // eagerly take all outgoing messages so writes are batched
+-                    while !self.kex.active() && !self.common.has_any_pending_data() {
++                    while !self.kex.active() && !self.deferred.full() {
+                         self.drain_priority_msgs()?;
+                         match self.inbound_channel_receiver.try_recv() {
+-                            Ok(next) => self.handle_msg(next)?,
++                            Ok(next) => self.take_outbound(next)?,
+                             Err(_) => break
+                         }
+                     }
+                 }
+             };
+ 
++            self.release_deferred()?;
+             self.flush()?;
+             crate::flush_or_timeout(
+                 &mut self.common.packet_writer,
+@@ -1620,6 +1654,63 @@ impl Session {
+         Ok(())
+     }
+ 
++    /// Does `channel` have output the server's window hasn't admitted yet?
++    fn waits_on_window(&self, channel: ChannelId) -> bool {
++        self.common
++            .encrypted
++            .as_ref()
++            .is_some_and(|enc| enc.has_pending_data(channel))
++    }
++
++    /// Does output for `channel` have to wait behind earlier output?
++    fn must_defer(&self, channel: ChannelId) -> bool {
++        self.deferred.holds(channel) || self.waits_on_window(channel)
++    }
++
++    /// Send an outbound message, or hold it back behind its channel's
++    /// earlier output.
++    fn take_outbound(&mut self, msg: Msg) -> Result<(), crate::Error> {
++        // Credits a reader gave before this message go out ahead of it.
++        self.drain_credits()?;
++        if let Msg::Channel(id, ref channel_msg) = msg
++            && self.must_defer(id)
++        {
++            let bytes = crate::deferred::data_bytes(channel_msg);
++            self.deferred.push(id, msg, bytes);
++            return Ok(());
++        }
++        self.handle_msg(msg)
++    }
++
++    /// Reopen the window a reader gave back.
++    fn apply_credit(&mut self, credit: WindowCredit) -> Result<(), crate::Error> {
++        match self.common.encrypted.as_mut() {
++            Some(enc) => enc.credit_window(credit.channel, credit.bytes),
++            None => Ok(()),
++        }
++    }
++
++    fn drain_credits(&mut self) -> Result<(), crate::Error> {
++        while let Ok(credit) = self.credit_receiver.try_recv() {
++            self.apply_credit(credit)?;
++        }
++        Ok(())
++    }
++
++    /// Send what channels held back, in order, for as long as their earlier
++    /// output has gone out.
++    fn release_deferred(&mut self) -> Result<(), crate::Error> {
++        for id in self.deferred.channels() {
++            while !self.kex.active() && !self.waits_on_window(id) {
++                match self.deferred.pop(id) {
++                    Some(msg) => self.handle_msg(msg)?,
++                    None => break,
++                }
++            }
++        }
++        Ok(())
++    }
++
+     fn handle_msg(&mut self, msg: Msg) -> Result<(), crate::Error> {
+         match msg {
+             Msg::Authenticate { user, method } => {
+@@ -1699,12 +1790,12 @@ impl Session {
+                 description,
+                 language_tag,
+             } => self.disconnect(reason, &description, &language_tag)?,
+-            Msg::Channel(id, ChannelMsg::Data { data }) => self.data(id, data)?,
++            Msg::Channel(id, ChannelMsg::Data { data }) => self.send_data(id, data)?,
+             Msg::Channel(id, ChannelMsg::Eof) => {
+-                self.eof(id)?;
++                self.send_eof(id)?;
+             }
+             Msg::Channel(id, ChannelMsg::ExtendedData { data, ext }) => {
+-                self.extended_data(id, ext, data)?;
++                self.send_extended_data(id, ext, data)?;
+             }
+             Msg::Channel(
+                 id,
+@@ -1778,7 +1869,7 @@ impl Session {
+             Msg::Channel(id, ChannelMsg::AgentForward { want_reply }) => {
+                 self.agent_forward(id, want_reply)?
+             }
+-            Msg::Channel(id, ChannelMsg::Close) => self.close(id)?,
++            Msg::Channel(id, ChannelMsg::Close) => self.send_close(id)?,
+             Msg::Rekey => self.initiate_rekey()?,
+             Msg::AwaitExtensionInfo {
+                 extension_name,
+@@ -2167,6 +2258,7 @@ mod tests {
+                     server_mac: mac::NONE,
+                     session_id: CryptoVec::new(),
+                     channels: HashMap::new(),
++                    closing: Default::default(),
+                     last_channel_id: Wrapping(0),
+                     write: Vec::new(),
+                     write_cursor: 0,
+@@ -2474,6 +2566,7 @@ mod tests {
+                     server_mac: mac::NONE,
+                     session_id: CryptoVec::new(),
+                     channels: HashMap::new(),
++                    closing: Default::default(),
+                     last_channel_id: Wrapping(0),
+                     write: Vec::new(),
+                     write_cursor: 0,
+@@ -2579,6 +2672,513 @@ mod tests {
+             matches!(err, crate::Error::PacketSize(len) if len > crate::cipher::MAXIMUM_DECOMPRESSED_PACKET_LEN)
+         );
+     }
++
++    /// Counts the closes the handler hears.
++    #[derive(Default)]
++    struct CloseCounter {
++        closes: usize,
++    }
++
++    impl Handler for CloseCounter {
++        type Error = crate::Error;
++
++        async fn check_server_key(
++            &mut self,
++            _: &PublicKeyOrCertificate,
++        ) -> Result<bool, Self::Error> {
++            Ok(true)
++        }
++
++        async fn channel_close(
++            &mut self,
++            _: ChannelId,
++            _: &mut Session,
++        ) -> Result<(), Self::Error> {
++            self.closes += 1;
++            Ok(())
++        }
++    }
++
++    const CLOSING_CHANNEL: ChannelId = ChannelId(7);
++    const CLOSING_RECIPIENT: u32 = 70;
++
++    /// An authenticated session with one open channel whose peer window is
++    /// shut, holding `pending` bytes the peer hasn't taken yet.
++    fn session_with_open_channel(pending: &'static [u8]) -> Session {
++        let (mut session, _sender, _reply) = keyboard_interactive_session();
++        let (sender, _receiver) = channel(CREDITED_QUEUE);
++        session
++            .channels
++            .insert(CLOSING_CHANNEL, ChannelRef::credited(sender));
++        let enc = session.common.encrypted.as_mut().unwrap();
++        enc.state = EncryptedState::Authenticated;
++        let mut pending_data = VecDeque::new();
++        if !pending.is_empty() {
++            pending_data.push_back((bytes::Bytes::from_static(pending), None, 0));
++        }
++        enc.channels.insert(
++            CLOSING_CHANNEL,
++            crate::ChannelParams {
++                recipient_channel: CLOSING_RECIPIENT,
++                sender_channel: CLOSING_CHANNEL,
++                recipient_window_size: 0,
++                sender_window_size: 1024,
++                recipient_maximum_packet_size: 1024,
++                sender_maximum_packet_size: 1024,
++                confirmed: true,
++                wants_reply: false,
++                pending_data,
++                pending_eof: false,
++                pending_close: false,
++            },
++        );
++        session
++    }
++
++    fn written_packet_types(session: &Session) -> Vec<u8> {
++        let write = &session.common.encrypted.as_ref().unwrap().write;
++        let mut types = Vec::new();
++        let mut cursor = 0;
++        while cursor < write.len() {
++            let len = <byteorder::BigEndian as byteorder::ByteOrder>::read_u32(&write[cursor..cursor + 4]) as usize;
++            types.push(write[cursor + 4]);
++            cursor += 4 + len;
++        }
++        types
++    }
++
++    fn peer_close_packet() -> Vec<u8> {
++        let mut packet = vec![msg::CHANNEL_CLOSE];
++        CLOSING_CHANNEL.encode(&mut packet).unwrap();
++        packet
++    }
++
++    /// After the peer's close, nothing more goes out for the channel.
++    fn assert_channel_silent(session: &mut Session) {
++        let before = written_packet_types(session);
++        session
++            .handle_msg(Msg::Channel(
++                CLOSING_CHANNEL,
++                ChannelMsg::Data {
++                    data: bytes::Bytes::from_static(b"late"),
++                },
++            ))
++            .unwrap();
++        session
++            .handle_msg(Msg::Channel(CLOSING_CHANNEL, ChannelMsg::Eof))
++            .unwrap();
++        session
++            .apply_credit(WindowCredit {
++                channel: CLOSING_CHANNEL,
++                bytes: 512,
++            })
++            .unwrap();
++        session
++            .handle_msg(Msg::Channel(CLOSING_CHANNEL, ChannelMsg::Close))
++            .unwrap();
++        let enc = session.common.encrypted.as_mut().unwrap();
++        enc.flush_all_pending().unwrap();
++        assert!(!enc.has_any_pending_data());
++        assert_eq!(written_packet_types(session), before);
++    }
++
++    #[tokio::test]
++    async fn deferred_close_crossing_peer_close_closes_once() {
++        let mut session = session_with_open_channel(b"queued behind a shut window");
++        let mut handler = CloseCounter::default();
++
++        // The close waits behind data the peer's window doesn't admit.
++        session
++            .handle_msg(Msg::Channel(CLOSING_CHANNEL, ChannelMsg::Close))
++            .unwrap();
++        assert!(written_packet_types(&session).is_empty());
++        let enc = session.common.encrypted.as_ref().unwrap();
++        assert!(enc.closing.contains(&CLOSING_CHANNEL));
++        assert!(enc.channels[&CLOSING_CHANNEL].pending_close);
++
++        // The peer closes too; it never saw ours.
++        session
++            .process_packet(&mut handler, &peer_close_packet())
++            .await
++            .unwrap();
++        assert_eq!(handler.closes, 1);
++        assert_eq!(written_packet_types(&session), vec![msg::CHANNEL_CLOSE]);
++        let enc = session.common.encrypted.as_ref().unwrap();
++        assert!(enc.closing.is_empty());
++        assert!(!enc.channels.contains_key(&CLOSING_CHANNEL));
++        assert!(!session.channels.contains_key(&CLOSING_CHANNEL));
++
++        // A repeated close from the peer is ignored.
++        session
++            .process_packet(&mut handler, &peer_close_packet())
++            .await
++            .unwrap();
++        assert_eq!(handler.closes, 1);
++        assert_channel_silent(&mut session);
++    }
++
++    #[tokio::test]
++    async fn sent_close_crossing_peer_close_closes_once() {
++        let mut session = session_with_open_channel(b"");
++        let mut handler = CloseCounter::default();
++
++        session
++            .handle_msg(Msg::Channel(CLOSING_CHANNEL, ChannelMsg::Close))
++            .unwrap();
++        assert_eq!(written_packet_types(&session), vec![msg::CHANNEL_CLOSE]);
++
++        session
++            .process_packet(&mut handler, &peer_close_packet())
++            .await
++            .unwrap();
++        assert_eq!(handler.closes, 1);
++        assert_eq!(written_packet_types(&session), vec![msg::CHANNEL_CLOSE]);
++        let enc = session.common.encrypted.as_ref().unwrap();
++        assert!(enc.closing.is_empty());
++        assert!(!session.channels.contains_key(&CLOSING_CHANNEL));
++
++        session
++            .process_packet(&mut handler, &peer_close_packet())
++            .await
++            .unwrap();
++        assert_eq!(handler.closes, 1);
++        assert_channel_silent(&mut session);
++    }
++
++    #[tokio::test]
++    async fn peer_close_drops_pending_data_and_answers() {
++        let mut session = session_with_open_channel(b"queued behind a shut window");
++        let mut handler = CloseCounter::default();
++
++        session
++            .process_packet(&mut handler, &peer_close_packet())
++            .await
++            .unwrap();
++        assert_eq!(handler.closes, 1);
++        assert_eq!(written_packet_types(&session), vec![msg::CHANNEL_CLOSE]);
++        let enc = session.common.encrypted.as_ref().unwrap();
++        assert!(enc.closing.is_empty());
++        assert_channel_silent(&mut session);
++    }
++
++    const HELD: ChannelId = ChannelId(3);
++    const HELD_RECIPIENT: u32 = 30;
++    const OPEN: ChannelId = ChannelId(4);
++    const OPEN_RECIPIENT: u32 = 40;
++
++    fn channel_params(
++        id: ChannelId,
++        recipient_channel: u32,
++        recipient_window_size: u32,
++        pending: &'static [u8],
++    ) -> crate::ChannelParams {
++        let mut pending_data = VecDeque::new();
++        if !pending.is_empty() {
++            pending_data.push_back((bytes::Bytes::from_static(pending), None, 0));
++        }
++        crate::ChannelParams {
++            recipient_channel,
++            sender_channel: id,
++            recipient_window_size,
++            sender_window_size: 1 << 20,
++            recipient_maximum_packet_size: 32768,
++            sender_maximum_packet_size: 32768,
++            confirmed: true,
++            wants_reply: false,
++            pending_data,
++            pending_eof: false,
++            pending_close: false,
++        }
++    }
++
++    /// An authenticated session with a channel whose `b"held"` the server's
++    /// window hasn't admitted, and a channel with room.
++    fn session_with_held_channel() -> (
++        Session,
++        tokio::sync::mpsc::Sender<Msg>,
++        tokio::sync::mpsc::UnboundedReceiver<Reply>,
++    ) {
++        let (mut session, sender, replies) = keyboard_interactive_session();
++        for id in [HELD, OPEN] {
++            let (channel_sender, _) = channel(CREDITED_QUEUE);
++            session
++                .channels
++                .insert(id, ChannelRef::credited(channel_sender));
++        }
++        let enc = session.common.encrypted.as_mut().unwrap();
++        enc.state = EncryptedState::Authenticated;
++        enc.channels
++            .insert(HELD, channel_params(HELD, HELD_RECIPIENT, 0, b"held"));
++        enc.channels
++            .insert(OPEN, channel_params(OPEN, OPEN_RECIPIENT, 1 << 20, b""));
++        (session, sender, replies)
++    }
++
++    fn spawn_event_loop(
++        mut session: Session,
++        stream: tokio::io::DuplexStream,
++    ) -> tokio::task::JoinHandle<()> {
++        tokio::spawn(async move {
++            let (stream_read, mut stream_write) = SshRead::new(stream).split();
++            let mut kex_done_signal = None;
++            let _ = session
++                .run_inner(
++                    stream_read,
++                    &mut stream_write,
++                    &mut TestHandler,
++                    &mut kex_done_signal,
++                )
++                .await;
++        })
++    }
++
++    fn data(id: ChannelId, data: &'static [u8]) -> Msg {
++        Msg::Channel(
++            id,
++            ChannelMsg::Data {
++                data: bytes::Bytes::from_static(data),
++            },
++        )
++    }
++
++    #[tokio::test]
++    async fn held_channel_leaves_other_output_flowing() {
++        use crate::deferred::peer::{self, Peer};
++
++        let (session, sender, _replies) = session_with_held_channel();
++        let credits = session.credit_sender.clone();
++        let (mut peer, stream) = Peer::new();
++        let event_loop = spawn_event_loop(session, stream);
++
++        credits
++            .send(WindowCredit {
++                channel: HELD,
++                bytes: 512,
++            })
++            .unwrap();
++        sender.send(data(HELD, b"a1")).await.unwrap();
++        sender
++            .send(Msg::Channel(
++                HELD,
++                ChannelMsg::ExtendedData {
++                    data: bytes::Bytes::from_static(b"a2"),
++                    ext: 1,
++                },
++            ))
++            .await
++            .unwrap();
++        sender
++            .send(Msg::Channel(HELD, ChannelMsg::Eof))
++            .await
++            .unwrap();
++        sender.send(data(OPEN, b"b1")).await.unwrap();
++        let (pong, _pong_rx) = oneshot::channel();
++        sender
++            .send(Msg::Ping {
++                reply_channel: pong,
++            })
++            .await
++            .unwrap();
++
++        // The held channel's credit, the open channel's data and the ping go
++        // out; the held channel's own output waits.
++        assert_eq!(peer.next().await, peer::window_adjust(HELD_RECIPIENT, 512));
++        assert_eq!(peer.next().await, peer::data(OPEN_RECIPIENT, b"b1"));
++        assert_eq!(peer.next().await.first(), Some(&msg::GLOBAL_REQUEST));
++        peer.assert_quiet().await;
++
++        // Room for the held bytes only: the next write waits again.
++        peer.send(peer::window_adjust(HELD.0, 4)).await;
++        assert_eq!(peer.next().await, peer::data(HELD_RECIPIENT, b"held"));
++        peer.assert_quiet().await;
++
++        // The rest goes out in the order it was written.
++        peer.send(peer::window_adjust(HELD.0, 100)).await;
++        assert_eq!(peer.next().await, peer::data(HELD_RECIPIENT, b"a1"));
++        assert_eq!(
++            peer.next().await,
++            peer::extended_data(HELD_RECIPIENT, 1, b"a2")
++        );
++        assert_eq!(peer.next().await, peer::eof(HELD_RECIPIENT));
++
++        // Drained, the channel's output goes straight out again.
++        sender.send(data(HELD, b"a3")).await.unwrap();
++        assert_eq!(peer.next().await, peer::data(HELD_RECIPIENT, b"a3"));
++        event_loop.abort();
++    }
++
++    #[tokio::test]
++    async fn channel_holding_too_much_stops_taking_output() {
++        use crate::deferred::peer::{self, Peer};
++
++        let (session, sender, _replies) = session_with_held_channel();
++        let (mut peer, stream) = Peer::new();
++        let event_loop = spawn_event_loop(session, stream);
++
++        let flood = bytes::Bytes::from(vec![b'x'; crate::deferred::DEFERRED_BYTES]);
++        sender
++            .send(Msg::Channel(HELD, ChannelMsg::Data { data: flood }))
++            .await
++            .unwrap();
++        sender.send(data(OPEN, b"b1")).await.unwrap();
++        peer.assert_quiet().await;
++
++        // Once the held channel drains, the session takes output again.
++        peer.send(peer::window_adjust(HELD.0, u32::MAX / 2)).await;
++        assert_eq!(peer.next().await, peer::data(HELD_RECIPIENT, b"held"));
++        let mut flooded = 0;
++        while flooded < crate::deferred::DEFERRED_BYTES {
++            let packet = peer.next().await;
++            assert_eq!(packet.first(), Some(&msg::CHANNEL_DATA));
++            // type, recipient, length
++            flooded += packet.len() - 9;
++        }
++        assert_eq!(flooded, crate::deferred::DEFERRED_BYTES);
++        assert_eq!(peer.next().await, peer::data(OPEN_RECIPIENT, b"b1"));
++        event_loop.abort();
++    }
++
++    #[tokio::test]
++    async fn credit_reaches_peer_while_output_is_held() {
++        use crate::deferred::peer::{self, Peer};
++
++        let (session, sender, _replies) = session_with_held_channel();
++        let (delivered, receiver) = channel(CREDITED_QUEUE);
++        let mut reader = ChannelReadHalf {
++            receiver,
++            credit: Some(Credit::new(OPEN, 1024, session.credit_sender.clone())),
++        };
++        let (mut peer, stream) = Peer::new();
++        let event_loop = spawn_event_loop(session, stream);
++
++        // The held channel reaches its cap, so the session takes no more
++        // output, and the bounded queue fills up behind it.
++        let flood = bytes::Bytes::from(vec![b'x'; crate::deferred::DEFERRED_BYTES]);
++        sender
++            .send(Msg::Channel(HELD, ChannelMsg::Data { data: flood }))
++            .await
++            .unwrap();
++        peer.assert_quiet().await;
++        while sender.try_send(data(OPEN, b"b1")).is_ok() {}
++
++        // A reader on another channel takes half its window: the window
++        // reopens all the same.
++        delivered
++            .send(ChannelMsg::Data {
++                data: bytes::Bytes::from(vec![0; 512]),
++            })
++            .await
++            .unwrap();
++        reader.wait().await.unwrap();
++        assert_eq!(peer.next().await, peer::window_adjust(OPEN_RECIPIENT, 512));
++        peer.assert_quiet().await;
++        assert_eq!(sender.capacity(), 0);
++        event_loop.abort();
++    }
++
++    #[tokio::test]
++    async fn credit_goes_out_before_close_and_never_after() {
++        use crate::deferred::peer::{self, Peer};
++
++        let (session, sender, _replies) = session_with_held_channel();
++        let credits = session.credit_sender.clone();
++        let (mut peer, stream) = Peer::new();
++        let event_loop = spawn_event_loop(session, stream);
++
++        // A credit given before the close goes out ahead of it.
++        credits
++            .send(WindowCredit {
++                channel: OPEN,
++                bytes: 100,
++            })
++            .unwrap();
++        sender
++            .send(Msg::Channel(OPEN, ChannelMsg::Close))
++            .await
++            .unwrap();
++        assert_eq!(peer.next().await, peer::window_adjust(OPEN_RECIPIENT, 100));
++        assert_eq!(peer.next().await, peer::close(OPEN_RECIPIENT));
++
++        // None after the close: the server may already have freed the
++        // channel.
++        credits
++            .send(WindowCredit {
++                channel: OPEN,
++                bytes: 200,
++            })
++            .unwrap();
++        peer.assert_quiet().await;
++
++        // Nor once the server's reply has.
++        peer.send(peer::close(OPEN.0)).await;
++        credits
++            .send(WindowCredit {
++                channel: OPEN,
++                bytes: 300,
++            })
++            .unwrap();
++        peer.assert_quiet().await;
++        event_loop.abort();
++    }
++
++    #[test]
++    fn credit_after_deferred_close_is_dropped() {
++        let (mut session, _sender, _replies) = session_with_held_channel();
++        // The close waits behind data the server's window doesn't admit.
++        session.close(HELD).unwrap();
++        session
++            .apply_credit(WindowCredit {
++                channel: HELD,
++                bytes: 512,
++            })
++            .unwrap();
++        assert!(written_packet_types(&session).is_empty());
++
++        let enc = session.common.encrypted.as_mut().unwrap();
++        enc.channels.get_mut(&HELD).unwrap().recipient_window_size = 100;
++        enc.flush_pending(HELD).unwrap();
++        assert_eq!(
++            written_packet_types(&session),
++            vec![msg::CHANNEL_DATA, msg::CHANNEL_CLOSE]
++        );
++    }
++
++    #[test]
++    fn direct_writes_keep_their_place_behind_held_output() {
++        let (mut session, _sender, _replies) = session_with_held_channel();
++        session.take_outbound(data(HELD, b"a1")).unwrap();
++        session.data(HELD, &b"a2"[..]).unwrap();
++        session.eof(HELD).unwrap();
++        session.close(HELD).unwrap();
++        assert!(written_packet_types(&session).is_empty());
++
++        let enc = session.common.encrypted.as_mut().unwrap();
++        enc.channels.get_mut(&HELD).unwrap().recipient_window_size = 100;
++        enc.flush_pending(HELD).unwrap();
++        session.release_deferred().unwrap();
++        assert_eq!(
++            written_packet_types(&session),
++            vec![
++                msg::CHANNEL_DATA,
++                msg::CHANNEL_DATA,
++                msg::CHANNEL_DATA,
++                msg::CHANNEL_EOF,
++                msg::CHANNEL_CLOSE,
++            ]
++        );
++        let write = &session.common.encrypted.as_ref().unwrap().write;
++        let held: Vec<&[u8]> = [&b"held"[..], b"a1", b"a2"].into();
++        let mut cursor = 0;
++        for expected in held {
++            let len =
++                <byteorder::BigEndian as byteorder::ByteOrder>::read_u32(&write[cursor..]) as usize;
++            assert_eq!(
++                &write[cursor + 4..cursor + 4 + len],
++                &crate::deferred::peer::data(HELD_RECIPIENT, expected)[..]
++            );
++            cursor += 4 + len;
++        }
++    }
+ }
+ 
+ fn initial_encrypted_state(session: &Session) -> EncryptedState {
+diff --git a/src/client/session.rs b/src/client/session.rs
+index b18c0528..26d8d3a9 100644
+--- a/src/client/session.rs
++++ b/src/client/session.rs
+@@ -2,9 +2,9 @@ use log::error;
+ use ssh_encoding::Encode;
+ use tokio::sync::oneshot;
+ 
+-use crate::client::Session;
++use crate::client::{Msg, Session};
+ use crate::session::EncryptedState;
+-use crate::{ChannelId, CryptoVec, Disconnect, Pty, Sig, map_err, msg};
++use crate::{ChannelId, ChannelMsg, CryptoVec, Disconnect, Pty, Sig, map_err, msg};
+ 
+ impl Session {
+     fn channel_open_generic<F>(
+@@ -519,6 +519,24 @@ impl Session {
+         &mut self,
+         channel: ChannelId,
+         data: impl Into<bytes::Bytes>,
++    ) -> Result<(), crate::Error> {
++        let data = data.into();
++        if self.deferred.holds(channel) {
++            let bytes = data.len();
++            self.deferred.push(
++                channel,
++                Msg::Channel(channel, ChannelMsg::Data { data }),
++                bytes,
++            );
++            return Ok(());
++        }
++        self.send_data(channel, data)
++    }
++
++    pub(super) fn send_data(
++        &mut self,
++        channel: ChannelId,
++        data: impl Into<bytes::Bytes>,
+     ) -> Result<(), crate::Error> {
+         let is_rekeying = self.kex.active();
+         let common = &mut self.common;
+@@ -530,6 +548,15 @@ impl Session {
+     }
+ 
+     pub fn eof(&mut self, channel: ChannelId) -> Result<(), crate::Error> {
++        if self.deferred.holds(channel) {
++            self.deferred
++                .push(channel, Msg::Channel(channel, ChannelMsg::Eof), 0);
++            return Ok(());
++        }
++        self.send_eof(channel)
++    }
++
++    pub(super) fn send_eof(&mut self, channel: ChannelId) -> Result<(), crate::Error> {
+         if let Some(ref mut enc) = self.common.encrypted {
+             enc.eof(channel)
+         } else {
+@@ -538,6 +565,15 @@ impl Session {
+     }
+ 
+     pub fn close(&mut self, channel: ChannelId) -> Result<(), crate::Error> {
++        if self.deferred.holds(channel) {
++            self.deferred
++                .push(channel, Msg::Channel(channel, ChannelMsg::Close), 0);
++            return Ok(());
++        }
++        self.send_close(channel)
++    }
++
++    pub(super) fn send_close(&mut self, channel: ChannelId) -> Result<(), crate::Error> {
+         if let Some(ref mut enc) = self.common.encrypted {
+             enc.close(channel)
+         } else {
+@@ -550,6 +586,25 @@ impl Session {
+         channel: ChannelId,
+         ext: u32,
+         data: impl Into<bytes::Bytes>,
++    ) -> Result<(), crate::Error> {
++        let data = data.into();
++        if self.deferred.holds(channel) {
++            let bytes = data.len();
++            self.deferred.push(
++                channel,
++                Msg::Channel(channel, ChannelMsg::ExtendedData { data, ext }),
++                bytes,
++            );
++            return Ok(());
++        }
++        self.send_extended_data(channel, ext, data)
++    }
++
++    pub(super) fn send_extended_data(
++        &mut self,
++        channel: ChannelId,
++        ext: u32,
++        data: impl Into<bytes::Bytes>,
+     ) -> Result<(), crate::Error> {
+         let is_rekeying = self.kex.active();
+         let common = &mut self.common;
+diff --git a/src/deferred.rs b/src/deferred.rs
+new file mode 100644
+index 00000000..c4502d07
+--- /dev/null
++++ b/src/deferred.rs
+@@ -0,0 +1,200 @@
++//! Outbound messages held back for channels whose earlier output still waits
++//! on the peer's window.
++//!
++//! A channel whose data went beyond the peer's window keeps it queued
++//! (`ChannelParams::pending_data`) until a `CHANNEL_WINDOW_ADJUST` admits it.
++//! The session loop keeps taking outbound messages meanwhile: those for that
++//! channel wait here, in order, behind its queued data, and everything else
++//! goes out.
++//!
++//! Channel writers wait for the window before they send, so on their own they
++//! never get a channel this far; it takes a write that bypasses the window
++//! (`Handle::data`, `Session::data`). The window bounds what a writer adds
++//! here. Nothing bounds such a bypassing caller, so once one channel holds
++//! [`DEFERRED_BYTES`] or [`DEFERRED_MESSAGES`], the session stops taking
++//! outbound messages until the window lets that channel drain, which pushes
++//! back on every sender as the session did before.
++
++use std::collections::{HashMap, VecDeque};
++
++use crate::{ChannelId, ChannelMsg};
++
++/// Data bytes one channel may hold back before the session stops taking
++/// outbound messages.
++pub(crate) const DEFERRED_BYTES: usize = 2 * 1024 * 1024;
++
++/// Messages one channel may hold back before the session stops taking
++/// outbound messages.
++pub(crate) const DEFERRED_MESSAGES: usize = 1024;
++
++/// The messages each channel holds back, in the order they were sent.
++#[derive(Debug)]
++pub(crate) struct Deferred<M> {
++    channels: HashMap<ChannelId, Held<M>>,
++}
++
++#[derive(Debug)]
++struct Held<M> {
++    /// Each message with the data bytes it carries.
++    messages: VecDeque<(M, usize)>,
++    bytes: usize,
++}
++
++impl<M> Default for Deferred<M> {
++    fn default() -> Self {
++        Self {
++            channels: HashMap::new(),
++        }
++    }
++}
++
++impl<M> Deferred<M> {
++    /// Does `channel` hold messages back?
++    pub(crate) fn holds(&self, channel: ChannelId) -> bool {
++        self.channels.contains_key(&channel)
++    }
++
++    /// Hold `message` back behind the channel's earlier output.
++    pub(crate) fn push(&mut self, channel: ChannelId, message: M, bytes: usize) {
++        let held = self.channels.entry(channel).or_insert_with(|| Held {
++            messages: VecDeque::new(),
++            bytes: 0,
++        });
++        held.messages.push_back((message, bytes));
++        held.bytes = held.bytes.saturating_add(bytes);
++    }
++
++    /// The channel's oldest held message.
++    pub(crate) fn pop(&mut self, channel: ChannelId) -> Option<M> {
++        let held = self.channels.get_mut(&channel)?;
++        let (message, bytes) = held.messages.pop_front()?;
++        held.bytes = held.bytes.saturating_sub(bytes);
++        if held.messages.is_empty() {
++            self.channels.remove(&channel);
++        }
++        Some(message)
++    }
++
++    /// Channels holding messages back.
++    pub(crate) fn channels(&self) -> Vec<ChannelId> {
++        self.channels.keys().copied().collect()
++    }
++
++    /// Has a channel reached its limit? Then the session takes no outbound
++    /// messages until it drains.
++    pub(crate) fn full(&self) -> bool {
++        self.channels
++            .values()
++            .any(|held| held.bytes >= DEFERRED_BYTES || held.messages.len() >= DEFERRED_MESSAGES)
++    }
++}
++
++/// The data bytes a channel message carries.
++pub(crate) fn data_bytes(message: &ChannelMsg) -> usize {
++    match message {
++        ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => data.len(),
++        _ => 0,
++    }
++}
++
++/// The other end of a session loop under test, over cleartext packets.
++#[cfg(test)]
++pub(crate) mod peer {
++    use std::time::Duration;
++
++    use ssh_encoding::Encode;
++    use tokio::io::DuplexStream;
++
++    use crate::sshbuffer::{PacketWriter, SSHBuffer};
++    use crate::{cipher, msg};
++
++    pub(crate) struct Peer {
++        stream: DuplexStream,
++        buffer: SSHBuffer,
++        writer: PacketWriter,
++    }
++
++    impl Peer {
++        /// A peer, and the stream for the session loop.
++        pub(crate) fn new() -> (Self, DuplexStream) {
++            let (stream, session) = tokio::io::duplex(1 << 20);
++            let peer = Self {
++                stream,
++                buffer: SSHBuffer::new(),
++                writer: PacketWriter::clear(),
++            };
++            (peer, session)
++        }
++
++        /// The payload of the next packet, if one arrives within `wait`.
++        pub(crate) async fn next_within(&mut self, wait: Duration) -> Option<Vec<u8>> {
++            let mut key = cipher::clear::Key;
++            let read = cipher::read(&mut self.stream, &mut self.buffer, &mut key);
++            match tokio::time::timeout(wait, read).await {
++                Ok(read) => {
++                    read.unwrap();
++                    Some(self.buffer.buffer[5..].to_vec())
++                }
++                Err(_) => None,
++            }
++        }
++
++        /// The payload of the next packet.
++        pub(crate) async fn next(&mut self) -> Vec<u8> {
++            self.next_within(Duration::from_secs(5))
++                .await
++                .expect("a packet from the session")
++        }
++
++        /// Fails if the session sends anything soon.
++        pub(crate) async fn assert_quiet(&mut self) {
++            if let Some(payload) = self.next_within(Duration::from_millis(200)).await {
++                panic!("unexpected packet {payload:?}");
++            }
++        }
++
++        pub(crate) async fn send(&mut self, payload: Vec<u8>) {
++            self.writer
++                .write_packet(|packet| {
++                    packet.extend_from_slice(&payload);
++                    Ok(())
++                })
++                .unwrap();
++            self.writer.flush_into(&mut self.stream).await.unwrap();
++        }
++    }
++
++    pub(crate) fn data(recipient: u32, data: &[u8]) -> Vec<u8> {
++        let mut payload = vec![msg::CHANNEL_DATA];
++        recipient.encode(&mut payload).unwrap();
++        data.encode(&mut payload).unwrap();
++        payload
++    }
++
++    pub(crate) fn extended_data(recipient: u32, ext: u32, data: &[u8]) -> Vec<u8> {
++        let mut payload = vec![msg::CHANNEL_EXTENDED_DATA];
++        recipient.encode(&mut payload).unwrap();
++        ext.encode(&mut payload).unwrap();
++        data.encode(&mut payload).unwrap();
++        payload
++    }
++
++    pub(crate) fn eof(recipient: u32) -> Vec<u8> {
++        let mut payload = vec![msg::CHANNEL_EOF];
++        recipient.encode(&mut payload).unwrap();
++        payload
++    }
++
++    pub(crate) fn close(recipient: u32) -> Vec<u8> {
++        let mut payload = vec![msg::CHANNEL_CLOSE];
++        recipient.encode(&mut payload).unwrap();
++        payload
++    }
++
++    pub(crate) fn window_adjust(recipient: u32, bytes: u32) -> Vec<u8> {
++        let mut payload = vec![msg::CHANNEL_WINDOW_ADJUST];
++        recipient.encode(&mut payload).unwrap();
++        bytes.encode(&mut payload).unwrap();
++        payload
++    }
++}
+diff --git a/src/lib_inner.rs b/src/lib_inner.rs
+index 5bb73a15..611970a5 100644
+--- a/src/lib_inner.rs
++++ b/src/lib_inner.rs
+@@ -62,6 +62,7 @@ macro_rules! push_packet {
+ mod channels;
+ pub use channels::{Channel, ChannelMsg, ChannelReadHalf, ChannelStream, ChannelWriteHalf};
+ 
++mod deferred;
+ mod parsing;
+ mod session;
+ 
+diff --git a/src/server/encrypted.rs b/src/server/encrypted.rs
+index c4daede4..396c328a 100644
+--- a/src/server/encrypted.rs
++++ b/src/server/encrypted.rs
+@@ -861,6 +861,7 @@ mod tests {
+             channels: std::collections::HashMap::new(),
+             open_global_requests: std::collections::VecDeque::new(),
+             kex: SessionKexState::Idle,
++            deferred: Default::default(),
+         }
+     }
+ 
+@@ -876,6 +877,7 @@ mod tests {
+             server_mac: mac::NONE,
+             session_id: CryptoVec::new(),
+             channels: std::collections::HashMap::new(),
++            closing: Default::default(),
+             last_channel_id: Wrapping(0),
+             write: Vec::new(),
+             write_cursor: 0,
+@@ -1444,12 +1446,13 @@ impl Session {
+             msg::CHANNEL_CLOSE => {
+                 let channel_num = map_err!(ChannelId::decode(r))?;
+                 map_err!(ensure_end(r))?;
+-                if !self.common.is_established_channel(channel_num) {
+-                    return Ok(());
+-                }
++                let established = self.common.is_established_channel(channel_num);
+                 if let Some(ref mut enc) = self.common.encrypted {
+                     // Reply with CHANNEL_CLOSE per RFC 4254 Section 5.3.
+-                    enc.close(channel_num)?;
++                    enc.peer_closed(channel_num)?;
++                }
++                if !established {
++                    return Ok(());
+                 }
+                 // Forward the close to the channel before removing it, so that
+                 // consumers waiting on `Channel::wait()` receive an explicit
+diff --git a/src/server/mod.rs b/src/server/mod.rs
+index 3b4ab699..faf67bd9 100644
+--- a/src/server/mod.rs
++++ b/src/server/mod.rs
+@@ -1126,6 +1126,7 @@ where
+         channels: HashMap::new(),
+         open_global_requests: VecDeque::new(),
+         kex: SessionKexState::Idle,
++        deferred: Default::default(),
+     };
+ 
+     session.begin_rekey()?;
+diff --git a/src/server/session.rs b/src/server/session.rs
+index 423e64de..8f2fbef5 100644
+--- a/src/server/session.rs
++++ b/src/server/session.rs
+@@ -29,6 +29,9 @@ pub struct Session {
+     pub(crate) channels: HashMap<ChannelId, ChannelRef>,
+     pub(crate) open_global_requests: VecDeque<GlobalRequestResponse>,
+     pub(crate) kex: SessionKexState<ServerKex>,
++    /// Outbound messages for channels whose earlier output still waits on
++    /// the client's window.
++    pub(crate) deferred: crate::deferred::Deferred<Msg>,
+ }
+ 
+ #[derive(Debug)]
+@@ -414,7 +417,10 @@ impl Handle {
+                             max_packet_size,
+                             window_size: window_size_ref,
+                         },
+-                        read_half: ChannelReadHalf { receiver },
++                        read_half: ChannelReadHalf {
++                            receiver,
++                            credit: None,
++                        },
+                     });
+                 }
+                 Some(ChannelMsg::OpenFailure(reason)) => {
+@@ -498,16 +504,16 @@ impl Session {
+     fn dispatch_msg(&mut self, msg: Msg) -> Result<(), Error> {
+         match msg {
+             Msg::Channel(id, ChannelMsg::Data { data }) => {
+-                self.data(id, data)?;
++                self.send_data(id, data)?;
+             }
+             Msg::Channel(id, ChannelMsg::ExtendedData { ext, data }) => {
+-                self.extended_data(id, ext, data)?;
++                self.send_extended_data(id, ext, data)?;
+             }
+             Msg::Channel(id, ChannelMsg::Eof) => {
+-                self.eof(id)?;
++                self.send_eof(id)?;
+             }
+             Msg::Channel(id, ChannelMsg::Close) => {
+-                self.close(id)?;
++                self.send_close(id)?;
+             }
+             Msg::Channel(id, ChannelMsg::Success) => {
+                 self.channel_success(id)?;
+@@ -629,6 +635,41 @@ impl Session {
+         Ok(())
+     }
+ 
++    /// Does `channel` have output the client's window hasn't admitted yet?
++    fn waits_on_window(&self, channel: ChannelId) -> bool {
++        self.common
++            .encrypted
++            .as_ref()
++            .is_some_and(|enc| enc.has_pending_data(channel))
++    }
++
++    /// Send an outbound message, or hold it back behind its channel's
++    /// earlier output.
++    fn take_outbound(&mut self, msg: Msg) -> Result<(), Error> {
++        if let Msg::Channel(id, ref channel_msg) = msg
++            && (self.deferred.holds(id) || self.waits_on_window(id))
++        {
++            let bytes = crate::deferred::data_bytes(channel_msg);
++            self.deferred.push(id, msg, bytes);
++            return Ok(());
++        }
++        self.dispatch_msg(msg)
++    }
++
++    /// Send what channels held back, in order, for as long as their earlier
++    /// output has gone out.
++    fn release_deferred(&mut self) -> Result<(), Error> {
++        for id in self.deferred.channels() {
++            while !self.kex.active() && !self.waits_on_window(id) {
++                match self.deferred.pop(id) {
++                    Some(msg) => self.dispatch_msg(msg)?,
++                    None => break,
++                }
++            }
++        }
++        Ok(())
++    }
++
+     pub(crate) async fn run<H, R>(
+         mut self,
+         mut stream: SshRead<R>,
+@@ -675,10 +716,12 @@ impl Session {
+             // to `select!`, which picks up any client-side event first. Gated on
+             // `!kex.active()` to match the `select!` receiver arm.
+             const MAX_MESSAGES_PER_BATCH: usize = 64;
+-            // Leave application messages in the bounded receiver once a peer's
+-            // channel window is exhausted. Network reads remain active so a
+-            // window adjustment can release the queued data.
+-            if !self.kex.active() && !self.common.has_any_pending_data() {
++            // Output for a channel the client's window holds back waits in
++            // `deferred`; everything else keeps going out. Only a channel
++            // holding too much leaves application messages in the bounded
++            // receiver; network reads go on, so a window adjustment can
++            // release it.
++            if !self.kex.active() && !self.deferred.full() {
+                 let mut drained = 0;
+                 while drained < MAX_MESSAGES_PER_BATCH {
+                     // Only Empty/Disconnected end the drain; both mean "nothing
+@@ -690,9 +733,9 @@ impl Session {
+                             Err(_) => break,
+                         },
+                     };
+-                    self.dispatch_msg(msg)?;
++                    self.take_outbound(msg)?;
+                     drained += 1;
+-                    if self.common.has_any_pending_data() {
++                    if self.deferred.full() {
+                         break;
+                     }
+                 }
+@@ -788,7 +831,7 @@ impl Session {
+                         }
+                     }
+                 }
+-                msg = self.receiver.recv(), if !self.kex.active() && !self.common.has_any_pending_data() => {
++                msg = self.receiver.recv(), if !self.kex.active() && !self.deferred.full() => {
+                     // Channel open replies must be dispatched before any
+                     // channel traffic queued after them: `msg` may be data for
+                     // a channel whose confirmation is still sitting in the
+@@ -799,13 +842,14 @@ impl Session {
+                         self.dispatch_msg(reply)?;
+                     }
+                     match msg {
+-                        Some(msg) => self.dispatch_msg(msg)?,
++                        Some(msg) => self.take_outbound(msg)?,
+                         None => {
+                             debug!("self.receiver: received None");
+                         }
+                     }
+                 }
+             }
++            self.release_deferred()?;
+             self.flush()?;
+ 
+             crate::flush_or_timeout(
+@@ -1149,6 +1193,15 @@ impl Session {
+ 
+     /// Close a channel.
+     pub fn close(&mut self, channel: ChannelId) -> Result<(), Error> {
++        if self.deferred.holds(channel) {
++            self.deferred
++                .push(channel, Msg::Channel(channel, ChannelMsg::Close), 0);
++            return Ok(());
++        }
++        self.send_close(channel)
++    }
++
++    fn send_close(&mut self, channel: ChannelId) -> Result<(), Error> {
+         if let Some(ref mut enc) = self.common.encrypted {
+             enc.close(channel)
+         } else {
+@@ -1158,6 +1211,15 @@ impl Session {
+ 
+     /// Send EOF to a channel
+     pub fn eof(&mut self, channel: ChannelId) -> Result<(), Error> {
++        if self.deferred.holds(channel) {
++            self.deferred
++                .push(channel, Msg::Channel(channel, ChannelMsg::Eof), 0);
++            return Ok(());
++        }
++        self.send_eof(channel)
++    }
++
++    fn send_eof(&mut self, channel: ChannelId) -> Result<(), Error> {
+         if let Some(ref mut enc) = self.common.encrypted {
+             enc.eof(channel)
+         } else {
+@@ -1172,6 +1234,24 @@ impl Session {
+     /// The number of bytes added to the "sending pipeline" (to be
+     /// processed by the event loop) is returned.
+     pub fn data(&mut self, channel: ChannelId, data: impl Into<bytes::Bytes>) -> Result<(), Error> {
++        let data = data.into();
++        if self.deferred.holds(channel) {
++            let bytes = data.len();
++            self.deferred.push(
++                channel,
++                Msg::Channel(channel, ChannelMsg::Data { data }),
++                bytes,
++            );
++            return Ok(());
++        }
++        self.send_data(channel, data)
++    }
++
++    fn send_data(
++        &mut self,
++        channel: ChannelId,
++        data: impl Into<bytes::Bytes>,
++    ) -> Result<(), Error> {
+         let is_rekeying = self.kex.active();
+         let common = &mut self.common;
+         if let Some(enc) = common.encrypted.as_mut() {
+@@ -1192,6 +1272,31 @@ impl Session {
+         channel: ChannelId,
+         extended: u32,
+         data: impl Into<bytes::Bytes>,
++    ) -> Result<(), Error> {
++        let data = data.into();
++        if self.deferred.holds(channel) {
++            let bytes = data.len();
++            self.deferred.push(
++                channel,
++                Msg::Channel(
++                    channel,
++                    ChannelMsg::ExtendedData {
++                        data,
++                        ext: extended,
++                    },
++                ),
++                bytes,
++            );
++            return Ok(());
++        }
++        self.send_extended_data(channel, extended, data)
++    }
++
++    fn send_extended_data(
++        &mut self,
++        channel: ChannelId,
++        extended: u32,
++        data: impl Into<bytes::Bytes>,
+     ) -> Result<(), Error> {
+         let is_rekeying = self.kex.active();
+         let common = &mut self.common;
+@@ -1641,6 +1746,7 @@ mod tests {
+                     server_mac: mac::NONE,
+                     session_id: CryptoVec::new(),
+                     channels: HashMap::new(),
++                    closing: Default::default(),
+                     last_channel_id: Wrapping(0),
+                     write: Vec::new(),
+                     write_cursor: 0,
+@@ -1672,6 +1778,7 @@ mod tests {
+             channels: HashMap::new(),
+             open_global_requests: VecDeque::new(),
+             kex: SessionKexState::Idle,
++            deferred: Default::default(),
+         }
+     }
+ 
+@@ -1864,4 +1971,167 @@ mod tests {
+             Some(msg::KEXINIT)
+         );
+     }
++
++    const HELD: ChannelId = ChannelId(3);
++    const HELD_RECIPIENT: u32 = 30;
++    const OPEN: ChannelId = ChannelId(4);
++    const OPEN_RECIPIENT: u32 = 40;
++
++    fn channel_params(
++        id: ChannelId,
++        recipient_channel: u32,
++        recipient_window_size: u32,
++        pending: &'static [u8],
++    ) -> crate::ChannelParams {
++        let mut pending_data = VecDeque::new();
++        if !pending.is_empty() {
++            pending_data.push_back((bytes::Bytes::from_static(pending), None, 0));
++        }
++        crate::ChannelParams {
++            recipient_channel,
++            sender_channel: id,
++            recipient_window_size,
++            sender_window_size: 1 << 20,
++            recipient_maximum_packet_size: 32768,
++            sender_maximum_packet_size: 32768,
++            confirmed: true,
++            wants_reply: false,
++            pending_data,
++            pending_eof: false,
++            pending_close: false,
++        }
++    }
++
++    /// An authenticated session with a channel whose `b"held"` the client's
++    /// window hasn't admitted, and a channel with room.
++    fn session_with_held_channel() -> Session {
++        let mut session = authenticated_session();
++        let enc = session.common.encrypted.as_mut().unwrap();
++        enc.decompress = Decompress::None;
++        enc.channels
++            .insert(HELD, channel_params(HELD, HELD_RECIPIENT, 0, b"held"));
++        enc.channels
++            .insert(OPEN, channel_params(OPEN, OPEN_RECIPIENT, 1 << 20, b""));
++        session
++    }
++
++    fn data(id: ChannelId, data: &'static [u8]) -> Msg {
++        Msg::Channel(
++            id,
++            ChannelMsg::Data {
++                data: bytes::Bytes::from_static(data),
++            },
++        )
++    }
++
++    #[tokio::test]
++    async fn held_channel_leaves_other_output_flowing() {
++        use crate::deferred::peer::{self, Peer};
++
++        let session = session_with_held_channel();
++        let sender = session.sender.sender.clone();
++        let (mut peer, stream) = Peer::new();
++        let event_loop = tokio::spawn(session.run(SshRead::new(stream), TestHandler));
++
++        sender.send(data(HELD, b"a1")).await.unwrap();
++        sender
++            .send(Msg::Channel(
++                HELD,
++                ChannelMsg::ExitStatus { exit_status: 3 },
++            ))
++            .await
++            .unwrap();
++        sender
++            .send(Msg::Channel(HELD, ChannelMsg::Eof))
++            .await
++            .unwrap();
++        sender.send(data(OPEN, b"b1")).await.unwrap();
++
++        assert_eq!(peer.next().await, peer::data(OPEN_RECIPIENT, b"b1"));
++        peer.assert_quiet().await;
++
++        // Room for the held bytes only: the next write waits again.
++        peer.send(peer::window_adjust(HELD.0, 4)).await;
++        assert_eq!(peer.next().await, peer::data(HELD_RECIPIENT, b"held"));
++        peer.assert_quiet().await;
++
++        // The rest goes out in the order it was written.
++        peer.send(peer::window_adjust(HELD.0, 100)).await;
++        assert_eq!(peer.next().await, peer::data(HELD_RECIPIENT, b"a1"));
++        assert_eq!(peer.next().await.first(), Some(&msg::CHANNEL_REQUEST));
++        assert_eq!(peer.next().await, peer::eof(HELD_RECIPIENT));
++
++        // Drained, the channel's output goes straight out again.
++        sender.send(data(HELD, b"a3")).await.unwrap();
++        assert_eq!(peer.next().await, peer::data(HELD_RECIPIENT, b"a3"));
++        event_loop.abort();
++    }
++
++    #[tokio::test]
++    async fn channel_holding_too_much_stops_taking_output() {
++        use crate::deferred::peer::{self, Peer};
++
++        let session = session_with_held_channel();
++        let sender = session.sender.sender.clone();
++        let (mut peer, stream) = Peer::new();
++        let event_loop = tokio::spawn(session.run(SshRead::new(stream), TestHandler));
++
++        let flood = bytes::Bytes::from(vec![b'x'; crate::deferred::DEFERRED_BYTES]);
++        sender
++            .send(Msg::Channel(HELD, ChannelMsg::Data { data: flood }))
++            .await
++            .unwrap();
++        sender.send(data(OPEN, b"b1")).await.unwrap();
++        peer.assert_quiet().await;
++
++        // Once the held channel drains, the session takes output again.
++        peer.send(peer::window_adjust(HELD.0, u32::MAX / 2)).await;
++        assert_eq!(peer.next().await, peer::data(HELD_RECIPIENT, b"held"));
++        let mut flooded = 0;
++        while flooded < crate::deferred::DEFERRED_BYTES {
++            let packet = peer.next().await;
++            assert_eq!(packet.first(), Some(&msg::CHANNEL_DATA));
++            // type, recipient, length
++            flooded += packet.len() - 9;
++        }
++        assert_eq!(flooded, crate::deferred::DEFERRED_BYTES);
++        assert_eq!(peer.next().await, peer::data(OPEN_RECIPIENT, b"b1"));
++        event_loop.abort();
++    }
++
++    #[test]
++    fn direct_writes_keep_their_place_behind_held_output() {
++        let mut session = session_with_held_channel();
++        session.take_outbound(data(HELD, b"a1")).unwrap();
++        session.data(HELD, &b"a2"[..]).unwrap();
++        session.eof(HELD).unwrap();
++        session.close(HELD).unwrap();
++        assert!(session.common.encrypted.as_ref().unwrap().write.is_empty());
++
++        let enc = session.common.encrypted.as_mut().unwrap();
++        enc.channels.get_mut(&HELD).unwrap().recipient_window_size = 100;
++        enc.flush_pending(HELD).unwrap();
++        session.release_deferred().unwrap();
++        let write = &session.common.encrypted.as_ref().unwrap().write;
++        let mut payloads = Vec::new();
++        let mut cursor = 0;
++        while cursor < write.len() {
++            let len =
++                <byteorder::BigEndian as byteorder::ByteOrder>::read_u32(&write[cursor..]) as usize;
++            payloads.push(write[cursor + 4..cursor + 4 + len].to_vec());
++            cursor += 4 + len;
++        }
++        let mut close = vec![msg::CHANNEL_CLOSE];
++        HELD_RECIPIENT.encode(&mut close).unwrap();
++        assert_eq!(
++            payloads,
++            vec![
++                crate::deferred::peer::data(HELD_RECIPIENT, b"held"),
++                crate::deferred::peer::data(HELD_RECIPIENT, b"a1"),
++                crate::deferred::peer::data(HELD_RECIPIENT, b"a2"),
++                crate::deferred::peer::eof(HELD_RECIPIENT),
++                close,
++            ]
++        );
++    }
+ }
+diff --git a/src/session.rs b/src/session.rs
+index df11ef43..2903ef21 100644
+--- a/src/session.rs
++++ b/src/session.rs
+@@ -46,6 +46,8 @@ pub(crate) struct Encrypted {
+     pub server_mac: mac::Name,
+     pub session_id: CryptoVec,
+     pub channels: HashMap<ChannelId, ChannelParams>,
++    /// Channels this side closed whose `CHANNEL_CLOSE` reply hasn't arrived.
++    pub closing: std::collections::HashSet<ChannelId>,
+     pub last_channel_id: Wrapping<u32>,
+     // Non-sensitive packet assembly buffer, analogous to
+     // OpenSSH sshbuf (output side).  Not mlocked because it
+@@ -129,12 +131,6 @@ impl ChannelFlushResult {
+ }
+ 
+ impl<C> CommonSession<C> {
+-    pub(crate) fn has_any_pending_data(&self) -> bool {
+-        self.encrypted
+-            .as_ref()
+-            .is_some_and(Encrypted::has_any_pending_data)
+-    }
+-
+     /// Channel-scoped messages (`CHANNEL_DATA`, `CHANNEL_EOF`, `CHANNEL_CLOSE`,
+     /// `CHANNEL_REQUEST`, ...) operate on an already-open channel. An
+     /// authenticated peer must not be able to drive channel callbacks
+@@ -179,6 +175,7 @@ impl<C> CommonSession<C> {
+             session_id: newkeys.session_id,
+             state,
+             channels: HashMap::new(),
++            closing: Default::default(),
+             last_channel_id: Wrapping(1),
+             write: Vec::new(),
+             write_cursor: 0,
+@@ -285,6 +282,9 @@ impl Encrypted {
+     }
+ 
+     pub fn close(&mut self, channel: ChannelId) -> Result<(), crate::Error> {
++        if self.channels.contains_key(&channel) {
++            self.closing.insert(channel);
++        }
+         if let Some(channel) = self.has_pending_data_mut(channel) {
+             channel.pending_close = true;
+         } else {
+@@ -294,6 +294,21 @@ impl Encrypted {
+         Ok(())
+     }
+ 
++    /// The peer closed `channel`. Data still queued for it will never be
++    /// read, so it's dropped, and this side's close is sent now unless it
++    /// already went out (RFC 4254 section 5.3). Nothing more is sent for it.
++    pub fn peer_closed(&mut self, channel: ChannelId) -> Result<(), crate::Error> {
++        self.closing.remove(&channel);
++        if let Some(params) = self.channels.get_mut(&channel) {
++            params.pending_data.clear();
++            params.pending_eof = false;
++            params.pending_close = false;
++        }
++        self.byte(channel, msg::CHANNEL_CLOSE)?;
++        self.channels.remove(&channel);
++        Ok(())
++    }
++
+     pub fn sender_window_size(&self, channel: ChannelId) -> usize {
+         if let Some(channel) = self.channels.get(&channel) {
+             channel.sender_window_size as usize
+@@ -302,6 +317,39 @@ impl Encrypted {
+         }
+     }
+ 
++    /// Data arrived on a credited channel: the window shrinks, and reopens only
++    /// through [`Self::credit_window`]. Its queue is bounded only by the
++    /// window, so a peer that sends beyond it is disconnected.
++    pub fn consume_window(&mut self, channel: ChannelId, data: &[u8]) -> Result<(), crate::Error> {
++        if let Some(channel) = self.channels.get_mut(&channel) {
++            // https://tools.ietf.org/html/rfc4254#section-5.2
++            channel.sender_window_size = channel
++                .sender_window_size
++                .checked_sub(data.len() as u32)
++                .ok_or(crate::Error::Inconsistent)?;
++        }
++        Ok(())
++    }
++
++    /// The reader took `bytes`: give them back to the peer as window. Not
++    /// once either side has closed the channel: after this side's close the
++    /// peer may already have freed it, and a message for a channel it
++    /// doesn't know ends the connection.
++    pub fn credit_window(&mut self, channel: ChannelId, bytes: u32) -> Result<(), crate::Error> {
++        if self.closing.contains(&channel) {
++            return Ok(());
++        }
++        if let Some(channel) = self.channels.get_mut(&channel) {
++            push_packet!(self.write, {
++                self.write.push(msg::CHANNEL_WINDOW_ADJUST);
++                channel.recipient_channel.encode(&mut self.write)?;
++                bytes.encode(&mut self.write)?;
++            });
++            channel.sender_window_size = channel.sender_window_size.saturating_add(bytes);
++        }
++        Ok(())
++    }
++
+     pub fn adjust_window_size(
+         &mut self,
+         channel: ChannelId,
+@@ -462,6 +510,7 @@ impl Encrypted {
+         }
+     }
+ 
++    #[cfg(test)]
+     pub(crate) fn has_any_pending_data(&self) -> bool {
+         self.channels
+             .values()
+@@ -881,6 +930,7 @@ mod tests {
+             server_mac: mac::NONE,
+             session_id: CryptoVec::new(),
+             channels: HashMap::new(),
++            closing: Default::default(),
+             last_channel_id: Wrapping(0),
+             write: Vec::new(),
+             write_cursor: 0,

@@ -1,5 +1,8 @@
 //! System events are recovery hints, not evidence that an SSH server is reachable.
-use std::{sync::OnceLock, time::Duration};
+use std::{
+    sync::{Mutex, OnceLock},
+    time::Duration,
+};
 use tokio::sync::watch;
 
 #[derive(Clone, Copy, Default)]
@@ -8,16 +11,31 @@ struct State {
     sleep_epoch: u64,
 }
 
-fn events() -> &'static watch::Sender<State> {
-    static EVENTS: OnceLock<watch::Sender<State>> = OnceLock::new();
-    EVENTS.get_or_init(|| watch::channel(State::default()).0)
+fn state() -> &'static watch::Sender<State> {
+    static STATE: OnceLock<watch::Sender<State>> = OnceLock::new();
+    STATE.get_or_init(|| watch::channel(State::default()).0)
+}
+
+type Listener = Box<dyn FnMut(Event) -> bool + Send>;
+
+fn listeners() -> &'static Mutex<Vec<Listener>> {
+    static LISTENERS: OnceLock<Mutex<Vec<Listener>>> = OnceLock::new();
+    LISTENERS.get_or_init(Mutex::default)
+}
+
+/// Calls `listener` with every event from now on, until it returns false.
+pub fn listen(listener: impl FnMut(Event) -> bool + Send + 'static) {
+    listeners()
+        .lock()
+        .expect("recovery listeners")
+        .push(Box::new(listener));
 }
 
 #[derive(Clone)]
 pub struct Recovery(watch::Receiver<State>);
 
 pub fn subscribe() -> Recovery {
-    Recovery(events().subscribe())
+    Recovery(state().subscribe())
 }
 
 impl Recovery {
@@ -69,7 +87,11 @@ pub use newport_platform::events::Event;
 
 /// The application supplies OS lifecycle hints; they never prove reachability.
 pub fn report(event: Event) {
-    publish(events(), event);
+    publish(state(), event);
+    listeners()
+        .lock()
+        .expect("recovery listeners")
+        .retain_mut(|listener| listener(event));
 }
 
 fn publish(events: &watch::Sender<State>, event: Event) {

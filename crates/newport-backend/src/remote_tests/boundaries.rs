@@ -18,7 +18,10 @@ async fn destination_health_distinguishes_unavailable_service_from_broken_ssh() 
             "remoteHost":"127.0.0.1", "remotePort":remote
         }))
         .unwrap();
-        let forwarding = Forwarding::start(&server, Some(&tunnel)).await.unwrap();
+        let forwarding =
+            Forward::start(ssh::link(&server, crate::ssh::no_jump_hosts), &tunnel, true)
+                .await
+                .unwrap();
         timeout(Duration::from_secs(10), async {
             loop {
                 let states = forwarding.destination_health();
@@ -32,8 +35,9 @@ async fn destination_health_distinguishes_unavailable_service_from_broken_ssh() 
         })
         .await
         .unwrap();
-        assert!(
-            forwarding.error().is_none(),
+        assert_ne!(
+            forwarding.state().borrow().status,
+            crate::model::Status::Error,
             "destination failure must not break SSH"
         );
         forwarding.shutdown().await;
@@ -44,8 +48,8 @@ async fn destination_health_distinguishes_unavailable_service_from_broken_ssh() 
 #[tokio::test]
 #[ignore = "Requires cargo xtask test remote"]
 async fn browser_only_rejects_clipboard_and_unsafe_urls_but_accepts_matching_ack() {
-    let session = ExecSession::connect(&server()).await.unwrap();
-    crate::agent::install(&session).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
+    crate::agent::install(&session.0, &server()).await.unwrap();
     let mut stream = session
         .stream(&format!(
             "exec ~/.local/bin/newport-agent serve {} --browser",
@@ -114,8 +118,8 @@ async fn browser_only_rejects_clipboard_and_unsafe_urls_but_accepts_matching_ack
 #[tokio::test]
 #[ignore = "Requires cargo xtask test remote"]
 async fn callback_leases_are_bounded_and_rollback_releases_port() {
-    let session = ExecSession::connect(&server()).await.unwrap();
-    let mut callbacks = session.callbacks();
+    let session = crate::remote::Shell::new(&server());
+    let mut callbacks = crate::ssh::callback::Callbacks::new(session.0.clone());
     let mut ports = Vec::new();
     for _ in 0..8 {
         let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -174,7 +178,7 @@ async fn callback_leases_are_bounded_and_rollback_releases_port() {
 async fn sftp_permission_failure_is_reported_without_harming_session() {
     use crate::files::{Operations, transfer};
     let server = server();
-    let session = ExecSession::connect(&server).await.unwrap();
+    let session = crate::remote::Shell::new(&server);
     let folder = format!("/home/fixture/readonly-{}", Uuid::new_v4());
     session
         .execute(&format!("mkdir -m 500 {folder}"), None)
@@ -183,30 +187,26 @@ async fn sftp_permission_failure_is_reported_without_harming_session() {
     let temp = tempfile::tempdir().unwrap();
     let local = temp.path().join("upload.txt");
     std::fs::write(&local, b"must not appear").unwrap();
-    let sftp = std::sync::Arc::new(Sftp::connect(&server).await.unwrap());
+    let remote = crate::files::Remote::new(
+        server.clone(),
+        crate::ssh::link(&server, crate::ssh::no_jump_hosts),
+    );
+    let sftp = remote.sftp.shared().await.unwrap();
     let operations = Operations::default();
     assert!(
-        transfer::upload(&operations, sftp.clone(), &local, &folder, |_, _| {})
+        transfer::upload(&operations, &remote, &local, &folder, |_, _| {})
             .await
             .is_err()
     );
-    assert!(
-        sftp.session
-            .stat(format!("{folder}/upload.txt"))
-            .await
-            .is_err()
-    );
+    assert!(sftp.stat(format!("{folder}/upload.txt")).await.is_err());
     session
         .execute(&format!("chmod 700 {folder}"), None)
         .await
         .unwrap();
-    let uploaded = transfer::upload(&operations, sftp.clone(), &local, &folder, |_, _| {})
+    let uploaded = transfer::upload(&operations, &remote, &local, &folder, |_, _| {})
         .await
         .unwrap();
-    assert_eq!(
-        sftp.session.stat(uploaded).await.unwrap().attrs.size,
-        Some(15)
-    );
+    assert_eq!(sftp.stat(uploaded).await.unwrap().attrs.size, Some(15));
     session
         .execute(&format!("rm -r {folder}"), None)
         .await
@@ -235,7 +235,11 @@ async fn port_range_bind_conflict_rolls_back_without_stealing_existing_listener(
     }))
     .unwrap();
     drop(first);
-    assert!(Forwarding::start(&server, Some(&tunnel)).await.is_err());
+    assert!(
+        Forward::start(ssh::link(&server, crate::ssh::no_jump_hosts), &tunnel, true)
+            .await
+            .is_err()
+    );
     let released = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
     let _connection = tokio::net::TcpStream::connect(("127.0.0.1", port + 1))
         .await
@@ -246,7 +250,9 @@ async fn port_range_bind_conflict_rolls_back_without_stealing_existing_listener(
         .unwrap();
     drop(released);
     drop(second);
-    let forwarding = Forwarding::start(&server, Some(&tunnel)).await.unwrap();
+    let forwarding = Forward::start(ssh::link(&server, crate::ssh::no_jump_hosts), &tunnel, true)
+        .await
+        .unwrap();
     assert_eq!(forwarding.destination_health().len(), 2);
     forwarding.shutdown().await;
     let _first = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
@@ -255,81 +261,20 @@ async fn port_range_bind_conflict_rolls_back_without_stealing_existing_listener(
 
 #[tokio::test]
 #[ignore = "Requires cargo xtask test remote"]
-async fn temporary_callback_does_not_reconnect_a_closed_ssh_session() {
-    let server = server();
-    let control = ExecSession::connect(&server).await.unwrap();
-    let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = reservation.local_addr().unwrap().port();
-    drop(reservation);
-    // Keep the destination alive on a separate SSH connection throughout.
-    let mut httpd = control
-        .stream(&format!("newport-test-fixture http {port}"))
-        .await
-        .unwrap();
-    let mut ready = [0; 6];
-    timeout(Duration::from_secs(5), httpd.read_exact(&mut ready))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(&ready, b"ready\n");
-    let session = ExecSession::connect(&server).await.unwrap();
-    let mut callbacks = session.callbacks();
-    let url = url::Url::parse(&format!(
-        "https://example.com/?redirect_uri=http://127.0.0.1:{port}/"
-    ))
-    .unwrap();
-    callbacks
-        .prepare(ssh::callback::endpoint(&url).unwrap().unwrap())
-        .await
-        .unwrap();
-    async fn get(port: u16) -> std::io::Result<String> {
-        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
-        stream
-            .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
-            .await?;
-        let mut response = String::new();
-        stream.read_to_string(&mut response).await?;
-        Ok(response)
-    }
-    assert!(
-        timeout(Duration::from_secs(5), get(port))
-            .await
-            .unwrap()
-            .unwrap()
-            .contains("200 OK")
-    );
-    session.close().await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let response = timeout(Duration::from_secs(5), get(port)).await.unwrap();
-    assert!(
-        response.is_err() || response.unwrap().is_empty(),
-        "callback must not reconnect"
-    );
-    let direct = control
-        .execute(&format!("newport-test-fixture http-status {port}"), None)
-        .await
-        .unwrap();
-    assert_eq!(
-        direct.trim(),
-        "200",
-        "the remote destination remains healthy"
-    );
-    drop(callbacks);
-    control.close().await;
-}
-
-#[tokio::test]
-#[ignore = "Requires cargo xtask test remote"]
 async fn file_listing_and_preview_enforce_types_and_size_limits() {
     use crate::files;
     let server = server();
-    let session = ExecSession::connect(&server).await.unwrap();
+    let session = crate::remote::Shell::new(&server);
     let folder = format!("/home/fixture/preview-{}", Uuid::new_v4());
     session
         .execute(&format!("newport-test-fixture preview {folder}"), None)
         .await
         .unwrap();
-    let sftp = Sftp::connect(&server).await.unwrap();
+    let remote = files::Remote::new(
+        server.clone(),
+        crate::ssh::link(&server, crate::ssh::no_jump_hosts),
+    );
+    let sftp = remote.sftp.shared().await.unwrap();
     let list = serde_json::to_value(files::list(&sftp, &folder).await.unwrap()).unwrap();
     assert_eq!(list["entries"].as_array().unwrap().len(), 6);
     let preview = serde_json::to_value(

@@ -32,6 +32,21 @@ pub struct Server {
     pub agent_install_approved: bool,
     #[serde(default)]
     pub setup_complete: bool,
+    /// How the server is reached; `None` connects to it directly.
+    #[serde(default)]
+    pub proxy: Option<Proxy>,
+}
+/// What a server's SSH connection goes through.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum Proxy {
+    /// A command run on this computer, as ssh's `ProxyCommand`; SSH runs over
+    /// its input and output. `%h`, `%p`, `%r` and `%n` stand for the server's
+    /// host, port, username and name.
+    Command(String),
+    /// Another saved server, as ssh's `ProxyJump`. A chain is a jump host
+    /// with its own jump host.
+    Jump(Uuid),
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -123,7 +138,9 @@ impl ConnectionState {
         }
     }
 }
-fn host_valid(s: &str) -> bool {
+/// A host name or an unbracketed IP address, with nothing a shell or an SSH
+/// option would read as more than a name.
+pub fn host_valid(s: &str) -> bool {
     (!s.contains(':') || s.parse::<std::net::Ipv6Addr>().is_ok())
         && !s.is_empty()
         && s.len() <= 253
@@ -143,6 +160,7 @@ impl Server {
             && self.agent_source == other.agent_source
             && self.agent_key_fingerprint == other.agent_key_fingerprint
             && self.auth_method == other.auth_method
+            && self.proxy == other.proxy
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -181,8 +199,31 @@ impl Server {
         if self.ssh_port == 0 {
             return Err("SSH port must be between 1 and 65535.".into());
         }
+        match &self.proxy {
+            Some(Proxy::Command(command)) => proxy_command_valid(command)?,
+            Some(Proxy::Jump(id)) if *id == self.id => {
+                return Err("A server can’t be its own jump host.".into());
+            }
+            _ => {}
+        }
         Ok(())
     }
+}
+/// The tokens a proxy command may use are the ones Newport expands.
+fn proxy_command_valid(command: &str) -> Result<(), String> {
+    if command.trim().is_empty() {
+        return Err("Enter a proxy command.".into());
+    }
+    if command.contains(['\n', '\r', '\0']) {
+        return Err("Write the proxy command on one line.".into());
+    }
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' && !matches!(chars.next(), Some('h' | 'p' | 'r' | 'n' | '%')) {
+            return Err("The proxy command can use only %h, %p, %r, %n and %% after a %.".into());
+        }
+    }
+    Ok(())
 }
 fn forwarding_host(host: &str) -> String {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
@@ -279,6 +320,43 @@ impl Config {
             .collect()
     }
 
+    /// The saved servers `server` connects through, nearest first. Fails when
+    /// one is missing or the chain leads back to a server already in it.
+    pub fn jump_hosts(&self, server: &Server) -> Result<Vec<&Server>, String> {
+        let mut chain: Vec<&Server> = Vec::new();
+        let mut proxy = &server.proxy;
+        while let Some(Proxy::Jump(id)) = proxy {
+            if *id == server.id || chain.iter().any(|jump| jump.id == *id) {
+                return Err(format!(
+                    "The jump hosts of ‘{}’ lead back to it. Choose another jump host.",
+                    server.name
+                ));
+            }
+            let jump = self
+                .servers
+                .iter()
+                .find(|saved| saved.id == *id)
+                .ok_or_else(|| format!("The jump host of ‘{}’ isn’t saved.", server.name))?;
+            chain.push(jump);
+            proxy = &jump.proxy;
+        }
+        Ok(chain)
+    }
+    /// `id` and every saved server that connects through it.
+    pub fn through(&self, id: Uuid) -> Vec<Uuid> {
+        let mut found = vec![id];
+        let mut index = 0;
+        while let Some(&jump) = found.get(index) {
+            for server in &self.servers {
+                if server.proxy == Some(Proxy::Jump(jump)) && !found.contains(&server.id) {
+                    found.push(server.id);
+                }
+            }
+            index += 1;
+        }
+        found
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         let mut ids = HashSet::new();
         for s in &self.servers {
@@ -286,6 +364,9 @@ impl Config {
             if !ids.insert(s.id) {
                 return Err("Duplicate server ID.".into());
             }
+        }
+        for s in &self.servers {
+            self.jump_hosts(s)?;
         }
         let mut tunnels = HashSet::new();
         for t in &self.tunnels {
@@ -475,5 +556,94 @@ mod tests {
         assert_eq!(saved["agentInstallApproved"], true);
         assert_eq!(saved["setupComplete"], true);
         assert_eq!(serde_json::from_value::<Server>(saved).unwrap(), approved);
+    }
+    fn server(name: &str) -> Server {
+        serde_json::from_value(serde_json::json!({"id":Uuid::new_v4(),"name":name,"sshUser":"user","sshHost":"host","sshPort":22})).unwrap()
+    }
+    #[test]
+    fn a_saved_server_without_a_proxy_connects_directly() {
+        let saved = serde_json::json!({"id":Uuid::new_v4(),"name":"Old","sshUser":"user","sshHost":"host","sshPort":22,"authMethod":"publicKey","identityFile":null});
+        let server: Server = serde_json::from_value(saved).unwrap();
+        assert_eq!(server.proxy, None);
+        assert_eq!(
+            serde_json::to_value(&server).unwrap()["proxy"],
+            serde_json::Value::Null
+        );
+    }
+    #[test]
+    fn proxies_round_trip_in_their_saved_form() {
+        let jump = Uuid::new_v4();
+        for (proxy, json) in [
+            (
+                Proxy::Command("nc -X connect -x proxy:8080 %h %p".into()),
+                serde_json::json!({"command":"nc -X connect -x proxy:8080 %h %p"}),
+            ),
+            (Proxy::Jump(jump), serde_json::json!({"jump":jump})),
+        ] {
+            let mut s = server("Proxied");
+            s.proxy = Some(proxy);
+            let saved = serde_json::to_value(&s).unwrap();
+            assert_eq!(saved["proxy"], json);
+            assert_eq!(serde_json::from_value::<Server>(saved).unwrap(), s);
+        }
+    }
+    #[test]
+    fn a_proxy_command_is_one_line_with_known_tokens() {
+        let mut s = server("Proxied");
+        for (command, valid) in [
+            ("ssh -W %h:%p bastion", true),
+            ("connect %r@%n 100%%", true),
+            ("", false),
+            ("   ", false),
+            ("nc %h %p\nProxyCommand=bad", false),
+            ("nc %h %p\r", false),
+            ("nc %C", false),
+            ("nc %h %", false),
+        ] {
+            s.proxy = Some(Proxy::Command(command.into()));
+            assert_eq!(s.validate().is_ok(), valid, "{command:?}");
+        }
+    }
+    #[test]
+    fn a_server_cant_jump_through_itself() {
+        let mut s = server("Loop");
+        s.proxy = Some(Proxy::Jump(s.id));
+        assert!(s.validate().unwrap_err().contains("its own jump host"));
+        let config = Config {
+            servers: vec![s],
+            tunnels: vec![],
+        };
+        assert!(config.validate().is_err());
+    }
+    #[test]
+    fn jump_hosts_must_be_saved_and_never_lead_back() {
+        let bastion = server("Bastion");
+        let mut middle = server("Middle");
+        middle.proxy = Some(Proxy::Jump(bastion.id));
+        let mut inner = server("Inner");
+        inner.proxy = Some(Proxy::Jump(middle.id));
+        let mut config = Config {
+            servers: vec![inner.clone(), middle.clone(), bastion.clone()],
+            tunnels: vec![],
+        };
+        config.validate().unwrap();
+        let chain: Vec<_> = config
+            .jump_hosts(&inner)
+            .unwrap()
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(chain, [middle.id, bastion.id]);
+        assert_eq!(
+            config.through(bastion.id),
+            [bastion.id, middle.id, inner.id]
+        );
+        assert_eq!(config.through(inner.id), [inner.id]);
+
+        config.servers[2].proxy = Some(Proxy::Jump(inner.id));
+        assert!(config.validate().unwrap_err().contains("lead back"));
+
+        config.servers.truncate(2);
+        assert!(config.validate().unwrap_err().contains("isn’t saved"));
     }
 }

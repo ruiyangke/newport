@@ -2,7 +2,7 @@
 //! the login and direnv environment, direnv's allow list, change detection,
 //! and stopping everything a server started.
 use super::{installed_server, owner};
-use crate::{agent::Service, ssh::ExecSession};
+use crate::{agent::Service, remote::Shell};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -89,7 +89,7 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite> Lsp<S> {
                 message
             }
             Err(_) => {
-                let session = ExecSession::connect(&self.server).await.unwrap();
+                let session = Shell::new(&self.server);
                 let processes =
                     run(&session, "ps -u \"$(id -u)\" -o pid,pgid,stat,etime,args").await;
                 panic!(
@@ -143,7 +143,7 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite> Lsp<S> {
     }
 }
 
-async fn run(session: &ExecSession, command: &str) -> String {
+async fn run(session: &Shell, command: &str) -> String {
     session.execute(command, None).await.unwrap()
 }
 
@@ -151,7 +151,7 @@ async fn run(session: &ExecSession, command: &str) -> String {
 #[ignore = "Requires cargo xtask test remote and real OpenSSH"]
 async fn language_servers_start_in_the_worktree_environment() {
     let server = installed_server("NEWPORT_TEST_SSH_PORT", "Language servers", "fixture").await;
-    let session = ExecSession::connect(&server).await.unwrap();
+    let session = Shell::new(&server);
     let home = run(&session, "printf %s \"$HOME\"").await;
     let root = format!("{home}/lsp fixture/app");
     run(
@@ -170,7 +170,7 @@ async fn language_servers_start_in_the_worktree_environment() {
     let launch = |envrc: bool, id: &'static str| {
         let (owner, server, root) = (owner.clone(), server.clone(), root.clone());
         async move {
-            let lease = owner.acquire(&server).await.unwrap();
+            let lease = owner.needle(&server).unwrap();
             let (stream, _) = lease
                 .launch(Service::Lsp {
                     root,
@@ -244,5 +244,4 @@ async fn language_servers_start_in_the_worktree_environment() {
         "cd ~/'lsp fixture/app' && direnv deny; rm -rf ~/'lsp fixture' ~/.local/bin/gopls",
     )
     .await;
-    session.close().await;
 }

@@ -126,6 +126,7 @@ pub async fn delete_server(
             None,
             move |manager| {
                 manager.server(id)?;
+                jump_host_in_use(&manager.config, id)?;
                 let owner = manager.sessions.get(id).ok_or("Server no longer exists.")?;
                 let mut config = manager.config.clone();
                 let tunnels: Vec<_> = config
@@ -184,6 +185,29 @@ pub async fn delete_server(
         )
         .await?;
     cleanup.wait().await
+}
+
+/// A jump host stays until no server connects through it, so removing it
+/// never leaves them connecting some other way.
+fn jump_host_in_use(config: &crate::model::Config, id: Uuid) -> Result<(), String> {
+    let behind: Vec<_> = config
+        .servers
+        .iter()
+        .filter(|server| server.proxy == Some(crate::model::Proxy::Jump(id)))
+        .map(|server| format!("‘{}’", server.name))
+        .collect();
+    let (names, verb, pronoun) = match behind.as_slice() {
+        [] => return Ok(()),
+        [only] => (only.clone(), "connects", "it connects"),
+        [first @ .., last] => (
+            format!("{} and {last}", first.join(", ")),
+            "connect",
+            "they connect",
+        ),
+    };
+    Err(format!(
+        "{names} {verb} through this server. Change how {pronoun} before removing it."
+    ))
 }
 
 pub async fn save_tunnel(state: &Shared, tunnel: Tunnel) -> Result<(), String> {
@@ -473,7 +497,7 @@ pub async fn set_integration_enabled(
         if !owner.permissions.preference_is_current(intent) {
             return Err("Integration preference was superseded by a newer choice.".into());
         }
-        owner.acquire(&server).await?.setup_integrations().await?;
+        owner.setup_integrations(&server).await?;
     }
     let captured = owner.clone();
     state.edit_configuration(None, move |manager| {
@@ -517,32 +541,23 @@ pub async fn set_integration_enabled(
     start.run(desktop).await
 }
 
-pub async fn test_connection(state: &Shared, id: Uuid) -> Result<(), String> {
-    probe_connection(state, id, true).await
-}
-
-pub(crate) async fn probe_connection(state: &Shared, id: Uuid, retry: bool) -> Result<(), String> {
-    let (server, owner) = state.current(id)?;
-    let revision = owner.revision();
-    let started = std::time::Instant::now();
-    // Verify the transport used by the pages. A separate connection could
-    // succeed while their shared transport was still awaiting agent consent.
-    // Explicit tests may release backoff; background health probes must not.
-    if retry {
-        owner.retry_transport_fresh();
+/// Checks the link the pages use: it logs in afresh, replacing a login that
+/// waits for approval, and runs a command.
+pub async fn test_connection(state: &Shared, id: Uuid) -> Result<(), crate::remote::Failure> {
+    let (_, owner) = state.current(id)?;
+    owner.retry_fresh();
+    let text = owner
+        .unless_unreachable(crate::remote::command::stdout(
+            owner.link(),
+            "printf ok",
+            None,
+        ))
+        .await?;
+    if text.trim() == "ok" {
+        Ok(())
+    } else {
+        Err("Unexpected connection test response".to_owned().into())
     }
-    let result = async {
-        let lease = owner.acquire(&server).await?;
-        let text = lease.execute("printf ok", None).await?;
-        if text.trim() == "ok" {
-            Ok(())
-        } else {
-            Err("Unexpected connection test response".into())
-        }
-    }
-    .await;
-    state.observe_connection(&server, revision, started, result.clone());
-    result
 }
 /// Cheap cache observation. It never waits for SSH or another observer's fetch.
 pub async fn connections_query(
@@ -567,15 +582,11 @@ pub async fn reinstall_agent(
     id: Uuid,
 ) -> Result<(), String> {
     let (server, owner) = state.current(id)?;
-    owner.retry_transport();
+    owner.retry();
     // Healthy integrations keep their pinned runtime throughout staging and
-    // activation. Deployment uses the shared managed lifecycle.
-    let installed = async {
-        let session = owner.acquire(&server).await?;
-        // Updating the shared agent must not rewrite optional shell configuration.
-        session.install(false).await.map(|_| ())
-    }
-    .await;
+    // activation. Deployment uses the shared managed lifecycle. Updating the
+    // shared agent must not rewrite optional shell configuration.
+    let installed = owner.install(&server, false).await.map(|_| ());
     let resumed = if !owner.is_revoked() {
         let start = state.prepare_integration(id).await?;
         if std::sync::Arc::ptr_eq(&start.owner, &owner) {
@@ -611,9 +622,8 @@ pub async fn uninstall_agent(state: &Shared, expected: Server) -> Result<String,
             Ok((config, server))
         })
         .await?;
-    owner.retry_transport();
-    let session = owner.acquire(&server).await?;
-    session.uninstall().await
+    owner.retry();
+    owner.uninstall(&server).await
 }
 
 pub async fn inspect_agent(
@@ -629,8 +639,11 @@ pub async fn inspect_agent(
         }
         (server, owner)
     };
-    owner.retry_transport();
-    owner.acquire(&server).await?.check_installation().await
+    if !owner.server().same_connection(&server) {
+        return Err("Server connection changed. Inspect Needle from the current server.".into());
+    }
+    owner.retry();
+    owner.check_installation().await
 }
 
 pub async fn open_tunnel(
@@ -858,7 +871,7 @@ mod connection_tests {
 
     #[tokio::test]
     #[ignore = "Run with the SSH harness and its ephemeral fixture"]
-    async fn connection_test_and_background_probe_use_the_pages_transport() {
+    async fn the_connection_check_uses_the_pages_link() {
         use crate::{
             manager::{Manager, share},
             model::Config,
@@ -880,19 +893,30 @@ mod connection_tests {
             .unwrap();
         let state = share(manager);
         let owner = state.owner(server.id).unwrap();
-        assert_eq!(owner.transport_snapshot().generation, 0);
+        assert_eq!(owner.reached(), 0);
         test_connection(&state, server.id).await.unwrap();
-        assert_eq!(owner.transport_snapshot().status, "connected");
-        let generation = owner.transport_snapshot().generation;
-        assert_eq!(generation, 1);
-        let lease = owner.acquire(&server).await.unwrap();
-        assert_eq!(lease.execute("printf ok", None).await.unwrap(), "ok");
+        assert_eq!(
+            crate::remote::command::stdout(owner.link(), "printf ok", None)
+                .await
+                .unwrap(),
+            "ok"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while owner.transport().status != "connected" {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the pages' link to show connected");
+        assert_eq!(owner.reached(), 1);
         for _ in 0..3 {
-            probe_connection(&state, server.id, false).await.unwrap();
             test_connection(&state, server.id).await.unwrap();
-            assert_eq!(owner.transport_snapshot().generation, generation);
+            assert_eq!(owner.reached(), 1, "a check keeps the ready connection");
         }
-        assert_eq!(state.snapshot().runtime.health[&server.id], "reachable");
+        assert_eq!(
+            state.snapshot().runtime.agent_transport[&server.id].status,
+            "connected"
+        );
         assert!(!state.snapshot().runtime.awaiting_agent.contains(&server.id));
         state.sessions.shutdown().await;
     }

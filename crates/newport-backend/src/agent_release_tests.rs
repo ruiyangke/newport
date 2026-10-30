@@ -73,9 +73,33 @@ fn full_installations_are_preserved_by_core_clients_and_core_follows_release_ord
     assert!(!status.own_runtime_available());
     assert!(!Trigger::Required.allows(&status));
     assert!(require_product_replacement(&status, Trigger::Manual).is_err());
+    // An older full agent isn't kept as installed: the person's own install
+    // stages this Newport's build beside it.
+    assert!(kept_installed(&status).is_none());
+    assert_eq!(
+        activation_for(&status, Trigger::Manual),
+        Ok(Activation::Keep)
+    );
+    assert!(activation_for(&status, Trigger::Automatic).is_err());
+
+    // A full agent of a newer release serves this Newport as it is.
+    let newer_full = product_metadata(&pair, "3.0.0", &old_hash, Some(full.clone()));
+    let newer_full = parse_release_check(
+        &format!(
+            "Linux\nx86_64\n{old_hash}\n{}",
+            String::from_utf8(newer_full).unwrap()
+        ),
+        &bundled,
+        verify,
+    )
+    .unwrap();
+    let kept = kept_installed(&newer_full).expect("the newer full agent is kept");
+    assert_eq!(kept.build_sha256, old_hash);
+    assert!(kept.output.contains("already installed"));
 
     let bundled_full = product_metadata(&pair, "2.0.0", candidate_hash, Some(full.clone()));
     let same_variant = parse_release_check(&output, &bundled_full, verify).unwrap();
+    assert!(kept_installed(&same_variant).is_none());
     assert!(same_variant.automatic_update_available());
     assert!(require_product_replacement(&same_variant, Trigger::Automatic).is_ok());
 
@@ -95,6 +119,7 @@ fn full_installations_are_preserved_by_core_clients_and_core_follows_release_ord
         status
     };
     let upgrade = core("1.0.0");
+    assert!(kept_installed(&upgrade).is_none());
     assert_eq!(upgrade.build_relation, BuildRelation::Older);
     assert_eq!(upgrade.update_available, Some(true));
     assert!(upgrade.automatic_update_available());
@@ -130,6 +155,9 @@ fn full_installations_are_preserved_by_core_clients_and_core_follows_release_ord
         assert!(require_product_replacement(&refused, Trigger::Automatic).is_err());
         assert!(require_product_replacement(&refused, Trigger::Required).is_err());
         assert!(require_product_replacement(&refused, Trigger::Manual).is_ok());
+        // Core lacks Remote apps, so even a newer one isn't kept for this
+        // full Newport.
+        assert!(kept_installed(&refused).is_none());
     }
 }
 
@@ -162,6 +190,13 @@ fn needle_follows_newport_except_over_a_newer_release() {
         assert_eq!(status.installed_version.as_deref(), Some(version));
         assert_eq!(status.bundled_version.as_deref(), Some("1.10.0"));
         assert_eq!(require_ordered_replacement(&status).is_ok(), allowed);
+        // A newer release counts as installed: the person's own install
+        // leaves it and installs nothing.
+        assert_eq!(
+            kept_installed(&status).map(|kept| kept.build_sha256),
+            (!allowed).then(|| hash.clone())
+        );
+        assert_eq!(activation_for(&status, Trigger::Automatic).is_ok(), allowed);
         // A Newport without release order can't tell newer from older: its
         // own build replaces an idle one or runs beside it.
         let unsigned = parse_release_check(&output, &[], verify).unwrap();
@@ -176,6 +211,12 @@ fn needle_follows_newport_except_over_a_newer_release() {
     assert!(!status.automatic_update_available());
     assert!(require_product_replacement(&status, Trigger::Manual).is_err());
     assert!(require_ordered_replacement(&status).is_ok());
+    // An installed product Newport can't identify stays; the install still succeeds.
+    assert_eq!(
+        activation_for(&status, Trigger::Manual),
+        Ok(Activation::Keep)
+    );
+    assert!(activation_for(&status, Trigger::Required).is_err());
     let missing = parse_release_check("Linux\nx86_64\nmissing\n", &bundled, verify).unwrap();
     assert_eq!(missing.update_available, Some(false));
     assert_eq!(missing.installed, Some(false));
@@ -303,26 +344,31 @@ async fn remote_release_identity_is_recorded_once_and_checks_do_not_write() {
         "sshHost": "127.0.0.1", "sshPort": std::env::var("NEWPORT_TEST_SSH_PORT").unwrap().parse::<u16>().unwrap(),
         "identityFile": std::env::var("NEWPORT_TEST_IDENTITY").unwrap(), "agentInstallApproved": true
     })).unwrap();
-    let session = ExecSession::connect(&server).await.unwrap();
-    manage_test(&session, false, false).await.unwrap();
-    let initial = check(&session).await.unwrap();
+    let link = crate::ssh::link(&server, crate::ssh::no_jump_hosts);
+    let session = &link;
+    let run = |command: &str| {
+        let command = command.to_owned();
+        async move { command::stdout(session, &command, None).await }
+    };
+    manage_test(session, &server, false, false).await.unwrap();
+    let initial = check(session).await.unwrap();
     let hash = initial.installed_hash.unwrap();
-    let architecture = session.execute("uname -m", None).await.unwrap();
+    let architecture = run("uname -m").await.unwrap();
     let architecture = architecture.trim();
     let pair = KeyPair::generate_unencrypted_keypair().unwrap();
     let public = STANDARD.encode(pair.pk.to_box().unwrap().to_string());
     let verify = |bytes: &[u8]| newport_release::needle::verify(bytes, &public);
     let release = metadata(&pair, "1.2.3", &hash);
-    record_release(&session, &hash, architecture, &release, verify)
+    record_release(session, &hash, architecture, &release, verify)
         .await
         .unwrap();
     let stamp_command = format!(
         "stat -c '%i:%y:%s' \"$HOME/.local/share/newport/needle/builds/{hash}/needle-release.json\""
     );
-    let stamp = session.execute(&stamp_command, None).await.unwrap();
+    let stamp = run(&stamp_command).await.unwrap();
     // A second desktop signing the same bytes must preserve the first record.
     record_release(
-        &session,
+        session,
         &hash,
         architecture,
         &metadata(&pair, "1.2.4", &hash),
@@ -330,26 +376,27 @@ async fn remote_release_identity_is_recorded_once_and_checks_do_not_write() {
     )
     .await
     .unwrap();
-    let output = session.execute(CHECK, None).await.unwrap();
+    let output = run(CHECK).await.unwrap();
     let observed = parse_release_check(&output, &[], verify).unwrap();
     assert_eq!(observed.installed_version.as_deref(), Some("1.2.3"));
     assert_eq!(observed.installed_hash.as_deref(), Some(hash.as_str()));
-    assert_eq!(session.execute(&stamp_command, None).await.unwrap(), stamp);
+    assert_eq!(run(&stamp_command).await.unwrap(), stamp);
     // The real trust root cannot accept this test key, and deployment refuses
     // the invalid metadata before modifying the active executable.
-    assert!(check(&session).await.is_err());
-    assert!(manage_test(&session, true, false).await.is_err());
-    assert_eq!(session.execute(&stamp_command, None).await.unwrap(), stamp);
-    session.execute(&format!("printf tampered > \"$HOME/.local/share/newport/needle/builds/{hash}/needle-release.json\""), None).await.unwrap();
+    assert!(check(session).await.is_err());
+    assert!(manage_test(session, &server, true, false).await.is_err());
+    assert_eq!(run(&stamp_command).await.unwrap(), stamp);
+    run(&format!(
+        "printf tampered > \"$HOME/.local/share/newport/needle/builds/{hash}/needle-release.json\""
+    ))
+    .await
+    .unwrap();
     assert!(
-        record_release(&session, &hash, architecture, &release, verify)
+        record_release(session, &hash, architecture, &release, verify)
             .await
             .is_err()
     );
-    assert!(
-        parse_release_check(&session.execute(CHECK, None).await.unwrap(), &[], verify).is_err()
-    );
-    session.close().await;
+    assert!(parse_release_check(&run(CHECK).await.unwrap(), &[], verify).is_err());
 }
 
 #[test]

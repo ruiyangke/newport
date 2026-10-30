@@ -1,14 +1,14 @@
-use crate::{model::Server, ssh};
+use crate::model::Server;
 use serde::Serialize;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 use tokio::sync::mpsc;
 use uuid::Uuid;
 pub(crate) mod display;
 pub(crate) mod shell;
+pub(crate) mod shell_channel;
 
 #[derive(Default)]
 pub(crate) struct Shell {
@@ -29,12 +29,16 @@ pub enum Input {
     Data(Vec<u8>),
     Resize(u32, u32),
 }
+/// A terminal's input and output, carried to the app by its lease. Dropping
+/// the output ends the shell.
+pub struct Io {
+    pub input: mpsc::Sender<Input>,
+    pub output: mpsc::Receiver<Event>,
+}
 struct Session {
     shell: Arc<shell::State>,
     server: Uuid,
     owner: Arc<crate::server_session::ServerSession>,
-    input: mpsc::Sender<Input>,
-    output: Arc<tokio::sync::Mutex<mpsc::Receiver<Event>>>,
     task: tokio::task::JoinHandle<()>,
 }
 #[derive(Clone, Default)]
@@ -104,7 +108,7 @@ impl Sessions {
         cols: u32,
         rows: u32,
         owner: Arc<crate::server_session::ServerSession>,
-    ) -> Result<(), String> {
+    ) -> Result<Io, String> {
         self.open_bound_with_display(id, server, cols, rows, owner, display::Display::None)
     }
     pub(crate) fn open_bound_with_display(
@@ -115,7 +119,7 @@ impl Sessions {
         rows: u32,
         owner: Arc<crate::server_session::ServerSession>,
         display: display::Display,
-    ) -> Result<(), String> {
+    ) -> Result<Io, String> {
         self.open_bound_with_handoff(id, server, (cols, rows), owner, display, None)
     }
     pub(crate) fn open_bound_with_handoff(
@@ -126,20 +130,20 @@ impl Sessions {
         owner: Arc<crate::server_session::ServerSession>,
         display: display::Display,
         handoff: Option<display::Source>,
-    ) -> Result<(), String> {
+    ) -> Result<Io, String> {
         size(cols, rows)?;
         let mut sessions = self.inner.entries.lock().unwrap();
         if sessions.contains_key(&id) {
             return Err("Terminal session already exists.".into());
         }
-        if sessions.len() >= newport_domain::terminal::MAX_TERMINALS {
+        // The limit is each server's, as the app's tabs are.
+        let open = sessions.values().filter(|s| s.server == server.id).count();
+        if open >= newport_domain::terminal::MAX_TERMINALS {
             return Err("Close an existing terminal before opening another.".into());
         }
         let (input, rx) = mpsc::channel(32);
         let (tx, output) = mpsc::channel(32);
         let server_id = server.id;
-        // Every tab owns a fresh transport and retry lifecycle. Opening a tab
-        // must not retry or replace the connection used by app services.
         let task_owner = owner.clone();
         let shell = owner.terminal_shells.register(id)?;
         shell.configure(handoff);
@@ -148,7 +152,7 @@ impl Sessions {
         let task_shell = shell.clone();
         let task = tokio::spawn(async move {
             let _lifetime = lifetime;
-            if let Err(error) = ssh::terminal_with_session(
+            if let Err(error) = shell_channel::run(
                 task_owner,
                 &server,
                 (cols, rows),
@@ -170,47 +174,10 @@ impl Sessions {
                 shell,
                 server: server_id,
                 owner,
-                input,
-                output: Arc::new(tokio::sync::Mutex::new(output)),
                 task,
             },
         );
-        Ok(())
-    }
-    pub async fn read(&self, id: Uuid) -> Result<Option<Event>, String> {
-        let output = self
-            .inner
-            .entries
-            .lock()
-            .unwrap()
-            .get(&id)
-            .map(|s| s.output.clone())
-            .ok_or("Terminal is closed.")?;
-        let mut output = output
-            .try_lock()
-            .map_err(|_| "Terminal already has a reader.")?;
-        match tokio::time::timeout(Duration::from_millis(500), output.recv()).await {
-            Ok(Some(event)) => Ok(Some(event)),
-            Ok(None) => Ok(Some(Event::Exit(None))),
-            Err(_) => Ok(None),
-        }
-    }
-    pub async fn send(&self, id: Uuid, input: Input) -> Result<(), String> {
-        let sender = self
-            .inner
-            .entries
-            .lock()
-            .unwrap()
-            .get(&id)
-            .map(|session| session.input.clone())
-            .ok_or("Terminal is closed.")?;
-        // Fast typing can outrun the SSH channel briefly. Apply backpressure
-        // instead of treating a full bounded queue as a failed connection.
-        // Never hold the session map lock while waiting: close must cancel us.
-        sender
-            .send(input)
-            .await
-            .map_err(|_| "Terminal is disconnected. Reconnect if needed.".into())
+        Ok(Io { input, output })
     }
     pub async fn close(&self, id: Uuid) {
         let session = self.inner.entries.lock().unwrap().remove(&id);
@@ -276,6 +243,9 @@ impl Drop for SessionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server_session::ServerSession;
+    use newport_ssh::Reach;
+    use std::time::Duration;
 
     fn test_owner(id: Uuid, revision: u64) -> Arc<crate::server_session::ServerSession> {
         let server: Server = serde_json::from_value(serde_json::json!({
@@ -284,24 +254,50 @@ mod tests {
         crate::server_session::Registry::default().session(&server, revision)
     }
 
-    fn queued_session(
-        input: mpsc::Sender<Input>,
+    fn insert(
+        sessions: &Sessions,
+        id: Uuid,
+        server: Uuid,
+        revision: u64,
         task: tokio::task::JoinHandle<()>,
-    ) -> (Sessions, Uuid) {
-        let sessions = Sessions::default();
-        let id = Uuid::new_v4();
-        let (_, output) = mpsc::channel(1);
+    ) {
         sessions.inner.entries.lock().unwrap().insert(
             id,
             Session {
                 shell: shell::State::new(id),
-                server: Uuid::nil(),
-                owner: test_owner(Uuid::nil(), 0),
-                input,
-                output: Arc::new(tokio::sync::Mutex::new(output)),
+                server,
+                owner: test_owner(server, revision),
                 task,
             },
         );
+    }
+
+    #[tokio::test]
+    async fn each_server_has_its_own_terminal_limit() {
+        let sessions = Sessions::default();
+        let full = Uuid::new_v4();
+        for _ in 0..newport_domain::terminal::MAX_TERMINALS {
+            let task = tokio::spawn(std::future::pending());
+            insert(&sessions, Uuid::new_v4(), full, 0, task);
+        }
+        let open = |server: Uuid| {
+            let owner = test_owner(server, 0);
+            let config = owner.server().clone();
+            sessions.open_bound(Uuid::new_v4(), config, 80, 24, owner)
+        };
+        // Another server's tabs don't count against this one.
+        assert!(open(Uuid::new_v4()).is_ok());
+        assert_eq!(
+            open(full).err().as_deref(),
+            Some("Close an existing terminal before opening another.")
+        );
+        sessions.close_server(None).await;
+    }
+
+    fn queued_session(task: tokio::task::JoinHandle<()>) -> (Sessions, Uuid) {
+        let sessions = Sessions::default();
+        let id = Uuid::new_v4();
+        insert(&sessions, id, Uuid::nil(), 0, task);
         (sessions, id)
     }
 
@@ -331,7 +327,7 @@ mod tests {
                     }
                 })
             };
-            sessions
+            let _io = sessions
                 .open_bound_with_handoff(
                     id,
                     server,
@@ -354,84 +350,53 @@ mod tests {
 
     #[tokio::test]
     async fn retired_owner_cleanup_preserves_replacement_tabs_already_open() {
-        let (input, _rx) = mpsc::channel(1);
-        let (sessions, old_id) = queued_session(input, tokio::spawn(std::future::pending()));
+        let (sessions, old_id) = queued_session(tokio::spawn(std::future::pending()));
         let owner = sessions.inner.entries.lock().unwrap()[&old_id]
             .owner
             .clone();
         let server = owner.server().id;
         let replacement_id = Uuid::new_v4();
-        let (input, mut received) = mpsc::channel(1);
-        let (_output, output) = mpsc::channel(1);
         let replacement = tokio::spawn(std::future::pending());
         let active = replacement.abort_handle();
-        sessions.inner.entries.lock().unwrap().insert(
-            replacement_id,
-            Session {
-                shell: shell::State::new(replacement_id),
-                server,
-                owner: test_owner(server, 1),
-                input,
-                output: Arc::new(tokio::sync::Mutex::new(output)),
-                task: replacement,
-            },
-        );
+        insert(&sessions, replacement_id, server, 1, replacement);
         let cleanup_handle = sessions.clone();
         drop(sessions);
         cleanup_handle.begin_close_owner(&owner).wait().await;
-        assert!(
-            !cleanup_handle
+        let entries = |id| {
+            cleanup_handle
                 .inner
                 .entries
                 .lock()
                 .unwrap()
-                .contains_key(&old_id)
-        );
+                .contains_key(&id)
+        };
+        assert!(!entries(old_id));
+        assert!(entries(replacement_id));
         assert!(!active.is_finished());
-        cleanup_handle
-            .send(replacement_id, Input::Data(vec![42]))
-            .await
-            .unwrap();
-        assert!(matches!(received.recv().await, Some(Input::Data(bytes)) if bytes == [42]));
         cleanup_handle.close_server(None).await;
         assert!(active.is_finished());
     }
 
     #[tokio::test]
     async fn captured_cleanup_does_not_close_a_replacement_terminal() {
-        let (input, _rx) = mpsc::channel(1);
         let old = tokio::spawn(std::future::pending());
-        let (sessions, id) = queued_session(input, old);
+        let (sessions, id) = queued_session(old);
         let server = sessions.inner.entries.lock().unwrap()[&id].server;
         let cleanup = sessions.begin_close_server(Some(server));
         assert!(!sessions.inner.entries.lock().unwrap().contains_key(&id));
 
-        let (input, mut received) = mpsc::channel(1);
-        let (_output, output) = mpsc::channel(1);
         let replacement = tokio::spawn(std::future::pending());
         let active = replacement.abort_handle();
-        sessions.inner.entries.lock().unwrap().insert(
-            id,
-            Session {
-                shell: shell::State::new(id),
-                server,
-                owner: test_owner(server, 1),
-                input,
-                output: Arc::new(tokio::sync::Mutex::new(output)),
-                task: replacement,
-            },
-        );
+        insert(&sessions, id, server, 1, replacement);
         cleanup.wait().await;
         assert!(!active.is_finished());
-        sessions.send(id, Input::Data(vec![42])).await.unwrap();
-        assert!(matches!(received.recv().await, Some(Input::Data(bytes)) if bytes == [42]));
+        assert!(sessions.inner.entries.lock().unwrap().contains_key(&id));
         sessions.close_server(None).await;
         assert!(active.is_finished());
     }
 
     #[tokio::test]
     async fn lease_cancellation_is_synchronous_and_shutdown_joins_the_task() {
-        let (input, _rx) = mpsc::channel(1);
         let (ready, started) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
             ready.send(()).unwrap();
@@ -439,77 +404,16 @@ mod tests {
         });
         let abort = task.abort_handle();
         started.await.unwrap();
-        let (sessions, id) = queued_session(input, task);
+        let (sessions, id) = queued_session(task);
         sessions.cancel(id);
-        assert!(
-            sessions
-                .read(id)
-                .await
-                .unwrap_err()
-                .contains("Terminal is closed")
-        );
+        assert!(matches!(
+            sessions.link_owner(id),
+            Err(error) if error.contains("Terminal is closed")
+        ));
         sessions.close_server(None).await;
         assert!(abort.is_finished());
         assert!(sessions.inner.cancelled.lock().unwrap().is_empty());
         sessions.cancel(id);
-    }
-
-    #[tokio::test]
-    async fn input_waits_for_capacity_without_holding_the_session_map() {
-        let (input, mut rx) = mpsc::channel(1);
-        let (sessions, id) = queued_session(input, tokio::spawn(std::future::pending()));
-        sessions
-            .send(id, Input::Data(b"first".to_vec()))
-            .await
-            .unwrap();
-        let waiting = sessions.send(id, Input::Resize(100, 40));
-        tokio::pin!(waiting);
-        tokio::select! {
-            biased;
-            result = &mut waiting => panic!("full input queue should wait, got {result:?}"),
-            _ = tokio::time::sleep(Duration::from_millis(10)) => {},
-        }
-        assert!(
-            sessions.inner.entries.try_lock().is_ok(),
-            "pending input held the session map"
-        );
-        assert!(matches!(rx.recv().await, Some(Input::Data(bytes)) if bytes == b"first"));
-        tokio::time::timeout(Duration::from_secs(1), waiting)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(matches!(rx.recv().await, Some(Input::Resize(100, 40))));
-        sessions.close(id).await;
-    }
-
-    #[tokio::test]
-    async fn closing_cancels_input_waiting_for_capacity() {
-        let (input, rx) = mpsc::channel(1);
-        let task = tokio::spawn(async move {
-            std::future::pending::<()>().await;
-            drop(rx);
-        });
-        let (sessions, id) = queued_session(input, task);
-        sessions
-            .send(id, Input::Data(b"first".to_vec()))
-            .await
-            .unwrap();
-        let waiting = sessions.send(id, Input::Data(b"second".to_vec()));
-        tokio::pin!(waiting);
-        tokio::select! {
-            biased;
-            result = &mut waiting => panic!("full input queue should wait, got {result:?}"),
-            _ = tokio::time::sleep(Duration::from_millis(10)) => {},
-        }
-        tokio::time::timeout(Duration::from_secs(1), sessions.close(id))
-            .await
-            .unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_secs(1), waiting)
-                .await
-                .unwrap()
-                .is_err()
-        );
     }
 
     fn fixture() -> Server {
@@ -530,10 +434,11 @@ mod tests {
             browser_enabled: false,
             agent_install_approved: true,
             setup_complete: true,
+            proxy: None,
         }
     }
     #[tokio::test]
-    async fn closing_terminal_cancels_handshake_and_releases_next_terminal_without_app_transport() {
+    async fn tabs_waiting_for_a_login_share_it_and_the_last_to_close_cancels_it() {
         use tokio::io::AsyncReadExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server: Server = serde_json::from_value(serde_json::json!({
@@ -544,62 +449,87 @@ mod tests {
         let registry = crate::server_session::Registry::default();
         let owner = registry.session(&server, 0);
         let sessions = Sessions::default();
-        let id = Uuid::new_v4();
-        sessions
-            .open_bound(id, server.clone(), 80, 24, owner.clone())
+        let first = Uuid::new_v4();
+        let _first = sessions
+            .open_bound(first, server.clone(), 80, 24, owner.clone())
             .unwrap();
         let (mut socket, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
             .await
             .unwrap()
             .unwrap();
-        let queued = Uuid::new_v4();
-        sessions
-            .open_bound(queued, server, 80, 24, owner.clone())
+        let second = Uuid::new_v4();
+        let _second = sessions
+            .open_bound(second, server, 80, 24, owner.clone())
             .unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            tokio::time::timeout(Duration::from_millis(200), listener.accept())
                 .await
-                .is_err()
+                .is_err(),
+            "the second tab must wait for the login in progress"
         );
-        sessions.close(id).await;
-        let mut bytes = Vec::new();
-        tokio::time::timeout(Duration::from_secs(3), socket.read_to_end(&mut bytes))
+        sessions.close(first).await;
+        // The client's banner arrives at once; only the end of the socket
+        // tells that the login stopped.
+        let mut received = Vec::new();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                socket.read_to_end(&mut received)
+            )
             .await
-            .unwrap()
-            .unwrap();
-        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+            .is_err(),
+            "the login must go on while a tab still waits for it"
+        );
+        sessions.close(second).await;
+        tokio::time::timeout(Duration::from_secs(3), socket.read_to_end(&mut received))
             .await
-            .unwrap()
+            .expect("the login must stop once no tab waits for it")
             .unwrap();
-        sessions.close(queued).await;
-        tokio::time::timeout(Duration::from_secs(3), socket.read_to_end(&mut bytes))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(owner.transport_snapshot().generation, 0);
-        assert_eq!(owner.transport_snapshot().demand, 0);
         registry.shutdown().await;
     }
 
-    async fn until(sessions: &Sessions, id: Uuid, needle: &str) -> String {
+    /// The next event; a closed output reads as an exit.
+    async fn next(io: &mut Io) -> Event {
+        io.output.recv().await.unwrap_or(Event::Exit(None))
+    }
+    async fn type_in(io: &Io, input: impl Into<Vec<u8>>) {
+        io.input.send(Input::Data(input.into())).await.unwrap();
+    }
+    async fn until(io: &mut Io, needle: &str) -> String {
         tokio::time::timeout(Duration::from_secs(8), async {
             let mut text = String::new();
             loop {
-                match sessions.read(id).await.unwrap() {
-                    Some(Event::Data(bytes)) => {
+                match next(io).await {
+                    Event::Data(bytes) => {
                         text.push_str(&String::from_utf8_lossy(&bytes));
                         if text.contains(needle) {
                             return text;
                         }
                     }
-                    Some(Event::Error(error)) => panic!("{error}"),
-                    Some(Event::Exit(code)) => panic!("Unexpected exit {code:?}: {text}"),
+                    Event::Error(error) => panic!("{error}"),
+                    Event::Exit(code) => panic!("Unexpected exit {code:?}: {text}"),
                     _ => {}
                 }
             }
         })
         .await
-        .unwrap()
+        .unwrap_or_else(|_| panic!("missing {needle:?}"))
+    }
+    async fn refused(io: &mut Io) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match next(io).await {
+                    Event::Error(error) => {
+                        assert!(error.contains("refused"));
+                        break;
+                    }
+                    Event::Reconnecting { .. } | Event::Ready => panic!("refused PTY retried"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
     }
     #[tokio::test]
     #[ignore = "Run with cargo xtask test ssh; runs a real Bash PTY in an isolated HOME"]
@@ -610,69 +540,35 @@ mod tests {
         let registry = crate::server_session::Registry::default();
         let owner = registry.session(&server, 0);
         let integration = owner.integration_session_id();
-        sessions
+        let mut io = sessions
             .open_bound(id, server.clone(), 80, 24, owner.clone())
             .unwrap();
-        until(&sessions, id, "early shell output").await;
-        until(&sessions, id, "fixture> ").await;
-        sessions
-            .send(
-                id,
-                Input::Data(b"export NEWPORT_VALUE=persistent\r".to_vec()),
-            )
-            .await
-            .unwrap();
-        until(&sessions, id, "fixture> ").await;
-        sessions
-            .send(
-                id,
-                Input::Data(b"printf 'value=%s\\n' \"$NEWPORT_VALUE\"\r".to_vec()),
-            )
-            .await
-            .unwrap();
-        until(&sessions, id, "value=persistent").await;
-        sessions
-            .send(
-                id,
-                Input::Data(b"printf 'session=%s\\n' \"$NEWPORT_SESSION\"\r".to_vec()),
-            )
-            .await
-            .unwrap();
-        until(&sessions, id, &format!("session={integration}")).await;
-        sessions
-            .send(
-                id,
-                Input::Data(b"printf 'terminal=%s\\n' \"$NEWPORT_TERMINAL\"\r".to_vec()),
-            )
-            .await
-            .unwrap();
-        until(&sessions, id, &format!("terminal={id}")).await;
-        sessions.send(id, Input::Resize(100, 40)).await.unwrap();
-        sessions
-            .send(id, Input::Data(b"stty size\r".to_vec()))
-            .await
-            .unwrap();
-        until(&sessions, id, "40 100").await;
-        sessions
-            .send(id, Input::Data(b"sleep 60\r".to_vec()))
-            .await
-            .unwrap();
+        until(&mut io, "early shell output").await;
+        until(&mut io, "fixture> ").await;
+        type_in(&io, b"export NEWPORT_VALUE=persistent\r").await;
+        until(&mut io, "fixture> ").await;
+        type_in(&io, b"printf 'value=%s\\n' \"$NEWPORT_VALUE\"\r").await;
+        until(&mut io, "value=persistent").await;
+        type_in(&io, b"printf 'session=%s\\n' \"$NEWPORT_SESSION\"\r").await;
+        until(&mut io, &format!("session={integration}")).await;
+        type_in(&io, b"printf 'terminal=%s\\n' \"$NEWPORT_TERMINAL\"\r").await;
+        until(&mut io, &format!("terminal={id}")).await;
+        io.input.send(Input::Resize(100, 40)).await.unwrap();
+        type_in(&io, b"stty size\r").await;
+        until(&mut io, "40 100").await;
+        type_in(&io, b"sleep 60\r").await;
         tokio::time::sleep(Duration::from_millis(150)).await;
-        sessions.send(id, Input::Data(vec![3])).await.unwrap();
-        until(&sessions, id, "^C").await;
-        sessions
-            .send(id, Input::Data(b"exit 7\r".to_vec()))
-            .await
-            .unwrap();
+        type_in(&io, [3]).await;
+        until(&mut io, "^C").await;
+        type_in(&io, b"exit 7\r").await;
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                match sessions.read(id).await.unwrap() {
-                    Some(Event::Exit(code)) => {
+                match next(&mut io).await {
+                    Event::Exit(code) => {
                         assert_eq!(code, Some(7));
                         break;
                     }
-                    Some(Event::Data(_)) => {}
-                    Some(Event::Error(error)) => panic!("{error}"),
+                    Event::Error(error) => panic!("{error}"),
                     _ => {}
                 }
             }
@@ -680,41 +576,28 @@ mod tests {
         .await
         .unwrap();
         sessions.close(id).await;
-        assert!(sessions.read(id).await.is_err());
+        assert!(sessions.link_owner(id).is_err());
         let rejected = Uuid::new_v4();
-        sessions
+        let mut io = sessions
             .open_bound(rejected, server.clone(), 13, 24, owner.clone())
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(Event::Error(error)) = sessions.read(rejected).await.unwrap() {
-                    assert!(error.contains("refused"));
-                    break;
-                }
-            }
-        })
-        .await
-        .unwrap();
+        refused(&mut io).await;
         sessions.close_server(Some(server.id)).await;
         assert!(sessions.inner.entries.lock().unwrap().is_empty());
         let cancelled = Uuid::new_v4();
-        sessions
+        let _io = sessions
             .open_bound(cancelled, server, 80, 24, owner)
             .unwrap();
         sessions.close(cancelled).await;
         assert!(sessions.inner.entries.lock().unwrap().is_empty());
     }
-    async fn fixture_connection(sessions: &Sessions, id: Uuid) -> Uuid {
-        sessions
-            .send(
-                id,
-                Input::Data(
-                    b"printf '\\nconnection=%s\\n' \"$NEWPORT_FIXTURE_CONNECTION\"\r".to_vec(),
-                ),
-            )
-            .await
-            .unwrap();
-        let output = until(sessions, id, "fixture> ").await;
+    async fn fixture_connection(io: &mut Io) -> Uuid {
+        type_in(
+            io,
+            b"printf '\\nconnection=%s\\n' \"$NEWPORT_FIXTURE_CONNECTION\"\r",
+        )
+        .await;
+        let output = until(io, "fixture> ").await;
         output
             .lines()
             .find_map(|line| {
@@ -725,15 +608,9 @@ mod tests {
             .unwrap_or_else(|| panic!("Missing fixture connection ID: {output}"))
     }
 
-    async fn fixture_shell_epoch(sessions: &Sessions, id: Uuid) -> Uuid {
-        sessions
-            .send(
-                id,
-                Input::Data(b"printf '\\nepoch=%s\\n' \"$NEWPORT_TERMINAL_EPOCH\"\r".to_vec()),
-            )
-            .await
-            .unwrap();
-        let output = until(sessions, id, "fixture> ").await;
+    async fn fixture_shell_epoch(io: &mut Io) -> Uuid {
+        type_in(io, b"printf '\\nepoch=%s\\n' \"$NEWPORT_TERMINAL_EPOCH\"\r").await;
+        let output = until(io, "fixture> ").await;
         output
             .lines()
             .find_map(|line| {
@@ -744,96 +621,196 @@ mod tests {
             .unwrap_or_else(|| panic!("Missing shell epoch: {output}"))
     }
 
-    #[tokio::test]
-    #[ignore = "Run with cargo xtask test ssh -- terminal::tests"]
-    async fn twelve_terminals_keep_independent_connections_while_app_session_slots_are_full() {
-        let sessions = Sessions::default();
-        let server = fixture();
-        let registry = crate::server_session::Registry::default();
-        let owner = registry.session(&server, 0);
-        let lease = owner.acquire(&server).await.unwrap();
-        let state = registry.connections.subscribe();
-        let revision = state.borrow().revision;
-        let mut workers = Vec::new();
-        // Eight workers, Needle control, and SFTP occupy all ten app slots.
-        for _ in 0..8 {
-            workers.push(lease.launch(crate::agent::Service::Git).await.unwrap().0);
-        }
-        let sftp = lease.sftp().await.unwrap();
-        sftp.realpath(".").await.unwrap();
-        let permissions = serde_json::to_value(owner.permissions.snapshot()).unwrap();
-        let ids: Vec<_> = (0..12).map(|_| Uuid::new_v4()).collect();
-        for id in &ids {
-            sessions
-                .open_bound(*id, server.clone(), 80, 24, owner.clone())
-                .unwrap();
-        }
-        let mut connections = std::collections::HashSet::new();
-        let mut first = Uuid::nil();
-        for id in &ids {
-            until(&sessions, *id, "fixture> ").await;
-            let connection = fixture_connection(&sessions, *id).await;
-            assert!(
-                connections.insert(connection),
-                "two terminals shared an SSH connection"
-            );
-            if *id == ids[0] {
-                first = connection;
-            }
-        }
-        assert_eq!(owner.transport_snapshot().demand, 1);
-        // Make room for a control command on the still-healthy app connection.
-        drop(workers.pop());
-        lease
-            .execute(&format!("drop-connection {first}"), None)
-            .await
-            .unwrap();
-        until(&sessions, ids[0], "fixture> ").await;
-        assert!(!connections.contains(&fixture_connection(&sessions, ids[0]).await));
-        for id in &ids[1..] {
-            assert!(connections.remove(&fixture_connection(&sessions, *id).await));
-        }
-        // A refused PTY is terminal-local and must not cause a reconnect loop.
-        let refused = Uuid::new_v4();
+    fn open(sessions: &Sessions, server: &Server, owner: &Arc<ServerSession>) -> Io {
         sessions
-            .open_bound(refused, server, 13, 24, owner.clone())
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
+            .open_bound(Uuid::new_v4(), server.clone(), 80, 24, owner.clone())
+            .unwrap()
+    }
+
+    /// Waits for the tab's next shell after its connection was lost.
+    async fn reconnects(io: &mut Io) {
+        tokio::time::timeout(Duration::from_secs(8), async {
             loop {
-                match sessions.read(refused).await.unwrap() {
-                    Some(Event::Error(error)) => {
-                        assert!(error.contains("refused"));
+                match next(io).await {
+                    Event::Reconnecting { attempt, .. } => {
+                        assert!(attempt >= 1);
                         break;
                     }
-                    Some(Event::Reconnecting { .. } | Event::Ready) => {
-                        panic!("refused PTY retried")
-                    }
+                    Event::Error(error) => panic!("{error}"),
+                    Event::Exit(code) => panic!("Unexpected exit {code:?}"),
                     _ => {}
                 }
             }
         })
         .await
         .unwrap();
-        sessions.close(refused).await;
-        sftp.realpath(".").await.unwrap();
-        assert_eq!(lease.execute("printf ok", None).await.unwrap(), "ok");
-        assert_eq!(owner.transport_snapshot().generation, 1);
-        assert_eq!(state.borrow().revision, revision);
+        until(io, "fixture> ").await;
+    }
+
+    #[tokio::test]
+    #[ignore = "Run with cargo xtask test ssh -- terminal::tests"]
+    async fn two_tabs_on_one_server_share_one_login() {
+        let sessions = Sessions::default();
+        let server = fixture();
+        let registry = crate::server_session::Registry::default();
+        let owner = registry.session(&server, 0);
+        let mut a = open(&sessions, &server, &owner);
+        let mut b = open(&sessions, &server, &owner);
+        until(&mut a, "fixture> ").await;
+        until(&mut b, "fixture> ").await;
+        let connection = fixture_connection(&mut a).await;
+        assert_eq!(fixture_connection(&mut b).await, connection);
         assert_eq!(
-            serde_json::to_value(owner.permissions.snapshot()).unwrap(),
-            permissions
+            crate::remote::command::stdout(owner.link(), "fixture-connection-id", None)
+                .await
+                .unwrap(),
+            connection.to_string()
         );
+        assert_eq!(
+            owner.link().status().borrow().reach,
+            Reach::Ready { connections: 1 }
+        );
+        // A refused PTY ends only its own tab, and nothing reconnects.
+        let refused_id = Uuid::new_v4();
+        let mut io = sessions
+            .open_bound(refused_id, server, 13, 24, owner.clone())
+            .unwrap();
+        refused(&mut io).await;
+        sessions.close(refused_id).await;
+        assert_eq!(fixture_connection(&mut a).await, connection);
         sessions.close_server(None).await;
-        assert_eq!(lease.execute("printf ok", None).await.unwrap(), "ok");
-        drop(sftp);
-        drop(workers);
-        drop(lease);
         registry.shutdown().await;
     }
 
     #[tokio::test]
     #[ignore = "Run with cargo xtask test ssh -- terminal::tests"]
-    async fn terminals_use_dedicated_transports_without_needle_and_close_only_their_shell() {
+    async fn a_link_that_stopped_trying_ends_the_tab_with_its_error() {
+        // A refused login waits for Retry; a server without sessions can't
+        // run a shell at all. Neither tab waits or reconnects.
+        for (user, error) in [
+            ("nobody", newport_ssh::Error::AuthRefused),
+            ("fixture-no-sessions", newport_ssh::Error::SessionsDisabled),
+        ] {
+            let sessions = Sessions::default();
+            let mut server = fixture();
+            server.ssh_user = user.into();
+            let registry = crate::server_session::Registry::default();
+            let owner = registry.session(&server, 0);
+            let mut io = open(&sessions, &server, &owner);
+            match tokio::time::timeout(Duration::from_secs(8), next(&mut io))
+                .await
+                .unwrap()
+            {
+                Event::Error(message) => assert_eq!(message, error.to_string()),
+                event => panic!("Unexpected {event:?}"),
+            }
+            sessions.close_server(None).await;
+            registry.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "Run with cargo xtask test ssh -- terminal::tests"]
+    async fn a_tab_opened_on_a_link_that_stopped_trying_logs_in_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let identity = directory.path().join("identity");
+        let sessions = Sessions::default();
+        let mut server = fixture();
+        server.identity_file = Some(identity.to_string_lossy().into_owned());
+        let registry = crate::server_session::Registry::default();
+        let owner = registry.session(&server, 0);
+        // A key file that isn't there stops the link until Retry.
+        let mut stopped = open(&sessions, &server, &owner);
+        match tokio::time::timeout(Duration::from_secs(8), next(&mut stopped))
+            .await
+            .unwrap()
+        {
+            Event::Error(message) => assert!(message.contains("Cannot read identity"), "{message}"),
+            event => panic!("Unexpected {event:?}"),
+        }
+        assert!(matches!(
+            owner.link().status().borrow().reach,
+            Reach::Failed(_)
+        ));
+        std::fs::copy(std::env::var("NEWPORT_TEST_IDENTITY").unwrap(), &identity).unwrap();
+        let mut io = open(&sessions, &server, &owner);
+        until(&mut io, "fixture> ").await;
+        sessions.close_server(None).await;
+        registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "Run with cargo xtask test ssh -- terminal::tests"]
+    async fn a_lost_connection_reconnects_every_tab_on_one_new_login() {
+        let sessions = Sessions::default();
+        let server = fixture();
+        let registry = crate::server_session::Registry::default();
+        let owner = registry.session(&server, 0);
+        let mut a = open(&sessions, &server, &owner);
+        let mut b = open(&sessions, &server, &owner);
+        until(&mut a, "fixture> ").await;
+        until(&mut b, "fixture> ").await;
+        let lost = fixture_connection(&mut a).await;
+        assert_eq!(fixture_connection(&mut b).await, lost);
+        // The command runs on the connection it drops, so its own result is lost.
+        let _ = crate::remote::command::run(owner.link(), &format!("drop-connection {lost}"), None)
+            .await;
+        reconnects(&mut a).await;
+        reconnects(&mut b).await;
+        let replacement = fixture_connection(&mut a).await;
+        assert_ne!(replacement, lost);
+        assert_eq!(fixture_connection(&mut b).await, replacement);
+        assert_eq!(
+            owner.link().status().borrow().reach,
+            Reach::Ready { connections: 1 }
+        );
+        sessions.close_server(None).await;
+        registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "Run with cargo xtask test ssh -- terminal::tests"]
+    async fn heavy_output_in_one_tab_does_not_delay_echo_in_another() {
+        let sessions = Sessions::default();
+        let server = fixture();
+        let registry = crate::server_session::Registry::default();
+        let owner = registry.session(&server, 0);
+        let flooding = Uuid::new_v4();
+        let mut flood = sessions
+            .open_bound(flooding, server.clone(), 80, 24, owner.clone())
+            .unwrap();
+        let mut quiet = open(&sessions, &server, &owner);
+        until(&mut flood, "fixture> ").await;
+        until(&mut quiet, "fixture> ").await;
+        let connection = fixture_connection(&mut flood).await;
+        assert_eq!(fixture_connection(&mut quiet).await, connection);
+        type_in(&flood, b"yes newport-flood\r").await;
+        until(&mut flood, "newport-flood\r\nnewport-flood\r\n").await;
+        // From here the flooding tab is never read: its shell fills its
+        // channel's window and waits.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let mut slowest = Duration::ZERO;
+        for index in 0..20 {
+            let started = std::time::Instant::now();
+            type_in(&quiet, format!("echo-{index}-")).await;
+            until(&mut quiet, &format!("echo-{index}-")).await;
+            slowest = slowest.max(started.elapsed());
+            type_in(&quiet, [3]).await;
+            until(&mut quiet, "fixture> ").await;
+        }
+        assert!(
+            slowest < Duration::from_secs(1),
+            "keystroke echo took {slowest:?} beside a flooding tab"
+        );
+        sessions.close(flooding).await;
+        assert_eq!(fixture_connection(&mut quiet).await, connection);
+        sessions.close_server(None).await;
+        registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "Run with cargo xtask test ssh -- terminal::tests"]
+    async fn terminals_need_no_needle_and_closing_one_ends_only_its_shell() {
         let sessions = Sessions::default();
         let mut server = fixture();
         server.agent_install_approved = false;
@@ -842,43 +819,37 @@ mod tests {
         let owner = registry.session(&server, 0);
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
-        sessions
+        let mut io_a = sessions
             .open_bound(a, server.clone(), 80, 24, owner.clone())
             .unwrap();
-        sessions
+        let mut io_b = sessions
             .open_bound(b, server.clone(), 80, 24, owner.clone())
             .unwrap();
-        until(&sessions, a, "fixture> ").await;
-        until(&sessions, b, "fixture> ").await;
-        assert_eq!(owner.transport_snapshot().generation, 0);
-        assert_eq!(owner.transport_snapshot().demand, 0);
-        let lease = owner.acquire(&server).await.unwrap();
-        assert_eq!(owner.transport_snapshot().generation, 1);
+        until(&mut io_a, "fixture> ").await;
+        until(&mut io_b, "fixture> ").await;
         assert!(owner.agent_runtime.snapshot().hello.is_none());
         let pid_file = format!("terminal-{a}.pid");
-        sessions
-            .send(
-                a,
-                Input::Data(format!("echo $$ > \"$HOME/{pid_file}\"\r").into_bytes()),
-            )
-            .await
-            .unwrap();
-        until(&sessions, a, "fixture> ").await;
+        type_in(&io_a, format!("echo $$ > \"$HOME/{pid_file}\"\r")).await;
+        until(&mut io_a, "fixture> ").await;
         sessions.close(a).await;
-        // The surviving shell observes that the closed tab's shell was reaped,
-        // while its own channel and an ordinary exec lease remain usable.
-        sessions.send(b, Input::Data(format!(
+        // The surviving shell sees that the closed tab's shell was reaped,
+        // while its own channel and an ordinary command still work.
+        type_in(&io_b, format!(
             "for i in {{1..100}}; do kill -0 \"$(cat \"$HOME/{pid_file}\")\" 2>/dev/null || {{ printf 'channel-%s\\n' released; break; }}; sleep 0.03; done; rm -f \"$HOME/{pid_file}\"\r"
-        ).into_bytes())).await.unwrap();
-        until(&sessions, b, "channel-released").await;
-        assert_eq!(lease.execute("printf ok", None).await.unwrap(), "ok");
-        assert_eq!(owner.transport_snapshot().generation, 1);
-        // Changing the profile revokes an active terminal without moving it to
-        // the new connection or leaking its demand.
+        )).await;
+        until(&mut io_b, "channel-released").await;
+        assert_eq!(
+            crate::remote::command::stdout(owner.link(), "printf ok", None)
+                .await
+                .unwrap(),
+            "ok"
+        );
+        // Changing the profile ends an active terminal without moving it to
+        // the new session.
         registry.invalidate(server.id);
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let Some(Event::Error(error)) = sessions.read(b).await.unwrap() {
+                if let Event::Error(error) = next(&mut io_b).await {
                     assert!(error.contains("Server session changed"));
                     break;
                 }
@@ -887,11 +858,9 @@ mod tests {
         .await
         .unwrap();
         sessions.close(b).await;
-        assert_eq!(owner.transport_snapshot().demand, 1); // retained exec lease
-        drop(lease);
-        assert_eq!(owner.transport_snapshot().demand, 0);
         registry.shutdown().await;
     }
+
     #[tokio::test]
     #[ignore = "Run with cargo xtask test ssh; runs a real Bash PTY in an isolated HOME"]
     async fn interrupted_terminal_reconnects_with_a_fresh_shell() {
@@ -900,23 +869,23 @@ mod tests {
         let id = Uuid::new_v4();
         let registry = crate::server_session::Registry::default();
         let owner = registry.session(&server, 0);
-        sessions
+        let mut io = sessions
             .open_bound(id, server.clone(), 80, 24, owner.clone())
             .unwrap();
-        until(&sessions, id, "fixture> ").await;
-        let epoch = fixture_shell_epoch(&sessions, id).await;
+        until(&mut io, "fixture> ").await;
+        let epoch = fixture_shell_epoch(&mut io).await;
         let mut approval = owner.terminal_shells.capture(id, Some(epoch)).unwrap();
-        // The fixture drops every SSH connection, including this PTY's transport.
-        let _ = ssh::execute(&server, "drop", None).await;
+        // The fixture drops every SSH connection, including this shell's.
+        let _ = crate::remote::command::run(owner.link(), "drop", None).await;
         tokio::time::timeout(Duration::from_secs(8), async {
             loop {
-                match sessions.read(id).await.unwrap() {
-                    Some(Event::Reconnecting { attempt, .. }) => {
+                match next(&mut io).await {
+                    Event::Reconnecting { attempt, .. } => {
                         assert!(attempt >= 1);
                         break;
                     }
-                    Some(Event::Error(error)) => panic!("{error}"),
-                    Some(Event::Exit(code)) => panic!("Unexpected exit {code:?}"),
+                    Event::Error(error) => panic!("{error}"),
+                    Event::Exit(code) => panic!("Unexpected exit {code:?}"),
                     _ => {}
                 }
             }
@@ -929,16 +898,10 @@ mod tests {
         assert!(approval.validate().is_err());
         // A fresh shell starts without user action.
         let replay_file = format!("terminal-replay-{id}");
-        sessions
-            .send(
-                id,
-                Input::Data(format!("touch \"$HOME/{replay_file}\"\r").into_bytes()),
-            )
-            .await
-            .unwrap();
-        sessions.send(id, Input::Resize(110, 42)).await.unwrap();
-        until(&sessions, id, "fixture> ").await;
-        let replacement_epoch = fixture_shell_epoch(&sessions, id).await;
+        type_in(&io, format!("touch \"$HOME/{replay_file}\"\r")).await;
+        io.input.send(Input::Resize(110, 42)).await.unwrap();
+        until(&mut io, "fixture> ").await;
+        let replacement_epoch = fixture_shell_epoch(&mut io).await;
         assert_ne!(epoch, replacement_epoch);
         let current = owner
             .terminal_shells
@@ -946,18 +909,20 @@ mod tests {
             .unwrap();
         current.validate().unwrap();
         assert!(approval.validate().is_err());
-        sessions.send(id, Input::Data(format!("stty size; test ! -e \"$HOME/{replay_file}\" && printf 'replay-%s\\n' absent\r").into_bytes())).await.unwrap();
-        let recovered = until(&sessions, id, "replay-absent").await;
+        type_in(
+            &io,
+            format!(
+                "stty size; test ! -e \"$HOME/{replay_file}\" && printf 'replay-%s\\n' absent\r"
+            ),
+        )
+        .await;
+        let recovered = until(&mut io, "replay-absent").await;
         assert!(
             recovered.contains("42 110"),
             "resize lost during recovery: {recovered}"
         );
-        sessions
-            .send(id, Input::Data(b"printf 'new-shell\\n'\r".to_vec()))
-            .await
-            .unwrap();
-        until(&sessions, id, "new-shell").await;
-        assert_eq!(owner.transport_snapshot().generation, 0);
+        type_in(&io, b"printf 'new-shell\\n'\r").await;
+        until(&mut io, "new-shell").await;
         sessions.close(id).await;
         assert!(current.validate().is_err());
         registry.shutdown().await;

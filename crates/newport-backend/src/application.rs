@@ -244,7 +244,21 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
         }
     }
 
-    async fn open_terminal(&self, request: rpc::TerminalOpen) -> Result<Box<dyn Send>, String> {
+    fn link_status(
+        &self,
+        server: uuid::Uuid,
+    ) -> Option<tokio::sync::watch::Receiver<newport_ssh::Status>> {
+        self.state
+            .manager
+            .owner(server)
+            .ok()
+            .map(|owner| owner.status())
+    }
+
+    async fn open_terminal(
+        &self,
+        request: rpc::TerminalOpen,
+    ) -> Result<rpc::TerminalChannel, String> {
         let owner = self.state.manager.owner(request.id)?;
         let server = owner.server().clone();
         // Every terminal may use the server's shared display, and none waits
@@ -269,7 +283,7 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
                 terminal::display::handoff_source(account, preferences, desktop)
             })
         });
-        self.state.terminals.open_bound_with_handoff(
+        let io = self.state.terminals.open_bound_with_handoff(
             request.session,
             server,
             (request.cols, request.rows),
@@ -277,10 +291,13 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
             display,
             handoff,
         )?;
-        Ok(Box::new(TerminalLease {
-            state: self.state.clone(),
-            session: request.session,
-        }))
+        Ok(rpc::TerminalChannel {
+            io,
+            guard: Box::new(TerminalLease {
+                state: self.state.clone(),
+                session: request.session,
+            }),
+        })
     }
     async fn open_remote_stream(
         &self,
@@ -288,12 +305,15 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
         command: String,
     ) -> Result<rpc::RemoteChannel, String> {
         let owner = self.state.manager.owner(server)?;
-        let config = owner.server().clone();
-        let lease = owner.acquire(&config).await?;
-        let channel = lease.exec_channel(&command).await?;
+        if owner.is_revoked() {
+            return Err(crate::server_session::STALE.into());
+        }
+        // The channel lasts as long as the server's link, which its session
+        // closes when it is retired.
+        let channel = crate::remote::command::stream(owner.link(), &command).await?;
         Ok(rpc::RemoteChannel {
             channel: channel.into(),
-            guard: Box::new(lease),
+            guard: Box::new(()),
         })
     }
     async fn open_remote_apps(
@@ -302,14 +322,13 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
         arguments: Vec<String>,
     ) -> Result<rpc::RemoteChannel, String> {
         let owner = self.state.manager.owner(server)?;
-        let config = owner.server().clone();
-        let lease = owner.acquire(&config).await?;
-        let (channel, worker) = lease
+        let needle = owner.needle(owner.server())?;
+        let (channel, worker) = needle
             .launch_channel(crate::agent::Service::RemoteApps { arguments })
             .await?;
         Ok(rpc::RemoteChannel {
             channel,
-            guard: Box::new((worker, lease)),
+            guard: Box::new((worker, needle)),
         })
     }
     async fn open_lsp(&self, request: rpc::LspOpen) -> Result<rpc::LspChannel, String> {
@@ -326,8 +345,8 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
         {
             return Err("The server connection changed. Reopen the project.".into());
         }
-        let lease = owner.acquire(&profile).await?;
-        let (stream, _) = lease
+        let needle = owner.needle(&profile)?;
+        let (stream, _) = needle
             .launch(crate::agent::Service::Lsp {
                 root: request.root,
                 server: request.server,
@@ -336,7 +355,7 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
             .await?;
         Ok(rpc::LspChannel {
             stream: Box::new(stream),
-            guard: Box::new(lease),
+            guard: Box::new(needle),
         })
     }
 }

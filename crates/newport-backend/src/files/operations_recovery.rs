@@ -5,14 +5,20 @@ use super::super::{
     download_cleanup::DownloadCleanup,
     recovery_storage::{Owners, scope_server},
 };
-use super::{Operations, Registry};
+use super::{super::Remote, Operations, Registry};
 use anyhow::{Context, Result};
 use std::{
     path::Path,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use tokio::sync::oneshot;
 use uuid::Uuid;
+
+/// How long cleanup may wait for the server's shared SFTP session.
+const CLEANUP_SESSION: Duration = Duration::from_secs(10);
+/// How long removing one staging file may take.
+const CLEANUP_REMOVE: Duration = Duration::from_secs(3);
 
 pub(in crate::files) struct Upload {
     id: Uuid,
@@ -155,29 +161,32 @@ impl Operations {
         .context("Download recovery worker stopped")??
     }
 
-    pub(in crate::files) fn cleanup_upload(
-        &self,
-        sftp: Arc<crate::ssh::sftp::Sftp>,
-        record: Upload,
-        created: bool,
-    ) {
+    pub(in crate::files) fn cleanup_upload(&self, remote: Remote, record: Upload, created: bool) {
         // An interrupted OPEN may still create the file. Leave that entry
-        // excluded until restart, when the old transport is known to be closed.
+        // excluded until restart, when the old channel is known to be closed.
         if created {
-            self.schedule_upload_cleanup(sftp, Some(record));
+            self.schedule_upload_cleanup(remote, Some(record));
         }
     }
 
-    pub fn retry_upload_cleanup(&self, sftp: Arc<crate::ssh::sftp::Sftp>) {
-        self.schedule_upload_cleanup(sftp, None);
+    /// Removes this server's staging files left by uploads that didn't
+    /// finish.
+    pub fn retry_upload_cleanup(&self, remote: Remote) {
+        self.schedule_upload_cleanup(remote, None);
     }
 
-    fn schedule_upload_cleanup(&self, sftp: Arc<crate::ssh::sftp::Sftp>, release: Option<Upload>) {
+    fn schedule_upload_cleanup(&self, remote: Remote, release: Option<Upload>) {
         let operations = self.clone();
         self.cleanup(async move {
             let owners = operations.uploads.clone();
-            let server = sftp.server_id();
-            let scope = sftp.cleanup_scope().clone();
+            let server = remote.server_id();
+            let scope = match remote.cleanup_scope() {
+                Ok(scope) => scope,
+                Err(error) => {
+                    log::warn!("Could not scope this server's upload recovery: {error:#}");
+                    return;
+                }
+            };
             let pending = operations
                 .start_blocking(move || {
                     let journal = match &release {
@@ -204,23 +213,39 @@ impl Operations {
                     return;
                 }
             };
+            if pending.is_empty() {
+                return;
+            }
+            let session = match tokio::time::timeout(CLEANUP_SESSION, remote.sftp.shared()).await {
+                Ok(Ok(session)) => Arc::new(session),
+                _ => {
+                    log::warn!("SFTP staging cleanup deferred until the next file connection");
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let mut uploads = journal.lock().unwrap();
+                        for (id, _) in pending {
+                            uploads.finish(id, false);
+                        }
+                    })
+                    .await;
+                    return;
+                }
+            };
             for (id, path) in pending {
                 let uploads = journal.clone();
-                let sftp = sftp.clone();
+                let session = session.clone();
+                // The session's channel lives only as long as its link.
+                let remote = remote.clone();
                 operations.cleanup(async move {
-                    let removed = match tokio::time::timeout(
-                        std::time::Duration::from_secs(3),
-                        sftp.session.remove(&path),
-                    )
-                    .await
-                    {
-                        Ok(Ok(_)) => true,
-                        Ok(Err(error)) => super::super::status(
-                            &error,
-                            russh_sftp::protocol::StatusCode::NoSuchFile,
-                        ),
-                        Err(_) => false,
-                    };
+                    let _link = remote;
+                    let removed =
+                        match tokio::time::timeout(CLEANUP_REMOVE, session.remove(&path)).await {
+                            Ok(Ok(_)) => true,
+                            Ok(Err(error)) => super::super::status(
+                                &error,
+                                russh_sftp::protocol::StatusCode::NoSuchFile,
+                            ),
+                            Err(_) => false,
+                        };
                     let _ = tokio::task::spawn_blocking(move || {
                         uploads.lock().unwrap().finish(id, removed)
                     })

@@ -32,6 +32,7 @@ enum Input {
 
 pub struct Stream {
     uses_session_slot: bool,
+    fate: Option<newport_ssh::Fate>,
     input: mpsc::Sender<Input>,
     output: mpsc::Receiver<Vec<u8>>,
     pending: io::Cursor<Vec<u8>>,
@@ -46,6 +47,7 @@ pub struct Stream {
 impl Stream {
     pub(super) fn new(channel: Channel) -> Self {
         let uses_session_slot = !channel.reader.framed;
+        let fate = channel.fate.clone();
         let (input, pending) = mpsc::channel(8);
         let (output, received) = mpsc::channel(32);
         let (cancel, cancelled) = oneshot::channel();
@@ -56,6 +58,7 @@ impl Stream {
         tokio::spawn(relay(channel, pending, output, cancelled, completion));
         Self {
             uses_session_slot,
+            fate,
             input,
             output: received,
             pending: io::Cursor::new(Vec::new()),
@@ -70,6 +73,10 @@ impl Stream {
     }
     pub(crate) fn uses_session_slot(&self) -> bool {
         self.uses_session_slot
+    }
+    /// The fate of the link connection under the stream.
+    pub(crate) fn fate(&self) -> Option<&newport_ssh::Fate> {
+        self.fate.as_ref()
     }
     fn barrier(&self, eof: bool) -> Barrier {
         let input = self.input.clone();

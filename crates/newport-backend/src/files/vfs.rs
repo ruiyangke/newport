@@ -3,7 +3,7 @@
 //! exclusively to editor buffers; cached revisions never authorize writes.
 //! Native notifications are hints; atomic saves still verify the content hash.
 use super::{Listing, Operations};
-use crate::{manager::Shared, query::Registry, server_session::ServerSession, ssh::sftp::Sftp};
+use crate::{manager::Shared, query::Registry, remote::sftp, server_session::ServerSession};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -16,6 +16,7 @@ use uuid::Uuid;
 pub(crate) struct Vfs {
     pub documents: super::vfs_documents::Documents,
     pub listings: Registry<String, Arc<Listing>>,
+    remote: std::sync::OnceLock<super::Remote>,
     fallback: tokio::sync::Mutex<Fallback>,
 }
 struct Snapshot {
@@ -27,7 +28,9 @@ struct Snapshot {
 }
 #[derive(Default)]
 struct Fallback {
-    sftp: Option<Arc<Sftp>>,
+    /// Held while metadata watches exist, so the shared session stays open
+    /// between polls.
+    session: Option<sftp::Shared>,
     snapshots: HashMap<Uuid, Snapshot>,
     native_retry: Option<Instant>,
 }
@@ -36,6 +39,7 @@ impl Default for Vfs {
         Self {
             listings: Registry::new(64),
             documents: Default::default(),
+            remote: Default::default(),
             fallback: Default::default(),
         }
     }
@@ -78,6 +82,13 @@ fn validate(request: &Request) -> Result<(), String> {
     Ok(())
 }
 impl Vfs {
+    /// The server's SFTP, made on first use from the server's link.
+    pub(crate) fn remote(&self, owner: &ServerSession) -> super::Remote {
+        self.remote
+            .get_or_init(|| super::Remote::new(owner.server().clone(), owner.link().clone()))
+            .clone()
+    }
+
     async fn poll(&self, owner: &Arc<ServerSession>, request: &Request) -> Result<Value, String> {
         let native = self
             .fallback
@@ -120,23 +131,22 @@ impl Vfs {
         if request.directories.is_empty() {
             state.snapshots.remove(&request.watch);
             if state.snapshots.is_empty() {
-                state.sftp = None;
+                state.session = None;
             }
             return Ok(json!({"mode":"poll","cursor":null,"paths":[],"reset":false}));
         }
         if state.snapshots.len() >= 8 && !state.snapshots.contains_key(&request.watch) {
             return Err("Too many project watches.".into());
         }
-        if state.sftp.as_ref().is_some_and(|s| s.is_stale()) {
-            state.sftp = None;
+        // After a lost channel, watches start over so clients reload what they show.
+        if state.session.as_ref().is_some_and(|s| s.is_closed()) {
+            state.session = None;
             state.snapshots.clear();
         }
-        if state.sftp.is_none() {
-            state.sftp = Some(Arc::new(
-                Sftp::shared(owner).await.map_err(|e| e.to_string())?,
-            ));
+        if state.session.is_none() {
+            let session = self.remote(owner).sftp.shared().await;
+            state.session = Some(session.map_err(|e| e.to_string())?);
         }
-        let sftp = state.sftp.as_ref().unwrap().clone();
         if state.snapshots.is_empty() {
             let weak = Arc::downgrade(owner);
             tokio::spawn(async move {
@@ -150,15 +160,16 @@ impl Vfs {
                         !owner.is_revoked() && s.touched.elapsed() < Duration::from_secs(60)
                     });
                     if state.snapshots.is_empty() {
-                        state.sftp = None;
+                        state.session = None;
                         break;
                     }
                 }
             });
         }
         // Metadata only: no large-document content is transferred on a quiet poll.
+        let session = state.session.as_deref().expect("opened above");
         let result = async {
-            let root = match super::canonical(&sftp, &request.root).await {
+            let root = match super::canonical(session, &request.root).await {
                 Ok(root) => root,
                 Err(error) if missing(&error) => {
                     return Ok(BTreeMap::from([(request.root.clone(), Value::Null)]));
@@ -168,7 +179,7 @@ impl Vfs {
             anyhow::ensure!(root == request.root, "Project root changed.");
             let mut entries = BTreeMap::new();
             for directory in &request.directories {
-                let listing = match super::list(&sftp, directory).await {
+                let listing = match super::list(session, directory).await {
                     Ok(listing) => listing,
                     Err(e) => {
                         if missing(&e) {
@@ -193,7 +204,7 @@ impl Vfs {
         let entries = match result {
             Ok(entries) => entries,
             Err(e) => {
-                state.sftp = None;
+                state.session = None;
                 return Err(e.to_string());
             }
         };
@@ -259,14 +270,13 @@ pub(crate) async fn dispatch(
     request: Request,
 ) -> Result<Value, String> {
     validate(&request)?;
-    let owner = crate::server_session::resolve(state, request.id).await?;
     operations
         .run_with_connection(
             state,
             request.id,
             request.operation,
             Some(&Value::Array(request.expected_connection.clone())),
-            async |_| {
+            async |_, owner| {
                 tokio::time::timeout(Duration::from_secs(30), owner.files.poll(&owner, &request))
                     .await
                     .map_err(|_| anyhow::anyhow!("File watch timed out."))?
@@ -345,11 +355,10 @@ mod tests {
         assert_eq!(quiet["reset"], false);
         assert_eq!(quiet["paths"], json!([]));
         request.cursor = quiet["cursor"].as_str().map(str::to_owned);
-        let sftp = owner.files.fallback.lock().await.sftp.clone().unwrap();
+        let sftp = owner.files.remote(&owner).sftp.shared().await.unwrap();
         let path = format!("/vfs-{}.txt", Uuid::new_v4());
         use russh_sftp::protocol::{FileAttributes, OpenFlags};
         let file = sftp
-            .session
             .open(
                 &path,
                 OpenFlags::CREATE | OpenFlags::WRITE,
@@ -357,26 +366,93 @@ mod tests {
             )
             .await
             .unwrap();
-        sftp.session
-            .write(&file.handle, 0, b"hello".to_vec())
+        sftp.write(&file.handle, 0, b"hello".to_vec())
             .await
             .unwrap();
-        sftp.session.close(file.handle).await.unwrap();
+        sftp.close(file.handle).await.unwrap();
         let created = owner.files.poll(&owner, &request).await.unwrap();
         assert!(created["paths"].as_array().unwrap().contains(&json!(path)));
         request.cursor = created["cursor"].as_str().map(str::to_owned);
-        sftp.session.remove(&path).await.unwrap();
+        sftp.remove(&path).await.unwrap();
         let deleted = owner.files.poll(&owner, &request).await.unwrap();
         assert!(deleted["paths"].as_array().unwrap().contains(&json!(path)));
-        assert!(Arc::ptr_eq(
-            &sftp,
-            owner.files.fallback.lock().await.sftp.as_ref().unwrap()
-        ));
+        assert!(
+            owner
+                .files
+                .fallback
+                .lock()
+                .await
+                .session
+                .as_ref()
+                .unwrap()
+                .downgrade()
+                .ptr_eq(&sftp.downgrade())
+        );
+        drop(sftp);
         request.directories.clear();
         owner.files.poll(&owner, &request).await.unwrap();
         let state = owner.files.fallback.lock().await;
-        assert!(state.sftp.is_none());
+        assert!(state.session.is_none());
         assert!(state.snapshots.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "Run with cargo xtask test ssh -- files::vfs"]
+    async fn the_shared_sftp_session_reopens_after_its_channel_is_lost() {
+        use crate::remote::command;
+        let (_directory, state, owner, server) = super::super::integration_tests::app();
+        owner.files.fallback.lock().await.native_retry =
+            Some(Instant::now() + Duration::from_secs(300));
+        let mut request: Request = serde_json::from_value(
+            json!({"id":server.id,"operation":Uuid::new_v4(),"expectedConnection":[],
+            "root":"/","watch":Uuid::new_v4(),"directories":["/"],"cursor":null}),
+        )
+        .unwrap();
+        let watched = owner.files.poll(&owner, &request).await.unwrap();
+        request.cursor = watched["cursor"].as_str().map(str::to_owned);
+        let lost = owner.files.remote(&owner).sftp.shared().await.unwrap();
+        let link = owner.link();
+        let connection = command::stdout(link, "fixture-connection-id", None)
+            .await
+            .unwrap();
+        // The command runs on the connection it drops, so its own result is lost.
+        let _ = command::run(link, &format!("drop-connection {connection}"), None).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !lost.is_closed() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the session to see its channel lost");
+        let lost = lost.downgrade();
+
+        let preview = super::super::files_preview(
+            &state,
+            &Operations::default(),
+            server.id,
+            Uuid::new_v4(),
+            "/Documents/hello 世界.txt".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(preview.content.contains("<script>inert text</script>"));
+        // The watch starts over on the new session.
+        let resumed = owner.files.poll(&owner, &request).await.unwrap();
+        assert_eq!(resumed["reset"], true);
+        {
+            let fallback = owner.files.fallback.lock().await;
+            let session = fallback.session.as_ref().unwrap();
+            assert!(!session.is_closed());
+            assert!(!session.downgrade().ptr_eq(&lost));
+        }
+        assert_ne!(
+            command::stdout(link, "fixture-connection-id", None)
+                .await
+                .unwrap(),
+            connection
+        );
+        crate::manager::shutdown(&state).await;
     }
     #[test]
     fn metadata_diff_is_targeted_and_includes_rename_and_deletion() {

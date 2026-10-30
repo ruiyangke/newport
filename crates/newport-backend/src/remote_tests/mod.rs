@@ -3,7 +3,7 @@
 use crate::{
     agent::wire,
     model::{Server, Tunnel},
-    ssh::{self, ExecSession, Forwarding, sftp::Sftp},
+    ssh::{self, forward::Forward},
 };
 use serde_json::json;
 use tokio::{
@@ -78,14 +78,42 @@ fn test_server(port_variable: &str, name: &str, user: &str) -> Server {
     .unwrap()
 }
 
+/// The first login failure on a new link to `server`, while the link may
+/// keep trying.
+async fn login_failure(server: &Server) -> newport_ssh::Error {
+    use newport_ssh::{Login, Open, Reach};
+    let link = ssh::link(server, crate::ssh::no_jump_hosts);
+    let mut status = link.status();
+    let open = link.open(Open::Session);
+    tokio::pin!(open);
+    timeout(Duration::from_secs(15), async {
+        loop {
+            tokio::select! {
+                result = &mut open => panic!("the login succeeded: {:?}", result.err()),
+                changed = status.changed() => {
+                    changed.unwrap();
+                    let current = status.borrow_and_update();
+                    match (&current.reach, &current.login) {
+                        (Reach::Failed(error), _) | (_, Some(Login::Failed(error))) => {
+                            return error.clone();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("a login to fail")
+}
+
 /// Each test explicitly prepares its account, including permission-denied
 /// accounts. Feature reads must never implicitly install the remote agent.
 async fn installed_server(port_variable: &str, name: &str, user: &str) -> Server {
     let mut server = test_server(port_variable, name, user);
     server.agent_install_approved = true;
-    let session = ExecSession::connect(&server).await.unwrap();
-    let installed = crate::agent_lifecycle::manage_test(&session, false, false).await;
-    session.close().await;
+    let session = crate::remote::Shell::new(&server);
+    let installed = crate::agent_lifecycle::manage_test(&session.0, &server, false, false).await;
     installed.expect("Deploying agent to disposable test account");
     server
 }
@@ -94,8 +122,8 @@ async fn installed_server(port_variable: &str, name: &str, user: &str) -> Server
 #[ignore = "Requires cargo xtask test remote and real OpenSSH"]
 async fn authentication_exec_sftp_and_metrics() {
     let mut server = server();
-    let session = ExecSession::connect(&server).await.unwrap();
-    crate::agent_lifecycle::manage_test(&session, false, false)
+    let session = crate::remote::Shell::new(&server);
+    crate::agent_lifecycle::manage_test(&session.0, &server, false, false)
         .await
         .unwrap();
     let payload = vec![b'x'; 512 * 1024];
@@ -111,7 +139,8 @@ async fn authentication_exec_sftp_and_metrics() {
         session.execute("printf 'remote 世界'", None).await.unwrap(),
         "remote 世界"
     );
-    let failed = ssh::execute(&server, "printf denied >&2; exit 7", None)
+    let failed = crate::remote::Shell::new(&server)
+        .execute("printf denied >&2; exit 7", None)
         .await
         .unwrap_err();
     assert!(failed.contains("status 7") && failed.contains("denied"));
@@ -119,20 +148,19 @@ async fn authentication_exec_sftp_and_metrics() {
         .execute("printf 'sftp-data' > ~/roundtrip.txt", None)
         .await
         .unwrap();
-    let sftp = Sftp::connect(&server).await.unwrap();
+    let sftp = crate::remote::Sftp::new(ssh::link(&server, crate::ssh::no_jump_hosts))
+        .dedicated()
+        .await
+        .unwrap();
     assert_eq!(
-        sftp.session
-            .stat("/home/fixture/roundtrip.txt")
+        sftp.stat("/home/fixture/roundtrip.txt")
             .await
             .unwrap()
             .attrs
             .size,
         Some(9)
     );
-    sftp.session
-        .remove("/home/fixture/roundtrip.txt")
-        .await
-        .unwrap();
+    sftp.remove("/home/fixture/roundtrip.txt").await.unwrap();
     assert!(
         session
             .execute("test -e ~/roundtrip.txt", None)
@@ -160,17 +188,20 @@ async fn authentication_exec_sftp_and_metrics() {
                 .as_f64()
                 .is_some_and(|u| (0.0..=100.0).contains(&u))
     }));
-    session.close().await;
     server.identity_file = None;
     server.agent_source = Some("system".into());
     assert_eq!(
-        ssh::execute(&server, "printf agent-ok", None)
+        crate::remote::Shell::new(&server)
+            .execute("printf agent-ok", None)
             .await
             .unwrap(),
         "agent-ok"
     );
     server.agent_key_fingerprint = Some("SHA256:missing-key".into());
-    assert!(ssh::execute(&server, "true", None).await.is_err());
+    assert_eq!(
+        login_failure(&server).await,
+        newport_ssh::Error::AgentUnavailable
+    );
 }
 
 #[tokio::test]
@@ -185,7 +216,9 @@ async fn forwarding_roundtrip_and_shutdown() {
         "localPort":local, "remoteHost":"127.0.0.1", "remotePort":8080
     }))
     .unwrap();
-    let forwarding = Forwarding::start(&server, Some(&tunnel)).await.unwrap();
+    let forwarding = Forward::start(ssh::link(&server, crate::ssh::no_jump_hosts), &tunnel, true)
+        .await
+        .unwrap();
     let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", local))
         .await
         .unwrap();
@@ -210,14 +243,14 @@ async fn forwarding_roundtrip_and_shutdown() {
 #[ignore = "Requires cargo xtask test remote and real OpenSSH"]
 async fn deploy_reinstall_and_agent_protocol() {
     let server = server();
-    let session = ExecSession::connect(&server).await.unwrap();
-    crate::agent::install(&session).await.unwrap();
+    let session = crate::remote::Shell::new(&server);
+    crate::agent::install(&session.0, &server).await.unwrap();
     let hash = session
         .execute("sha256sum ~/.local/bin/newport-agent", None)
         .await
         .unwrap();
-    crate::agent::install(&session).await.unwrap();
-    crate::agent::reinstall(&session).await.unwrap();
+    crate::agent::install(&session.0, &server).await.unwrap();
+    crate::agent::reinstall(&session.0, &server).await.unwrap();
     assert_eq!(
         session
             .execute("sha256sum ~/.local/bin/newport-agent", None)
@@ -305,7 +338,6 @@ async fn deploy_reinstall_and_agent_protocol() {
             .await
             .is_err()
     );
-    session.close().await;
 }
 
 #[tokio::test]
@@ -314,8 +346,22 @@ async fn interactive_shell_resize_and_exit() {
     use crate::terminal::{Event, Input};
     let (input, receiver) = tokio::sync::mpsc::channel(8);
     let (output, mut events) = tokio::sync::mpsc::channel(32);
-    let task =
-        tokio::spawn(async move { ssh::terminal(&server(), 80, 24, receiver, &output).await });
+    let task = tokio::spawn(async move {
+        let server = server();
+        let registry = crate::server_session::Registry::default();
+        let owner = registry.session(&server, 0);
+        let result = crate::terminal::shell_channel::run(
+            owner,
+            &server,
+            (80, 24),
+            receiver,
+            &output,
+            Default::default(),
+        )
+        .await;
+        registry.shutdown().await;
+        result
+    });
     timeout(Duration::from_secs(15), async {
         assert!(matches!(events.recv().await, Some(Event::Ready)));
         input.send(Input::Resize(100, 40)).await.unwrap();
@@ -377,14 +423,15 @@ async fn changed_host_key_is_rejected_and_restoration_recovers() {
     ))
     .unwrap();
     std::fs::write(&path, format!("[127.0.0.1]:{} {wrong}", server().ssh_port)).unwrap();
-    let error = ssh::execute(&server(), "true", None).await.unwrap_err();
+    let error = login_failure(&server()).await;
     assert!(
-        error.contains("changed"),
+        matches!(error, newport_ssh::Error::HostKeyChanged { .. }),
         "Expected host-key rejection: {error}"
     );
     drop(restore);
     assert_eq!(
-        ssh::execute(&server(), "printf recovered", None)
+        crate::remote::Shell::new(&server())
+            .execute("printf recovered", None)
             .await
             .unwrap(),
         "recovered"
@@ -394,8 +441,8 @@ async fn changed_host_key_is_rejected_and_restoration_recovers() {
 #[tokio::test]
 #[ignore = "Requires cargo xtask test remote"]
 async fn shell_setup_is_idempotent_and_respects_protected_files() {
-    let session = ExecSession::connect(&server()).await.unwrap();
-    crate::agent::install(&session).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
+    crate::agent::install(&session.0, &server()).await.unwrap();
     let output = session
         .execute("newport-test-fixture shell-setup", None)
         .await
@@ -406,7 +453,6 @@ async fn shell_setup_is_idempotent_and_respects_protected_files() {
             "{output}"
         );
     }
-    session.close().await;
 }
 
 async fn frame(stream: &mut (impl tokio::io::AsyncWrite + Unpin), kind: u8, data: &[u8]) {
@@ -441,8 +487,8 @@ async fn receive(stream: &mut (impl tokio::io::AsyncRead + Unpin), kind: u8) -> 
 #[ignore = "Requires cargo xtask test remote"]
 async fn demand_clipboard_compression_freshness_and_failed_transfer_recovery() {
     use std::io::Write;
-    let session = ExecSession::connect(&server()).await.unwrap();
-    crate::agent::install(&session).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
+    crate::agent::install(&session.0, &server()).await.unwrap();
     let mut stream = session
         .stream(&format!(
             "exec ~/.local/bin/newport-agent serve {} --clipboard",
@@ -520,45 +566,34 @@ async fn demand_clipboard_compression_freshness_and_failed_transfer_recovery() {
         .await
         .unwrap()
         .unwrap();
-    session.close().await;
 }
 
 #[tokio::test]
 #[ignore = "Requires cargo xtask test remote"]
 async fn files_transfer_roundtrip_and_existing_file_protection() {
-    use crate::files::{Operations, transfer};
-    use std::sync::Arc;
+    use crate::files::{Operations, Remote, transfer};
     let server = server();
-    let sftp = Arc::new(Sftp::connect(&server).await.unwrap());
+    let files = Remote::new(
+        server.clone(),
+        crate::ssh::link(&server, crate::ssh::no_jump_hosts),
+    );
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join(format!("世界-{}.bin", Uuid::new_v4()));
     let bytes: Vec<u8> = (0..524_288).map(|n| (n % 251) as u8).collect();
     std::fs::write(&source, &bytes).unwrap();
     let operations = Operations::default();
-    let remote = transfer::upload(
-        &operations,
-        sftp.clone(),
-        &source,
-        "/home/fixture",
-        |_, _| {},
-    )
-    .await
-    .unwrap();
-    assert!(
-        transfer::upload(
-            &operations,
-            sftp.clone(),
-            &source,
-            "/home/fixture",
-            |_, _| {}
-        )
+    let remote = transfer::upload(&operations, &files, &source, "/home/fixture", |_, _| {})
         .await
-        .is_err()
+        .unwrap();
+    assert!(
+        transfer::upload(&operations, &files, &source, "/home/fixture", |_, _| {})
+            .await
+            .is_err()
     );
     let destination = temp.path().join("download.bin");
     transfer::download(
         &crate::files::Operations::default(),
-        &sftp,
+        &files,
         &remote,
         &destination,
         |_, _| {},
@@ -566,21 +601,22 @@ async fn files_transfer_roundtrip_and_existing_file_protection() {
     .await
     .unwrap();
     assert_eq!(std::fs::read(&destination).unwrap(), bytes);
-    sftp.session.remove(remote).await.unwrap();
+    let sftp = files.sftp.shared().await.unwrap();
+    sftp.remove(remote).await.unwrap();
     operations.shutdown().await;
 }
 
 #[tokio::test]
 #[ignore = "Requires cargo xtask test remote"]
 async fn browser_callback_http_roundtrip_conflict_and_cleanup() {
-    let session = ExecSession::connect(&server()).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
     let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = reservation.local_addr().unwrap().port();
     let url = url::Url::parse(&format!(
         "https://login.example/authorize?redirect_uri=http://127.0.0.1:{port}/callback"
     ))
     .unwrap();
-    let mut callbacks = session.callbacks();
+    let mut callbacks = crate::ssh::callback::Callbacks::new(session.0.clone());
     assert!(
         callbacks
             .prepare(ssh::callback::endpoint(&url).unwrap().unwrap())
@@ -638,7 +674,6 @@ async fn browser_callback_http_roundtrip_conflict_and_cleanup() {
             .unwrap(),
         "still-connected"
     );
-    session.close().await;
 }
 
 #[tokio::test]
@@ -651,8 +686,8 @@ async fn native_x11_and_wayland_clients_fetch_png_on_demand() {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let session = ExecSession::connect(&server()).await.unwrap();
-    crate::agent::install(&session).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
+    crate::agent::install(&session.0, &server()).await.unwrap();
     let mut stream = session
         .stream(&format!(
             "exec ~/.local/bin/newport-agent serve {} --clipboard",
@@ -705,5 +740,4 @@ async fn native_x11_and_wayland_clients_fetch_png_on_demand() {
         .await
         .unwrap()
         .unwrap();
-    session.close().await;
 }

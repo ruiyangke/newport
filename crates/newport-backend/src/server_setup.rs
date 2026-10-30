@@ -43,16 +43,19 @@ fn parse(output: &str) -> Result<Value, String> {
         json!({"os":get("os"),"arch":get("arch"),"cores":number("cores"),"memoryKiB":number("memory"),"freeKiB":number("free"),"installed":get("installed")=="yes","total":total}),
     )
 }
-pub async fn inspect(state: &Shared, expected: Server) -> Result<Value, String> {
-    let (server, owner) = current_owner(state, &expected)?;
-    owner.retry_transport();
-    let session = owner.acquire(&server).await?;
+pub async fn inspect(state: &Shared, expected: Server) -> Result<Value, crate::remote::Failure> {
+    let (_, owner) = current_owner(state, &expected)?;
+    owner.retry();
     let command = format!("{INSPECT}printf 'transfer='; {}", TransferEncoding::PROBE);
-    let output = session.execute(&command, None).await;
+    let output = owner
+        .unless_unreachable(crate::remote::command::stdout(owner.link(), &command, None))
+        .await;
     if owner.is_revoked() {
-        return Err("Server connection changed. Restart setup.".into());
+        return Err("Server connection changed. Restart setup."
+            .to_owned()
+            .into());
     }
-    parse(&output?)
+    Ok(parse(&output?)?)
 }
 pub async fn install(state: &Shared, expected: Server) -> Result<(), String> {
     let (_, owner) = current_owner(state, &expected)?;
@@ -80,8 +83,7 @@ pub async fn install(state: &Shared, expected: Server) -> Result<(), String> {
         })
         .await?;
     crate::monitor::retry_installation(&owner).await;
-    let session = owner.acquire(&server).await?;
-    session.install(false).await?;
+    owner.install(&server, false).await?;
     if owner.is_revoked() {
         return Err("Server connection changed. Restart setup.".into());
     }
@@ -117,14 +119,13 @@ pub async fn finish(
         let preferences = owner.permissions.preference_revisions();
         (server, owner, revision, preferences)
     };
-    let session = owner.acquire(&server).await?;
     let notice = if browser || clipboard {
         // Installing with integrations writes the command links and shell
         // setup; what it couldn't write comes back as a notice.
-        let outcome = session.install(true).await?;
+        let outcome = owner.install(&server, true).await?;
         crate::agent_lifecycle::setup_notice(&outcome)
     } else {
-        session.require_installed().await?;
+        owner.require_installed().await?;
         None
     };
     let id = expected.id;

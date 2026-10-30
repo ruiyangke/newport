@@ -10,7 +10,7 @@ Open **Terminal** for a shell on the selected server. Commands run on that serve
 
 ## Work with terminal tabs
 
-Use the new-tab control to open another shell. A tab's menu lets you **Rename**, **Reset name**, **Disconnect**, **Reconnect**, or **Close** it. A custom name can help distinguish a server process, a log viewer, and a working shell.
+Use the new-tab control, or **Cmd+T** on macOS, to open another shell. Press **Cmd+1** to **Cmd+8** on macOS, or **Ctrl+Alt+1** to **Ctrl+Alt+8** on Windows, to go to a tab by its position; **Cmd+9** or **Ctrl+Alt+9** goes to the last tab. A tab's menu lets you **Rename**, **Reset name**, **Disconnect**, **Reconnect**, or **Close** it. A custom name can help distinguish a server process, a log viewer, and a working shell.
 
 Switching pages leaves terminal sessions available. Closing or disconnecting a terminal ends its shell connection; remote processes follow the shell's normal job-control rules.
 

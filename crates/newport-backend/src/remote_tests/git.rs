@@ -3,7 +3,6 @@ use crate::git::{
     client::Client as TransportClient,
     protocol::{Path, Request, Side},
 };
-use crate::ssh::ExecSession;
 use uuid::Uuid;
 
 /// Optional test-only wire capture that feeds real agent responses to the
@@ -132,7 +131,7 @@ async fn git_rpc_roundtrip() {
     let bare_bytes = bare_archive.into_inner().unwrap();
     let server =
         super::installed_server("NEWPORT_TEST_SSH_PORT", "Disposable Git", "fixture").await;
-    let session = ExecSession::connect(&server).await.unwrap();
+    let session = crate::remote::Shell::new(&server);
     let root = format!("/tmp/newport-git-{}", Uuid::new_v4());
     session
         .execute(
@@ -3047,7 +3046,6 @@ async fn git_rpc_roundtrip() {
             .any(|remote| remote["name"] == "upstream")
     );
     drop(ssh_client);
-    session.close().await;
 }
 
 async fn run_operation<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
@@ -3090,7 +3088,7 @@ fn stage_all(status: &serde_json::Value) -> crate::git::protocol::Action {
 /// every identifier reported at its own width, not assumed to be SHA-1.
 async fn sha256_repository<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     client: &mut Client<S>,
-    session: &ExecSession,
+    session: &crate::remote::Shell,
     root: &str,
 ) {
     let path = format!("{root}-sha256");
@@ -3152,7 +3150,7 @@ async fn sha256_repository<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unp
 async fn line_selection_roundtrip<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     client: &mut Client<S>,
     repo_id: &str,
-    session: &ExecSession,
+    session: &crate::remote::Shell,
     root: &str,
 ) {
     use crate::git::protocol::{Action, HunkSelection};

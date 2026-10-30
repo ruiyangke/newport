@@ -228,7 +228,8 @@ fn header_and_sharing_follow_global_failure_even_with_a_stale_connected_page_sna
             view.server = id.to_string();
             view.snapshot["instanceId"] = json!(instance);
             view.snapshot["config"]["servers"][0]["id"] = json!(id);
-            view.snapshot["runtime"]["health"][id.to_string()] = json!("reachable");
+            view.snapshot["runtime"]["agentTransport"][id.to_string()] =
+                json!({"status": "connected", "generation": 1});
             view.snapshot["runtime"]["clipboard"][id.to_string()] = json!({"status":"connected"});
             view
         });
@@ -1085,7 +1086,7 @@ fn other_server_runtime_changes_are_retained_without_window_notifications(cx: &m
         1,
         "selected-server permission changes must remain immediate"
     );
-    data["runtime"]["health"]["fixture"] = json!("error");
+    data["runtime"]["agentTransport"]["fixture"] = json!({"status": "recovering"});
     deliver(Ok(data.clone()), visual);
     assert_eq!(notices.read_with(visual, |count, _| *count), 2);
     deliver(Err("Snapshot transport failed".into()), visual);

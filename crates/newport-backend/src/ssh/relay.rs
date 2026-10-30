@@ -1,7 +1,10 @@
 //! Shared listener-to-SSH relay for persistent tunnels and temporary callbacks.
-use super::Connection;
-use std::{io, sync::Arc, time::Duration};
-use tokio::{net::TcpListener, task::JoinSet};
+use std::{future::Future, io, net::SocketAddr, time::Duration};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpListener,
+    task::JoinSet,
+};
 
 #[derive(Clone, Copy)]
 pub(super) struct Policy {
@@ -58,13 +61,18 @@ fn classify_accept(error: &io::Error) -> AcceptFailure {
 const EXHAUSTED_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Dropping this future cancels every accepted client along with the listener.
-pub(super) async fn serve(
+/// `open` gives the channel for one accepted connection from `origin`, or
+/// nothing when none could be opened.
+pub(super) async fn serve<Open, Opening, Stream>(
     listener: TcpListener,
-    connection: Arc<Connection>,
-    host: String,
-    port: u16,
+    open: Open,
     policy: Policy,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    Open: Fn(SocketAddr) -> Opening,
+    Opening: Future<Output = Option<Stream>> + Send + 'static,
+    Stream: AsyncRead + AsyncWrite + Unpin + Send,
+{
     let mut clients = JoinSet::new();
     let mut logged = std::collections::HashSet::new();
     loop {
@@ -85,14 +93,9 @@ pub(super) async fn serve(
                     }
                 };
                 if clients.len() >= policy.max_clients { continue; }
-                let connection = connection.clone();
-                let host = host.clone();
+                let open = open(origin);
                 clients.spawn(async move {
-                    let open = connection.handle.channel_open_direct_tcpip(
-                        host, u32::from(port), origin.ip().to_string(), u32::from(origin.port()),
-                    );
-                    if let Ok(Ok(channel)) = tokio::time::timeout(Duration::from_secs(10), open).await {
-                        let mut stream = channel.into_stream();
+                    if let Ok(Some(mut stream)) = tokio::time::timeout(Duration::from_secs(10), open).await {
                         let transfer = tokio::io::copy_bidirectional(&mut socket, &mut stream);
                         if let Some(timeout) = policy.transfer_timeout {
                             let _ = tokio::time::timeout(timeout, transfer).await;

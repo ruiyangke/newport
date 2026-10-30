@@ -10,6 +10,9 @@ use newport_domain::terminal::MAX_TERMINALS;
 
 struct TerminalTab {
     id: usize,
+    /// Its number in the tab's title: the lowest no open tab has, so numbers
+    /// start over once tabs close.
+    number: usize,
     focus: FocusHandle,
     custom: Option<String>,
     view: Entity<TerminalView>,
@@ -89,6 +92,15 @@ impl Workspace {
         cx.notify();
     }
     /// Tab `number` (1–8), or the last tab for 9, as browsers number them.
+    /// A new shell tab, focused, unless the tabs are at their limit.
+    pub(super) fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_rename(true, false, window, cx);
+        self.add(cx);
+        if let Some(tab) = self.tabs.get(self.active) {
+            let focus = tab.view.read(cx).focus.clone();
+            focus.focus(window, cx);
+        }
+    }
     pub(super) fn select_tab(
         &mut self,
         number: usize,
@@ -374,8 +386,10 @@ impl Workspace {
                 view.update(cx, |view, cx| view.open_link(event.0.clone(), cx));
             },
         );
+        let number = free_number(self.tabs.iter().map(|tab| tab.number));
         self.tabs.push(TerminalTab {
             id,
+            number,
             focus: cx.focus_handle(),
             custom: None,
             view,
@@ -584,7 +598,14 @@ impl Workspace {
 
 // Only shorten the recognizable user@host:path prompt format. Command titles
 // and explicitly named tabs keep their meaning; the full OSC title stays available.
-fn automatic_tab_title(title: &str, id: usize) -> String {
+/// The lowest tab number not in `taken`.
+fn free_number(taken: impl Iterator<Item = usize> + Clone) -> usize {
+    (0..)
+        .find(|number| taken.clone().all(|taken| taken != *number))
+        .expect("a free number")
+}
+
+fn automatic_tab_title(title: &str, number: usize) -> String {
     let title = title.trim();
     let prompt_path = title.split_once(':').filter(|(host, path)| {
         host.contains('@') && (path.starts_with('/') || path.starts_with('~'))
@@ -600,10 +621,10 @@ fn automatic_tab_title(title: &str, id: usize) -> String {
     } else {
         return title.to_owned();
     };
-    if id == 0 {
+    if number == 0 {
         base.to_owned()
     } else {
-        format!("{base} {}", id + 1)
+        format!("{base} {}", number + 1)
     }
 }
 
@@ -729,6 +750,7 @@ impl Render for Workspace {
                             .track_scroll(&self.tab_scroll)
                             .children(self.tabs.iter().enumerate().map(|(index, tab)| {
                                 let id = tab.id;
+                                let number = tab.number;
                                 if let Some(rename) =
                                     self.rename.as_ref().filter(|rename| rename.id == id)
                                 {
@@ -736,7 +758,7 @@ impl Render for Workspace {
                                         .unfocusable()
                                         .when(index == 0 && inset, |tab| tab.border_l_1())
                                         .set_position(index + 1, self.tabs.len())
-                                        .accessibility_label(format!("Rename Terminal {}", id + 1))
+                                        .accessibility_label(format!("Rename Terminal {}", number + 1))
                                         .debug_selector(move || format!("terminal-tab-{id}"))
                                         .child(
                                             Styled::h(crate::controls::input(&rename.input), px(26.))
@@ -747,7 +769,7 @@ impl Render for Workspace {
                                                 .py_0()
                                                 .appearance(false)
                                                 .bordered(false)
-                                                .aria_label(format!("Rename Terminal {}", id + 1)),
+                                                .aria_label(format!("Rename Terminal {}", number + 1)),
                                         )
                                         .on_action(cx.listener(
                                             |this,
@@ -760,7 +782,7 @@ impl Render for Workspace {
                                 }
                                 let remote_title = tab.view.read(cx).title.clone();
                                 let title = tab.custom.clone()
-                                    .unwrap_or_else(|| automatic_tab_title(&remote_title, id));
+                                    .unwrap_or_else(|| automatic_tab_title(&remote_title, number));
                                 let startup_exit = {
                                     let status = &tab.view.read(cx).status;
                                     (!tab.exit.should_close(&status.phase) && matches!(status.phase, Phase::Exited(_)))
@@ -854,14 +876,7 @@ impl Render for Workspace {
                             .accessibility_label("New terminal")
                             .tooltip("New terminal")
                             .disabled(self.tabs.len() >= MAX_TERMINALS)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.finish_rename(true, false, window, cx);
-                                this.add(cx);
-                                if let Some(tab) = this.tabs.get(this.active) {
-                                    let focus = tab.view.read(cx).focus.clone();
-                                    focus.focus(window, cx);
-                                }
-                            })),
+                            .on_click(cx.listener(|this, _, window, cx| this.new_tab(window, cx))),
                     )
                     .child(
                         // Native title-bar hit testing runs before button clicks on
@@ -1063,6 +1078,40 @@ mod tests {
             assert_eq!(workspace.active, 1);
             assert_eq!(workspace.tabs[1].custom.as_deref(), Some("Allow .envrc"));
             assert!(!workspace.tabs[1].view.read(cx).status.started);
+        });
+    }
+
+    #[test]
+    fn a_new_tab_takes_the_lowest_free_number() {
+        assert_eq!(super::free_number([].into_iter()), 0);
+        assert_eq!(super::free_number([0, 1, 2].into_iter()), 3);
+        assert_eq!(super::free_number([0, 2].into_iter()), 1);
+    }
+
+    #[gpui::test]
+    fn tab_numbers_start_over_once_the_tabs_close(cx: &mut TestAppContext) {
+        init(cx);
+        cx.update(|cx| {
+            let workspace = cx.new(|cx| {
+                Workspace::new(
+                    "fixture".into(),
+                    json!({"scope":"fixture"}),
+                    "fixture@unconnected.invalid".into(),
+                    cx,
+                )
+            });
+            workspace.update(cx, |workspace, cx| {
+                for i in 0..3 {
+                    let draft = CommandDraft::new(format!("true {i}")).unwrap();
+                    workspace.open_command(draft, cx).unwrap();
+                }
+                assert_eq!(workspace.tabs.last().map(|tab| tab.number), Some(3));
+                workspace.tabs.clear();
+                let draft = CommandDraft::new("true".into()).unwrap();
+                workspace.open_command(draft, cx).unwrap();
+                assert_eq!(workspace.tabs[0].number, 0);
+                assert!(workspace.tabs[0].id > 3, "ids stay unique");
+            });
         });
     }
 

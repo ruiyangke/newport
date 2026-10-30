@@ -13,8 +13,6 @@ const SERVER_FIELDS: &[&str] = &[
     "clipboard",
     "clipboardMessages",
     "clipboardPathNeeded",
-    "health",
-    "connectivity",
     "connectionRevisions",
 ];
 
@@ -27,12 +25,11 @@ pub(super) enum Surface {
 
 impl Surface {
     fn watches(self, field: &str) -> bool {
-        // Connection epochs invalidate the current page's owner. Health fields
-        // conservatively request redraws, but never set connectivity:
-        // the header subscribes to the global store. The wizard shows progress.
+        // Connection epochs invalidate the current page's owner. The header
+        // subscribes to the global connectivity store. The wizard shows progress.
         // Remaining agent state belongs to the Integration page. Accepting it
         // still updates permission checks and retained state on every page.
-        matches!(field, "health" | "connectionRevisions")
+        field == "connectionRevisions"
             || self == Self::Integration
             || self == Self::Setup && field == "agentInstallation"
     }
@@ -104,12 +101,12 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn transport_status_changes_remain_visible_without_repainting_for_demand_telemetry() {
+    fn transport_status_changes_remain_visible_without_repainting_for_waiting_requests() {
         let before = json!({"runtime": {"agentTransport": {
-            "selected": {"status":"connecting", "demand":1}
+            "selected": {"status":"connecting", "waiting":1}
         }}});
         let mut next = before.clone();
-        next["runtime"]["agentTransport"]["selected"]["demand"] = json!(2);
+        next["runtime"]["agentTransport"]["selected"]["waiting"] = json!(2);
         assert!(!changed(&before, &next, "selected", Surface::General));
         next["runtime"]["agentTransport"]["other"]["status"] = json!("connected");
         assert!(!changed(&before, &next, "selected", Surface::General));

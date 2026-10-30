@@ -1,7 +1,6 @@
 //! Lifetime ownership for background services.
 use crate::{
     account::Account,
-    connectivity,
     desktop_integration::Desktop,
     manager::{self, Shared},
     metrics_db::MetricsDb,
@@ -18,11 +17,6 @@ impl Workers {
         let mut tasks = JoinSet::new();
         tasks.spawn(desktop.maintain_graphical(account.clone()));
         tasks.spawn(account.maintain());
-        tasks.spawn(manager.sessions.connections.clone().observe_approvals());
-        tasks.spawn(manager::connection_events(
-            manager.clone(),
-            connectivity::subscribe(),
-        ));
         tasks.spawn(manager::background(manager.clone(), desktop));
         tasks.spawn(crate::agent_lifecycle::run(manager.clone()));
         tasks.spawn(crate::metrics_sampler::run(manager, metrics.clone()));

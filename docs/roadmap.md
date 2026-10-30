@@ -8,21 +8,11 @@ slug: roadmap
 
 These are planned improvements, not features you can use today. Priorities can change, and there is no committed release date. See the [release notes](https://newport.app/releases) for features that have shipped.
 
-## More ways to connect over SSH
+## SSH config import
 
-### Proxy commands
+### Clearer import messages
 
-Planned support for SSH `ProxyCommand` would let Newport connect through a helper program, including connections to some local virtual machines and servers reached through an access gateway.
-
-Today, Newport requires a direct SSH connection. A host that relies on `ProxyCommand` cannot be imported and connected as-is. Use a directly reachable SSH address if your environment provides one.
-
-### Clearer SSH import messages
-
-The SSH config importer should explain why each host cannot be imported and keep the full reason visible. In particular, proxy commands and jump hosts need different explanations. The current message may describe both as a jump host.
-
-### Jump hosts
-
-Planned support for `ProxyJump` would let you reach a private server through another SSH host, including connections with more than one hop. Newport does not currently support this connection method.
+The SSH config importer should explain why each host cannot be imported and keep the full reason visible.
 
 ## Request a feature
 

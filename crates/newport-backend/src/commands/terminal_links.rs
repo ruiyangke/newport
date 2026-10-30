@@ -347,7 +347,7 @@ mod tests {
             .unwrap();
         let sessions = Sessions::default();
         let terminal = Uuid::new_v4();
-        sessions
+        let _io = sessions
             .open_bound(terminal, server, 80, 24, owner)
             .unwrap();
         let browser = Arc::new(Browser::default());

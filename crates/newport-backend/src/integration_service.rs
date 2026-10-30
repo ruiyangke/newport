@@ -80,9 +80,9 @@ impl Slot {
         }
         if running.as_ref().is_some_and(|r| !r.task.is_finished()) {
             // An explicit start may find the enabled service suspended on an
-            // authentication failure. Wake the shared transport, not a second
+            // authentication failure. Retry the server's link, not a second
             // integration task or a second signing request.
-            owner.retry_transport();
+            owner.retry();
             if owner.permissions.snapshot().error.is_some() {
                 owner.permissions.retry();
             }
@@ -100,14 +100,13 @@ impl Slot {
             connection: ConnectionState::new(Status::Connecting),
             ..Snapshot::default()
         });
-        owner.retry_transport();
+        owner.retry();
         owner.agent_runtime.retry_failed().await;
         let state = self.state.clone();
         let (cancel, rx) = watch::channel(false);
         let revoked = owner.cancellation();
         let stop = cancel.clone();
         let task = tokio::spawn(async move {
-            let _demand = owner.transport_demand();
             let run = crate::clipboard::run(
                 owner,
                 server,
@@ -250,7 +249,7 @@ mod tests {
         }
         assert!(!owner.permissions.browser_enabled());
         assert!(!owner.permissions.clipboard_enabled());
-        assert_eq!(owner.transport_snapshot().demand, 0);
+        assert!(!owner.has_link());
         assert!(state.lock().await.config.integration_servers().is_empty());
     }
 
@@ -296,7 +295,7 @@ mod tests {
                 serde_json::to_value(replacement.permissions.snapshot()).unwrap(),
                 before
             );
-            assert_eq!(replacement.transport_snapshot().demand, 0);
+            assert!(!replacement.has_link());
             assert!(state.lock().await.config.servers[0].browser_enabled);
             crate::manager::shutdown(&state).await;
         }
@@ -353,7 +352,7 @@ mod tests {
                 result.unwrap();
             }
             assert!(owner.integration.running.lock().await.is_none());
-            assert_eq!(owner.transport_snapshot().demand, 0);
+            assert!(!owner.has_link());
             crate::manager::shutdown(&state).await;
         }
     }

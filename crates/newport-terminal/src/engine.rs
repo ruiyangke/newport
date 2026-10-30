@@ -427,7 +427,16 @@ impl Engine {
         self.terminal.set_options(config(false));
         self.terminal.set_options(config(true));
         self.clear_selection()?;
-        self.advance(b"\x1b[?1049l\x1b[r\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1005l\x1b[?1004l\x1b[?1l\x1b>\x1b[4l\x1b[?6l\x1b[?7h\x1b[<999u\x1b[=0u")
+        // Resetting the scroll region homes the cursor; put it back, and start
+        // the new session on a line of its own below the retained output.
+        self.advance(b"\x1b[?1049l")?;
+        let cursor = self.terminal.grid().cursor.point;
+        let line = cursor.line.0 + 1;
+        let fresh_line = if cursor.column.0 == 0 { "" } else { "\r\n" };
+        self.advance(
+            format!("\x1b[r\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1005l\x1b[?1004l\x1b[?1l\x1b>\x1b[4l\x1b[?6l\x1b[?7h\x1b[<999u\x1b[=0u\x1b[{line}H{fresh_line}")
+                .as_bytes(),
+        )
     }
     pub(crate) fn point(&self, point: Point) -> Result<GridPoint> {
         let (p, offset) = match point {

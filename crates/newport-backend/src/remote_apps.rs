@@ -106,15 +106,15 @@ const CATALOGUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60
 /// The agent marker only becomes present for a compatible full installation.
 pub(crate) async fn status(owner: &Arc<ServerSession>) -> Result<Value, String> {
     let server = owner.server().clone();
-    let lease = owner.acquire(&server).await?;
-    let output = lease
-        .execute(
-            &format!(
-                "sh -c {}",
-                quote(&format!("{}\n{FIND_AGENT}{REPORT}", display::PROBE))
-            ),
-            None,
-        )
+    if owner.is_revoked() {
+        return Err(crate::server_session::STALE.into());
+    }
+    let probe = format!(
+        "sh -c {}",
+        quote(&format!("{}\n{FIND_AGENT}{REPORT}", display::PROBE))
+    );
+    let output = owner
+        .unless_unreachable(crate::remote::command::stdout(owner.link(), &probe, None))
         .await?;
     let mut value = parse_status(&output);
     value["expectedConnection"] = json!(server);
@@ -126,12 +126,12 @@ pub(crate) async fn status(owner: &Arc<ServerSession>) -> Result<Value, String> 
     if value["system"] != "Linux" || payload.is_none() {
         return Ok(value);
     }
-    let installation = lease.check_installation().await?;
+    let installation = owner.check_installation().await?;
     let capability = if installation.installed_variant
         == Some(newport_release::agent_product::Variant::Full)
         && installation.error.is_none()
     {
-        let product = lease
+        let product = owner
             .inspect_product(
                 installation
                     .installed_hash
@@ -315,9 +315,8 @@ fn parse_gap(line: &str) -> Option<Gap> {
 
 /// The agent's catalogue as it prints it: `{"apps": [...]}` with PNG icons.
 pub(crate) async fn catalogue(owner: &Arc<ServerSession>) -> Result<Value, String> {
-    let server = owner.server().clone();
-    let lease = owner.acquire(&server).await?;
-    let (channel, worker) = lease
+    let needle = owner.needle(owner.server())?;
+    let (channel, worker) = needle
         .launch_channel(crate::agent::Service::RemoteApps {
             arguments: vec!["--catalog".into()],
         })
@@ -329,7 +328,7 @@ pub(crate) async fn catalogue(owner: &Arc<ServerSession>) -> Result<Value, Strin
             ReadError::Failed(message) => message,
         })?;
     drop(worker);
-    lease.validate()?;
+    needle.validate()?;
     let catalogue: Value = serde_json::from_slice(&output)
         .map_err(|error| format!("The agent returned an invalid catalogue: {error}"))?;
     if !catalogue["apps"].is_array() {

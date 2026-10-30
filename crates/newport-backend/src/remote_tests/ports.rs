@@ -3,9 +3,9 @@
 //! both forwarding directions.
 use super::server;
 use crate::{
-    model::{DestinationStatus, Direction, Tunnel},
+    model::{DestinationStatus, Direction, Server, Status, Tunnel},
     ports::{DiscoveredPort, discover},
-    ssh::{self, Forwarding},
+    ssh::{self, forward::Forward},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -14,8 +14,32 @@ use tokio::{
 };
 use uuid::Uuid;
 
+/// A forward on its own link to `server`, once it is connected.
+async fn started(server: &Server, tunnel: &Tunnel) -> Forward {
+    let forward = Forward::start(ssh::link(server, crate::ssh::no_jump_hosts), tunnel, true)
+        .await
+        .unwrap();
+    let mut state = forward.state();
+    let connected = timeout(
+        Duration::from_secs(15),
+        state.wait_for(|state| matches!(state.status, Status::Connected | Status::Error)),
+    )
+    .await
+    .expect("the forward connects")
+    .unwrap()
+    .clone();
+    assert_eq!(
+        connected.status,
+        Status::Connected,
+        "{:?}",
+        connected.error_message
+    );
+    forward
+}
+
 async fn run(script: &str) -> String {
-    ssh::execute(&server(), script, None)
+    crate::remote::Shell::new(&server())
+        .execute(script, None)
         .await
         .unwrap_or_else(|error| panic!("{error}\n--- script ---\n{script}"))
 }
@@ -160,7 +184,7 @@ async fn reverse_forward_serves_this_machine_on_the_server() {
         direction: Direction::Remote,
         project: None,
     };
-    let forwarding = Forwarding::start(&server, Some(&tunnel)).await.unwrap();
+    let forwarding = started(&server, &tunnel).await;
     // A client on the server reaches this machine through the forwarded port.
     let reply = run(&format!(
         "bash -c {}",
@@ -175,7 +199,7 @@ async fn reverse_forward_serves_this_machine_on_the_server() {
     })
     .await
     .expect("the local target is reported reachable");
-    assert!(forwarding.error().is_none());
+    assert_eq!(forwarding.state().borrow().status, Status::Connected);
 
     // Without the service here, the server's client is closed at once rather
     // than left hanging (a hang would exit 124 from `timeout`).
@@ -226,7 +250,7 @@ for i in $(seq 50); do ss -ltn | grep -q ':18300 ' && exit 0; sleep 0.1; done; e
         direction: Direction::Local,
         project: None,
     };
-    let forwarding = Forwarding::start(&server, Some(&tunnel)).await.unwrap();
+    let forwarding = started(&server, &tunnel).await;
     let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", local))
         .await
         .unwrap();

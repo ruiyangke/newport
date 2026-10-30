@@ -22,7 +22,7 @@ const CHANGED: &str = "Server connection changed. Refresh again.";
 const INTERVAL: Duration = Duration::from_secs(3);
 
 // Consent/setup changes must discard pre-install failures without retiring the
-// transport. Cosmetic edits and integration switches preserve the metrics cache.
+// link. Cosmetic edits and integration switches preserve the metrics cache.
 pub(crate) fn same_sampling_profile(a: &Server, b: &Server) -> bool {
     a.same_connection(b)
         && a.agent_install_approved == b.agent_install_approved
@@ -36,7 +36,6 @@ struct Reading {
     query: Query<Arc<Value>>,
     cancelled: Arc<AtomicBool>,
     retry: Arc<AtomicBool>,
-    _demand: crate::session_transport::Demand,
 }
 impl Reading {
     fn close(&self) {
@@ -91,7 +90,6 @@ fn query(state: &Shared, db: &MetricsDb, id: Uuid) -> Result<Arc<Reading>, Strin
             profile: profile.clone(),
             cancelled,
             retry,
-            _demand: owner.transport_demand(),
             query: Query::new(policy(), move || {
                 let (state, owner, profile, db, token, retry) = (
                     weak_state.clone(),
@@ -108,9 +106,8 @@ fn query(state: &Shared, db: &MetricsDb, id: Uuid) -> Result<Arc<Reading>, Strin
                     if retry.swap(false, Ordering::AcqRel) {
                         crate::monitor::retry_overview(&owner).await;
                     }
-                    let started = std::time::Instant::now();
                     let data = cockpit::collect(&owner, cockpit::Section::Overview).await?;
-                    record(&state, &db, &owner, &profile, &token, started, data)
+                    record(&state, &db, &owner, &profile, &token, data)
                         .await
                         .map(Arc::new)
                 }
@@ -146,7 +143,6 @@ async fn record(
     owner: &Arc<ServerSession>,
     profile: &Server,
     cancelled: &AtomicBool,
-    started: std::time::Instant,
     mut data: Value,
 ) -> Result<Value, String> {
     let sampled_at = metrics_db::now_ms();
@@ -154,7 +150,6 @@ async fn record(
     // history takes the exclusive maintenance guard, not ordinary UI reads.
     let _history = crate::manager::server_history_guard(state, profile.id).await;
     validate(state, owner, profile, cancelled)?;
-    state.observe_connection(profile, owner.revision(), started, Ok(()));
     data["sampledAt"] = sampled_at.into();
     if let Err(error) = db.record(profile, sampled_at, &data).await {
         data["historyError"] =

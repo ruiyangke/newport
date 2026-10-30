@@ -1,13 +1,19 @@
 //! Fault injection against the disposable server; never touches saved profiles.
 use super::*;
-use std::sync::Arc;
 type Stream = russh::ChannelStream<russh::client::Msg>;
 
-async fn agent(session: &ExecSession) -> Stream {
+fn files_remote(server: &Server) -> crate::files::Remote {
+    crate::files::Remote::new(
+        server.clone(),
+        crate::ssh::link(server, crate::ssh::no_jump_hosts),
+    )
+}
+
+async fn agent(session: &crate::remote::Shell) -> Stream {
     // Explicit fixture setup, separate from the production feature launcher.
-    crate::agent::install(session).await.unwrap();
+    crate::agent::install(&session.0, &server()).await.unwrap();
     let (mut stream, _) = crate::agent::launch(
-        session,
+        &session.0,
         crate::agent::Service::Integration {
             client: Uuid::new_v4(),
             clipboard: true,
@@ -71,10 +77,10 @@ async fn download_journal_crash_child() {
         serde_json::from_str(&std::env::var("NEWPORT_DOWNLOAD_CRASH_SERVER").unwrap()).unwrap();
     assert_eq!(server.ssh_host, "127.0.0.1");
     let operations = crate::files::Operations::persistent(profile);
-    let sftp = Sftp::connect(&server).await.unwrap();
+    let files = files_remote(&server);
     crate::files::transfer::download(
         &operations,
-        &sftp,
+        &files,
         &std::env::var("NEWPORT_DOWNLOAD_CRASH_REMOTE").unwrap(),
         &profile.join("downloads/existing.bin"),
         |done, _| {
@@ -112,7 +118,7 @@ async fn download_journal_crash_child() {
 #[ignore = "Requires disposable OpenSSH fixture; kills only its own child test process"]
 async fn backend_crash_recovers_download_staging() {
     let server = server();
-    let sftp = Arc::new(Sftp::connect(&server).await.unwrap());
+    let files = files_remote(&server);
     let profile = tempfile::tempdir().unwrap();
     let folder = profile.path().join("downloads");
     std::fs::create_dir(&folder).unwrap();
@@ -127,7 +133,7 @@ async fn backend_crash_recovers_download_staging() {
     std::fs::write(&source, &data).unwrap();
     let remote = crate::files::transfer::upload(
         &crate::files::Operations::default(),
-        sftp.clone(),
+        &files,
         &source,
         "/home/fixture",
         |_, _| {},
@@ -191,13 +197,13 @@ async fn backend_crash_recovers_download_staging() {
     let journal = profile
         .path()
         .join("download-recovery.json.servers")
-        .join(sftp.server_id().to_string())
+        .join(server.id.to_string())
         .join("journal.json");
     let records: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
     assert!(records["entries"].as_object().unwrap().is_empty());
     // A separate intentional retry publishes complete data and retires recovery.
-    crate::files::transfer::download(&operations, &sftp, &remote, &destination, |_, _| {})
+    crate::files::transfer::download(&operations, &files, &remote, &destination, |_, _| {})
         .await
         .unwrap();
     assert_eq!(std::fs::read(&destination).unwrap(), data);
@@ -205,7 +211,8 @@ async fn backend_crash_recovers_download_staging() {
     let records: serde_json::Value =
         serde_json::from_slice(&std::fs::read(journal).unwrap()).unwrap();
     assert!(records["entries"].as_object().unwrap().is_empty());
-    sftp.session.remove(remote).await.unwrap();
+    let sftp = files.sftp.shared().await.unwrap();
+    sftp.remove(remote).await.unwrap();
 }
 
 // Invoked by the parent crash test only. Blocking at the first written chunk
@@ -221,10 +228,10 @@ async fn upload_journal_crash_child() {
         serde_json::from_str(&std::env::var("NEWPORT_UPLOAD_CRASH_SERVER").unwrap()).unwrap();
     assert_eq!(server.ssh_host, "127.0.0.1");
     let operations = crate::files::Operations::persistent(profile);
-    let sftp = Arc::new(Sftp::connect(&server).await.unwrap());
+    let files = files_remote(&server);
     crate::files::transfer::upload(
         &operations,
-        sftp,
+        &files,
         &profile.join("payload.bin"),
         &std::env::var("NEWPORT_UPLOAD_CRASH_FOLDER").unwrap(),
         |done, _| {
@@ -245,7 +252,7 @@ async fn upload_journal_crash_child() {
 #[ignore = "Requires disposable OpenSSH fixture; kills only its own child test process"]
 async fn backend_crash_recovers_upload_staging() {
     let server = server();
-    let session = ExecSession::connect(&server).await.unwrap();
+    let session = crate::remote::Shell::new(&server);
     let folder = format!("/home/fixture/upload-crash-{}", Uuid::new_v4());
     let unrelated = format!("{folder}/.newport-upload-{}", Uuid::new_v4());
     session
@@ -301,19 +308,15 @@ async fn backend_crash_recovers_upload_staging() {
     let entries = records["entries"].as_object().unwrap();
     assert_eq!(entries.len(), 1);
     let owned = entries.values().next().unwrap()["path"].as_str().unwrap();
-    let sftp = Arc::new(Sftp::connect(&server).await.unwrap());
-    assert!(sftp.session.stat(owned).await.unwrap().attrs.size.unwrap() > 0);
-    assert!(
-        sftp.session
-            .stat(format!("{folder}/payload.bin"))
-            .await
-            .is_err()
-    );
+    let files = files_remote(&server);
+    let sftp = files.sftp.shared().await.unwrap();
+    assert!(sftp.stat(owned).await.unwrap().attrs.size.unwrap() > 0);
+    assert!(sftp.stat(format!("{folder}/payload.bin")).await.is_err());
     let operations = crate::files::Operations::persistent(temp.path());
-    operations.retry_upload_cleanup(sftp.clone());
+    operations.retry_upload_cleanup(files.clone());
     timeout(Duration::from_secs(8), async {
         loop {
-            if let Err(error) = sftp.session.lstat(owned).await {
+            if let Err(error) = sftp.lstat(owned).await {
                 assert!(
                     matches!(error, russh_sftp::client::error::Error::Status(ref status)
                     if status.status_code == russh_sftp::protocol::StatusCode::NoSuchFile)
@@ -326,10 +329,7 @@ async fn backend_crash_recovers_upload_staging() {
     .await
     .unwrap();
     operations.shutdown().await;
-    assert_eq!(
-        sftp.session.stat(&unrelated).await.unwrap().attrs.size,
-        Some(4)
-    );
+    assert_eq!(sftp.stat(&unrelated).await.unwrap().attrs.size, Some(4));
     let records: serde_json::Value =
         serde_json::from_slice(&std::fs::read(journal).unwrap()).unwrap();
     assert!(records["entries"].as_object().unwrap().is_empty());
@@ -337,7 +337,7 @@ async fn backend_crash_recovers_upload_staging() {
     let retry = crate::files::Operations::persistent(temp.path());
     let uploaded = crate::files::transfer::upload(
         &retry,
-        sftp,
+        &files,
         &temp.path().join("payload.bin"),
         &folder,
         |_, _| {},
@@ -365,7 +365,7 @@ async fn backend_crash_recovers_upload_staging() {
 #[tokio::test]
 #[ignore = "Requires cargo xtask test remote; replaces the disposable server agent"]
 async fn services_require_explicit_install_and_preserve_damaged_installations() {
-    let session = ExecSession::connect(&server()).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
     let services = || {
         [
             crate::agent::Service::Git,
@@ -386,7 +386,7 @@ async fn services_require_explicit_install_and_preserve_damaged_installations() 
             .execute("rm -f ~/.local/bin/newport-agent", None)
             .await
             .unwrap();
-        let error = crate::agent::launch(&session, service)
+        let error = crate::agent::launch(&session.0, service)
             .await
             .err()
             .expect("Missing agent must not be deployed by a feature");
@@ -395,9 +395,11 @@ async fn services_require_explicit_install_and_preserve_damaged_installations() 
             .execute("test ! -e ~/.local/bin/newport-agent", None)
             .await
             .unwrap();
-        crate::agent::install(&session).await.unwrap();
+        crate::agent::install(&session.0, &server()).await.unwrap();
         let git = matches!(after_install, crate::agent::Service::Git);
-        let (mut stream, _) = crate::agent::launch(&session, after_install).await.unwrap();
+        let (mut stream, _) = crate::agent::launch(&session.0, after_install)
+            .await
+            .unwrap();
         if git {
             let (client, _) =
                 crate::git::client::Client::start_with_identity(stream, Uuid::new_v4().to_string())
@@ -417,11 +419,13 @@ async fn services_require_explicit_install_and_preserve_damaged_installations() 
         .await
         .unwrap();
     assert!(
-        crate::agent::launch(&session, crate::agent::Service::Git)
+        crate::agent::launch(&session.0, crate::agent::Service::Git)
             .await
             .is_err()
     );
-    let error = crate::agent::install(&session).await.unwrap_err();
+    let error = crate::agent::install(&session.0, &server())
+        .await
+        .unwrap_err();
     assert!(error.contains("not executable"), "{error}");
     session
         .execute("test ! -x ~/.local/bin/newport-agent", None)
@@ -449,16 +453,15 @@ async fn services_require_explicit_install_and_preserve_damaged_installations() 
         inode,
         "a matching executable must not be uploaded again"
     );
-    crate::agent_lifecycle::activate_variant_test(&session).await;
+    crate::agent_lifecycle::activate_variant_test(&session.0).await;
     let mut stream = agent(&session).await;
     stop(&mut stream).await;
-    session.close().await;
 }
 
 #[tokio::test]
 #[ignore = "Requires cargo xtask test remote"]
 async fn clipboard_copy_during_transfer_rejects_late_old_response() {
-    let session = ExecSession::connect(&server()).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
     let mut stream = agent(&session).await;
     offer(&mut stream, 1, "text/plain").await;
     let (old, ()) = tokio::join!(session.execute(READ, None), async {
@@ -491,7 +494,7 @@ async fn clipboard_copy_during_transfer_rejects_late_old_response() {
 #[tokio::test]
 #[ignore = "Requires cargo xtask test remote"]
 async fn clipboard_concurrent_readers_share_one_request() {
-    let session = ExecSession::connect(&server()).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
     let mut stream = agent(&session).await;
     offer(&mut stream, 10, "text/plain").await;
     let (a, b, ()) = tokio::join!(
@@ -513,8 +516,8 @@ async fn clipboard_concurrent_readers_share_one_request() {
 #[tokio::test]
 #[ignore = "Requires cargo xtask test remote"]
 async fn crashed_agent_restarts_without_serving_old_clipboard() {
-    let session = ExecSession::connect(&server()).await.unwrap();
-    crate::agent::install(&session).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
+    crate::agent::install(&session.0, &server()).await.unwrap();
     let pid_file = format!("/home/fixture/agent-{}.pid", Uuid::new_v4());
     let mut stream = session
         .stream(&format!(
@@ -556,13 +559,13 @@ async fn crashed_agent_restarts_without_serving_old_clipboard() {
 #[ignore = "Requires cargo xtask test remote"]
 async fn cancelled_upload_cleans_staging_and_can_be_retried() {
     use crate::files::{Operations, transfer};
-    let session = ExecSession::connect(&server()).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
     let folder = format!("/home/fixture/upload-{}", Uuid::new_v4());
     session
         .execute(&format!("mkdir {folder}"), None)
         .await
         .unwrap();
-    let sftp = Arc::new(Sftp::connect(&server()).await.unwrap());
+    let files = files_remote(&server());
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("payload.bin");
     let data = vec![0x5a; 4 * 1024 * 1024];
@@ -571,7 +574,7 @@ async fn cancelled_upload_cleans_staging_and_can_be_retried() {
     let progressed = tokio::sync::Notify::new();
     // Dropping the future is the same cancellation mechanism used by Operations.
     {
-        let upload = transfer::upload(&operations, sftp.clone(), &source, &folder, |done, _| {
+        let upload = transfer::upload(&operations, &files, &source, &folder, |done, _| {
             if done > 0 {
                 progressed.notify_one();
             }
@@ -592,13 +595,13 @@ async fn cancelled_upload_cleans_staging_and_can_be_retried() {
         "0"
     );
     let retry = Operations::default();
-    let remote = transfer::upload(&retry, sftp.clone(), &source, &folder, |_, _| {})
+    let remote = transfer::upload(&retry, &files, &source, &folder, |_, _| {})
         .await
         .unwrap();
     let downloaded = temp.path().join("download.bin");
     transfer::download(
         &crate::files::Operations::default(),
-        &sftp,
+        &files,
         &remote,
         &downloaded,
         |_, _| {},
@@ -616,13 +619,13 @@ async fn cancelled_upload_cleans_staging_and_can_be_retried() {
 #[ignore = "Requires cargo xtask test remote"]
 async fn cancelled_download_preserves_destination_and_removes_partial_file() {
     use crate::files::transfer;
-    let session = ExecSession::connect(&server()).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
     let remote = format!("/home/fixture/download-{}.bin", Uuid::new_v4());
     session
         .execute(&format!("truncate -s 8388608 {remote}"), None)
         .await
         .unwrap();
-    let sftp = Sftp::connect(&server()).await.unwrap();
+    let files = files_remote(&server());
     let temp = tempfile::tempdir().unwrap();
     let destination = temp.path().join("existing.bin");
     std::fs::write(&destination, b"keep existing file").unwrap();
@@ -630,7 +633,7 @@ async fn cancelled_download_preserves_destination_and_removes_partial_file() {
     let profile = tempfile::tempdir().unwrap();
     let operations = crate::files::Operations::persistent(profile.path());
     {
-        let download = transfer::download(&operations, &sftp, &remote, &destination, |done, _| {
+        let download = transfer::download(&operations, &files, &remote, &destination, |done, _| {
             if done > 0 {
                 progressed.notify_one();
             }
@@ -651,14 +654,15 @@ async fn cancelled_download_preserves_destination_and_removes_partial_file() {
             profile
                 .path()
                 .join("download-recovery.json.servers")
-                .join(sftp.server_id().to_string())
+                .join(files.server_id().to_string())
                 .join("journal.json"),
         )
         .unwrap(),
     )
     .unwrap();
     assert!(records["entries"].as_object().unwrap().is_empty());
-    sftp.session.remove(remote).await.unwrap();
+    let sftp = files.sftp.shared().await.unwrap();
+    sftp.remove(remote).await.unwrap();
 }
 
 #[tokio::test]
@@ -666,8 +670,8 @@ async fn cancelled_download_preserves_destination_and_removes_partial_file() {
 async fn agent_upgrade_and_bad_upload_preserve_working_installation() {
     use std::io::Write as _;
 
-    let session = ExecSession::connect(&server()).await.unwrap();
-    crate::agent::install(&session).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
+    crate::agent::install(&session.0, &server()).await.unwrap();
     let hash = session
         .execute("sha256sum ~/.local/bin/newport-agent", None)
         .await
@@ -699,8 +703,8 @@ async fn agent_upgrade_and_bad_upload_preserve_working_installation() {
     );
     // A distinct executable build exercises replacement through the actual
     // activation protocol. This is not an old-release compatibility assertion.
-    crate::agent_lifecycle::activate_variant_test(&session).await;
-    crate::agent::install(&session).await.unwrap();
+    crate::agent_lifecycle::activate_variant_test(&session.0).await;
+    crate::agent::install(&session.0, &server()).await.unwrap();
     assert_eq!(
         session
             .execute("sha256sum ~/.local/bin/newport-agent", None)
@@ -748,8 +752,8 @@ async fn discovery_and_unavailable_capabilities_report_real_server_state() {
 #[tokio::test]
 #[ignore = "Requires cargo xtask test remote"]
 async fn disk_full_reports_retryable_error_and_recovers_after_space_is_freed() {
-    let session = ExecSession::connect(&server()).await.unwrap();
-    crate::agent::install(&session).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
+    crate::agent::install(&session.0, &server()).await.unwrap();
     let home = format!("/fault-disk/home-{}", Uuid::new_v4());
     let filler = format!("/fault-disk/fill-{}", Uuid::new_v4());
     session
@@ -888,14 +892,15 @@ async fn persistent_tunnel_reconnects_after_real_ssh_disconnect_and_stop_cancels
     http(port).await;
     // Only this disposable account's SSH worker processes; the root listener lives.
     let disconnect = "pkill -KILL -u $(id -u) -x 'sshd(-session)?'";
+    let shell = crate::remote::Shell::new(&server);
     let _ = tokio::join!(
-        ssh::execute(&server, disconnect, None),
+        shell.execute(disconnect, None),
         wait_status(&manager, tunnel.id, Status::Reconnecting)
     );
     wait_status(&manager, tunnel.id, Status::Connected).await;
     http(port).await;
     let _ = tokio::join!(
-        ssh::execute(&server, disconnect, None),
+        shell.execute(disconnect, None),
         wait_status(&manager, tunnel.id, Status::Reconnecting)
     );
     manager.disconnect(tunnel.id).await;
@@ -916,7 +921,7 @@ async fn changing_local_file_during_upload_does_not_publish_partial_content() {
         io::Write,
         sync::atomic::{AtomicBool, Ordering},
     };
-    let session = ExecSession::connect(&server()).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
     for (size, mutation) in [
         (256 * 1024, "append"),
         (2 * 1024 * 1024, "append"),
@@ -932,10 +937,10 @@ async fn changing_local_file_during_upload_does_not_publish_partial_content() {
         let local = temp.path().join("growing.bin");
         std::fs::write(&local, vec![1; size]).unwrap();
         let modified = std::fs::metadata(&local).unwrap().modified().unwrap();
-        let sftp = Arc::new(Sftp::connect(&server()).await.unwrap());
+        let files = files_remote(&server());
         let operations = Operations::default();
         let changed = AtomicBool::new(false);
-        let error = transfer::upload(&operations, sftp.clone(), &local, &folder, |done, _| {
+        let error = transfer::upload(&operations, &files, &local, &folder, |done, _| {
             if done == 0 || changed.swap(true, Ordering::SeqCst) {
                 return;
             }
@@ -977,7 +982,7 @@ async fn changing_local_file_during_upload_does_not_publish_partial_content() {
         );
         let retry = Operations::default();
         assert_eq!(
-            transfer::upload(&retry, sftp, &local, &folder, |_, _| {})
+            transfer::upload(&retry, &files, &local, &folder, |_, _| {})
                 .await
                 .unwrap(),
             format!("{folder}/growing.bin")
@@ -988,20 +993,19 @@ async fn changing_local_file_during_upload_does_not_publish_partial_content() {
             .await
             .unwrap();
     }
-    session.close().await;
 }
 
 #[tokio::test]
 #[ignore = "Requires cargo xtask test remote"]
 async fn changing_remote_file_during_download_preserves_local_destination() {
     use crate::files::transfer;
-    let session = ExecSession::connect(&server()).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
     let remote = format!("/home/fixture/changing-{}.bin", Uuid::new_v4());
     session
         .execute(&format!("truncate -s 8388608 {remote}"), None)
         .await
         .unwrap();
-    let sftp = Sftp::connect(&server()).await.unwrap();
+    let files = files_remote(&server());
     let temp = tempfile::tempdir().unwrap();
     let local = temp.path().join("existing.bin");
     std::fs::write(&local, b"original bytes").unwrap();
@@ -1009,7 +1013,7 @@ async fn changing_remote_file_during_download_preserves_local_destination() {
     let operations = crate::files::Operations::default();
     let mut download = Box::pin(transfer::download(
         &operations,
-        &sftp,
+        &files,
         &remote,
         &local,
         |done, _| {

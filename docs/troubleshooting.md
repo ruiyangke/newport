@@ -15,7 +15,7 @@ Start with the error shown in the affected workspace. Confirm that you have sele
 3. For agent keys, unlock your SSH agent and choose **Refresh agent keys**. Follow [Prepare your SSH key](getting-started.md#prepare-your-ssh-key) to load and verify a passphrase-protected key on your computer.
 4. Use **Server → Test connection** or retry the failed operation.
 
-Newport currently needs a directly reachable SSH server. Hosts using `ProxyJump` or `ProxyCommand` cannot be used as-is. The SSH config importer may describe either setting as a jump-host limitation.
+For a server behind a jump host, Newport signs in to the jump host first, so check the jump host the same way. For a server reached with `ProxyCommand`, Newport shows what the command printed; run the command in a terminal to check it.
 
 For **connection refused** or a timeout, check that SSH is listening on the selected address and allowed through the network. For **authentication failed**, check the user and key/password rather than changing unrelated network settings.
 

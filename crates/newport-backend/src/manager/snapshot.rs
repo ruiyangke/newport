@@ -123,9 +123,13 @@ impl Source {
         for owner in &published.owners {
             let id = owner.server().id;
             runtime.connection_revisions.insert(id, owner.revision());
-            runtime
-                .agent_transport
-                .insert(id, owner.transport_snapshot());
+            runtime.agent_transport.insert(id, owner.transport());
+            if matches!(
+                owner.status().borrow().login,
+                Some(newport_ssh::Login::WaitingForApproval)
+            ) {
+                runtime.awaiting_agent.push(id);
+            }
             runtime
                 .agent_runtime
                 .insert(id, owner.agent_runtime.snapshot());
@@ -145,23 +149,7 @@ impl Source {
                     runtime.clipboard_messages.insert(id, message);
                 }
             }
-            let health = owner
-                .connectivity
-                .lock()
-                .unwrap()
-                .health(std::time::Instant::now());
-            runtime.health.insert(id, health.status.into());
-            runtime.connectivity.insert(id, health);
         }
-        let approvals = crate::agent_approval::subscribe();
-        let pending = approvals.borrow();
-        runtime.awaiting_agent = published
-            .config
-            .servers
-            .iter()
-            .filter(|server| pending.contains_key(&server.id))
-            .map(|server| server.id)
-            .collect();
         Snapshot {
             instance_id: self.instance_id,
             revision: 0,
@@ -201,13 +189,22 @@ mod tests {
         let before = commands::snapshot(&state).await.unwrap();
         let mut writer = state.lock().await;
         writer.config.servers[0].name = "unpublished edit".into();
-        state.observe_connection(&server, 0, std::time::Instant::now(), Ok(()));
+        state
+            .owner(server.id)
+            .unwrap()
+            .set_status_for_test(newport_ssh::Status {
+                reach: newport_ssh::Reach::Ready { connections: 1 },
+                ..Default::default()
+            });
         let during = tokio::time::timeout(Duration::from_millis(200), commands::snapshot(&state))
             .await
             .expect("shell must not wait for profile storage")
             .unwrap();
         assert_eq!(during.config.servers[0].name, "A");
-        assert_eq!(during.runtime.health[&server.id], "reachable");
+        assert_eq!(
+            during.runtime.agent_transport[&server.id].status,
+            "connected"
+        );
         assert!(during.revision > before.revision);
         assert_eq!(
             commands::snapshot(&state).await.unwrap().revision,
@@ -263,15 +260,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn older_parallel_collection_cannot_overwrite_newer_health() {
+    async fn older_parallel_collection_cannot_overwrite_a_newer_connection_status() {
         let (_directory, state, server) = fixture();
         let source = state.lock().await.snapshots.clone();
         let before = source.read();
         let published = source.state.lock().unwrap().published.clone();
         let stale = source.collect(&published);
-        state.observe_connection(&server, 0, std::time::Instant::now(), Ok(()));
+        state
+            .owner(server.id)
+            .unwrap()
+            .set_status_for_test(newport_ssh::Status {
+                reach: newport_ssh::Reach::Ready { connections: 1 },
+                ..Default::default()
+            });
         let current = source.read();
-        assert_eq!(current.runtime.health[&server.id], "reachable");
+        assert_eq!(
+            current.runtime.agent_transport[&server.id].status,
+            "connected"
+        );
         assert!(source.finish(&published, before.revision, stale).is_none());
         assert_eq!(source.read().revision, current.revision);
         crate::manager::shutdown(&state).await;

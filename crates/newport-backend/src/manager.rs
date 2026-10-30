@@ -6,7 +6,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::{sync::watch, task::JoinHandle};
 use uuid::Uuid;
@@ -14,7 +14,7 @@ use uuid::Uuid;
 #[derive(Default, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Runtime {
-    pub agent_transport: HashMap<Uuid, crate::session_transport::Snapshot>,
+    pub agent_transport: HashMap<Uuid, crate::connection_state::Transport>,
     pub agent_runtime: HashMap<Uuid, crate::agent_runtime::Snapshot>,
     pub agent_permissions: HashMap<Uuid, crate::integration_permissions::Snapshot>,
     pub agent_status: HashMap<Uuid, crate::agent_lifecycle::Status>,
@@ -24,8 +24,6 @@ pub struct Runtime {
     pub clipboard: HashMap<Uuid, ConnectionState>,
     pub clipboard_messages: HashMap<Uuid, String>,
     pub clipboard_path_needed: HashMap<Uuid, bool>,
-    pub health: HashMap<Uuid, String>,
-    pub connectivity: HashMap<Uuid, crate::connectivity::Health>,
     pub connection_revisions: HashMap<Uuid, u64>,
     pub awaiting_agent: Vec<Uuid>,
 }
@@ -217,16 +215,17 @@ impl Manager {
         };
         let runtime = Arc::new(Mutex::new(Runtime::default()));
         let instance_id = Uuid::new_v4();
+        let sessions = Arc::new(crate::server_session::Registry::with_instance(
+            &store.directory,
+            instance_id,
+        ));
         let manager = Self {
-            sessions: Arc::new(crate::server_session::Registry::with_instance(
-                &store.directory,
-                instance_id,
-            )),
+            sessions: sessions.clone(),
             store: Arc::new(store),
             config,
             load_error,
             runtime: runtime.clone(),
-            forwarding: Arc::new(forwarding::Forwarding::new(runtime.clone())),
+            forwarding: Arc::new(forwarding::Forwarding::new(runtime.clone(), sessions)),
             profile_cleanup: Vec::new(),
             history_barrier: Arc::default(),
             next_connection_revision: 0,
@@ -280,16 +279,20 @@ impl Manager {
         ))
     }
 
+    /// Replaces the server's session, and the sessions of the servers behind
+    /// it, whose links reach theirs through its link.
     pub fn advance_connection_revision(&mut self, id: Uuid) {
-        self.sessions.invalidate(id);
-        self.next_connection_revision += 1;
-        self.runtime
-            .lock()
-            .unwrap()
-            .connection_revisions
-            .insert(id, self.next_connection_revision);
-        if let Ok(server) = self.server(id) {
-            self.sessions.session(&server, self.connection_revision(id));
+        for id in self.config.through(id) {
+            self.sessions.invalidate(id);
+            self.next_connection_revision += 1;
+            self.runtime
+                .lock()
+                .unwrap()
+                .connection_revisions
+                .insert(id, self.next_connection_revision);
+            if let Ok(server) = self.server(id) {
+                self.sessions.session(&server, self.connection_revision(id));
+            }
         }
     }
     pub fn matches_connection(&self, server: &Server, revision: u64) -> bool {
@@ -299,22 +302,6 @@ impl Manager {
                 .servers
                 .iter()
                 .any(|current| current.id == server.id && current.same_connection(server))
-    }
-    pub fn observe_connection(
-        &self,
-        server: &Server,
-        revision: u64,
-        started: Instant,
-        result: Result<(), String>,
-    ) {
-        if self.matches_connection(server, revision) {
-            self.sessions
-                .session(server, revision)
-                .connectivity
-                .lock()
-                .unwrap()
-                .observe(started, result);
-        }
     }
     fn publish_snapshot(&self) {
         self.publish_sessions();
@@ -556,11 +543,12 @@ fn set_tunnel_state(runtime: &Arc<Mutex<Runtime>>, id: Uuid, state: ConnectionSt
     r.tunnels.insert(id, state);
 }
 fn spawn(
-    server: Server,
+    owner: Arc<crate::server_session::ServerSession>,
     tunnel: Tunnel,
     id: Uuid,
     runtime: Arc<Mutex<Runtime>>,
     previous: Vec<Arc<TunnelCleanup>>,
+    asked: bool,
 ) -> Result<Running, String> {
     let local_ports = if tunnel.direction == Direction::Local {
         tunnel.pairs()?.into_iter().map(|(port, _)| port).collect()
@@ -583,62 +571,38 @@ fn spawn(
                 _ = cleanup.wait() => {},
             }
         }
-        let mut attempt: u32 = 0;
-        let mut recovery = crate::recovery::subscribe();
-        loop {
-            if *rx.borrow() {
-                break;
+        let link = owner.link().clone();
+        drop(owner);
+        let forward = match ssh::forward::Forward::start(link, &tunnel, asked).await {
+            Ok(forward) => forward,
+            Err(message) => {
+                publish.state(ConnectionState::error(message));
+                return;
             }
+        };
+        let mut state = forward.state();
+        let mut current = state.borrow_and_update().clone();
+        publish.state(current.clone());
+        let mut health = tokio::time::interval(Duration::from_millis(250));
+        health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // An error is final: the forward stopped itself.
+        while current.status != Status::Error {
             tokio::select! {
                 biased;
                 _ = rx.changed() => break,
-                _ = recovery.ready() => {},
-            }
-            let connected = tokio::select! {
-                _ = rx.changed() => break,
-                result = ssh::Forwarding::start(&server, Some(&tunnel)) => result,
-            };
-            let (message, retryable) = match connected {
-                Ok(forwarding) => {
-                    publish.state(ConnectionState::new(Status::Connected));
-                    let started = Instant::now();
-                    let failure = loop {
-                        tokio::select! {
-                            _ = rx.changed() => break None,
-                            _ = tokio::time::sleep(Duration::from_millis(250)) => {
-                                if let Some(error) = forwarding.error() { break Some(error); }
-                                publish.health(forwarding.destination_health());
-                                if started.elapsed() > Duration::from_secs(60) { attempt = 0; }
-                            }
-                        }
-                    };
-                    forwarding.shutdown().await;
-                    let Some(message) = failure else {
+                changed = state.changed() => {
+                    if changed.is_err() {
                         break;
-                    };
-                    (message, true)
+                    }
+                    current = state.borrow_and_update().clone();
+                    publish.state(current.clone());
                 }
-                Err(error) => (
-                    ssh::connection_failure(&error),
-                    ssh::is_transient_connection_error(&error),
-                ),
-            };
-            if *rx.borrow() {
-                break;
+                _ = health.tick(), if current.status == Status::Connected => {
+                    publish.health(forward.destination_health());
+                }
             }
-            if !retryable || !tunnel.auto_reconnect {
-                publish.state(ConnectionState::error(message));
-                break;
-            }
-            attempt = attempt.saturating_add(1);
-            publish.state(ConnectionState {
-                status: Status::Reconnecting,
-                error_message: Some(message),
-                reconnect_attempt: attempt,
-            });
-            let delay = (2u64.pow(attempt.min(5))).min(30);
-            tokio::select! { biased; _ = rx.changed() => break, _ = recovery.wait(Duration::from_secs(delay)) => {} }
         }
+        forward.shutdown().await;
     });
     Ok(Running {
         cancel,
@@ -648,32 +612,6 @@ fn spawn(
         previous,
     })
 }
-pub async fn connection_events(
-    state: Shared,
-    mut events: tokio::sync::broadcast::Receiver<crate::connectivity::Observation>,
-) {
-    loop {
-        match events.recv().await {
-            Ok(event) => {
-                if let Ok(owner) = state.owner(event.server.id)
-                    && owner.server().same_connection(&event.server)
-                    && event.started >= owner.created_at
-                {
-                    owner.connectivity.lock().unwrap().observe_at(
-                        event.started,
-                        event.finished,
-                        event.finished_wall,
-                        event.result,
-                    );
-                }
-            }
-            // Probes and future operations reconcile after an overflow.
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-        }
-    }
-}
-
 pub async fn background(state: Shared, app: crate::desktop_integration::Desktop) {
     state.forwarding.auto_connect();
     let profiles = state.sessions.profiles();
@@ -696,153 +634,10 @@ pub async fn background(state: Shared, app: crate::desktop_integration::Desktop)
         });
     }
     while starting.join_next().await.is_some() {}
-    let mut timer = tokio::time::interval(Duration::from_secs(30));
-    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        timer.tick().await;
-        let servers = state
-            .sessions
-            .all()
-            .into_iter()
-            .filter(|owner| !owner.is_revoked())
-            .map(|owner| owner.server().id)
-            .collect::<Vec<_>>();
-        // Independent probes prevent a slow server from delaying every other server.
-        let mut probes = tokio::task::JoinSet::new();
-        for server in servers {
-            let state = state.clone();
-            probes.spawn(async move {
-                let _ = crate::commands::probe_connection(&state, server, false).await;
-            });
-        }
-        while probes.join_next().await.is_some() {}
-    }
 }
 
 #[cfg(test)]
-mod integration_tests {
-    use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
-    }
-    async fn wait_status(m: &Manager, id: Uuid, status: Status) {
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                let current = m
-                    .runtime
-                    .lock()
-                    .unwrap()
-                    .tunnels
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_default();
-                if current.status == status {
-                    return;
-                }
-                if current.status == Status::Error && status != Status::Error {
-                    panic!("Unexpected SSH error: {:?}", current.error_message);
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("Timed out waiting for {status:?}"));
-    }
-    #[tokio::test]
-    #[ignore = "Run with cargo xtask test ssh and its ephemeral SSH fixture"]
-    async fn real_ssh_forward_reconnect_and_cancel() {
-        let dir = tempfile::tempdir().unwrap();
-        let server = Server {
-            id: Uuid::new_v4(),
-            name: "Fixture".into(),
-            ssh_user: "fixture".into(),
-            ssh_host: "127.0.0.1".into(),
-            ssh_port: std::env::var("NEWPORT_TEST_SSH_PORT")
-                .unwrap()
-                .parse()
-                .unwrap(),
-            identity_file: Some(std::env::var("NEWPORT_TEST_IDENTITY").unwrap()),
-            agent_source: None,
-            agent_key_fingerprint: None,
-            auth_method: AuthMethod::PublicKey,
-            clipboard_enabled: false,
-            browser_enabled: false,
-            agent_install_approved: true,
-            setup_complete: true,
-        };
-        let port = free_port();
-        let tunnel = Tunnel {
-            id: Uuid::new_v4(),
-            name: "Echo".into(),
-            server_id: server.id,
-            local_port: port,
-            local_port_end: None,
-            remote_host: "127.0.0.1".into(),
-            remote_port: 12345,
-            remote_port_end: None,
-            auto_connect: false,
-            auto_reconnect: true,
-            direction: Default::default(),
-            project: None,
-        };
-        let mut m = Manager::new(Store::for_test(dir.path().into()));
-        m.save(Config {
-            servers: vec![server.clone()],
-            tunnels: vec![tunnel.clone()],
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            ssh::execute(&server, "printf ok", None).await.unwrap(),
-            "ok"
-        );
-        m.connect(tunnel.id).unwrap();
-        wait_status(&m, tunnel.id, Status::Connected).await;
-        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .unwrap();
-        stream.write_all(b"newport roundtrip").await.unwrap();
-        let mut received = [0; 17];
-        tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut received))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(&received, b"newport roundtrip");
-        drop(stream);
-        // A second profile cannot claim a live local port.
-        let mut overlap = tunnel.clone();
-        overlap.id = Uuid::new_v4();
-        m.config.tunnels.push(overlap.clone());
-        assert!(m.connect(overlap.id).unwrap_err().contains("overlap"));
-        // The fixture drops every SSH connection on this fixed command.
-        let _ = ssh::execute(&server, "drop", None).await;
-        wait_status(&m, tunnel.id, Status::Reconnecting).await;
-        wait_status(&m, tunnel.id, Status::Connected).await;
-        let _ = ssh::execute(&server, "drop", None).await;
-        wait_status(&m, tunnel.id, Status::Reconnecting).await;
-        m.disconnect(tunnel.id).await;
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        assert_eq!(
-            m.runtime.lock().unwrap().tunnels[&tunnel.id].status,
-            Status::Disconnected
-        );
-        let listener =
-            std::net::TcpListener::bind(("127.0.0.1", port)).expect("Stop must release local port");
-        drop(listener);
-        // A bind failure must never settle in connected state.
-        let occupied = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
-        m.config.tunnels[0].auto_reconnect = false;
-        m.connect(tunnel.id).unwrap();
-        wait_status(&m, tunnel.id, Status::Error).await;
-        drop(occupied);
-        m.shutdown().await;
-    }
-}
+mod integration_tests;
 
 #[cfg(test)]
 mod configuration_tests {
@@ -850,55 +645,79 @@ mod configuration_tests {
     fn server() -> Server {
         serde_json::from_value(serde_json::json!({"id":Uuid::new_v4(),"name":"Saved","sshHost":"fixture.example","sshUser":"fixture","sshPort":22})).unwrap()
     }
+    fn status(reach: newport_ssh::Reach, login: Option<newport_ssh::Login>) -> newport_ssh::Status {
+        newport_ssh::Status {
+            reach,
+            login,
+            waiting: 1,
+        }
+    }
     #[test]
-    fn consent_snapshot_is_profile_scoped_and_clears_after_last_wait() {
+    fn approval_snapshot_is_profile_scoped_and_clears_when_the_login_ends() {
         let directory = tempfile::tempdir().unwrap();
         let mut manager = Manager::new(Store::for_test(directory.path().into()));
         let server = server();
-        manager.config.servers.push(server.clone());
+        let other = Server {
+            id: Uuid::new_v4(),
+            ..server.clone()
+        };
+        manager.config.servers = vec![server.clone(), other.clone()];
         let before = manager.snapshot();
-        let unrelated = crate::agent_approval::Wait::begin(Uuid::new_v4());
-        assert_eq!(manager.snapshot().revision, before.revision);
-        let first = crate::agent_approval::Wait::begin(server.id);
-        let second = crate::agent_approval::Wait::begin(server.id);
+        let owner = manager.sessions.get(server.id).unwrap();
+        owner.set_status_for_test(status(
+            newport_ssh::Reach::Connecting,
+            Some(newport_ssh::Login::WaitingForApproval),
+        ));
         let waiting = manager.snapshot();
         assert_eq!(waiting.runtime.awaiting_agent, vec![server.id]);
         assert!(waiting.revision > before.revision);
-        assert_eq!(waiting.runtime.health, before.runtime.health);
-        drop(first);
-        assert_eq!(manager.snapshot().revision, waiting.revision);
-        drop(second);
+        assert_eq!(
+            waiting.runtime.agent_transport[&other.id].status,
+            "disconnected"
+        );
+        owner.set_status_for_test(status(newport_ssh::Reach::Ready { connections: 1 }, None));
         let completed = manager.snapshot();
         assert!(completed.runtime.awaiting_agent.is_empty());
         assert!(completed.revision > waiting.revision);
-        let _removed = crate::agent_approval::Wait::begin(server.id);
+        owner.set_status_for_test(status(
+            newport_ssh::Reach::Connecting,
+            Some(newport_ssh::Login::WaitingForApproval),
+        ));
         manager.config.servers.clear();
         assert!(manager.snapshot().runtime.awaiting_agent.is_empty());
-        drop(unrelated);
     }
     #[test]
-    fn snapshots_are_versioned_and_obsolete_observations_are_rejected() {
+    fn snapshots_are_versioned_and_follow_the_current_connection() {
         let directory = tempfile::tempdir().unwrap();
         let mut manager = Manager::new(Store::for_test(directory.path().into()));
         let server = server();
         manager.config.servers.push(server.clone());
         let initial = manager.snapshot();
         assert_eq!(initial.revision, manager.snapshot().revision);
-        manager.observe_connection(&server, 0, Instant::now(), Ok(()));
+        manager
+            .sessions
+            .get(server.id)
+            .unwrap()
+            .set_status_for_test(status(newport_ssh::Reach::Ready { connections: 1 }, None));
         let online = manager.snapshot();
         assert!(online.revision > initial.revision);
-        assert_eq!(online.runtime.health[&server.id], "reachable");
-        manager.advance_connection_revision(server.id);
-        manager.observe_connection(&server, 0, Instant::now(), Ok(()));
-        assert_eq!(manager.snapshot().runtime.health[&server.id], "unknown");
-        manager.config.servers.clear();
-        manager.observe_connection(
-            &server,
-            manager.connection_revision(server.id),
-            Instant::now(),
-            Ok(()),
+        assert_eq!(
+            online.runtime.agent_transport[&server.id].status,
+            "connected"
         );
-        assert!(!manager.snapshot().runtime.health.contains_key(&server.id));
+        manager.advance_connection_revision(server.id);
+        assert_eq!(
+            manager.snapshot().runtime.agent_transport[&server.id].status,
+            "disconnected"
+        );
+        manager.config.servers.clear();
+        assert!(
+            !manager
+                .snapshot()
+                .runtime
+                .agent_transport
+                .contains_key(&server.id)
+        );
         let restarted = Manager::new(Store::for_test(directory.path().into()));
         assert_ne!(restarted.snapshot().instance_id, initial.instance_id);
     }
@@ -1021,7 +840,7 @@ mod configuration_tests {
             .unwrap();
         assert!(!manager.store.load().unwrap().servers[0].clipboard_enabled);
         assert!(owner.permissions.snapshot().desired.browser);
-        assert_eq!(owner.transport_snapshot().demand, 0);
+        assert!(!owner.has_link());
     }
 
     #[tokio::test]
@@ -1040,7 +859,7 @@ mod configuration_tests {
         let access = manager.integration_access();
         let old = manager.connection_scope(id).unwrap();
         let owner = manager.sessions.get(id).unwrap();
-        assert_eq!(owner.transport_snapshot().demand, 0);
+        assert!(!owner.has_link());
         let mut config = manager.config.clone();
         config.servers[0].name = "Renamed".into();
         manager.save(config.clone()).await.unwrap();
@@ -1058,7 +877,7 @@ mod configuration_tests {
         let current = manager.connection_scope(id).unwrap();
         assert_ne!(current, old);
         let (replacement, _) = access.begin(id, false, false, &current).unwrap();
-        assert_eq!(replacement.transport_snapshot().demand, 0);
+        assert!(!replacement.has_link());
         manager.save(Config::default()).await.unwrap();
         assert!(replacement.is_revoked());
         assert!(access.begin(id, false, false, &current).is_err());

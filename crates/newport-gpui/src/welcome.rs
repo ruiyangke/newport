@@ -120,12 +120,26 @@ impl Newport {
         let Some(resource) = self.resources.get(HOSTS) else {
             return;
         };
+        // A chosen host brings the hosts it jumps through, which the list
+        // puts before it so they are saved first.
+        let mut wanted = chosen.clone();
+        for host in config_hosts(&resource.value) {
+            if host["alias"].as_str().is_some_and(|a| chosen.contains(a)) {
+                wanted.extend(
+                    host["through"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|alias| alias.as_str().map(str::to_owned)),
+                );
+            }
+        }
         self.welcome.queue = config_hosts(&resource.value)
             .filter(|host| host["importable"] == true)
-            .filter(|host| host["alias"].as_str().is_some_and(|a| chosen.contains(a)))
+            .filter(|host| host["alias"].as_str().is_some_and(|a| wanted.contains(a)))
             .map(|host| {
                 json!({
-                    "id": uuid::Uuid::new_v4(),
+                    "id": host["id"],
                     "name": host["alias"],
                     "sshHost": host["host"],
                     "sshUser": host["user"],
@@ -134,6 +148,7 @@ impl Newport {
                     "agentSource": null,
                     "agentKeyFingerprint": null,
                     "authMethod": "publicKey",
+                    "proxy": host["proxy"],
                 })
             })
             .collect();

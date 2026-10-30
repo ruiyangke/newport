@@ -311,6 +311,7 @@ async fn invalid_preferences_abort_startup_without_claiming_credentials_or_repla
 mod remote_tests {
     use super::*;
     use crate::git::protocol::{Path as GitPath, Request};
+    use newport_client::terminal_transport::{Event, Session};
 
     #[tokio::test]
     #[ignore = "Requires cargo xtask test remote and disposable OpenSSH"]
@@ -360,9 +361,7 @@ mod remote_tests {
         .await
         .unwrap();
         assert_eq!(listing["path"], "/home/fixture");
-        let setup = crate::ssh::ExecSession::connect(&serde_json::from_value(server).unwrap())
-            .await
-            .unwrap();
+        let setup = crate::remote::Shell::new(&serde_json::from_value(server).unwrap());
         let root = format!("/home/fixture/standalone-{}", Uuid::new_v4());
         setup
             .execute(
@@ -385,49 +384,27 @@ mod remote_tests {
         }})).await.unwrap();
         assert!(status.to_string().contains("sample.txt"), "{status}");
 
-        let session = Uuid::new_v4();
         // Held for the rest of the test, as the app holds its terminals.
-        let lease_endpoint = endpoint.to_owned();
-        let _lease = tokio::task::spawn_blocking(move || {
-            newport_client::backend::Backend::at_path(lease_endpoint)
-                .open_terminal_lease(json!({"id":id,"session":session,"cols":80,"rows":24}))
-        })
-        .await
-        .unwrap()
-        .unwrap();
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let event = call(&endpoint, "terminal_read", json!({"session":session}))
-                    .await
-                    .unwrap();
-                assert_ne!(event["type"], "error", "{event}");
-                if event["type"] == "ready" {
-                    break;
-                }
-            }
-        })
-        .await
-        .unwrap();
-        call(
-            &endpoint,
-            "terminal_write",
-            json!({"session":session,"data":b"printf 'STANDALONE_%s\\n' READY\n".to_vec()}),
-        )
-        .await
-        .unwrap();
+        let backend = newport_client::backend::Backend::at_path(endpoint.to_owned());
+        let terminal = Session::open_with_backend(backend, &id.to_string(), 80, 24).unwrap();
         let mut output = Vec::new();
-        tokio::time::timeout(Duration::from_secs(10), async {
+        let mut typed = false;
+        tokio::time::timeout(Duration::from_secs(20), async {
             loop {
-                let event = call(&endpoint, "terminal_read", json!({"session":session}))
-                    .await
-                    .unwrap();
-                assert_ne!(event["type"], "error", "{event}");
-                if event["type"] == "data" {
-                    output
-                        .extend(serde_json::from_value::<Vec<u8>>(event["data"].clone()).unwrap());
-                    if String::from_utf8_lossy(&output).contains("STANDALONE_READY") {
-                        break;
-                    }
+                match terminal.try_read() {
+                    Ok(Event::Data(bytes)) => output.extend(bytes),
+                    Ok(Event::Ready) => {}
+                    Ok(event) => panic!("{event:?}"),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+                }
+                if !typed && terminal.ready() {
+                    terminal
+                        .send(b"printf 'STANDALONE_%s\\n' READY\n".to_vec())
+                        .unwrap();
+                    typed = true;
+                }
+                if String::from_utf8_lossy(&output).contains("STANDALONE_READY") {
+                    break;
                 }
             }
         })
@@ -435,17 +412,14 @@ mod remote_tests {
         .unwrap();
         // Leave terminal and Git sessions active: the application must close them.
         application.stop().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !terminal.is_closed() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
         let restarted = start(directory.path()).await;
-        assert!(
-            call(
-                restarted.endpoint(),
-                "terminal_read",
-                json!({"session":session})
-            )
-            .await
-            .unwrap_err()
-            .contains("Terminal is closed")
-        );
         let reopened = call(
             restarted.endpoint(),
             "git_request",
@@ -459,6 +433,5 @@ mod remote_tests {
             .execute(&format!("rm -rf {root}"), None)
             .await
             .unwrap();
-        setup.close().await;
     }
 }

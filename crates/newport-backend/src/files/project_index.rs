@@ -92,10 +92,8 @@ pub async fn dispatch(
             request.id,
             request.operation,
             Some(&expected),
-            async |server| {
-                let output = crate::ssh::execute(&server, &command, None)
-                    .await
-                    .map_err(anyhow::Error::msg)?;
+            async |_server, owner| {
+                let output = crate::remote::command::stdout(owner.link(), &command, None).await?;
                 parse(&output)
             },
         )

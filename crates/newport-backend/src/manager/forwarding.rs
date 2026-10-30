@@ -5,6 +5,8 @@ use super::*;
 pub(super) struct Forwarding {
     pub(super) state: Mutex<State>,
     runtime: Arc<Mutex<Runtime>>,
+    /// Where each tunnel finds its server's link.
+    sessions: Arc<crate::server_session::Registry>,
 }
 #[derive(Default)]
 pub(super) struct State {
@@ -16,10 +18,14 @@ pub(super) struct State {
     shutting_down: bool,
 }
 impl Forwarding {
-    pub(super) fn new(runtime: Arc<Mutex<Runtime>>) -> Self {
+    pub(super) fn new(
+        runtime: Arc<Mutex<Runtime>>,
+        sessions: Arc<crate::server_session::Registry>,
+    ) -> Self {
         Self {
             state: Mutex::default(),
             runtime,
+            sessions,
         }
     }
 
@@ -78,7 +84,7 @@ impl Forwarding {
         for (id, was_active) in changed {
             if was_active
                 && state.config.tunnels.iter().any(|t| t.id == id)
-                && let Err(error) = state.connect(id, &self.runtime)
+                && let Err(error) = state.connect(id, &self.runtime, &self.sessions, false)
             {
                 set_tunnel_state(&self.runtime, id, ConnectionState::error(error));
             }
@@ -93,7 +99,10 @@ impl Forwarding {
     }
 
     pub(super) fn connect(&self, id: Uuid) -> Result<(), String> {
-        self.state.lock().unwrap().connect(id, &self.runtime)
+        self.state
+            .lock()
+            .unwrap()
+            .connect(id, &self.runtime, &self.sessions, true)
     }
     pub(super) fn auto_connect(&self) {
         let mut state = self.state.lock().unwrap();
@@ -105,7 +114,7 @@ impl Forwarding {
             .map(|t| t.id)
             .collect();
         for id in ids {
-            if let Err(error) = state.connect(id, &self.runtime) {
+            if let Err(error) = state.connect(id, &self.runtime, &self.sessions, false) {
                 set_tunnel_state(&self.runtime, id, ConnectionState::error(error));
             }
         }
@@ -161,7 +170,7 @@ impl Forwarding {
         if !state.config.tunnels.iter().any(|t| t.id == tunnel.id) {
             return Ok(false);
         }
-        state.connect(tunnel.id, &self.runtime)?;
+        state.connect(tunnel.id, &self.runtime, &self.sessions, true)?;
         Ok(true)
     }
     pub(super) fn connect_batch(
@@ -188,7 +197,7 @@ impl Forwarding {
             &state.config.tunnels,
         )?;
         for id in &resolved.connect {
-            state.connect(*id, &self.runtime)?;
+            state.connect(*id, &self.runtime, &self.sessions, true)?;
         }
         Ok(resolved
             .connect
@@ -262,7 +271,14 @@ impl State {
         }
         Ok(())
     }
-    fn connect(&mut self, id: Uuid, runtime: &Arc<Mutex<Runtime>>) -> Result<(), String> {
+    /// `asked` when the person connects the tunnel.
+    fn connect(
+        &mut self,
+        id: Uuid,
+        runtime: &Arc<Mutex<Runtime>>,
+        sessions: &crate::server_session::Registry,
+        asked: bool,
+    ) -> Result<(), String> {
         if self.shutting_down {
             return Err("Newport is shutting down.".into());
         }
@@ -320,9 +336,15 @@ impl State {
             })
             .map(|(_, cleanup)| cleanup.clone())
             .collect();
+        let owner = sessions.session(
+            &server,
+            self.revisions.get(&server.id).copied().unwrap_or(0),
+        );
         set_tunnel_state(runtime, id, ConnectionState::new(Status::Connecting));
-        self.running
-            .insert(id, spawn(server, tunnel, id, runtime.clone(), previous)?);
+        self.running.insert(
+            id,
+            spawn(owner, tunnel, id, runtime.clone(), previous, asked)?,
+        );
         Ok(())
     }
     fn disconnect(

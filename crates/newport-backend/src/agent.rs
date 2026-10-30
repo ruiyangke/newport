@@ -1,6 +1,8 @@
 // Deployment and the single, bidirectional SSH connection to the Linux agent.
+use crate::agent_runtime::Error;
 use crate::desktop_integration::Desktop;
-use crate::ssh::ExecSession;
+use crate::remote::command;
+use newport_ssh::{Link, Open};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -69,27 +71,29 @@ impl Service {
 }
 #[cfg(test)]
 pub async fn launch(
-    session: &ExecSession,
+    link: &Link,
     service: Service,
 ) -> Result<(russh::ChannelStream<russh::client::Msg>, String), String> {
-    require_installed(session).await?;
-    let stream = session.stream(&service.command()).await?;
-    Ok((stream, String::new()))
+    require_installed(link).await?;
+    let channel = command::stream(link, &service.command()).await?;
+    Ok((channel.into_stream(), String::new()))
 }
 
 pub(crate) async fn launch_worker_channel(
-    session: &ExecSession,
+    link: &Link,
     service: Service,
     hello: &crate::agent_runtime::protocol::Hello,
     worker: uuid::Uuid,
     endpoint: Option<&crate::agent_runtime::protocol::worker_stream::Endpoint>,
-) -> Result<crate::service_channel::Channel, String> {
+) -> Result<crate::service_channel::Channel, Error> {
     use crate::agent_runtime::protocol::worker_stream as wire;
-    hello.validate().map_err(|e| e.to_string())?;
+    hello
+        .validate()
+        .map_err(|e| Error::Unavailable(e.to_string()))?;
     let build = &hello.build_sha256;
     let runtime = &hello.instance_id;
     let name = service.capability().0;
-    let args = worker_literal_arguments(service)?;
+    let args = worker_literal_arguments(service).map_err(Error::Unavailable)?;
     if let Some(endpoint) = endpoint {
         let open = wire::Open {
             version: wire::VERSION,
@@ -101,11 +105,15 @@ pub(crate) async fn launch_worker_channel(
             arguments: args.clone(),
         };
         open.validate()
-            .map_err(|_| "Invalid worker stream admission")?;
-        if let Ok(channel) = session.direct_streamlocal(&endpoint.path).await {
+            .map_err(|_| Error::Unavailable("Invalid worker stream admission".into()))?;
+        let path = endpoint.path.clone();
+        if let Ok(channel) = link.open(Open::DirectStreamLocal { path }).await {
             // From this point admission may have consumed the ticket and
             // spawned the process. Never replay a failed/ambiguous exchange.
-            return crate::service_channel::Channel::forwarded(channel, &open).await;
+            let fate = channel.fate();
+            return crate::service_channel::Channel::forwarded(channel, &open)
+                .await
+                .map_err(|error| fate.error().map_or(Error::Interrupted(error), Error::Link));
         }
         // Opening the forwarding channel sent no worker admission bytes.
         // Older/restricted SSH servers may still run the registered worker
@@ -116,7 +124,10 @@ pub(crate) async fn launch_worker_channel(
     let arguments = worker_command(name, args);
     // Activation can change the entry point while this runtime is still serving
     // admitted work, so launch the runtime's own retained, immutable build.
-    session.exec_channel(&format!("exec \"$HOME/.local/share/newport/needle/builds/{build}/newport-agent\" worker {build} {runtime} {socket} {worker} {arguments}")).await.map(Into::into)
+    let command = format!(
+        "exec \"$HOME/.local/share/newport/needle/builds/{build}/newport-agent\" worker {build} {runtime} {socket} {worker} {arguments}"
+    );
+    Ok(command::stream(link, &command).await?.into())
 }
 
 #[cfg(test)]
@@ -162,21 +173,21 @@ fn worker_literal_arguments(service: Service) -> Result<Vec<String>, String> {
 /// Explicit install and reinstall for remote tests. Feature startup uses
 /// `launch`, which never calls these operations.
 #[cfg(test)]
-pub async fn install(session: &ExecSession) -> Result<String, String> {
-    crate::agent_lifecycle::manage_test(session, false, true).await
+pub async fn install(link: &Link, server: &crate::model::Server) -> Result<String, String> {
+    crate::agent_lifecycle::manage_test(link, server, false, true).await
 }
 #[cfg(test)]
-pub async fn reinstall(session: &ExecSession) -> Result<String, String> {
-    crate::agent_lifecycle::manage_test(session, true, true).await
+pub async fn reinstall(link: &Link, server: &crate::model::Server) -> Result<String, String> {
+    crate::agent_lifecycle::manage_test(link, server, true, true).await
 }
 
-pub(crate) async fn is_installed(session: &ExecSession) -> Result<bool, String> {
-    let present = session
-        .execute(
-            "test -x \"$HOME/.local/bin/newport-agent\" && printf installed || true",
-            None,
-        )
-        .await?;
+pub(crate) async fn is_installed(link: &Link) -> Result<bool, command::Error> {
+    let present = command::stdout(
+        link,
+        "test -x \"$HOME/.local/bin/newport-agent\" && printf installed || true",
+        None,
+    )
+    .await?;
     Ok(present.trim() == "installed")
 }
 
@@ -184,11 +195,43 @@ pub(crate) async fn is_installed(session: &ExecSession) -> Result<bool, String> 
 pub(crate) const NOT_INSTALLED: &str =
     "Needle is not installed. Open Overview to set up this server.";
 
-pub(crate) async fn require_installed(session: &ExecSession) -> Result<(), String> {
-    if !is_installed(session).await? {
-        return Err(NOT_INSTALLED.into());
+pub(crate) async fn require_installed(link: &Link) -> Result<(), Error> {
+    if !is_installed(link).await? {
+        return Err(Error::NotInstalled);
     }
     Ok(())
+}
+
+/// Why the integration agent's stream failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Failure {
+    /// The stream broke or timed out, or the agent said to try again.
+    Interrupted(String),
+    /// The agent refused, or spoke out of protocol; trying again won't help.
+    Refused(String),
+}
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failure::Interrupted(cause) => write!(f, "SSH transport interrupted: {cause}"),
+            Failure::Refused(message) => f.write_str(message),
+        }
+    }
+}
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Failure::Refused(message)
+    }
+}
+impl From<&str> for Failure {
+    fn from(message: &str) -> Self {
+        Failure::Refused(message.into())
+    }
+}
+impl From<Failure> for String {
+    fn from(failure: Failure) -> Self {
+        failure.to_string()
+    }
 }
 
 pub struct Agent<W> {
@@ -205,7 +248,7 @@ impl<W> Drop for Agent<W> {
         self.reader.abort();
     }
 }
-async fn read_event(input: &mut (impl AsyncRead + Unpin)) -> Result<(u8, Vec<u8>), String> {
+async fn read_event(input: &mut (impl AsyncRead + Unpin)) -> Result<(u8, Vec<u8>), Failure> {
     let mut header = [0; 5];
     input.read_exact(&mut header).await.map_err(transport)?;
     let len = wire::payload_length(&header, exports::MAX_FRAME).map_err(|e| e.to_string())?;
@@ -213,17 +256,20 @@ async fn read_event(input: &mut (impl AsyncRead + Unpin)) -> Result<(u8, Vec<u8>
     input.read_exact(&mut data).await.map_err(transport)?;
     let event = wire::decode(&data, exports::MAX_FRAME).map_err(|e| e.to_string())?;
     if event.0 != exports::FRAME && event.1.len() > 8224 {
-        return Err("Agent event exceeds limit".into());
+        return Err(Failure::Refused("Agent event exceeds limit".into()));
     }
     Ok(event)
 }
-fn transport(error: impl std::fmt::Display) -> String {
-    format!("SSH transport interrupted: {error}")
+fn transport(error: impl std::fmt::Display) -> Failure {
+    Failure::Interrupted(error.to_string())
 }
 
-pub(crate) fn checked_event(kind: u8, data: Vec<u8>) -> Result<(u8, Vec<u8>), String> {
+pub(crate) fn checked_event(kind: u8, data: Vec<u8>) -> Result<(u8, Vec<u8>), Failure> {
     match kind {
-        b'E' => Err(format!("Agent error: {}", String::from_utf8_lossy(&data))),
+        b'E' => Err(Failure::Refused(format!(
+            "Agent error: {}",
+            String::from_utf8_lossy(&data)
+        ))),
         b'T' => Err(transport(String::from_utf8_lossy(&data))),
         _ => Ok((kind, data)),
     }
@@ -239,7 +285,7 @@ impl Agent<tokio::io::Sink> {
         app: Desktop,
         permissions: std::sync::Arc<crate::integration_permissions::Gate>,
         callbacks: crate::ssh::callback::Callbacks,
-    ) -> Result<Agent<impl AsyncWrite + Unpin>, String> {
+    ) -> Result<Agent<impl AsyncWrite + Unpin>, Failure> {
         let (reader, writer) = tokio::io::split(stream);
         let (events, reader) = incoming::Events::start(reader);
         let mut agent = Agent {
@@ -254,7 +300,9 @@ impl Agent<tokio::io::Sink> {
             .await
             .map_err(|_| transport("agent startup timed out"))??;
         if kind != b'R' {
-            return Err("Unsupported Needle integration handshake.".into());
+            return Err(Failure::Refused(
+                "Unsupported Needle integration handshake.".into(),
+            ));
         }
         let hello: control::Hello = control::decode(&data)
             .map_err(|_| "Update Needle to use live integration permissions.".to_owned())?;
@@ -263,13 +311,13 @@ impl Agent<tokio::io::Sink> {
     }
 }
 impl<W: AsyncWrite + Unpin> Agent<W> {
-    pub async fn event(&mut self) -> Result<(u8, Vec<u8>), String> {
+    pub async fn event(&mut self) -> Result<(u8, Vec<u8>), Failure> {
         self.events.next().await
     }
-    async fn receive(&mut self) -> Result<(u8, Vec<u8>), String> {
+    async fn receive(&mut self) -> Result<(u8, Vec<u8>), Failure> {
         self.events.receive().await
     }
-    pub async fn open(&mut self, data: &[u8]) -> Result<(), String> {
+    pub async fn open(&mut self, data: &[u8]) -> Result<(), Failure> {
         let (id, request) = wire::parse_browser_request(data).map_err(|e| e.to_string())?;
         let result = self.open_request(&request).await;
         let (success, message) = match result {
@@ -321,13 +369,15 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
         }
         Ok(warning.map(|reason| format!("Browser opened without callback forwarding. {reason}")))
     }
-    pub async fn request(&mut self, kind: u8, data: &[u8]) -> Result<String, String> {
+    pub async fn request(&mut self, kind: u8, data: &[u8]) -> Result<String, Failure> {
         if kind == exports::FRAME {
-            return Err("Negotiate clipboard exports before requesting data".into());
+            return Err(Failure::Refused(
+                "Negotiate clipboard exports before requesting data".into(),
+            ));
         }
         self.request_inner(kind, data).await
     }
-    async fn request_inner(&mut self, kind: u8, data: &[u8]) -> Result<String, String> {
+    async fn request_inner(&mut self, kind: u8, data: &[u8]) -> Result<String, Failure> {
         let frame = wire::encode(kind, data).map_err(|e| e.to_string())?;
         let mut request = self.events.request_guard()?;
         let result = tokio::time::timeout(request_timeout(kind), async {
@@ -341,7 +391,7 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
                     b'C' | b'G' | b'L' | b'l' | b'K' | b'a' | exports::FRAME => {
                         self.events.defer(kind, data)?
                     }
-                    _ => return Err("Unexpected agent event.".into()),
+                    _ => return Err(Failure::Refused("Unexpected agent event.".into())),
                 }
             }
         })
@@ -360,7 +410,7 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
     pub async fn enable_clipboard_exports(
         &mut self,
         runtime: &crate::agent_runtime::protocol::Hello,
-    ) -> Result<(), String> {
+    ) -> Result<(), Failure> {
         self.enable_clipboard_export_version(runtime, exports::VERSION)
             .await
     }
@@ -369,7 +419,7 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
     pub async fn enable_clipboard_copies(
         &mut self,
         runtime: &crate::agent_runtime::protocol::Hello,
-    ) -> Result<(), String> {
+    ) -> Result<(), Failure> {
         self.enable_clipboard_export_version(runtime, exports::COPY_VERSION)
             .await
     }
@@ -377,7 +427,7 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
         &mut self,
         runtime: &crate::agent_runtime::protocol::Hello,
         version: u32,
-    ) -> Result<(), String> {
+    ) -> Result<(), Failure> {
         runtime.validate().map_err(|e| e.to_string())?;
         runtime
             .require(exports::CAPABILITY, version)
@@ -393,7 +443,7 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
     pub async fn commit_clipboard_copy(
         &mut self,
         proposal: &crate::clipboard_export::Lease,
-    ) -> Result<crate::clipboard_export::Commit, String> {
+    ) -> Result<crate::clipboard_export::Commit, Failure> {
         self.maintain_clipboard_exports().await?;
         let (commit, command) = self.events.exports.commit(proposal)?;
         self.export_command(command).await?;
@@ -405,7 +455,7 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
         &mut self,
         copy: &crate::clipboard_export::CommittedCopy,
         format: &str,
-    ) -> Result<crate::clipboard_export::Read, String> {
+    ) -> Result<crate::clipboard_export::Read, Failure> {
         self.maintain_clipboard_exports().await?;
         let (read, command) = self.events.exports.read_copy(copy, format)?;
         self.export_command(command).await?;
@@ -416,7 +466,7 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
     pub async fn release_clipboard_copy(
         &mut self,
         copy: &crate::clipboard_export::CommittedCopy,
-    ) -> Result<(), String> {
+    ) -> Result<(), Failure> {
         self.events.exports.release_copy(copy)?;
         self.maintain_clipboard_exports().await
     }
@@ -433,17 +483,17 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
         &mut self,
         offer: &ExportOffer,
         format: &str,
-    ) -> Result<crate::clipboard_export::Read, String> {
+    ) -> Result<crate::clipboard_export::Read, Failure> {
         self.maintain_clipboard_exports().await?;
         let (read, command) = self.events.exports.read(offer, format)?;
         self.export_command(command).await?;
         Ok(read)
     }
-    pub async fn cancel_clipboard_export(&mut self, id: u64) -> Result<(), String> {
+    pub async fn cancel_clipboard_export(&mut self, id: u64) -> Result<(), Failure> {
         self.events.exports.cancel(id);
         self.maintain_clipboard_exports().await
     }
-    pub async fn disable_clipboard_exports(&mut self) -> Result<(), String> {
+    pub async fn disable_clipboard_exports(&mut self) -> Result<(), Failure> {
         if self.events.exports.enabled() {
             self.events.exports.begin_disable();
             self.export_command(exports::Control::Disable).await?;
@@ -451,7 +501,7 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
         }
         Ok(())
     }
-    pub(crate) async fn maintain_clipboard_exports(&mut self) -> Result<(), String> {
+    pub(crate) async fn maintain_clipboard_exports(&mut self) -> Result<(), Failure> {
         self.events.exports.expire();
         if self
             .events
@@ -473,7 +523,7 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
         }
         Ok(())
     }
-    async fn export_command(&mut self, command: exports::Control) -> Result<(), String> {
+    async fn export_command(&mut self, command: exports::Control) -> Result<(), Failure> {
         self.request_inner(
             exports::FRAME,
             &command.encode().map_err(|e| e.to_string())?,
@@ -481,7 +531,7 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
         .await?;
         Ok(())
     }
-    pub async fn clipboard_reply(&mut self, data: &[u8]) -> Result<(), String> {
+    pub async fn clipboard_reply(&mut self, data: &[u8]) -> Result<(), Failure> {
         self.write_unacknowledged(b'D', data, "clipboard reply")
             .await
     }
@@ -490,7 +540,7 @@ impl<W: AsyncWrite + Unpin> Agent<W> {
         kind: u8,
         data: &[u8],
         operation: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), Failure> {
         write_reply(&mut self.writer, &mut self.events, kind, data, operation).await
     }
     pub async fn close(&mut self) {
@@ -511,7 +561,7 @@ async fn write_reply(
     kind: u8,
     data: &[u8],
     operation: &str,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     let frame = wire::encode(kind, data).map_err(|e| e.to_string())?;
     let mut request = events.request_guard()?;
     let result = tokio::time::timeout(Duration::from_secs(5), async {
@@ -566,6 +616,7 @@ mod tests {
                 .next()
                 .await
                 .unwrap_err()
+                .to_string()
                 .starts_with("SSH transport interrupted:")
         );
     }
@@ -620,6 +671,7 @@ mod tests {
         assert!(
             checked_event(b'T', b"previous agent is still closing".to_vec())
                 .unwrap_err()
+                .to_string()
                 .starts_with("SSH transport interrupted:")
         );
         assert!(
@@ -628,6 +680,7 @@ mod tests {
                 b"SSH transport interrupted: permission denied".to_vec()
             )
             .unwrap_err()
+            .to_string()
             .starts_with("Agent error:")
         );
         assert_eq!(checked_event(b'A', vec![]).unwrap(), (b'A', vec![]));
@@ -662,6 +715,7 @@ mod tests {
             read_event(&mut destination)
                 .await
                 .unwrap_err()
+                .to_string()
                 .starts_with("SSH transport interrupted:")
         );
         let mut oversized = vec![b'M'];
@@ -670,6 +724,7 @@ mod tests {
             read_event(&mut oversized.as_slice())
                 .await
                 .unwrap_err()
+                .to_string()
                 .contains("limit")
         );
         let oversized_legacy = wire::encode(b'O', &vec![0; 8225]).unwrap();
@@ -677,6 +732,7 @@ mod tests {
             read_event(&mut oversized_legacy.as_slice())
                 .await
                 .unwrap_err()
+                .to_string()
                 .contains("limit")
         );
         let export = exports::Event::Data {

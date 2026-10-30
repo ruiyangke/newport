@@ -1659,6 +1659,11 @@ impl Render for Newport {
                     this.select_tab(action.number, window, cx)
                 }),
             )
+            .on_action(
+                cx.listener(|this, _: &navigation::NewTerminal, window, cx| {
+                    this.new_terminal(window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &NewServer, window, cx| {
                 if this.configuration_available() {
                     this.edit_server(None, window, cx);

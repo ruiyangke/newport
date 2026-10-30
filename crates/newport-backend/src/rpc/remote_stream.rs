@@ -63,6 +63,7 @@ pub(super) async fn serve<H: Host>(
             // the start always completes, so a client that left can have the
             // command stopped rather than left running.
             let mut started = None;
+            let status = host.link_status(server);
             let opening = async {
                 started = Some(match target {
                     Target::Command(command) => host.open_remote_stream(server, command).await,
@@ -71,7 +72,7 @@ pub(super) async fn serve<H: Host>(
                 Ok(Value::Null)
             };
             let progress =
-                super::progress::with_progress(&mut stream, Some(server), false, opening).await;
+                super::progress::with_progress(&mut stream, status, false, opening).await;
             let started = started.unwrap_or_else(|| Err("The command did not start.".into()));
             if progress.is_err() {
                 close(started).await;

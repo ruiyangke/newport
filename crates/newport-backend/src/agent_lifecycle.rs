@@ -1,8 +1,9 @@
 //! Needle on a server: install (also update) and uninstall. Installing again
 //! converges and uninstalling is final; nothing is journaled in between.
 use crate::agent_payload::{TransferEncoding, payload};
-use crate::ssh::ExecSession;
+use crate::remote::command;
 use newport_release::agent_product::Variant;
+use newport_ssh::Link;
 use serde::Serialize;
 use std::{
     sync::{Arc, Mutex},
@@ -77,22 +78,23 @@ pub struct Deployment {
 /// then made active as the trigger's `Activation` says; with `integrations`,
 /// also the command links and shell setup.
 pub async fn manage(
-    session: &ExecSession,
+    link: &Link,
+    server: &crate::model::Server,
     progress: &crate::agent_install::Attempt,
     integrations: bool,
     trigger: Trigger,
 ) -> Result<Deployment, String> {
-    if !session.server().agent_install_approved {
+    if !server.agent_install_approved {
         return Err(
             "Needle installation requires approval. Open Overview to set up this server.".into(),
         );
     }
-    let platform = session
-        .execute(
-            &format!("uname -s; uname -m\n{}", TransferEncoding::PROBE),
-            None,
-        )
-        .await?;
+    let platform = command::stdout(
+        link,
+        &format!("uname -s; uname -m\n{}", TransferEncoding::PROBE),
+        None,
+    )
+    .await?;
     let mut lines = platform.lines();
     if lines.next() != Some("Linux") {
         return Err("The Newport agent requires Linux.".into());
@@ -102,21 +104,23 @@ pub async fn manage(
     let binary = payload(architecture)
         .ok_or("The Newport agent supports x86_64 and ARM64 Linux servers.")?;
     let hash = binary.sha256.to_owned();
-    let status = check(session).await?;
+    let status = check(link).await?;
     if !trigger.allows(&status) {
         return Err(
             "Needle changed since the automatic update check; leaving it unchanged.".into(),
         );
     }
-    require_ordered_replacement(&status)?;
-    require_product_replacement(&status, trigger)?;
+    if let Some(kept) = kept_installed(&status) {
+        return Ok(kept);
+    }
+    let activation = activation_for(&status, trigger)?;
     let candidate = format!("\"$HOME/.local/share/newport/needle/builds/{hash}/newport-agent\"");
-    let staged = session
-        .execute(
-            &format!("if test -x {candidate}; then printf yes; fi"),
-            None,
-        )
-        .await?
+    let staged = command::stdout(
+        link,
+        &format!("if test -x {candidate}; then printf yes; fi"),
+        None,
+    )
+    .await?
         == "yes";
     if !staged {
         let command = format!(
@@ -126,23 +130,22 @@ pub async fn manage(
         );
         let total = binary.transfer_size(encoding);
         progress.update("uploading", 0, total, None);
-        session
-            .upload_resource(&command, binary.stream(encoding)?, &|sent| {
-                progress.update(
-                    if sent == total {
-                        "installing"
-                    } else {
-                        "uploading"
-                    },
-                    sent,
-                    total,
-                    None,
-                )
-            })
-            .await?;
+        command::upload(link, &command, binary.stream(encoding)?, &|sent| {
+            progress.update(
+                if sent == total {
+                    "installing"
+                } else {
+                    "uploading"
+                },
+                sent,
+                total,
+                None,
+            )
+        })
+        .await?;
     }
     progress.update("verifying", 0, 0, None);
-    let product = crate::agent_runtime::verify_candidate(session, &hash).await?;
+    let product = crate::agent_runtime::verify_candidate(link, &hash).await?;
     if product.variant != status.bundled_variant {
         return Err("Candidate product does not match the bundled agent variant".into());
     }
@@ -164,7 +167,7 @@ pub async fn manage(
             return Err("Candidate protocols do not match the signed agent product".into());
         }
         record_release(
-            session,
+            link,
             &hash,
             architecture,
             BUNDLED_RELEASE,
@@ -172,7 +175,6 @@ pub async fn manage(
         )
         .await?;
     }
-    let activation = trigger.activation(&status);
     // Either way this Newport's sessions run its build; `active` says
     // whether the entry point is it now.
     let kept = |active| Deployment {
@@ -192,26 +194,26 @@ pub async fn manage(
         notice: Option<String>,
     }
     let installed: Installed = serde_json::from_str(
-        &session
-            .execute(
-                &format!(
-                    "{candidate} deployment install {hash}{}{} --expect-current {}{}",
-                    if integrations { " --integrations" } else { "" },
-                    if activation == Activation::UnlessRunning {
-                        " --unless-running"
-                    } else {
-                        ""
-                    },
-                    status.installed_hash.as_deref().unwrap_or("missing"),
-                    match status.installed_variant {
-                        Some(Variant::Core) => " --expect-variant core",
-                        Some(Variant::Full) => " --expect-variant full",
-                        None => "",
-                    }
-                ),
-                None,
-            )
-            .await?,
+        &command::stdout(
+            link,
+            &format!(
+                "{candidate} deployment install {hash}{}{} --expect-current {}{}",
+                if integrations { " --integrations" } else { "" },
+                if activation == Activation::UnlessRunning {
+                    " --unless-running"
+                } else {
+                    ""
+                },
+                status.installed_hash.as_deref().unwrap_or("missing"),
+                match status.installed_variant {
+                    Some(Variant::Core) => " --expect-variant core",
+                    Some(Variant::Full) => " --expect-variant full",
+                    None => "",
+                }
+            ),
+            None,
+        )
+        .await?,
     )
     .map_err(|e| format!("Invalid Needle install result: {e}"))?;
     if installed.build != hash {
@@ -227,6 +229,28 @@ pub async fn manage(
 }
 
 const INSTALLED: &str = "Needle installed and verified.";
+const ALREADY_INSTALLED: &str = "Needle is already installed on this server.";
+
+/// The installed Needle already serves this Newport when it offers this
+/// Newport's product and isn't an older release: it stays as it is, with
+/// nothing installed again.
+fn kept_installed(status: &Status) -> Option<Deployment> {
+    let installed = status.installed_variant?;
+    let full_for_core = installed == Variant::Full && status.bundled_variant == Variant::Core;
+    let serves = match status.build_relation {
+        BuildRelation::Newer => installed == status.bundled_variant || full_for_core,
+        BuildRelation::Older => false,
+        _ => full_for_core,
+    };
+    if !serves || status.error.is_some() || status.installed != Some(true) {
+        return None;
+    }
+    Some(Deployment {
+        output: ALREADY_INSTALLED.into(),
+        build_sha256: status.installed_hash.clone()?,
+        setup_notice: None,
+    })
+}
 const BESIDE: &str = "Needle is ready for this Newport. The server keeps its default Needle build, which another connection may be using.";
 
 /// The shell setup left to do by hand, from an install's outcome.
@@ -239,16 +263,16 @@ pub(crate) fn setup_notice(outcome: &str) -> Option<String> {
 /// Uninstalls Needle: stops it, takes out its command links and shell setup,
 /// and deletes everything it keeps. Final; running it again finishes an
 /// interrupted run. Needs no Needle executable on the server.
-pub(crate) async fn uninstall(session: &ExecSession) -> Result<(), String> {
-    let output = session
-        .execute(
-            &format!(
-                "sh -c {}",
-                crate::ssh::shell_quote(include_str!("agent-uninstall.sh"))
-            ),
-            None,
-        )
-        .await?;
+pub(crate) async fn uninstall(link: &Link) -> Result<(), String> {
+    let output = command::stdout(
+        link,
+        &format!(
+            "sh -c {}",
+            crate::ssh::shell_quote(include_str!("agent-uninstall.sh"))
+        ),
+        None,
+    )
+    .await?;
     if output.trim() != "uninstalled" {
         return Err("Needle didn't confirm it was uninstalled".into());
     }
@@ -793,12 +817,12 @@ fn parse_candidate_check(
 }
 // A failed hash or an unexpected/truncated response must never be read as absence.
 pub(crate) const CHECK: &str = include_str!("agent-release-check.sh");
-pub(crate) async fn check(session: &ExecSession) -> Result<Status, String> {
-    let mut status = parse_check(&session.execute(CHECK, None).await?)?;
+pub(crate) async fn check(link: &Link) -> Result<Status, String> {
+    let mut status = parse_check(&command::stdout(link, CHECK, None).await?)?;
     if status.installed_variant.is_none()
         && let Some(hash) = &status.installed_hash
     {
-        match crate::agent_runtime::inspect_product(session, hash).await {
+        match crate::agent_runtime::inspect_product(link, hash).await {
             Ok(product) => status.installed_variant = Some(product.variant),
             Err(error) => {
                 status.error = Some(format!(
@@ -810,23 +834,23 @@ pub(crate) async fn check(session: &ExecSession) -> Result<Status, String> {
     status.withhold_product_change();
     Ok(status)
 }
-/// Observe and upgrade only existing sessions. This never connects a disconnected
-/// profile. Connection establishment wakes this worker immediately.
+/// Observe and upgrade only servers whose link is ready. This never connects
+/// a disconnected server. A link becoming ready wakes this worker at once.
 pub async fn run(state: crate::manager::Shared) {
     let registry = state.sessions.clone();
     let mut timer = tokio::time::interval(Duration::from_secs(60));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
-            _ = registry.connected.notified() => {},
+            _ = registry.ready.notified() => {},
             _ = timer.tick() => {},
         }
         let mut checks = tokio::task::JoinSet::new();
         for owner in registry.all() {
-            let Some(lease) = owner.connected_lease().await else {
+            if owner.is_revoked() || !owner.link_ready() {
                 continue;
-            };
-            if !owner.lifecycle.due(lease.generation(), Instant::now())
+            }
+            if !owner.lifecycle.due(owner.reached(), Instant::now())
                 && !owner.lifecycle.snapshot().automatic_update_available()
             {
                 continue;
@@ -835,8 +859,8 @@ pub async fn run(state: crate::manager::Shared) {
                 let _ = checks.join_next().await;
             }
             checks.spawn(async move {
-                if let Ok(status) = lease.check_installation_if_due().await
-                    && let Err(error) = lease.automatically_update_needle(&status).await
+                if let Ok(status) = owner.check_installation_if_due().await
+                    && let Err(error) = owner.automatically_update_needle(&status).await
                 {
                     log::warn!("Automatic Needle update did not complete: {error}");
                 }
@@ -850,13 +874,14 @@ pub async fn run(state: crate::manager::Shared) {
 // state. Production callers must go through ServerSession's lifecycle lease.
 #[cfg(test)]
 pub(crate) async fn manage_test(
-    session: &ExecSession,
+    link: &Link,
+    server: &crate::model::Server,
     _force: bool,
     integrations: bool,
 ) -> Result<String, String> {
     let state = State::default();
     let progress = state.progress.attempt();
-    let result = manage(session, &progress, integrations, Trigger::Manual)
+    let result = manage(link, server, &progress, integrations, Trigger::Manual)
         .await
         .map(|d| d.output);
     progress.finish(&result);
@@ -865,10 +890,10 @@ pub(crate) async fn manage_test(
 /// Disposable Linux fixtures use an executable-equivalent ELF with a distinct
 /// digest to exercise a real build transition without publishing another release.
 #[cfg(test)]
-pub(crate) async fn activate_variant_test(session: &ExecSession) -> String {
-    session
-        .execute(
-            r#"set -e
+pub(crate) async fn activate_variant_test(link: &Link) -> String {
+    command::stdout(
+        link,
+        r#"set -e
 t=$(mktemp)
 cat "$HOME/.local/bin/newport-agent" > "$t"
 printf '\000fixture-older-build' >> "$t"
@@ -880,10 +905,22 @@ chmod 500 "$d/newport-agent"
 "$d/newport-agent" deployment install "$h" >/dev/null
 printf '%s' "$h"
 "#,
-            None,
-        )
-        .await
-        .unwrap()
+        None,
+    )
+    .await
+    .unwrap()
+}
+/// What the deployment does with the entry point. The person's own install
+/// always succeeds: where the server's default build may not change, this
+/// Newport's build is staged beside it and the default stays.
+fn activation_for(status: &Status, trigger: Trigger) -> Result<Activation, String> {
+    match require_ordered_replacement(status)
+        .and_then(|()| require_product_replacement(status, trigger))
+    {
+        Ok(()) => Ok(trigger.activation(status)),
+        Err(_) if trigger == Trigger::Manual => Ok(Activation::Keep),
+        Err(error) => Err(error),
+    }
 }
 fn require_ordered_replacement(status: &Status) -> Result<(), String> {
     if status.build_relation == BuildRelation::Newer {
@@ -911,7 +948,7 @@ fn require_product_replacement(status: &Status, trigger: Trigger) -> Result<(), 
 }
 
 async fn record_release(
-    session: &ExecSession,
+    link: &Link,
     hash: &str,
     architecture: &str,
     metadata: &[u8],
@@ -924,15 +961,15 @@ async fn record_release(
         "sh -c '{}' newport-release {hash}",
         include_str!("agent-release-record.sh").replace('\'', "'\"'\"'")
     );
-    session.execute(&command, Some(metadata)).await?;
-    let stored = read_release(session, hash).await?;
+    command::stdout(link, &command, Some(metadata)).await?;
+    let stored = read_release(link, hash).await?;
     verify(stored.as_bytes())?
         .version_for(architecture, hash)
         .ok_or("Stored release metadata does not identify the candidate")?;
     Ok(())
 }
 
-async fn read_release(session: &ExecSession, hash: &str) -> Result<String, String> {
+async fn read_release(link: &Link, hash: &str) -> Result<String, String> {
     if hash.len() != 64
         || !hash
             .bytes()
@@ -940,9 +977,9 @@ async fn read_release(session: &ExecSession, hash: &str) -> Result<String, Strin
     {
         return Err("Invalid Needle build identity".into());
     }
-    session.execute(&format!(
+    Ok(command::stdout(link, &format!(
         "set -e; p=\"$HOME/.local/share/newport/needle/builds/{hash}/needle-release.json\"; if test -e \"$p\" || test -L \"$p\"; then test -f \"$p\" && ! test -L \"$p\"; head -c 8193 \"$p\"; fi"
-    ), None).await
+    ), None).await?)
 }
 
 /// Explicit rollback of one unfinished, connection-scoped deployment. No upload or install.
@@ -1366,9 +1403,9 @@ mod tests {
         })).unwrap();
         let registry = crate::server_session::Registry::default();
         let owner = registry.session(&server, 0);
-        let lease = owner.acquire(&server).await.unwrap();
-        lease.install(false).await.unwrap();
-        let bundled = lease
+        let run = |command: &'static str| command::stdout(owner.link(), command, None);
+        owner.install(&server, false).await.unwrap();
+        let bundled = owner
             .check_installation()
             .await
             .unwrap()
@@ -1376,14 +1413,10 @@ mod tests {
             .unwrap();
         // Another build at the entry point, as an earlier Newport or another
         // developer's left it: Needle's own bytes plus one, so it still runs.
-        lease
-            .execute(
-                "set -e; d=\"$HOME/.local/share/newport/needle/builds\"; t=$(mktemp); cat \"$(readlink -f \"$HOME/.local/bin/newport-agent\")\" > \"$t\"; printf x >> \"$t\"; h=$(sha256sum \"$t\" | cut -d' ' -f1); mkdir -m 700 \"$d/$h\"; mv \"$t\" \"$d/$h/newport-agent\"; chmod 500 \"$d/$h/newport-agent\"; ln -sfn \"$d/$h/newport-agent\" \"$HOME/.local/bin/newport-agent\"",
-                None,
-            )
+        run("set -e; d=\"$HOME/.local/share/newport/needle/builds\"; t=$(mktemp); cat \"$(readlink -f \"$HOME/.local/bin/newport-agent\")\" > \"$t\"; printf x >> \"$t\"; h=$(sha256sum \"$t\" | cut -d' ' -f1); mkdir -m 700 \"$d/$h\"; mv \"$t\" \"$d/$h/newport-agent\"; chmod 500 \"$d/$h/newport-agent\"; ln -sfn \"$d/$h/newport-agent\" \"$HOME/.local/bin/newport-agent\"")
             .await
             .unwrap();
-        let other = lease.check_installation().await.unwrap();
+        let other = owner.check_installation().await.unwrap();
         assert_ne!(other.installed_hash.as_deref(), Some(bundled.as_str()));
         assert!(
             other.automatic_update_available(),
@@ -1393,12 +1426,12 @@ mod tests {
         // Product inspection must finish its own runtime before the next idle
         // observation, rather than making this otherwise unused build busy.
         assert_eq!(
-            lease.check_installation().await.unwrap().installed_running,
+            owner.check_installation().await.unwrap().installed_running,
             Some(false)
         );
-        lease.automatically_update_needle(&other).await.unwrap();
+        owner.automatically_update_needle(&other).await.unwrap();
         assert_eq!(
-            lease.check_installation().await.unwrap().installed_hash,
+            owner.check_installation().await.unwrap().installed_hash,
             Some(bundled)
         );
         registry.shutdown().await;
@@ -1414,23 +1447,24 @@ mod tests {
         })).unwrap();
         let registry = crate::server_session::Registry::default();
         let owner = registry.session(&server, 0);
-        let lease = owner.acquire(&server).await.unwrap();
-        lease.install(false).await.unwrap();
-        let status = lease.check_installation().await.unwrap();
+        let link = owner.link();
+        let run = |command: &'static str| command::stdout(link, command, None);
+        owner.install(&server, false).await.unwrap();
+        let status = owner.check_installation().await.unwrap();
         assert_eq!(status.build_relation, BuildRelation::Bundled);
         let hash = status.installed_hash.unwrap();
-        let link = lease
-            .execute("readlink \"$HOME/.local/bin/newport-agent\"", None)
+        let entry = run("readlink \"$HOME/.local/bin/newport-agent\"")
             .await
             .unwrap();
         assert!(
-            link.trim()
+            entry
+                .trim()
                 .ends_with(&format!("/builds/{hash}/newport-agent"))
         );
-        let worker = owner.acquire(&server).await.unwrap();
+        let worker = owner.needle(&server).unwrap();
         let (stream, _) = worker.launch(crate::agent::Service::Git).await.unwrap();
         let runtime = owner.agent_runtime.snapshot().hello.unwrap().instance_id;
-        lease.install(false).await.unwrap();
+        owner.install(&server, false).await.unwrap();
         assert!(
             !worker.is_closed(),
             "explicit activation must not cancel admitted Git work"
@@ -1441,23 +1475,16 @@ mod tests {
         );
         // A candidate that can execute but cannot complete the runtime handshake
         // must fail verification while the verified entry point remains usable.
-        let broken = lease.execute("set -e; d=\"$HOME/.local/share/newport/needle/builds\"; t=$(mktemp); printf '#!/bin/sh\\nexit 1\\n' > \"$t\"; h=$(sha256sum \"$t\"); h=${h%% *}; mkdir -m 700 -p \"$d/$h\"; mv \"$t\" \"$d/$h/newport-agent\"; chmod 500 \"$d/$h/newport-agent\"; printf '%s' \"$h\"", None).await.unwrap();
-        let connection = ExecSession::connect(&server).await.unwrap();
+        let broken = run("set -e; d=\"$HOME/.local/share/newport/needle/builds\"; t=$(mktemp); printf '#!/bin/sh\\nexit 1\\n' > \"$t\"; h=$(sha256sum \"$t\"); h=${h%% *}; mkdir -m 700 -p \"$d/$h\"; mv \"$t\" \"$d/$h/newport-agent\"; chmod 500 \"$d/$h/newport-agent\"; printf '%s' \"$h\"").await.unwrap();
         assert!(
-            crate::agent_runtime::verify_candidate(&connection, &broken)
+            crate::agent_runtime::verify_candidate(link, &broken)
                 .await
                 .is_err()
         );
         assert!(
             owner
                 .agent_runtime
-                .adopt(
-                    &connection,
-                    owner.integration_session_id(),
-                    1,
-                    &broken,
-                    || Ok(())
-                )
+                .adopt(link, owner.integration_session_id(), &broken, || Ok(()))
                 .await
                 .is_err()
         );
@@ -1467,40 +1494,35 @@ mod tests {
         );
         assert!(!worker.is_draining());
         assert_eq!(
-            check(&connection).await.unwrap().installed_hash.as_deref(),
+            check(link).await.unwrap().installed_hash.as_deref(),
             Some(hash.as_str())
         );
         // An occupied `newport-browser` fails the install after Needle itself
         // is in place; someone else's file is never touched. Point the entry
         // point at another build first, so the switch is visible.
-        lease
-            .execute(
-                "printf 'unrelated' > \"$HOME/.local/bin/newport-browser\"",
-                None,
-            )
+        run("printf 'unrelated' > \"$HOME/.local/bin/newport-browser\"")
             .await
             .unwrap();
-        let other = activate_variant_test(&connection).await;
+        let other = activate_variant_test(link).await;
         assert_ne!(other, hash);
-        let error = lease.install(true).await.unwrap_err();
+        let error = owner.install(&server, true).await.unwrap_err();
         assert!(
             error.contains("occupied by an unrelated command"),
             "{error}"
         );
         assert_eq!(
-            check(&connection).await.unwrap().installed_hash.as_deref(),
+            check(link).await.unwrap().installed_hash.as_deref(),
             Some(hash.as_str())
         );
         assert_eq!(
-            lease
-                .execute("cat \"$HOME/.local/bin/newport-browser\"", None)
+            run("cat \"$HOME/.local/bin/newport-browser\"")
                 .await
                 .unwrap(),
             "unrelated"
         );
         assert!(!worker.is_closed());
         // New work on the surviving runtime launches its own build.
-        let monitor = owner.acquire(&server).await.unwrap();
+        let monitor = owner.needle(&server).unwrap();
         let (mut channel, _) = monitor
             .launch(crate::agent::Service::Monitor)
             .await
@@ -1518,7 +1540,6 @@ mod tests {
             "{metrics}"
         );
         drop(stream);
-        connection.close().await;
         registry.shutdown().await;
     }
     #[test]

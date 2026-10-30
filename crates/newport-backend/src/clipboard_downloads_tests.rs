@@ -956,13 +956,13 @@ fn clearing_removes_downloads_even_when_nothing_swept_first() {
     assert_eq!(names(&root), ["unrelated"]);
 }
 
-/// The real [`crate::ssh::sftp::Sftp`] against the fixture of
+/// Clipboard downloads over a real SFTP session, against the fixture of
 /// `cargo xtask test ssh`, whose SFTP server works in a real directory.
 mod fixture {
     use super::*;
+    use crate::clipboard_files::Remote as Sftp;
     use crate::clipboard_files::remove_tree;
-    use crate::clipboard_files::tests::fixture::server;
-    use crate::ssh::sftp::Sftp;
+    use crate::clipboard_files::tests::fixture::connect;
 
     async fn put(sftp: &Sftp, path: &str, data: &[u8], mode: u32) {
         let handle = sftp.create(path, mode).await.unwrap();
@@ -973,7 +973,7 @@ mod fixture {
     #[tokio::test]
     #[ignore = "Run with cargo xtask test ssh -- clipboard_downloads::tests::fixture"]
     async fn listing_a_folder_stops_at_the_item_limit_over_sftp() {
-        let sftp = Sftp::connect(&server()).await.unwrap();
+        let sftp = connect().await;
         let base = format!("/clipboard-limit-{}", uuid::Uuid::new_v4());
         sftp.mkdir(&base, 0o700).await.unwrap();
         for index in 0..MAX_ENTRIES {
@@ -999,7 +999,7 @@ mod fixture {
     #[tokio::test]
     #[ignore = "Run with cargo xtask test ssh -- clipboard_downloads::tests::fixture"]
     async fn a_tree_is_downloaded_over_sftp_and_renamed_into_place() {
-        let sftp = Sftp::connect(&server()).await.unwrap();
+        let sftp = connect().await;
         let base = format!("/clipboard-downloads-{}", uuid::Uuid::new_v4());
         sftp.mkdir(&base, 0o700).await.unwrap();
         let tree = format!("{base}/tree");

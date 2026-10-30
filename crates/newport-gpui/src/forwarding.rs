@@ -23,14 +23,14 @@ pub fn status_for(runtime: &Value, id: &str, remote_port: Option<u64>) -> String
                 .iter()
                 .find(|h| matches!(h["status"].as_str(), Some("unavailable" | "blocked")))
             {
-                return format!(
-                    "Connected · destination {}{}",
-                    issue["status"].as_str().unwrap(),
-                    issue["message"]
-                        .as_str()
-                        .map(|m| format!(": {m}"))
-                        .unwrap_or_default()
-                );
+                // The row's status already says the destination is down: say why.
+                return issue["message"]
+                    .as_str()
+                    .filter(|message| !message.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| {
+                        format!("Destination {}", issue["status"].as_str().unwrap())
+                    });
             }
             if !health.is_empty() && health.iter().all(|h| h["status"] == "reachable") {
                 return "Connected · destination reachable".into();
@@ -47,8 +47,10 @@ mod tests {
     use serde_json::json;
     #[test]
     fn connected_transport_does_not_claim_destination_is_up() {
-        let runtime = json!({"tunnels":{"t":{"status":"connected"}},"tunnelHealth":{"t":[{"remotePort":8080,"status":"unavailable","message":"Connection refused"}]}});
-        assert!(status(&runtime, "t").contains("destination unavailable"));
+        let mut runtime = json!({"tunnels":{"t":{"status":"connected"}},"tunnelHealth":{"t":[{"remotePort":8080,"status":"unavailable","message":"Connection refused"}]}});
+        assert_eq!(status(&runtime, "t"), "Connection refused");
+        runtime["tunnelHealth"]["t"][0]["message"] = json!(null);
+        assert_eq!(status(&runtime, "t"), "Destination unavailable");
         assert!(
             status(&json!({"tunnels":{"t":{"status":"connected"}}}), "t").contains("not confirmed")
         );
@@ -68,10 +70,10 @@ mod tests {
             status_for(&runtime, "t", Some(8080)),
             "Connected · destination reachable"
         );
-        assert!(status_for(&runtime, "t", Some(8079)).contains("destination unavailable"));
+        assert_eq!(status_for(&runtime, "t", Some(8079)), "Connection refused");
         assert!(status_for(&runtime, "t", Some(8081)).contains("not confirmed"));
         assert!(status_for(&runtime, "t", Some(8082)).contains("not confirmed"));
-        assert!(status(&runtime, "t").contains("destination unavailable"));
+        assert_eq!(status(&runtime, "t"), "Connection refused");
     }
 
     #[test]

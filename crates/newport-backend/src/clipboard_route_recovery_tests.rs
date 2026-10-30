@@ -208,11 +208,15 @@ async fn recover(invalidate_before_completion: bool) -> (Result<(), String>, usi
         recover_connection(
             || {
                 attempts.fetch_add(1, Ordering::SeqCst);
-                stale_completion(
-                    invalidate_before_completion,
-                    Ok(ClipboardRoute::Retired),
-                    false,
-                )
+                async move {
+                    stale_completion(
+                        invalidate_before_completion,
+                        Ok(ClipboardRoute::Retired),
+                        false,
+                    )
+                    .await
+                    .map_err(super::Interruption::Failed)
+                }
             },
             cancel,
             || {

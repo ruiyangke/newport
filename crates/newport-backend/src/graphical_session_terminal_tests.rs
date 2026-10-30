@@ -877,23 +877,24 @@ fn ssh_fixture() -> crate::model::Server {
         browser_enabled: false,
         agent_install_approved: true,
         setup_complete: true,
+        proxy: None,
     }
 }
 /// Reads until `needle`; any error, exit or reconnect fails the test.
-async fn shell_output(sessions: &crate::terminal::Sessions, id: Uuid, needle: &str) -> String {
+async fn shell_output(io: &mut crate::terminal::Io, needle: &str) -> String {
     use crate::terminal::Event;
     tokio::time::timeout(Duration::from_secs(10), async {
         let mut text = String::new();
         loop {
-            match sessions.read(id).await.unwrap() {
+            match io.output.recv().await {
                 Some(Event::Data(bytes)) => {
                     text.push_str(&String::from_utf8_lossy(&bytes));
                     if text.contains(needle) {
                         return text;
                     }
                 }
-                Some(Event::Ready) | None => {}
-                Some(event) => panic!("Unexpected {event:?}: {text}"),
+                Some(Event::Ready) => {}
+                event => panic!("Unexpected {event:?}: {text}"),
             }
         }
     })
@@ -902,26 +903,18 @@ async fn shell_output(sessions: &crate::terminal::Sessions, id: Uuid, needle: &s
 }
 /// Runs a command once the shell prompts; `started` skips that wait for a
 /// shell already shown to be running.
-async fn usable(
-    sessions: &crate::terminal::Sessions,
-    id: Uuid,
-    marker: &str,
-    started: bool,
-) -> String {
+async fn usable(io: &mut crate::terminal::Io, marker: &str, started: bool) -> String {
     if !started {
-        shell_output(sessions, id, "fixture> ").await;
+        shell_output(io, "fixture> ").await;
     }
-    sessions
-        .send(
-            id,
-            crate::terminal::Input::Data(
-                // The echoed command line never contains "{marker}=".
-                format!("printf '%s=%s\\n' {marker} \"${{WAYLAND_DISPLAY-none}}\"\r").into_bytes(),
-            ),
-        )
+    io.input
+        .send(crate::terminal::Input::Data(
+            // The echoed command line never contains "{marker}=".
+            format!("printf '%s=%s\\n' {marker} \"${{WAYLAND_DISPLAY-none}}\"\r").into_bytes(),
+        ))
         .await
         .unwrap();
-    shell_output(sessions, id, &format!("{marker}=")).await
+    shell_output(io, &format!("{marker}=")).await
 }
 
 #[tokio::test]
@@ -946,7 +939,7 @@ async fn the_shell_is_ready_and_usable_whatever_its_display_does() {
     for (index, answer) in answers.into_iter().enumerate() {
         let id = Uuid::new_v4();
         let started = std::time::Instant::now();
-        sessions
+        let mut io = sessions
             .open_bound_with_handoff(
                 id,
                 server.clone(),
@@ -958,7 +951,7 @@ async fn the_shell_is_ready_and_usable_whatever_its_display_does() {
                 })),
             )
             .unwrap();
-        let text = usable(&sessions, id, &format!("plain{index}"), false).await;
+        let text = usable(&mut io, &format!("plain{index}"), false).await;
         assert!(text.contains(&format!("plain{index}=none")), "{text}");
         assert!(started.elapsed() < Duration::from_secs(8));
         sessions.close(id).await;
@@ -968,7 +961,7 @@ async fn the_shell_is_ready_and_usable_whatever_its_display_does() {
     let id = Uuid::new_v4();
     let lease = fixture.acquire(&owner.graphical, Demand::Terminal).await;
     assert_eq!(owner.graphical_sessions()[0].terminals, 1);
-    sessions
+    let mut io = sessions
         .open_bound_with_display(
             id,
             server.clone(),
@@ -978,7 +971,7 @@ async fn the_shell_is_ready_and_usable_whatever_its_display_does() {
             Startup::Ready(Display::Shared(lease)),
         )
         .unwrap();
-    let text = usable(&sessions, id, "fallback", false).await;
+    let text = usable(&mut io, "fallback", false).await;
     assert!(text.contains("fallback=none"), "{text}");
     assert_eq!(owner.graphical_sessions()[0].terminals, 0);
     // A display adopted after the shell started, then lost: the shell keeps
@@ -995,7 +988,7 @@ async fn the_shell_is_ready_and_usable_whatever_its_display_does() {
         .updates
         .send_replace(DriverState::Failed("Display worker exited".into()));
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let text = usable(&sessions, id, "after", true).await;
+    let text = usable(&mut io, "after", true).await;
     assert!(text.contains("after=none"), "{text}");
     sessions.close(id).await;
     drop(held);

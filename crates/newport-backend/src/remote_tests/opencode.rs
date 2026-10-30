@@ -10,7 +10,7 @@ type Stream = russh::ChannelStream<russh::client::Msg>;
 struct Probe(BufReader<Stream>);
 
 impl Probe {
-    async fn start(session: &ExecSession, version: &str, backend: &str) -> Self {
+    async fn start(session: &crate::remote::Shell, version: &str, backend: &str) -> Self {
         let isolate = match (version, backend) {
             // Restrict PATH so v1 must use its xclip fallback, then xsel for text.
             ("v1", "x11") => format!(
@@ -142,8 +142,8 @@ fn picture() -> Vec<u8> {
 }
 
 async fn sequence(version: &str, backend: &str) {
-    let session = ExecSession::connect(&server()).await.unwrap();
-    crate::agent::install(&session).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
+    crate::agent::install(&session.0, &server()).await.unwrap();
     let mut agent = session
         .stream(&format!(
             "exec ~/.local/bin/newport-agent serve {} --clipboard",

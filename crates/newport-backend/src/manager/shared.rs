@@ -116,20 +116,6 @@ impl SharedState {
         self.snapshots.read()
     }
 
-    pub(crate) fn observe_connection(
-        &self,
-        server: &crate::model::Server,
-        revision: u64,
-        started: std::time::Instant,
-        result: Result<(), String>,
-    ) {
-        if let Ok(owner) = self.owner(server.id)
-            && owner.revision() == revision
-            && owner.server().same_connection(server)
-        {
-            owner.connectivity.lock().unwrap().observe(started, result);
-        }
-    }
     pub(crate) fn current(
         &self,
         id: Uuid,
@@ -224,7 +210,6 @@ impl Drop for ControlGuard<'_> {
 mod tests {
     use super::*;
     use crate::{model::Server, profile::Store};
-    use std::time::Instant;
 
     #[tokio::test]
     async fn integration_preparation_bypasses_writer_and_keeps_the_published_owner() {
@@ -271,7 +256,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn setup_metadata_publishes_without_replacing_the_connection_and_health_is_scoped() {
+    async fn setup_metadata_publishes_without_replacing_the_connection() {
         let directory = tempfile::tempdir().unwrap();
         let mut manager = Manager::new(Store::for_test(directory.path().into()));
         let a: Server = serde_json::from_value(serde_json::json!({"id":Uuid::new_v4(),
@@ -284,18 +269,8 @@ mod tests {
         manager.config.servers = vec![a.clone(), b.clone()];
         let state = share(manager);
         let original = state.owner(a.id).unwrap();
+        let other = state.owner(b.id).unwrap();
         let mut writer = state.lock().await;
-        state.observe_connection(&a, 0, Instant::now(), Ok(()));
-        state.observe_connection(&b, 0, Instant::now(), Ok(()));
-        assert_eq!(
-            original
-                .connectivity
-                .lock()
-                .unwrap()
-                .health(Instant::now())
-                .status,
-            "reachable"
-        );
         writer.config.servers[0].agent_install_approved = true;
         writer.config.servers[0].setup_complete = true;
         drop(writer);
@@ -310,30 +285,10 @@ mod tests {
                 .any(|(profile, _)| profile.id == a.id && profile.setup_complete)
         );
         state.lock().await.advance_connection_revision(a.id);
-        state.observe_connection(&a, 0, Instant::now(), Ok(()));
         assert!(original.is_revoked());
-        assert_eq!(
-            state
-                .owner(a.id)
-                .unwrap()
-                .connectivity
-                .lock()
-                .unwrap()
-                .health(Instant::now())
-                .status,
-            "unknown"
-        );
-        assert_eq!(
-            state
-                .owner(b.id)
-                .unwrap()
-                .connectivity
-                .lock()
-                .unwrap()
-                .health(Instant::now())
-                .status,
-            "reachable"
-        );
+        assert!(!Arc::ptr_eq(&state.owner(a.id).unwrap(), &original));
+        assert!(Arc::ptr_eq(&state.owner(b.id).unwrap(), &other));
+        assert!(!other.is_revoked());
         crate::manager::shutdown(&state).await;
     }
 }

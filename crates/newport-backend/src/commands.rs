@@ -285,42 +285,10 @@ pub async fn terminal_open(
     session: Uuid,
     cols: u32,
     rows: u32,
-) -> Result<(), String> {
+) -> Result<crate::terminal::Io, String> {
     let owner = state.owner(id)?;
     let server = owner.server().clone();
     terminals.open_bound(session, server, cols, rows, owner)
-}
-
-pub async fn terminal_read(
-    terminals: &crate::terminal::Sessions,
-    session: Uuid,
-) -> Result<Option<crate::terminal::Event>, String> {
-    terminals.read(session).await
-}
-
-pub async fn terminal_write(
-    terminals: &crate::terminal::Sessions,
-    session: Uuid,
-    data: Vec<u8>,
-) -> Result<(), String> {
-    if data.len() > 65536 {
-        return Err("Terminal input is too large.".into());
-    }
-    terminals
-        .send(session, crate::terminal::Input::Data(data))
-        .await
-}
-
-pub async fn terminal_resize(
-    terminals: &crate::terminal::Sessions,
-    session: Uuid,
-    cols: u32,
-    rows: u32,
-) -> Result<(), String> {
-    crate::terminal::size(cols, rows)?;
-    terminals
-        .send(session, crate::terminal::Input::Resize(cols, rows))
-        .await
 }
 
 pub async fn terminal_close(

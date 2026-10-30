@@ -277,7 +277,7 @@ async fn desktop_commands_use_the_host_controller_and_keep_disabled_updates_read
     assert!(disabled.check().await.is_err());
     assert_eq!(
         disabled.status(),
-        json!({"enabled":false,"currentVersion":env!("CARGO_PKG_VERSION"),"phase":"idle","version":null,"downloaded":0,"total":null,"error":null})
+        json!({"enabled":false,"currentVersion":env!("CARGO_PKG_VERSION"),"build":crate::build_stamp::status(),"phase":"idle","version":null,"downloaded":0,"total":null,"error":null})
     );
 }
 

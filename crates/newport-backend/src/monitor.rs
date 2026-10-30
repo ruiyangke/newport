@@ -1,10 +1,7 @@
 //! A long-lived agent channel per server feature. Overview reads cannot queue
 //! behind a service action, container prune, or Compose operation.
 //! The agent samples on its own, so CPU figures are recent, not lifetime.
-use crate::{
-    agent,
-    server_session::{Lease, ServerSession},
-};
+use crate::{agent, needle::Needle, server_session::ServerSession};
 use serde_json::Value;
 use std::{
     sync::{Arc, Weak},
@@ -51,7 +48,7 @@ impl Channels {
     }
 }
 struct Open {
-    session: Lease,
+    session: Needle,
     uses_session_slot: bool,
     reader: BufReader<tokio::io::ReadHalf<Channel>>,
     writer: tokio::io::WriteHalf<Channel>,
@@ -79,9 +76,9 @@ impl Slot {
     }
 }
 
-/// Explicit retries clear this session's transport, runtime, and monitor failures.
+/// Explicit retries clear this session's link, runtime, and monitor failures.
 pub async fn retry_installation(server: &Arc<ServerSession>) {
-    server.retry_transport();
+    server.retry();
     server.agent_runtime.retry_failed().await;
     server.monitor.drain().await;
 }
@@ -89,7 +86,7 @@ pub async fn retry_installation(server: &Arc<ServerSession>) {
 /// Overview retries affect its own channel; another feature may be executing
 /// a mutation that must finish on its existing protocol stream.
 pub(crate) async fn retry_overview(server: &Arc<ServerSession>) {
-    server.retry_transport();
+    server.retry();
     server.agent_runtime.retry_failed().await;
     server
         .monitor
@@ -145,9 +142,8 @@ pub async fn ask(
         if slot.open.is_none() {
             match open(server).await? {
                 Ok(open) => {
-                    let pressure = open.session.channel_pressure();
                     slot.open = Some(open);
-                    close_when_idle(Arc::downgrade(&shared), pressure);
+                    close_when_idle(Arc::downgrade(&shared), server.link().pressure());
                 }
                 Err(reason) => {
                     slot.unavailable = Some(Unavailable {
@@ -236,10 +232,10 @@ fn unavailable(request: &Value, reason: &str) -> String {
     format!("{feature} needs the Newport agent, which can’t run on this server: {reason}")
 }
 
-/// Transport and runtime recovery remain eligible on the next request. Only
+/// Link and runtime recovery remain eligible on the next request. Only
 /// actionable capability/installation failures get the longer unavailable cache.
 async fn open(server: &Arc<ServerSession>) -> Result<Result<Open, String>, String> {
-    let session = server.acquire(server.server()).await?;
+    let session = server.needle(server.server())?;
     match session.launch(agent::Service::Monitor).await {
         Ok((stream, _)) => {
             let uses_session_slot = stream.uses_session_slot();
@@ -254,22 +250,13 @@ async fn open(server: &Arc<ServerSession>) -> Result<Result<Open, String>, Strin
         Err(error) => {
             server.agent_runtime.probe().await;
             let runtime = server.agent_runtime.snapshot();
-            if runtime.retryable || connection_problem(&error) {
-                Err(error)
+            if runtime.retryable || error.transient() {
+                Err(error.into())
             } else {
-                Ok(Err(error))
+                Ok(Err(error.into()))
             }
         }
     }
-}
-fn connection_problem(error: &str) -> bool {
-    error == crate::agent_runtime::BUSY
-        || error.starts_with("SSH session capacity unavailable")
-        || error.contains("Needle runtime disconnected")
-        || error.contains("Needle runtime changed before worker registration")
-        || error.starts_with("SSH transport interrupted")
-        || error.starts_with("SSH agent unavailable")
-        || error.contains("timed out")
 }
 
 fn close_when_idle(slot: Weak<Mutex<Slot>>, mut pressure: tokio::sync::watch::Receiver<u64>) {
@@ -559,23 +546,23 @@ mod tests {
 
     #[test]
     fn only_connection_failures_are_retried_at_once() {
-        assert!(connection_problem(crate::agent_runtime::BUSY));
-        assert!(connection_problem(
-            "SSH session capacity unavailable. Retry shortly"
-        ));
-        assert!(connection_problem("Needle runtime disconnected"));
-        assert!(connection_problem(
-            "Needle runtime changed before worker registration"
-        ));
-        assert!(connection_problem("SSH transport interrupted: reset"));
-        assert!(connection_problem("SSH command timed out starting agent"));
-        assert!(!connection_problem("The Newport agent requires Linux."));
-        assert!(!connection_problem(
-            "The Newport agent supports x86_64 and ARM64 Linux servers."
-        ));
-        assert!(!connection_problem(
-            "Remote command failed (status 1): noexec"
-        ));
+        use crate::agent_runtime::Error;
+        for error in [
+            Error::Interrupted(crate::agent_runtime::BUSY.into()),
+            Error::Interrupted("Needle runtime disconnected".into()),
+            Error::Link(newport_ssh::Error::Lost("reset".into())),
+            Error::Link(newport_ssh::Error::TimedOut),
+            Error::Link(newport_ssh::Error::SessionsDisabled),
+        ] {
+            assert!(error.transient(), "{error}");
+        }
+        for error in [
+            Error::Unavailable("The Newport agent requires Linux.".into()),
+            Error::Unavailable("The Newport agent supports x86_64 and ARM64 Linux servers.".into()),
+            Error::NotInstalled,
+        ] {
+            assert!(!error.transient(), "{error}");
+        }
         assert_eq!(
             unavailable(
                 &serde_json::json!({"op": "snapshot"}),

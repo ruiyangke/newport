@@ -36,20 +36,11 @@ impl Command {
             Self::GitRequest => {
                 let server_id = argument(args, "serverId")?;
                 let request = argument(args, "request")?;
-                if argument::<Option<bool>>(args, "retryConnection")?.unwrap_or(false) {
-                    if !matches!(request, crate::git::protocol::Request::Open { .. }) {
-                        return Err(error(
-                            "Connection retry is only supported when opening a checkout",
-                        ));
-                    }
-                    // The checkout's explicit Retry must release transport backoff
-                    // before acquiring a lease, otherwise it returns the cached
-                    // agent failure without making a new authentication attempt.
-                    services
-                        .manager
-                        .owner(server_id)
-                        .map_err(error)?
-                        .retry_transport_fresh();
+                let retry = argument::<Option<bool>>(args, "retryConnection")?.unwrap_or(false);
+                if retry && !matches!(request, crate::git::protocol::Request::Open { .. }) {
+                    return Err(error(
+                        "Connection retry is only supported when opening a checkout",
+                    ));
                 }
                 encode(
                     crate::git::git_request(
@@ -59,6 +50,7 @@ impl Command {
                         services.pending,
                         server_id,
                         request,
+                        retry,
                     )
                     .await
                     .map_err(error)?,

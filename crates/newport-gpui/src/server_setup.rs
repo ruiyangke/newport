@@ -10,23 +10,14 @@ pub(super) struct Flow {
     clipboard: bool,
     pub dismissed: bool,
     error: Option<String>,
+    /// The code of an error reaching the server, which names the cause.
+    error_code: Option<String>,
     pending: bool,
     /// Failures of the current step, and when the latest one happened.
     attempts: u32,
     failed_at: Option<i64>,
 }
-fn identity(server: &Value) -> Value {
-    json!([
-        server["id"],
-        server["sshHost"],
-        server["sshUser"],
-        server["sshPort"],
-        server["identityFile"],
-        server["agentSource"],
-        server["agentKeyFingerprint"],
-        server["authMethod"]
-    ])
-}
+use newport_domain::connection_scope::settings as connection_settings;
 impl Newport {
     pub(super) fn setup_visible(&self) -> bool {
         self.setup_flow.as_ref().is_some_and(|f| !f.dismissed)
@@ -57,7 +48,7 @@ impl Newport {
         let Some(server) = self.selected_server().cloned() else {
             return false;
         };
-        let connection = identity(&server);
+        let connection = connection_settings(&server);
         if self
             .setup_flow
             .as_ref()
@@ -90,6 +81,7 @@ impl Newport {
         }
         flow.pending = false;
         flow.error = resource.error.clone();
+        flow.error_code = resource.error_code.clone();
         if flow.error.is_some() {
             flow.attempts += 1;
             flow.failed_at = Some(chrono::Local::now().timestamp_millis());
@@ -113,13 +105,14 @@ impl Newport {
     /// Starts setup on `server` from its inspection.
     pub(super) fn start_setup(&mut self, server: Value) {
         self.setup_flow = Some(Flow {
-            connection: identity(&server),
+            connection: connection_settings(&server),
             phase: 0,
             specs: Value::Null,
             browser: true,
             clipboard: true,
             dismissed: false,
             error: None,
+            error_code: None,
             pending: true,
             attempts: 0,
             failed_at: None,
@@ -176,7 +169,7 @@ impl Newport {
         let Some(flow) = self.setup_flow.as_mut() else {
             return;
         };
-        if flow.pending || flow.connection != identity(&server) || flow.dismissed {
+        if flow.pending || flow.connection != connection_settings(&server) || flow.dismissed {
             return;
         }
         let operation = match flow.phase {
@@ -193,6 +186,7 @@ impl Newport {
         // its own progress instead.
         if flow.phase == 1 {
             flow.error = None;
+            flow.error_code = None;
         }
         self.request(
             &format!("setup-{operation}:{}", self.server),
@@ -421,7 +415,10 @@ impl Newport {
                         );
                     }
                 }
-                let copy = flow.error.as_deref().map(|error| error_copy(phase, error));
+                let copy = flow
+                    .error
+                    .as_ref()
+                    .map(|_| error_copy(phase, flow.error_code.as_deref()));
                 if let (Some(error), Some(copy)) = (&flow.error, copy) {
                     // The cause usually follows a summary line, so show the
                     // whole reply; only a very long one is cut short.
@@ -662,7 +659,7 @@ struct ErrorCopy {
     /// The fix is most likely in the server's connection settings, there.
     connection: Option<server_form::Fix>,
 }
-fn error_copy(phase: u8, error: &str) -> ErrorCopy {
+fn error_copy(phase: u8, code: Option<&str>) -> ErrorCopy {
     let copy = |title, guidance, connection| ErrorCopy {
         title,
         guidance,
@@ -671,7 +668,7 @@ fn error_copy(phase: u8, error: &str) -> ErrorCopy {
     if phase == 1 {
         return copy(
             "The helper couldn’t be installed.",
-            "Check the connection and try again. The server inspection is kept.",
+            "Check the connection and try again.",
             None,
         );
     }
@@ -682,37 +679,97 @@ fn error_copy(phase: u8, error: &str) -> ErrorCopy {
             None,
         );
     }
-    let error = error.to_lowercase();
-    if error.contains("host key changed") || error.contains("host key for") {
-        copy(
+    match code {
+        Some("SSH_HOST_KEY_CHANGED") => copy(
             "This server’s identity changed.",
             "Its SSH host key doesn’t match the one saved on this Mac. Make sure it’s the server you expect before you trust it:",
             None,
-        )
-    } else if error.contains("connection refused") {
-        copy(
-            "The server refused the connection.",
+        ),
+        Some("SSH_HOST_KEY_REJECTED") => copy(
+            "Newport can’t trust this server’s identity.",
+            "Its SSH host key was refused:",
+            None,
+        ),
+        Some("SSH_UNREACHABLE") => copy(
+            "The server couldn’t be reached.",
             "Check the server address and SSH port, and that SSH is running.",
             Some(server_form::Fix::Address),
-        )
-    } else if error.contains("timed out") || error.contains("timeout") {
-        copy(
+        ),
+        Some("SSH_TIMED_OUT") => copy(
             "The server isn’t responding.",
             "Check that it’s online and reachable from your network, then try again.",
             None,
-        )
-    } else if error.contains("permission denied") || error.contains("authentication") {
-        copy(
+        ),
+        Some("SSH_AUTH_REFUSED") => copy(
             "Newport couldn’t sign in.",
             "Check the SSH username and key or password.",
             Some(server_form::Fix::SignIn),
-        )
-    } else {
-        copy(
+        ),
+        Some("SSH_CREDENTIALS") => copy(
+            "Newport couldn’t use this server’s SSH credentials.",
+            "Check the key file or saved password for this server.",
+            Some(server_form::Fix::SignIn),
+        ),
+        Some("SSH_APPROVAL_REQUIRED") => copy(
+            "The SSH key wasn’t approved.",
+            "Try again and approve the request in your SSH agent.",
+            None,
+        ),
+        Some("SSH_AGENT_UNAVAILABLE") => copy(
+            "The SSH agent isn’t available.",
+            "Unlock or start your SSH agent, then try again.",
+            Some(server_form::Fix::SignIn),
+        ),
+        Some("SSH_PROXY_FAILED") => copy(
+            "Newport couldn’t connect through the proxy command.",
+            "Check the proxy command in the connection settings. It reported:",
+            Some(server_form::Fix::Proxy),
+        ),
+        Some("SSH_INVALID_PROXY") => copy(
+            "Newport couldn’t run the proxy command.",
+            "Check the proxy command in the connection settings:",
+            Some(server_form::Fix::Proxy),
+        ),
+        Some("SSH_INVALID_JUMP") => copy(
+            "Newport couldn’t connect through the jump host.",
+            "Check which server this one connects through in the connection settings:",
+            Some(server_form::Fix::Proxy),
+        ),
+        Some("SSH_LOST") => copy(
+            "The connection to the server was lost.",
+            "Check your network, then try again.",
+            None,
+        ),
+        Some("SSH_SESSIONS_DISABLED") => copy(
+            "The server doesn’t allow SSH sessions.",
+            "Allow sessions in its SSH settings (MaxSessions), then try again.",
+            None,
+        ),
+        Some("SSH_CHANNEL_REFUSED") => copy(
+            "The server refused a request from Newport.",
+            "Its SSH settings may not allow it. Check them, then try again.",
+            None,
+        ),
+        Some("SSH_REQUEST_DENIED") => copy(
+            "The server refused to forward a port.",
+            "Another connection may still hold the port. Try again in a moment.",
+            None,
+        ),
+        Some("SSH_BUSY") => copy(
+            "Too many requests are waiting for this server.",
+            "Wait a moment, then try again.",
+            None,
+        ),
+        Some("SSH_CLOSED") => copy(
+            "The connection closed before setup finished.",
+            "Try again.",
+            None,
+        ),
+        _ => copy(
             "Newport couldn’t read this server’s details.",
             "The server replied:",
             None,
-        )
+        ),
     }
 }
 
@@ -740,6 +797,51 @@ mod tests {
         }
     }
     #[gpui::test]
+    fn changing_how_the_server_is_reached_starts_setup_over(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::component::init(cx);
+            theme::install(false, cx);
+            cx.set_reduce_motion(true);
+        });
+        let mut owner = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                let mut view = page_perf_tests::owner(window, cx);
+                view.page = Page::Overview;
+                view.setup_flow = Some(super::Flow {
+                    connection: super::connection_settings(view.selected_server().unwrap()),
+                    phase: 1,
+                    specs: json!({"cores":8,"total":1000}),
+                    browser: true,
+                    clipboard: true,
+                    dismissed: false,
+                    error: None,
+                    error_code: None,
+                    pending: false,
+                    attempts: 0,
+                    failed_at: None,
+                });
+                view
+            });
+            owner = Some(view.clone());
+            Host(view)
+        });
+        let view = owner.unwrap();
+        view.update(visual, |view, _| {
+            assert!(!view.poll_setup() || view.setup_flow.as_ref().is_some_and(|f| f.phase == 1));
+            let id = view.server.clone();
+            let servers = view.snapshot["config"]["servers"].as_array_mut().unwrap();
+            let server = servers.iter_mut().find(|s| s["id"] == id.as_str()).unwrap();
+            server["proxy"] = json!({"command": "nc %h %p"});
+            view.poll_setup();
+            assert!(
+                view.setup_flow.as_ref().is_none_or(|flow| flow.phase == 0),
+                "the flow for the old route goes"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn visible_setup_receives_installation_progress_without_restarting_inspection(
         cx: &mut TestAppContext,
     ) {
@@ -754,13 +856,14 @@ mod tests {
                 let mut view = page_perf_tests::owner(window, cx);
                 view.page = Page::Overview;
                 view.setup_flow = Some(super::Flow {
-                    connection: super::identity(view.selected_server().unwrap()),
+                    connection: super::connection_settings(view.selected_server().unwrap()),
                     phase: 1,
                     specs: json!({"cores":8,"total":1000}),
                     browser: true,
                     clipboard: true,
                     dismissed: false,
                     error: None,
+                    error_code: None,
                     pending: true,
                     attempts: 0,
                     failed_at: None,
@@ -827,15 +930,24 @@ mod tests {
             gpui_kit::component::init(cx);
             theme::install(false, cx);
         });
-        let (_, visual)=cx.add_window_view(|window,cx| {
-            let view=cx.new(|cx| {
-                let mut v=page_perf_tests::owner(window,cx);
-                v.page=Page::Overview;
-                v.setup_flow=Some(super::Flow {
-                    connection:super::identity(v.selected_server().unwrap()), phase:0,
-                    specs:serde_json::Value::Null,browser:true,clipboard:true,dismissed:false,
-                    error:Some("SSH transport interrupted: Cannot connect to SSH server: Connection refused (os error 61)".into()),
-                    pending:false,attempts:2,failed_at:Some(0),
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                let mut v = page_perf_tests::owner(window, cx);
+                v.page = Page::Overview;
+                v.setup_flow = Some(super::Flow {
+                    connection: super::connection_settings(v.selected_server().unwrap()),
+                    phase: 0,
+                    specs: serde_json::Value::Null,
+                    browser: true,
+                    clipboard: true,
+                    dismissed: false,
+                    error: Some(
+                        "The server couldn't be reached: Connection refused (os error 61)".into(),
+                    ),
+                    error_code: Some("SSH_UNREACHABLE".into()),
+                    pending: false,
+                    attempts: 2,
+                    failed_at: Some(0),
                 });
                 v
             });
@@ -891,12 +1003,81 @@ mod tests {
 
     #[test]
     fn a_changed_host_key_reads_as_a_changed_identity_not_a_bad_reply() {
-        let copy = super::error_copy(
-            0,
-            "SSH handshake or host-key verification failed: SSH host key changed for [127.0.0.1]:2226: it now presents SHA256:x.",
-        );
+        let copy = super::error_copy(0, Some("SSH_HOST_KEY_CHANGED"));
         assert_eq!(copy.title, "This server’s identity changed.");
         assert!(copy.connection.is_none());
+    }
+
+    #[test]
+    fn every_ssh_error_code_has_its_own_wording() {
+        // Every code of `newport_ssh::Error::code`.
+        let codes = [
+            "SSH_UNREACHABLE",
+            "SSH_PROXY_FAILED",
+            "SSH_INVALID_PROXY",
+            "SSH_INVALID_JUMP",
+            "SSH_TIMED_OUT",
+            "SSH_LOST",
+            "SSH_AGENT_UNAVAILABLE",
+            "SSH_APPROVAL_REQUIRED",
+            "SSH_AUTH_REFUSED",
+            "SSH_CREDENTIALS",
+            "SSH_HOST_KEY_CHANGED",
+            "SSH_HOST_KEY_REJECTED",
+            "SSH_SESSIONS_DISABLED",
+            "SSH_CHANNEL_REFUSED",
+            "SSH_REQUEST_DENIED",
+            "SSH_BUSY",
+            "SSH_CLOSED",
+        ];
+        let reply = super::error_copy(0, None).title;
+        let mut titles = std::collections::HashSet::new();
+        for code in codes {
+            let copy = super::error_copy(0, Some(code));
+            assert_ne!(copy.title, reply, "{code} has no wording");
+            assert!(titles.insert(copy.title), "{code} repeats a title");
+            for text in [copy.title, copy.guidance] {
+                assert!(!text.contains('\''), "{code}: use a curly apostrophe");
+                assert!(
+                    text.starts_with(char::is_uppercase),
+                    "{code}: sentence case"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn errors_reaching_the_server_are_worded_by_their_code() {
+        for (code, title, fix) in [
+            (
+                "SSH_UNREACHABLE",
+                "The server couldn’t be reached.",
+                Some(crate::server_form::Fix::Address),
+            ),
+            (
+                "SSH_AUTH_REFUSED",
+                "Newport couldn’t sign in.",
+                Some(crate::server_form::Fix::SignIn),
+            ),
+            (
+                "SSH_PROXY_FAILED",
+                "Newport couldn’t connect through the proxy command.",
+                Some(crate::server_form::Fix::Proxy),
+            ),
+            (
+                "SSH_INVALID_JUMP",
+                "Newport couldn’t connect through the jump host.",
+                Some(crate::server_form::Fix::Proxy),
+            ),
+            ("SSH_TIMED_OUT", "The server isn’t responding.", None),
+        ] {
+            let copy = super::error_copy(0, Some(code));
+            assert_eq!((copy.title, copy.connection), (title, fix), "{code}");
+        }
+        // A reply mentioning a cause is the server's output, not that cause.
+        let reply = super::error_copy(0, None);
+        assert_eq!(reply.title, "Newport couldn’t read this server’s details.");
+        assert!(reply.connection.is_none());
     }
 
     #[gpui::test]

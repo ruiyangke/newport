@@ -44,7 +44,6 @@ impl Fixture {
             profile: profile.clone(),
             cancelled: Arc::new(AtomicBool::new(false)),
             retry: Arc::new(AtomicBool::new(false)),
-            _demand: owner.transport_demand(),
             query: Query::new(policy(), move || {
                 let calls = calls.clone();
                 async move {
@@ -244,7 +243,6 @@ async fn clear_fences_samples_waiting_to_write_history_and_other_servers_remain_
                 &owner,
                 &reading.profile,
                 &reading.cancelled,
-                std::time::Instant::now(),
                 json!({"cpu":11,"network":[]}),
             )
             .await
@@ -261,7 +259,6 @@ async fn clear_fences_samples_waiting_to_write_history_and_other_servers_remain_
             &other_owner,
             &b.profile,
             &b.cancelled,
-            std::time::Instant::now(),
             json!({"cpu":22,"network":[]}),
         ),
     )
@@ -287,7 +284,6 @@ async fn clear_fences_samples_waiting_to_write_history_and_other_servers_remain_
             &other_owner,
             &b.profile,
             &b.cancelled,
-            std::time::Instant::now(),
             json!({"cpu":33,"network":[]})
         )
         .await

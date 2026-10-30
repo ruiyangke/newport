@@ -38,7 +38,7 @@ impl rpc::Host for GitHost {
             )
             .await
     }
-    async fn open_terminal(&self, _: rpc::TerminalOpen) -> Result<Box<dyn Send>, String> {
+    async fn open_terminal(&self, _: rpc::TerminalOpen) -> Result<rpc::TerminalChannel, String> {
         Err("Not a terminal fixture".into())
     }
 }
@@ -127,30 +127,26 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn explicit_checkout_retry_clears_cached_transport_failure_through_rpc() {
+async fn explicit_checkout_retry_is_accepted_only_when_opening() {
     let fixture = Fixture::offline();
-    let owner = fixture.manager.owner(fixture.server.id).unwrap();
-    assert!(owner.acquire(&fixture.server).await.is_err());
-    let failure = owner.transport_snapshot().error;
-    assert!(failure.is_some());
     let mut args = json!({
         "serverId":fixture.server.id,
         "request":{"method":"repo.open","params":{"path":{
             "bytesB64":"L3Nydi9hcHA=","display":"/srv/app"
-        }}}
+        }}},
+        "retryConnection":true
     });
-    assert!(fixture.call("git_request", args.clone()).await.is_err());
-    assert_eq!(owner.transport_snapshot().error, failure);
-    args["retryConnection"] = json!(true);
     let mut other = args.clone();
     other["request"] = json!({"method":"repo.close","params":{"repoId":"checkout"}});
-    assert!(fixture.call("git_request", other).await.is_err());
-    assert_eq!(owner.transport_snapshot().error, failure);
-    // Identity persistence is deliberately refused by this fixture, so we can
-    // observe the reset before a new connection has a chance to fail again.
+    let error = fixture.call("git_request", other).await.unwrap_err();
+    assert!(error.contains("only supported when opening"), "{error}");
+    // Identity persistence is deliberately refused by this fixture, so the
+    // retried open goes no further than the request it retries.
+    let error = fixture.call("git_request", args.clone()).await.unwrap_err();
+    assert!(error.contains("Identity could not be persisted"), "{error}");
+    args["retryConnection"] = json!(false);
     let error = fixture.call("git_request", args).await.unwrap_err();
     assert!(error.contains("Identity could not be persisted"), "{error}");
-    assert!(owner.transport_snapshot().error.is_none());
     fixture.stop().await;
 }
 
@@ -241,10 +237,7 @@ async fn native_git_receipts_preserve_server_scope_and_require_confirmed_outcome
 mod remote_tests {
     mod git {
         use super::super::*;
-        use crate::{
-            git::protocol::{Action, Author, Path},
-            ssh::ExecSession,
-        };
+        use crate::git::protocol::{Action, Author, Path};
 
         #[tokio::test]
         #[ignore = "Requires cargo xtask test remote and real OpenSSH"]
@@ -267,25 +260,19 @@ mod remote_tests {
             .unwrap();
             let fixture = Fixture::start(server, Ok(Uuid::new_v4().to_string()));
             let args = json!({"serverId":fixture.server.id});
-            let setup = ExecSession::connect(&fixture.server).await.unwrap();
-            crate::agent_lifecycle::manage_test(&setup, false, false)
+            let setup = crate::remote::Shell::new(&fixture.server);
+            crate::agent_lifecycle::manage_test(&setup.0, &fixture.server, false, false)
                 .await
                 .unwrap();
             let old_hash = if upgrade {
-                let hash = crate::agent_lifecycle::activate_variant_test(&setup).await;
+                let hash = crate::agent_lifecycle::activate_variant_test(&setup.0).await;
                 let owner = fixture
                     .manager
                     .lock()
                     .await
                     .sessions
                     .session(&fixture.server, 0);
-                owner
-                    .acquire(&fixture.server)
-                    .await
-                    .unwrap()
-                    .adopt_build_for_test(&hash)
-                    .await
-                    .unwrap();
+                owner.adopt_build_for_test(&hash).await.unwrap();
                 Some(hash)
             } else {
                 None
@@ -399,9 +386,9 @@ mod remote_tests {
                 })
                 .await
                 .expect("commit never entered its hook");
-                let lease = owner.acquire(&fixture.server).await.unwrap();
+                let lease = owner.needle(&fixture.server).unwrap();
                 if upgrade {
-                    lease.install(false).await.unwrap();
+                    owner.install(&fixture.server, false).await.unwrap();
                 } else {
                     owner.agent_runtime.exhaust_registration_budget_for_test();
                 }
@@ -412,7 +399,7 @@ mod remote_tests {
                     owner.agent_runtime.snapshot().hello.unwrap().instance_id,
                     prior_runtime
                 );
-                assert_eq!(owner.transport_snapshot().generation, 1);
+                assert_eq!(owner.reached(), 1);
                 setup
                     .execute(&format!("touch {root}/.git/commit-release"), None)
                     .await
@@ -504,7 +491,6 @@ mod remote_tests {
                     .unwrap()
                     .is_empty()
             );
-            setup.close().await;
             fixture.stop().await;
         }
     }

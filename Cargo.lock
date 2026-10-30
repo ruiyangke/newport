@@ -5780,6 +5780,7 @@ dependencies = [
  "newport-domain",
  "newport-platform",
  "newport-release",
+ "newport-ssh",
  "rmp-serde",
  "russh",
  "russh-sftp",
@@ -5967,6 +5968,16 @@ dependencies = [
  "windows-sys 0.61.2",
  "winreg",
  "zeroize",
+]
+
+[[package]]
+name = "newport-ssh"
+version = "0.1.0"
+dependencies = [
+ "fastrand",
+ "log",
+ "russh",
+ "tokio",
 ]
 
 [[package]]
@@ -8052,9 +8063,7 @@ dependencies = [
 
 [[package]]
 name = "russh"
-version = "0.63.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "036204edbd199552a5b3832f63c60dcdf395dc44c7f06b4af1c0e8139cc11bce"
+version = "0.65.0"
 dependencies = [
  "aes 0.9.2",
  "aws-lc-rs",

@@ -293,7 +293,10 @@ async fn logs_follow_a_cursor_and_unit_files_include_drop_ins() {
     // has logged something, quietly shows nothing.
     let keeper = systemd("keeper").await;
     for setup in ["true", "logger newport && sleep 1"] {
-        crate::ssh::execute(&keeper, setup, None).await.unwrap();
+        crate::remote::Shell::new(&keeper)
+            .execute(setup, None)
+            .await
+            .unwrap();
         let error = services::logs(
             &crate::remote_tests::owner(&keeper),
             demo,

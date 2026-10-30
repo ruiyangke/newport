@@ -114,7 +114,7 @@ async fn connections_query_returns_immediately_and_shares_backend_owned_refresh(
     assert_eq!(cached["fetching"], false);
     assert!(receive.try_recv().is_err());
     assert!(
-        owner.connected_lease().await.is_none(),
+        !owner.has_link(),
         "query state itself must not connect or install Needle"
     );
 }
@@ -156,7 +156,7 @@ async fn uninstall_requires_the_reviewed_connection_and_never_connects_when_stal
         .get(server.id)
         .unwrap();
     assert!(
-        owner.connected_lease().await.is_none(),
+        !owner.has_link(),
         "invalid uninstall requests must not connect"
     );
 }
@@ -272,7 +272,7 @@ impl rpc::Host for ControlHost {
             )
             .await
     }
-    async fn open_terminal(&self, _: rpc::TerminalOpen) -> Result<Box<dyn Send>, String> {
+    async fn open_terminal(&self, _: rpc::TerminalOpen) -> Result<rpc::TerminalChannel, String> {
         Err("Not a terminal fixture".into())
     }
 }
@@ -356,6 +356,78 @@ fn server() -> Server {
 }
 
 #[tokio::test]
+async fn proxies_are_saved_over_rpc_and_a_used_jump_host_stays() {
+    let fixture = Fixture::start().await;
+    let mut bastion = server();
+    bastion.name = "Bastion".into();
+    let mut inner = server();
+    inner.name = "Inner".into();
+    let mut inner_json = serde_json::to_value(&inner).unwrap();
+    inner_json["proxy"] = json!({"jump": bastion.id});
+    let error = fixture
+        .call("save_server", json!({"server":inner_json}))
+        .await
+        .unwrap_err();
+    assert!(error.contains("isn’t saved"), "{error}");
+    for server in [serde_json::to_value(&bastion).unwrap(), inner_json] {
+        fixture
+            .call("save_server", json!({"server":server}))
+            .await
+            .unwrap();
+    }
+    let snapshot = serde_json::to_value(fixture.manager.lock().await.snapshot()).unwrap();
+    let saved = snapshot["config"]["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|server| server["id"] == inner.id.to_string())
+        .unwrap();
+    assert_eq!(saved["proxy"], json!({"jump": bastion.id}));
+    let store = fixture.manager.lock().await.store.clone();
+    inner.proxy = Some(crate::model::Proxy::Jump(bastion.id));
+    assert!(store.load().unwrap().servers.contains(&inner));
+
+    bastion.proxy = Some(crate::model::Proxy::Jump(inner.id));
+    let error = fixture
+        .call("save_server", json!({"server":bastion}))
+        .await
+        .unwrap_err();
+    assert!(error.contains("lead back"), "{error}");
+    bastion.proxy = None;
+
+    // A new way to reach the jump host reconnects the servers behind it.
+    let revision = fixture.manager.lock().await.connection_revision(inner.id);
+    bastion.ssh_user = "edited-user".into();
+    fixture
+        .call("save_server", json!({"server":bastion}))
+        .await
+        .unwrap();
+    assert!(fixture.manager.lock().await.connection_revision(inner.id) > revision);
+
+    let error = fixture
+        .call("delete_server", json!({"id":bastion.id}))
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("‘Inner’ connects through this server"),
+        "{error}"
+    );
+    assert!(fixture.manager.lock().await.server(bastion.id).is_ok());
+
+    inner.proxy = Some(crate::model::Proxy::Command("nc %h %p".into()));
+    fixture
+        .call("save_server", json!({"server":inner}))
+        .await
+        .unwrap();
+    assert!(store.load().unwrap().servers.contains(&inner));
+    fixture
+        .call("delete_server", json!({"id":bastion.id}))
+        .await
+        .unwrap();
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn native_profile_edits_preserve_scope_and_failed_delete_preserves_active_work() {
     let fixture = Fixture::start().await;
     let mut server = server();
@@ -387,7 +459,7 @@ async fn native_profile_edits_preserve_scope_and_failed_delete_preserves_active_
     let manager = fixture.manager.clone();
     let running = tokio::spawn(async move {
         files
-            .run(&manager, id, Uuid::new_v4(), async move |_| {
+            .run(&manager, id, Uuid::new_v4(), async move |_, _| {
                 started.send(()).unwrap();
                 std::future::pending::<anyhow::Result<()>>().await
             })
@@ -745,7 +817,7 @@ async fn integration_routes_reject_obsolete_connection_identity_before_any_side_
         serde_json::to_value(fixture.manager.lock().await.config.clone()).unwrap(),
         before
     );
-    assert_eq!(owner.transport_snapshot().demand, 0);
+    assert!(!owner.has_link());
     assert!(fixture.desktop.urls.lock().unwrap().is_empty());
     // Presentation edits and the other feature's saved choice do not invalidate
     // explicit intent for this same connection.
@@ -759,7 +831,7 @@ async fn integration_routes_reject_obsolete_connection_identity_before_any_side_
     let stored = fixture.manager.lock().await.store.load().unwrap();
     assert!(!stored.servers[0].browser_enabled);
     assert!(!stored.servers[0].clipboard_enabled);
-    assert_eq!(owner.transport_snapshot().demand, 0);
+    assert!(!owner.has_link());
     fixture.stop().await;
 }
 
@@ -831,7 +903,7 @@ async fn integration_off_revokes_before_manager_lock_and_supersedes_waiting_enab
         manager.config.servers[0].clipboard_enabled,
         "no premature claim of saved preference"
     );
-    assert_eq!(owner.transport_snapshot().demand, 0);
+    assert!(!owner.has_link());
     drop(manager);
     assert!(enable.await.unwrap_err().contains("superseded"));
     disable.await.unwrap();
@@ -899,7 +971,7 @@ async fn server_editor_cannot_replay_old_integration_choices_or_transfer_consent
         assert_ne!(manager.connection_scope(server.id).unwrap(), expected);
         assert!(owner.is_revoked());
         let replacement = manager.sessions.get(server.id).unwrap();
-        assert_eq!(replacement.transport_snapshot().demand, 0);
+        assert!(!replacement.has_link());
         assert!(!replacement.permissions.snapshot().desired.browser);
     }
     fixture.stop().await;

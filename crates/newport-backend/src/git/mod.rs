@@ -1,6 +1,6 @@
 //! Shared remote Git service. Writes use durable operation IDs.
 //!
-//! One shared server transport with independent metadata, history, diff and remote-advertisement channels. The agent is
+//! Independent metadata, history, diff and remote-advertisement channels on the server's link. The agent is
 //! stateless -- repository ids, snapshots, entry ids and cursors are
 //! self-describing tokens it re-verifies on every use -- so nothing a request
 //! depends on lives in a connection. A connection can therefore be shared by
@@ -46,7 +46,7 @@ type Stream = crate::agent_runtime::WorkerStream;
 struct Session {
     server_id: Uuid,
     revision: u64,
-    connection: server_session::Lease,
+    connection: crate::needle::Needle,
     clients: [Mutex<Option<Client<Stream>>>; 4],
     client_id: String,
     access: RwLock<()>,
@@ -64,7 +64,6 @@ impl Session {
     fn close(&self) {
         self.queries.close();
         self.cancelled.send_replace(true);
-        self.connection.release_demand();
         for lane in &self.clients {
             if let Ok(mut client) = lane.try_lock() {
                 *client = None;
@@ -219,6 +218,41 @@ async fn request_access<'a>(access: &'a RwLock<()>, request: &Request) -> Access
     }
 }
 
+/// What a failure to reach Git's agent means for the request: the server
+/// session changed, Needle can't serve Git here, or the link or runtime was
+/// interrupted.
+fn needle_error(error: crate::agent_runtime::Error) -> Error {
+    use crate::agent_runtime::Error as Needle;
+    match error {
+        Needle::Stale => Error::new("STALE_CONNECTION", error.to_string()),
+        Needle::NotInstalled | Needle::Unavailable(_) => {
+            Error::new("AGENT_UNAVAILABLE", error.to_string())
+        }
+        Needle::Link(_) | Needle::Interrupted(_) => Error::transport(error.to_string()),
+    }
+}
+
+/// Runs `setup` within [`DEADLINE`], counted once the link is ready: logging
+/// in may wait for the person to approve it. A link that stopped trying ends
+/// it with its error. `None` when the deadline passed.
+async fn within_deadline<T>(
+    mut link: watch::Receiver<newport_ssh::Status>,
+    setup: impl std::future::Future<Output = Result<T, Error>>,
+) -> Option<Result<T, Error>> {
+    let stopped = server_session::stopped(link.clone());
+    let deadline = async {
+        let _ = link
+            .wait_for(|status| matches!(status.reach, newport_ssh::Reach::Ready { .. }))
+            .await;
+        tokio::time::sleep(DEADLINE).await;
+    };
+    tokio::select! {
+        result = setup => Some(result),
+        error = stopped => Some(Err(needle_error(crate::agent_runtime::Error::Link(error)))),
+        () = deadline => None,
+    }
+}
+
 /// Whether a server's existing connection may carry the next request: it must
 /// still be open, and opened for the server's current configuration.
 fn reusable(cancelled: bool, revision: u64, current: u64) -> bool {
@@ -231,11 +265,13 @@ fn idle_expired(last_used: Instant, now: Instant) -> bool {
 
 /// The server's connection, connecting if it has none or the one it had is
 /// closed or was opened for an older configuration. Never called after a
-/// request has been sent, so reconnecting can never re-send one.
+/// request has been sent, so reconnecting can never re-send one. With
+/// `retry`, a new connection starts with a fresh login.
 async fn connection(
     preferences: &dyn ClientIdentity,
     state: &Shared,
     server_id: Uuid,
+    retry: bool,
 ) -> Result<Arc<Session>, Error> {
     let (server, owner) = state.current(server_id).map_err(Error::transport)?;
     let revision = owner.revision();
@@ -272,12 +308,22 @@ async fn connection(
             "Server connection changed. Reconnect.",
         ));
     }
-    let connection = owner.acquire(&server).await.map_err(Error::transport)?;
-    let setup = tokio::time::timeout(DEADLINE, async {
+    if retry {
+        // Setup ends at once on a stopped link, so it starts only once the
+        // link has taken the retry.
+        owner
+            .reconnect()
+            .await
+            .map_err(|error| needle_error(crate::agent_runtime::Error::Link(error)))?;
+    }
+    let connection = owner
+        .needle(&server)
+        .map_err(|error| Error::new("STALE_CONNECTION", error))?;
+    let setup = within_deadline(owner.link().status(), async {
         let (stream, _) = connection
             .launch(crate::agent::Service::Git)
             .await
-            .map_err(Error::transport)?;
+            .map_err(needle_error)?;
         tokio::time::timeout(
             Duration::from_secs(5),
             Client::start_with_identity(stream, client_id.clone()),
@@ -291,8 +337,7 @@ async fn connection(
         })?
     })
     .await
-    .map_err(|_| Error::transport("Git connection timed out."))
-    .and_then(|r| r);
+    .unwrap_or_else(|| Err(Error::transport("Git connection timed out.")));
     let (client, info) = match setup {
         Ok(v) => v,
         Err(e) => {
@@ -336,7 +381,7 @@ async fn connection(
     }
     *open = Some(session.clone());
     let weak = Arc::downgrade(&session);
-    let mut pressure = session.connection.channel_pressure();
+    let mut pressure = owner.link().pressure();
     let mut maintenance = slot.maintenance.lock().unwrap();
     if let Some(previous) = maintenance.take() {
         previous.abort();
@@ -393,7 +438,7 @@ pub async fn git_connect(
     state: &Shared,
     server_id: Uuid,
 ) -> Result<Value, Error> {
-    let session = connection(preferences, state, server_id).await?;
+    let session = connection(preferences, state, server_id, false).await?;
     Ok(json!({"serverId":server_id,"info":session.info}))
 }
 
@@ -419,6 +464,8 @@ pub async fn git_refresh_repository(
     Ok(json!({"repoId":repo_id}))
 }
 
+/// Runs `request` on the server's Git connection. With `retry`, a new
+/// connection starts with a fresh login: the person asked to try again.
 pub async fn git_request(
     events: LogSink,
     preferences: &dyn ClientIdentity,
@@ -426,9 +473,10 @@ pub async fn git_request(
     pending: &pending::PendingOperations,
     server_id: Uuid,
     request: Request,
+    retry: bool,
 ) -> Result<Value, Error> {
     // Connect, or reconnect, BEFORE sending -- never after.
-    let session = connection(preferences, state, server_id).await?;
+    let session = connection(preferences, state, server_id, retry).await?;
     if queries::cacheable(&request) {
         return queries::read(&session, events, state, pending, request).await;
     }
@@ -487,16 +535,16 @@ async fn execute(
                 .connection
                 .launch(crate::agent::Service::Git)
                 .await
-                .map_err(Error::transport)?;
+                .map_err(needle_error)?;
             let (client, info) =
                 Client::start_with_identity(stream, session.client_id.clone()).await?;
             Ok((client, info))
         };
+        let link = session.connection.link_status().map_err(needle_error)?;
         let initialized = tokio::select! {
             biased;
-            result = tokio::time::timeout(DEADLINE, setup) => result
-                .map_err(|_| Error::transport("Git channel initialization timed out."))
-                .and_then(|result| result),
+            result = within_deadline(link, setup) => result
+                .unwrap_or_else(|| Err(Error::transport("Git channel initialization timed out."))),
             _ = cancel.changed() => return Err(Error::transport("Git connection closed. Retry.")),
         };
         let (client, _) = match initialized {
@@ -604,7 +652,7 @@ async fn execute(
         .is_err_and(|e| e.code == "READ_CHANNEL_ERROR")
         && session.connection.is_closed()
     {
-        // Only a confirmed transport loss escalates a read-channel failure
+        // Only a confirmed runtime or connection loss escalates a read-channel failure
         // into a shared-session reset. A timed-out agent may be lane-local.
         session.close();
         return Err(Error::transport(
@@ -685,7 +733,7 @@ async fn execute(
     result
 }
 
-/// Closes Git channels without closing the shared server transport. In-flight
+/// Closes Git channels without closing the server's link. In-flight
 /// requests observe cancellation; the next request initializes fresh Git channels.
 pub async fn git_disconnect(state: &Shared, server_id: Uuid) -> Result<(), Error> {
     let owner = state.sessions.get(server_id);
@@ -745,6 +793,41 @@ mod tokens;
 #[cfg(test)]
 mod connection_tests {
     use super::*;
+    fn reaching(reach: newport_ssh::Reach) -> newport_ssh::Status {
+        newport_ssh::Status {
+            reach,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_deadline_counts_from_when_the_link_is_ready() {
+        let (link, status) = watch::channel(reaching(newport_ssh::Reach::Connecting));
+        let setup = tokio::spawn(within_deadline(
+            status,
+            std::future::pending::<Result<(), Error>>(),
+        ));
+        // A login waiting for approval takes as long as the person does.
+        tokio::time::sleep(DEADLINE * 10).await;
+        assert!(!setup.is_finished());
+        link.send_replace(reaching(newport_ssh::Reach::Ready { connections: 1 }));
+        tokio::time::sleep(DEADLINE - Duration::from_secs(1)).await;
+        assert!(!setup.is_finished());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(setup.await.unwrap().is_none(), "the deadline passed");
+    }
+
+    #[tokio::test]
+    async fn a_link_that_stopped_trying_ends_the_setup_with_its_error() {
+        let refused = newport_ssh::Error::AuthRefused;
+        let (_link, status) = watch::channel(reaching(newport_ssh::Reach::Failed(refused.clone())));
+        let error = within_deadline(status, std::future::pending::<Result<(), Error>>())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.message, refused.to_string());
+    }
+
     struct Identity;
     impl ClientIdentity for Identity {
         fn git_client_id(&self) -> IdentityFuture {
@@ -787,7 +870,8 @@ mod connection_tests {
         let resume = identity.resume.clone();
         let pending_state = state.clone();
         let id = server.id;
-        let pending = tokio::spawn(async move { connection(&identity, &pending_state, id).await });
+        let pending =
+            tokio::spawn(async move { connection(&identity, &pending_state, id, false).await });
         tokio::time::timeout(Duration::from_secs(1), async {
             while owner.git.connecting.try_lock().is_ok() {
                 tokio::task::yield_now().await;
@@ -809,7 +893,7 @@ mod connection_tests {
         }
         let other_error = tokio::time::timeout(
             Duration::from_secs(1),
-            connection(&FailedIdentity, &state, other.id),
+            connection(&FailedIdentity, &state, other.id, false),
         )
         .await
         .unwrap()
@@ -846,9 +930,12 @@ mod connection_tests {
         manager.config.servers.push(server.clone());
         let owner = manager.sessions.session(&server, 0);
         let state = crate::manager::share(manager);
-        let ssh = owner.acquire(&server).await.unwrap();
-        ssh.install(false).await.unwrap();
-        let session = connection(&Identity, &state, server.id).await.unwrap();
+        owner.install(&server, false).await.unwrap();
+        let run =
+            |command: &'static str| crate::remote::command::stdout(owner.link(), command, None);
+        let session = connection(&Identity, &state, server.id, false)
+            .await
+            .unwrap();
         // Hold exactly the guard used for an admitted Git mutation. A bounded
         // uninstall drain must return busy without closing that request's stream.
         let admitted = session.access.write().await;
@@ -859,7 +946,7 @@ mod connection_tests {
         );
         assert!(!*session.cancelled.borrow());
         assert!(session.clients[0].lock().await.is_some());
-        assert_eq!(ssh.execute("printf alive", None).await.unwrap(), "alive");
+        assert_eq!(run("printf alive").await.unwrap(), "alive");
         drop(admitted);
         tokio::time::timeout(Duration::from_secs(5), owner.git.drain())
             .await
@@ -867,10 +954,7 @@ mod connection_tests {
         assert!(*session.cancelled.borrow());
         assert!(session.clients[0].lock().await.is_none());
         assert!(owner.git.open.lock().await.is_none());
-        assert_eq!(
-            ssh.execute("printf still-alive", None).await.unwrap(),
-            "still-alive"
-        );
+        assert_eq!(run("printf still-alive").await.unwrap(), "still-alive");
         owner.agent_runtime.reset().await;
     }
 
@@ -888,11 +972,10 @@ mod connection_tests {
         manager.config.servers.push(server.clone());
         let owner = manager.sessions.session(&server, 0);
         let state = crate::manager::share(manager);
-        let ssh = owner.acquire(&server).await.unwrap();
-        ssh.install(false).await.unwrap();
+        owner.install(&server, false).await.unwrap();
         let (a, b) = tokio::join!(
-            connection(&Identity, &state, server.id),
-            connection(&Identity, &state, server.id)
+            connection(&Identity, &state, server.id, false),
+            connection(&Identity, &state, server.id, false)
         );
         let a = a.unwrap();
         let b = b.unwrap();
@@ -900,17 +983,22 @@ mod connection_tests {
             Arc::ptr_eq(&a, &b),
             "service state belongs to the server, not a caller facade"
         );
-        let transport = owner.acquire(&server).await.unwrap();
         git_disconnect(&state, server.id).await.unwrap();
         assert!(*a.cancelled.borrow());
-        assert_eq!(transport.execute("printf ok", None).await.unwrap(), "ok");
+        assert_eq!(
+            crate::remote::command::stdout(owner.link(), "printf ok", None)
+                .await
+                .unwrap(),
+            "ok"
+        );
 
         // Hold identity acquisition after the per-owner startup gate is entered.
         let identity = GatedIdentity::default();
         let resume = identity.resume.clone();
         let pending_state = state.clone();
         let id = server.id;
-        let pending = tokio::spawn(async move { connection(&identity, &pending_state, id).await });
+        let pending =
+            tokio::spawn(async move { connection(&identity, &pending_state, id, false).await });
         tokio::time::timeout(Duration::from_secs(3), async {
             while owner.git.connecting.try_lock().is_ok() {
                 tokio::task::yield_now().await;
@@ -928,7 +1016,9 @@ mod connection_tests {
         assert_eq!(error.code, "STALE_CONNECTION");
         assert!(owner.git.open.lock().await.is_none());
 
-        let next = connection(&Identity, &state, server.id).await.unwrap();
+        let next = connection(&Identity, &state, server.id, false)
+            .await
+            .unwrap();
         state.lock().await.advance_connection_revision(server.id);
         tokio::time::timeout(Duration::from_secs(3), async {
             while !*next.cancelled.borrow() {
@@ -937,7 +1027,9 @@ mod connection_tests {
         })
         .await
         .unwrap();
-        let replacement = connection(&Identity, &state, server.id).await.unwrap();
+        let replacement = connection(&Identity, &state, server.id, false)
+            .await
+            .unwrap();
         assert!(!Arc::ptr_eq(&next, &replacement));
         assert!(!*replacement.cancelled.borrow());
         state.lock().await.shutdown().await;

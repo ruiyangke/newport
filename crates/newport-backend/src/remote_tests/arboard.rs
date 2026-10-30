@@ -14,7 +14,7 @@ enum Backend {
 }
 struct Probe(BufReader<Stream>);
 impl Probe {
-    async fn start(session: &ExecSession, backend: Backend) -> Self {
+    async fn start(session: &crate::remote::Shell, backend: Backend) -> Self {
         let isolate = native_clipboard_environment(match backend {
             Backend::X11 => "x11",
             Backend::Wayland => "wayland",
@@ -62,8 +62,8 @@ impl Probe {
         assert!(rest.is_empty(), "unexpected extra probe output: {rest}");
     }
 }
-async fn agent(session: &ExecSession) -> Stream {
-    crate::agent::install(session).await.unwrap();
+async fn agent(session: &crate::remote::Shell) -> Stream {
+    crate::agent::install(&session.0, &server()).await.unwrap();
     let mut agent = session
         .stream(&format!(
             "exec ~/.local/bin/newport-agent serve {} --clipboard",
@@ -166,7 +166,7 @@ fn picture(width: u32, height: u32, mut seed: u32) -> Picture {
 }
 
 async fn sequence(backend: Backend) {
-    let session = ExecSession::connect(&server()).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
     let mut agent = agent(&session).await;
     offer(&mut agent, 1, "text/plain").await;
     let mut probe = Probe::start(&session, backend).await;
@@ -251,7 +251,7 @@ async fn sequence(backend: Backend) {
 }
 
 async fn superseded_image(backend: Backend) {
-    let session = ExecSession::connect(&server()).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
     let mut agent = agent(&session).await;
     offer(&mut agent, 1, "image/png").await;
     let mut probe = Probe::start(&session, backend).await;
@@ -282,7 +282,7 @@ async fn superseded_image(backend: Backend) {
 }
 
 async fn restart(backend: Backend) {
-    let session = ExecSession::connect(&server()).await.unwrap();
+    let session = crate::remote::Shell::new(&server());
     let mut running = agent(&session).await;
     offer(&mut running, 1, "image/png").await;
     let mut probe = Probe::start(&session, backend).await;

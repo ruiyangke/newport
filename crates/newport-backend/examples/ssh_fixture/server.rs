@@ -21,6 +21,8 @@ mod sftp;
 #[derive(Clone)]
 struct Config {
     http_port: u16,
+    /// Its own SSH port, which it forwards to as a jump host would.
+    ssh_port: u16,
     home: PathBuf,
     runtime: PathBuf,
     agent: PathBuf,
@@ -103,7 +105,12 @@ impl server::Handler for Client {
             Auth::reject()
         })
     }
-    async fn auth_publickey(&mut self, user: &str, key: &keys::PublicKey) -> anyhow::Result<Auth> {
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        verified: russh::server::VerifiedPublicKey<'_>,
+    ) -> anyhow::Result<Auth> {
+        let key = verified.public_key;
         Ok(
             if matches!(
                 user,
@@ -239,9 +246,11 @@ impl server::Handler for Client {
                     ChannelOpenFailure::AdministrativelyProhibited
                 })
                 .await;
-        } else if host == "127.0.0.1" && port == u32::from(self.config.http_port) {
-            let mut socket =
-                tokio::net::TcpStream::connect(("127.0.0.1", self.config.http_port)).await?;
+        } else if let Some(port) = [self.config.http_port, self.config.ssh_port]
+            .into_iter()
+            .find(|&target| host == "127.0.0.1" && port == u32::from(target))
+        {
+            let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
             reply.accept().await;
             self.tasks.push(tokio::spawn(async move {
                 let _ =
@@ -357,10 +366,9 @@ impl server::Handler for Client {
             session.channel_failure(id)?;
             return Ok(());
         };
-        session.data(id, b"early shell output\r\n".to_vec())?;
-        session.channel_success(id)?;
         let task = pty.start(
             self.channels.remove(&id).unwrap(),
+            session.handle(),
             self.config.home.clone(),
             None,
             None,
@@ -380,10 +388,9 @@ impl server::Handler for Client {
         if let Some((selector, terminal)) = terminal_identity(command)
             && let Some(pty) = self.ptys.get_mut(&id)
         {
-            session.data(id, b"early shell output\r\n".to_vec())?;
-            session.channel_success(id)?;
             let task = pty.start(
                 self.channels.remove(&id).unwrap(),
+                session.handle(),
                 self.config.home.clone(),
                 Some(selector),
                 terminal,
@@ -747,6 +754,7 @@ pub async fn run() -> anyhow::Result<()> {
     });
     let mut server = Listener(Config {
         http_port,
+        ssh_port: port,
         home,
         runtime,
         agent: PathBuf::from(env!("CARGO_MANIFEST_DIR"))

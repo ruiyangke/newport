@@ -210,14 +210,22 @@ pub(crate) trait Connect: Send + Sync + 'static {
     fn connect(&self) -> impl Future<Output = Result<Arc<Self::Remote>>> + Send;
 }
 
-/// The server's authenticated connection.
+/// The server's link.
 pub(crate) struct Shared(pub(crate) Arc<crate::server_session::ServerSession>);
 impl Connect for Shared {
-    type Remote = crate::ssh::sftp::Sftp;
-    async fn connect(&self) -> Result<Arc<Self::Remote>> {
-        Ok(Arc::new(crate::ssh::sftp::Sftp::shared(&self.0).await?))
+    type Remote = Remote;
+    async fn connect(&self) -> Result<Arc<Remote>> {
+        if self.0.is_revoked() {
+            anyhow::bail!(crate::server_session::STALE);
+        }
+        let sftp = self.0.files.remote(&self.0).sftp;
+        Ok(Arc::new(Remote(sftp.dedicated().await?)))
     }
 }
+
+/// An SFTP session of its own, so copying files never queues behind Files'
+/// previews.
+pub(crate) struct Remote(pub(crate) crate::remote::sftp::Session);
 
 /// The most items one copy of files may hold.
 pub(crate) const MAX_ENTRIES: u64 = 10_000;
@@ -262,9 +270,9 @@ mod sftp {
         }
     }
 
-    impl RemoteFs for crate::ssh::sftp::Sftp {
+    impl RemoteFs for super::Remote {
         async fn home(&self) -> Result<String> {
-            self.session
+            self.0
                 .realpath(".")
                 .await?
                 .files
@@ -275,7 +283,7 @@ mod sftp {
         }
         #[cfg(unix)]
         async fn realpath(&self, path: &str) -> Result<String> {
-            self.session
+            self.0
                 .realpath(path)
                 .await?
                 .files
@@ -285,7 +293,7 @@ mod sftp {
                 .context("Server returned no canonical path")
         }
         async fn kind(&self, path: &str) -> Result<Option<Kind>> {
-            match self.session.stat(path).await {
+            match self.0.stat(path).await {
                 Ok(found) => Ok(Some(kind(&found.attrs))),
                 Err(error) if status(&error, StatusCode::NoSuchFile) => Ok(None),
                 Err(error) => Err(error.into()),
@@ -293,7 +301,7 @@ mod sftp {
         }
         #[cfg(unix)]
         async fn lstat(&self, path: &str) -> Result<Option<Stat>> {
-            match self.session.lstat(path).await {
+            match self.0.lstat(path).await {
                 Ok(found) => Ok(Some(stat(&found.attrs))),
                 Err(error) if status(&error, StatusCode::NoSuchFile) => Ok(None),
                 Err(error) => Err(error.into()),
@@ -301,7 +309,7 @@ mod sftp {
         }
         #[cfg(unix)]
         async fn readlink(&self, path: &str) -> Result<String> {
-            self.session
+            self.0
                 .readlink(path)
                 .await?
                 .files
@@ -311,7 +319,7 @@ mod sftp {
                 .context("Server returned no link target")
         }
         async fn list(&self, path: &str) -> Result<Option<Vec<Item>>> {
-            let handle = match self.session.opendir(path).await {
+            let handle = match self.0.opendir(path).await {
                 Ok(handle) => handle.handle,
                 Err(error) if status(&error, StatusCode::NoSuchFile) => return Ok(None),
                 Err(error) => return Err(error.into()),
@@ -319,7 +327,7 @@ mod sftp {
             let mut items = Vec::new();
             let result = async {
                 loop {
-                    let batch = match self.session.readdir(&handle).await {
+                    let batch = match self.0.readdir(&handle).await {
                         Ok(batch) => batch,
                         Err(error) if status(&error, StatusCode::Eof) => return Ok(()),
                         Err(error) => return Err(error.into()),
@@ -348,33 +356,29 @@ mod sftp {
                 }
             }
             .await;
-            let _ = self.session.close(handle).await;
+            let _ = self.0.close(handle).await;
             result.map(|()| Some(items))
         }
         async fn mkdir(&self, path: &str, mode: u32) -> Result<()> {
-            self.session.mkdir(path, permissions(mode)).await?;
+            self.0.mkdir(path, permissions(mode)).await?;
             Ok(())
         }
         #[cfg(unix)]
         async fn create(&self, path: &str, mode: u32) -> Result<String> {
             let flags = OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE;
-            Ok(self
-                .session
-                .open(path, flags, permissions(mode))
-                .await?
-                .handle)
+            Ok(self.0.open(path, flags, permissions(mode)).await?.handle)
         }
         #[cfg(unix)]
         async fn open_read(&self, path: &str) -> Result<String> {
             Ok(self
-                .session
+                .0
                 .open(path, OpenFlags::READ, FileAttributes::empty())
                 .await?
                 .handle)
         }
         #[cfg(unix)]
         async fn read(&self, handle: &str, offset: u64, len: u32) -> Result<Option<Vec<u8>>> {
-            match self.session.read(handle, offset, len).await {
+            match self.0.read(handle, offset, len).await {
                 Ok(data) => Ok(Some(data.data)),
                 Err(error) if status(&error, StatusCode::Eof) => Ok(None),
                 Err(error) => Err(error.into()),
@@ -382,20 +386,20 @@ mod sftp {
         }
         #[cfg(unix)]
         async fn write(&self, handle: &str, offset: u64, data: Vec<u8>) -> Result<()> {
-            self.session.write(handle, offset, data).await?;
+            self.0.write(handle, offset, data).await?;
             Ok(())
         }
         #[cfg(unix)]
         async fn close(&self, handle: String) -> Result<()> {
-            self.session.close(handle).await?;
+            self.0.close(handle).await?;
             Ok(())
         }
         #[cfg(unix)]
         async fn symlink(&self, link: &str, target: &str) -> Result<()> {
             // OpenSSH's sftp-server reads SSH_FXP_SYMLINK's two paths in the
             // reverse of the draft's order: the target comes first.
-            self.session.symlink(target, link).await?;
-            let made = self.session.readlink(link).await?.files.into_iter().next();
+            self.0.symlink(target, link).await?;
+            let made = self.0.readlink(link).await?.files.into_iter().next();
             if made.is_none_or(|made| made.filename != target) {
                 bail!("The server created a different symbolic link");
             }
@@ -403,15 +407,15 @@ mod sftp {
         }
         async fn rename(&self, from: &str, to: &str) -> Result<()> {
             // Standard SFTP v3 rename fails when the destination exists.
-            self.session.rename(from, to).await?;
+            self.0.rename(from, to).await?;
             Ok(())
         }
         async fn remove_file(&self, path: &str) -> Result<()> {
-            self.session.remove(path).await?;
+            self.0.remove(path).await?;
             Ok(())
         }
         async fn remove_dir(&self, path: &str) -> Result<()> {
-            self.session.rmdir(path).await?;
+            self.0.rmdir(path).await?;
             Ok(())
         }
         async fn touch(&self, path: &str) -> Result<()> {
@@ -425,7 +429,7 @@ mod sftp {
                 mtime: Some(now),
                 ..FileAttributes::empty()
             };
-            self.session.setstat(path, times).await?;
+            self.0.setstat(path, times).await?;
             Ok(())
         }
         async fn set_attributes(
@@ -441,7 +445,7 @@ mod sftp {
                 mtime,
                 ..FileAttributes::empty()
             };
-            self.session.setstat(path, attrs).await?;
+            self.0.setstat(path, attrs).await?;
             Ok(())
         }
     }

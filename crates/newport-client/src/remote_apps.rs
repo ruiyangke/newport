@@ -24,10 +24,7 @@ pub struct Scope {
 impl Scope {
     pub fn new(server: &str, expected: Value) -> Result<Self, String> {
         let id: uuid::Uuid = server.parse().map_err(|_| "Invalid server identity")?;
-        if !expected.as_array().is_some_and(|parts| parts.len() == 10)
-            || expected[0].as_str() != Some(server)
-            || expected[9].as_str().is_none_or(str::is_empty)
-        {
+        if !newport_domain::connection_scope::is_connection_of(&expected, server) {
             return Err("Refresh the server connection before opening applications.".into());
         }
         Ok(Self {

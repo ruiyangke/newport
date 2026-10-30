@@ -35,13 +35,13 @@ pub(super) async fn serve<H: Host>(
             // Starting may wait on an SSH agent approval; progress frames keep
             // the client waiting. A client that left drops the started worker.
             let mut started = None;
-            let server = open.server_id;
+            let status = host.link_status(open.server_id);
             let opening = async {
                 started = Some(host.open_lsp(open).await);
                 Ok(Value::Null)
             };
             let progress =
-                super::progress::with_progress(&mut stream, Some(server), false, opening).await;
+                super::progress::with_progress(&mut stream, status, false, opening).await;
             if progress.is_err() {
                 return Ok(());
             }

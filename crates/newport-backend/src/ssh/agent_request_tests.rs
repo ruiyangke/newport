@@ -1,8 +1,9 @@
 //! Exercise Agent::request over framed duplex I/O, including its ACK dispatcher.
-//! The unused browser callback retains a real loopback SSH connection. All keys
-//! and known_hosts belong to a bounded subprocess, never the user's SSH setup.
-use super::*;
+//! The unused browser callback's link never dials. Everything runs in a
+//! bounded subprocess, never with the user's SSH setup.
 use crate::agent::{Agent, control, wire};
+use crate::model::Server;
+use std::{sync::Arc, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const CHILD: &str = "NEWPORT_AGENT_REQUEST_FIXTURE";
@@ -27,57 +28,14 @@ impl crate::desktop_integration::DesktopIntegration for NoDesktop {
         panic!("unexpected browser access")
     }
 }
-struct Peer;
-impl russh::server::Handler for Peer {
-    type Error = anyhow::Error;
-    async fn auth_none(&mut self, _: &str) -> Result<russh::server::Auth> {
-        Ok(russh::server::Auth::Accept)
-    }
-}
-
-async fn callbacks_connection() -> (Arc<Connection>, tokio::task::JoinHandle<()>) {
-    let key = russh::keys::PrivateKey::from(
-        russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[61; 32]),
-    );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    std::fs::write(
-        std::env::var_os("NEWPORT_TEST_KNOWN_HOSTS").unwrap(),
-        format!(
-            "[127.0.0.1]:{port} {}\n",
-            key.public_key().to_openssh().unwrap()
-        ),
-    )
-    .unwrap();
-    let config = russh::server::Config {
-        keys: vec![key],
-        auth_rejection_time: Duration::ZERO,
-        ..Default::default()
-    };
-    let peer = tokio::spawn(async move {
-        let (socket, _) = listener.accept().await.unwrap();
-        let session = russh::server::run_stream(Arc::new(config), socket, Peer)
-            .await
-            .unwrap();
-        let _ = session.await;
-    });
+/// The browser callback goes unused, so its link never dials.
+fn callbacks_link() -> newport_ssh::Link {
     let server: Server = serde_json::from_value(serde_json::json!({
         "id":uuid::Uuid::new_v4(), "name":"Agent ACK fixture", "sshHost":"127.0.0.1",
-        "sshPort":port, "sshUser":"fixture", "agentSource":"none"
+        "sshPort":9, "sshUser":"fixture", "agentSource":"none"
     }))
     .unwrap();
-    // Deliberately bypass auth::authenticate: only this local fixture's `none`
-    // authentication runs; no agent lookup, keychain or credential reader.
-    let mut connection = Connection::handshake(&server).await.unwrap();
-    assert!(
-        connection
-            .handle
-            .authenticate_none("fixture")
-            .await
-            .unwrap()
-            .success()
-    );
-    (Arc::new(connection), peer)
+    super::link(&server, crate::ssh::no_jump_hosts)
 }
 
 async fn receive(stream: &mut tokio::io::DuplexStream) -> (u8, Vec<u8>) {
@@ -89,7 +47,7 @@ async fn receive(stream: &mut tokio::io::DuplexStream) -> (u8, Vec<u8>) {
     wire::decode(&payload, 16384).unwrap()
 }
 
-async fn exercise(connection: Arc<Connection>, count: usize, unknown: bool) {
+async fn exercise(link: newport_ssh::Link, count: usize, unknown: bool) {
     let (stream, mut peer) = tokio::io::duplex(16384);
     let events: Vec<_> = (0..count)
         .map(|index| {
@@ -137,7 +95,7 @@ async fn exercise(connection: Arc<Connection>, count: usize, unknown: bool) {
         stream,
         Arc::new(NoDesktop),
         Arc::new(crate::integration_permissions::Gate::new(false, false)),
-        callback::Callbacks::new(connection),
+        super::callback::Callbacks::new(link),
     )
     .await
     .unwrap();
@@ -154,7 +112,7 @@ async fn exercise(connection: Arc<Connection>, count: usize, unknown: bool) {
                 .is_err()
         );
     } else {
-        let error = agent.request(b'H', &[]).await.unwrap_err();
+        let error = agent.request(b'H', &[]).await.unwrap_err().to_string();
         assert_eq!(
             error,
             if unknown {
@@ -168,6 +126,7 @@ async fn exercise(connection: Arc<Connection>, count: usize, unknown: bool) {
                 .request(b'H', &[])
                 .await
                 .unwrap_err()
+                .to_string()
                 .starts_with("SSH transport interrupted:")
         );
         assert!(
@@ -175,6 +134,7 @@ async fn exercise(connection: Arc<Connection>, count: usize, unknown: bool) {
                 .event()
                 .await
                 .unwrap_err()
+                .to_string()
                 .starts_with("SSH transport interrupted:")
         );
     }
@@ -187,12 +147,10 @@ fn agent_request_defers_shared_events_and_fences_overflow() {
     if std::env::var_os(CHILD).is_some() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             tokio::time::timeout(Duration::from_secs(8), async {
-                let (connection, peer) = callbacks_connection().await;
-                exercise(connection.clone(), 64, false).await;
-                exercise(connection.clone(), 65, false).await;
-                exercise(connection.clone(), 1, true).await;
-                connection.close().await;
-                peer.abort();
+                let link = callbacks_link();
+                exercise(link.clone(), 64, false).await;
+                exercise(link.clone(), 65, false).await;
+                exercise(link, 1, true).await;
             })
             .await
             .expect("Agent request fixture stalled");

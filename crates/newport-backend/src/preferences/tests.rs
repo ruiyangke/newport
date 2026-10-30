@@ -42,7 +42,10 @@ impl crate::rpc::Host for NativeHost {
             .dispatch(&self.0, &args)
             .await
     }
-    async fn open_terminal(&self, _: crate::rpc::TerminalOpen) -> Result<Box<dyn Send>, String> {
+    async fn open_terminal(
+        &self,
+        _: crate::rpc::TerminalOpen,
+    ) -> Result<crate::rpc::TerminalChannel, String> {
         Err("Not a terminal fixture".into())
     }
 }

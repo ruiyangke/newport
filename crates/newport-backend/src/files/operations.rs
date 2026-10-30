@@ -1,4 +1,4 @@
-use crate::{manager::Shared, model::Server};
+use crate::{manager::Shared, model::Server, server_session::ServerSession};
 use anyhow::Result;
 use serde::Serialize;
 use std::{
@@ -71,11 +71,13 @@ impl Operations {
         work: F,
     ) -> Result<T, String>
     where
-        F: AsyncFnOnce(Server) -> Result<T>,
+        F: AsyncFnOnce(Server, Arc<ServerSession>) -> Result<T>,
     {
         self.run_inner(state, server, id, None, work).await
     }
 
+    /// Runs `work` with the server's profile and the session that
+    /// `expected_connection` was checked against, never an earlier one.
     pub async fn run_with_connection<T, F>(
         &self,
         state: &Shared,
@@ -85,7 +87,7 @@ impl Operations {
         work: F,
     ) -> Result<T, String>
     where
-        F: AsyncFnOnce(Server) -> Result<T>,
+        F: AsyncFnOnce(Server, Arc<ServerSession>) -> Result<T>,
     {
         match expected_connection {
             Some(expected) => {
@@ -105,7 +107,7 @@ impl Operations {
         work: F,
     ) -> Result<T, String>
     where
-        F: AsyncFnOnce(Server) -> Result<T>,
+        F: AsyncFnOnce(Server, Arc<ServerSession>) -> Result<T>,
     {
         let (profile, owner) = state.current(server)?;
         let mut retired = owner.cancellation();
@@ -163,7 +165,7 @@ impl Operations {
             biased;
             _ = retired.changed() => Err(anyhow::anyhow!("File operation cancelled")),
             _ = cancel.changed() => Err(anyhow::anyhow!("File operation cancelled")),
-            result = work(server) => result,
+            result = work(server, owner.clone()) => result,
         };
         if owner.is_revoked() {
             return Err("File operation cancelled".into());
@@ -315,7 +317,9 @@ mod tests {
                 server,
                 Uuid::new_v4(),
                 Some(connection),
-                async |_| panic!("Rejected handover must not open a dialog or start transfer work"),
+                async |_, _| {
+                    panic!("Rejected handover must not open a dialog or start transfer work")
+                },
             )
             .await;
         assert!(result.unwrap_err().contains(expected_error));
@@ -332,6 +336,7 @@ mod tests {
             ("identityFile", json!("/unused/fixture-key")),
             ("agentSource", json!("replacement")),
             ("agentKeyFingerprint", json!("replacement")),
+            ("proxy", json!({"command": "nc %h %p"})),
         ] {
             let (_directory, state, server, connection) = fixture();
             {
@@ -383,7 +388,7 @@ mod tests {
             }
             let id = Uuid::new_v4();
             let captured = operations
-                .run_with_connection(&state, server, id, Some(&connection), async |profile| {
+                .run_with_connection(&state, server, id, Some(&connection), async |profile, _| {
                     assert!(
                         operations
                             .registry
@@ -407,7 +412,9 @@ mod tests {
 
         state.lock().await.config.servers[0].ssh_host = "replacement.invalid".into();
         let captured = operations
-            .run(&state, server, Uuid::new_v4(), async |profile| Ok(profile))
+            .run(&state, server, Uuid::new_v4(), async |profile, _| {
+                Ok(profile)
+            })
             .await
             .unwrap();
         assert_eq!(captured.ssh_host, "replacement.invalid");
@@ -424,7 +431,7 @@ mod tests {
             server,
             Uuid::new_v4(),
             Some(&connection),
-            async |_| {
+            async |_, _| {
                 started.send(()).unwrap();
                 std::future::pending().await
             },
@@ -454,7 +461,7 @@ mod tests {
             server,
             id,
             Some(&connection),
-            async |profile| {
+            async |profile, _| {
                 started.send(profile).unwrap();
                 std::future::pending().await
             },

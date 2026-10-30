@@ -624,6 +624,9 @@ impl SettingsView {
                         .map(|v| format!("Newport {v}"))
                         .unwrap_or_else(|| "Newport".into()),
                 )
+                .when_some(build_line(&update.value["build"]), |detail, line| {
+                    detail.child(help(line, cx).id("build-info"))
+                })
                 .child(
                     help(self.state.update_message(), cx)
                         .id("update-phase")
@@ -958,8 +961,58 @@ fn action_button(
     }
 }
 
+/// What this build is, so builds of one version can be told apart: its
+/// commit, whether the checkout had changes, and when it was built.
+fn build_line(build: &Value) -> Option<String> {
+    let commit = build["commit"].as_str();
+    let built = build["builtAt"]
+        .as_i64()
+        .map(crate::localized_time::detail_date);
+    if commit.is_none() && built.is_none() {
+        return None;
+    }
+    let mut line = String::from(if build["local"] == true {
+        "Development build"
+    } else {
+        "Build"
+    });
+    match commit.map(|commit| commit.strip_suffix('+').ok_or(commit)) {
+        Some(Ok(changed)) => line.push_str(&format!(" {changed} with local changes")),
+        Some(Err(commit)) => line.push_str(&format!(" {commit}")),
+        None => {}
+    }
+    if let Some(built) = built {
+        line.push_str(&format!(", built {built}"));
+    }
+    Some(line)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_build_line_names_the_commit_its_changes_and_when_it_was_built() {
+        let built = crate::localized_time::detail_date(1_793_000_000_000);
+        for (build, expected) in [
+            (
+                serde_json::json!({"commit": "8443065a+", "local": true, "builtAt": 1_793_000_000_000i64}),
+                Some(format!(
+                    "Development build 8443065a with local changes, built {built}"
+                )),
+            ),
+            (
+                serde_json::json!({"commit": "8443065a", "local": false, "builtAt": null}),
+                Some("Build 8443065a".to_owned()),
+            ),
+            (
+                serde_json::json!({"commit": null, "local": true, "builtAt": null}),
+                None,
+            ),
+            (serde_json::Value::Null, None),
+        ] {
+            assert_eq!(super::build_line(&build), expected, "{build}");
+        }
+    }
+
     use super::{Action, FocusReveal, PageState, Reading, SettingsView, ThemeSelect, theme_select};
     use crate::appearance::Appearance;
     use gpui::{

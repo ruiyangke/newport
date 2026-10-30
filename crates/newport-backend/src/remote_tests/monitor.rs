@@ -83,8 +83,7 @@ async fn overview_comes_from_the_agent_with_recent_process_cpu() {
         super::installed_server("NEWPORT_TEST_SSH_PORT", "Disposable metrics", "fixture").await;
     // A busy loop under its own name: its comm is the link's name, so
     // `pkill -x` cleanup cannot match the shell running it.
-    ssh::execute(
-        &server,
+    crate::remote::Shell::new(&server).execute(
         "ln -sf /bin/sh ~/newport-spin && setsid -f ~/newport-spin -c 'while :; do :; done' </dev/null >/dev/null 2>&1",
         None,
     )
@@ -110,7 +109,9 @@ async fn overview_comes_from_the_agent_with_recent_process_cpu() {
         }
         sleep(Duration::from_millis(1200)).await;
     }
-    let _ = ssh::execute(&server, "pkill -x newport-spin; rm -f ~/newport-spin", None).await;
+    let _ = crate::remote::Shell::new(&server)
+        .execute("pkill -x newport-spin; rm -f ~/newport-spin", None)
+        .await;
     let cores = reading["cpus"].as_array().unwrap();
     // Each core carries its last seconds, one value per second, for the grid.
     assert!(
@@ -149,14 +150,16 @@ async fn monitoring_requires_explicit_install_without_changing_shell_integration
     // Start from a server without the agent or its integration shims.
     let state = "cd ~ && for f in .bashrc .profile .zshrc; do [ -e \"$f\" ] && sha256sum \"$f\"; done; \
                  for n in xclip xsel wl-paste xdg-open newport-browser; do [ -L \".local/bin/$n\" ] && echo \"shim $n\"; done; true";
-    ssh::execute(
-        &server,
+    crate::remote::Shell::new(&server).execute(
         "rm -f ~/.local/bin/newport-agent ~/.local/bin/xclip ~/.local/bin/xsel ~/.local/bin/wl-paste ~/.local/bin/xdg-open ~/.local/bin/newport-browser",
         None,
     )
     .await
     .unwrap();
-    let before = ssh::execute(&server, state, None).await.unwrap();
+    let before = crate::remote::Shell::new(&server)
+        .execute(state, None)
+        .await
+        .unwrap();
     let error = cockpit::collect(
         &crate::remote_tests::owner(&server),
         cockpit::Section::Overview,
@@ -164,18 +167,29 @@ async fn monitoring_requires_explicit_install_without_changing_shell_integration
     .await
     .unwrap_err();
     assert!(error.contains("not installed"), "{error}");
-    ssh::execute(&server, "test ! -e ~/.local/bin/newport-agent", None)
+    crate::remote::Shell::new(&server)
+        .execute("test ! -e ~/.local/bin/newport-agent", None)
         .await
         .unwrap();
-    assert_eq!(ssh::execute(&server, state, None).await.unwrap(), before);
+    assert_eq!(
+        crate::remote::Shell::new(&server)
+            .execute(state, None)
+            .await
+            .unwrap(),
+        before
+    );
 
     // Onboarding grants consent explicitly. Monitoring itself must not deploy
     // binaries or rewrite shell profiles when merely opening the page.
     server.agent_install_approved = true;
-    let session = ssh::ExecSession::connect(&server).await.unwrap();
-    let installed = crate::agent_lifecycle::manage_test(&session, false, false).await;
-    session.close().await;
-    installed.unwrap();
+    crate::agent_lifecycle::manage_test(
+        &ssh::link(&server, crate::ssh::no_jump_hosts),
+        &server,
+        false,
+        false,
+    )
+    .await
+    .unwrap();
     crate::monitor::retry_installation(&crate::remote_tests::owner(&server)).await;
     let reading = cockpit::collect(
         &crate::remote_tests::owner(&server),
@@ -186,18 +200,18 @@ async fn monitoring_requires_explicit_install_without_changing_shell_integration
     assert!(reading["cpus"].as_array().is_some_and(|c| !c.is_empty()));
     // Sampling a server must never rewrite its shell profile or shadow its
     // xclip and xdg-open; those belong to the opt-in integration.
-    let after = ssh::execute(&server, state, None).await.unwrap();
+    let after = crate::remote::Shell::new(&server)
+        .execute(state, None)
+        .await
+        .unwrap();
     assert_eq!(after, before);
     assert!(!after.contains("shim"), "{after}");
     assert_eq!(
-        ssh::execute(
-            &server,
-            "test -x ~/.local/bin/newport-agent && echo deployed",
-            None
-        )
-        .await
-        .unwrap()
-        .trim(),
+        crate::remote::Shell::new(&server)
+            .execute("test -x ~/.local/bin/newport-agent && echo deployed", None)
+            .await
+            .unwrap()
+            .trim(),
         "deployed"
     );
 }
@@ -208,13 +222,7 @@ async fn runtime_loss_recovers_monitor_without_caching_ten_minute_unavailability
     let registry = crate::server_session::Registry::default();
     let server = super::server();
     let owner = registry.session(&server, 0);
-    owner
-        .acquire(&server)
-        .await
-        .unwrap()
-        .install(false)
-        .await
-        .unwrap();
+    owner.install(&server, false).await.unwrap();
     crate::monitor::snapshot(&owner).await.unwrap();
     let old_runtime = owner.agent_runtime.snapshot().hello.unwrap().instance_id;
     owner.agent_runtime.stop_remote_for_test().await;
@@ -239,6 +247,6 @@ async fn runtime_loss_recovers_monitor_without_caching_ten_minute_unavailability
         owner.agent_runtime.snapshot().hello.unwrap().instance_id,
         old_runtime
     );
-    assert_eq!(owner.transport_snapshot().generation, 1);
+    assert_eq!(owner.reached(), 1);
     registry.shutdown().await;
 }

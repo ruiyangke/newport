@@ -1,0 +1,15 @@
+[package]
+name = "newport-ssh"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "SSH links: connections, channels as leases, and one status per server"
+
+[dependencies]
+fastrand = "2"
+log = "0.4"
+russh = "0.65.0"
+tokio = { version = "1", features = ["rt", "sync", "time", "net", "macros", "io-util", "process"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "macros", "io-util"] }

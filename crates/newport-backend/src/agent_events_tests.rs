@@ -18,7 +18,7 @@ fn offer() -> ExportOffer {
         route_revision: 1,
     }
 }
-fn encoded(event: Event) -> Result<(u8, Vec<u8>), String> {
+fn encoded(event: Event) -> Result<(u8, Vec<u8>), super::super::Failure> {
     Ok((FRAME, event.encode().unwrap()))
 }
 
@@ -251,6 +251,7 @@ async fn payloads_before_an_ack_do_not_accumulate_in_deferred_events() {
             .next()
             .await
             .unwrap_err()
+            .to_string()
             .starts_with("SSH transport interrupted:")
     );
     assert!(representation.bytes().is_err());
@@ -299,7 +300,14 @@ async fn unnegotiated_events_and_excess_deferred_requests_fail_closed() {
     send.send(encoded(Event::Offer { offer: None }))
         .await
         .unwrap();
-    assert!(events.receive().await.unwrap_err().contains("Unnegotiated"));
+    assert!(
+        events
+            .receive()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Unnegotiated")
+    );
     assert!(events.request_guard().is_err());
     let (send, input) = mpsc::channel(8);
     let mut events = Events::new(input);
@@ -374,6 +382,7 @@ async fn cancelled_ack_wait_invalidates_results_and_cannot_consume_the_next_requ
             .next()
             .await
             .unwrap_err()
+            .to_string()
             .starts_with("SSH transport interrupted:")
     );
     assert!(events.exports.enable(&offer.offer.runtime).is_err());

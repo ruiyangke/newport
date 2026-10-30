@@ -126,3 +126,59 @@ fn an_empty_ssh_config_never_shows_the_import_card(cx: &mut TestAppContext) {
     });
     assert!(labels.iter().any(|l| l == "Add server"), "{labels:?}");
 }
+
+#[gpui::test]
+fn a_chosen_host_is_imported_after_the_jump_host_it_connects_through(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        theme::install(false, cx);
+    });
+    let mut view = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let entity = cx.new(|cx| {
+            let mut v = owner(window, cx);
+            v.server.clear();
+            v.snapshot["config"]["servers"] = json!([]);
+            v
+        });
+        view = Some(entity.clone());
+        ScreenHost(entity)
+    });
+    let view = view.unwrap();
+    let (work, requests) = std::sync::mpsc::sync_channel(16);
+    view.update(visual, |v, _| {
+        v.work = work.into();
+        v.poll_welcome();
+    });
+    let hosts = requests.try_recv().unwrap();
+    let bastion = uuid::Uuid::new_v4();
+    let inner = uuid::Uuid::new_v4();
+    view.update(visual, |v, _| {
+        v.resources.complete(
+            &hosts.key,
+            hosts.generation,
+            Ok(json!({"path": "~/.ssh/config", "hosts": [
+                {"id": bastion, "alias": "ops@bastion.example.com", "user": "ops",
+                 "host": "bastion.example.com", "port": 22, "proxy": null, "through": [],
+                 "importable": true, "suggested": false, "note": "Jump host for inner"},
+                {"id": inner, "alias": "inner", "user": "ops", "host": "10.1.0.2", "port": 22,
+                 "proxy": {"jump": bastion}, "through": ["ops@bastion.example.com"],
+                 "importable": true, "suggested": true, "note": null},
+            ]})),
+        );
+        v.poll_welcome();
+        v.import_chosen();
+    });
+    let first = requests.try_recv().unwrap();
+    assert_eq!(first.method, "save_server");
+    assert_eq!(first.args["server"]["id"], json!(bastion));
+    assert_eq!(first.args["server"]["proxy"], json!(null));
+    view.update(visual, |v, _| {
+        v.resources
+            .complete(&first.key, first.generation, Ok(json!(null)));
+        v.poll_welcome();
+    });
+    let second = requests.try_recv().unwrap();
+    assert_eq!(second.args["server"]["id"], json!(inner));
+    assert_eq!(second.args["server"]["proxy"], json!({"jump": bastion}));
+}

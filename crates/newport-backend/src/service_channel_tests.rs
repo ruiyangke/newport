@@ -173,7 +173,7 @@ async fn admission_coalesces_output_and_input_eof_preserves_final_output() {
             stream.flush().await.unwrap();
             length
         });
-        let channel = Channel::forwarded(local, &opening()).await.unwrap();
+        let channel = Channel::new(local, true).admit(&opening()).await.unwrap();
         let stream = channel.into_stream();
         assert!(!stream.uses_session_slot());
         let (mut reader, mut writer) = tokio::io::split(stream);
@@ -316,7 +316,11 @@ async fn admission_identity_mismatch_or_loss_is_not_retried() {
                     stream.flush().await.unwrap();
                 }
             });
-            let error = Channel::forwarded(local, &opening()).await.err().unwrap();
+            let error = Channel::new(local, true)
+                .admit(&opening())
+                .await
+                .err()
+                .unwrap();
             assert!(error.contains("not retried"));
             assert!(!error.contains(&"b".repeat(64)));
             server.await.unwrap();

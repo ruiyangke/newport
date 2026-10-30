@@ -1,6 +1,6 @@
 //! Bounded integration events while requests wait for acknowledgments. Export
 //! payloads go straight into their bounded receiver, never the deferred queue.
-use super::{checked_event, read_event, transport};
+use super::{Failure, checked_event, read_event, transport};
 use crate::{agent_runtime::protocol::clipboard_export::FRAME, clipboard_export::Receiver};
 use std::collections::VecDeque;
 use std::sync::{
@@ -10,7 +10,7 @@ use std::sync::{
 use tokio::{io::AsyncRead, sync::mpsc, task::JoinHandle};
 
 pub(super) struct Events {
-    input: mpsc::Receiver<Result<(u8, Vec<u8>), String>>,
+    input: mpsc::Receiver<Result<(u8, Vec<u8>), Failure>>,
     deferred: VecDeque<(u8, Vec<u8>)>,
     pub(super) exports: Receiver,
 }
@@ -33,7 +33,7 @@ impl Drop for RequestGuard {
     }
 }
 impl Events {
-    pub(super) fn request_guard(&self) -> Result<RequestGuard, String> {
+    pub(super) fn request_guard(&self) -> Result<RequestGuard, Failure> {
         let fence = self.exports.connection_fence();
         if fence.load(Ordering::Acquire) {
             return Err(transport("agent request was interrupted; reconnect"));
@@ -43,7 +43,7 @@ impl Events {
             completed: false,
         })
     }
-    pub(super) fn new(input: mpsc::Receiver<Result<(u8, Vec<u8>), String>>) -> Self {
+    pub(super) fn new(input: mpsc::Receiver<Result<(u8, Vec<u8>), Failure>>) -> Self {
         Self {
             input,
             deferred: VecDeque::new(),
@@ -65,7 +65,7 @@ impl Events {
         });
         (Self::new(events), task)
     }
-    pub(super) async fn next(&mut self) -> Result<(u8, Vec<u8>), String> {
+    pub(super) async fn next(&mut self) -> Result<(u8, Vec<u8>), Failure> {
         if self.exports.connection_fence().load(Ordering::Acquire) {
             self.exports.disconnect();
             return Err(transport("agent request was interrupted; reconnect"));
@@ -75,7 +75,7 @@ impl Events {
         }
         self.receive().await
     }
-    pub(super) async fn receive(&mut self) -> Result<(u8, Vec<u8>), String> {
+    pub(super) async fn receive(&mut self) -> Result<(u8, Vec<u8>), Failure> {
         let result = async {
             if self.exports.connection_fence().load(Ordering::Acquire) {
                 return Err(transport("agent request was interrupted; reconnect"));
@@ -100,7 +100,7 @@ impl Events {
         }
         result
     }
-    pub(super) fn defer(&mut self, kind: u8, data: Vec<u8>) -> Result<(), String> {
+    pub(super) fn defer(&mut self, kind: u8, data: Vec<u8>) -> Result<(), Failure> {
         let count = |kinds: &[u8]| {
             self.deferred
                 .iter()

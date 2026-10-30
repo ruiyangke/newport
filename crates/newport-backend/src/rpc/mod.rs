@@ -50,7 +50,7 @@ pub trait Host: Send + Sync + 'static {
     fn open_terminal(
         &self,
         request: TerminalOpen,
-    ) -> impl Future<Output = Result<Box<dyn Send>, String>> + Send;
+    ) -> impl Future<Output = Result<TerminalChannel, String>> + Send;
     /// Start a command on a server over its existing connection.
     fn open_remote_stream(
         &self,
@@ -66,6 +66,14 @@ pub trait Host: Send + Sync + 'static {
         _arguments: Vec<String>,
     ) -> impl Future<Output = Result<RemoteChannel, String>> + Send {
         async { Err("Remote Apps workers aren’t available.".to_owned()) }
+    }
+    /// The status of a server's link, without opening it, for requests that
+    /// wait while its login waits for approval.
+    fn link_status(
+        &self,
+        _server: Uuid,
+    ) -> Option<tokio::sync::watch::Receiver<newport_ssh::Status>> {
+        None
     }
     /// Start a language server for a worktree through a Needle worker.
     fn open_lsp(
@@ -93,6 +101,12 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin> LspIo for T
 /// A started language server worker, and whatever keeps its connection open.
 pub struct LspChannel {
     pub stream: Box<dyn LspIo>,
+    pub guard: Box<dyn Send>,
+}
+
+/// An open terminal's I/O, and the guard that closes it when dropped.
+pub struct TerminalChannel {
+    pub io: crate::terminal::Io,
     pub guard: Box<dyn Send>,
 }
 
@@ -163,7 +177,6 @@ impl Server {
         let slots = Arc::new(Semaphore::new(CONNECTIONS));
         let admission = Admission {
             commands: Arc::new(Semaphore::new(COMMANDS)),
-            terminal_io: Arc::new(Semaphore::new(TERMINAL_IO)),
             revocations: Arc::new(Semaphore::new(4)),
             large_payloads: Arc::new(Semaphore::new(2)),
         };
@@ -211,14 +224,11 @@ impl Server {
 const CONNECTIONS: usize = 256;
 /// Ordinary commands running at once.
 const COMMANDS: usize = 32;
-/// Terminal reads, writes and resizes running at once.
-const TERMINAL_IO: usize = 64;
 
 /// Separate capacity per kind of request, so one kind cannot starve another.
 #[derive(Clone)]
 struct Admission {
     commands: Arc<Semaphore>,
-    terminal_io: Arc<Semaphore>,
     revocations: Arc<Semaphore>,
     large_payloads: Arc<Semaphore>,
 }
@@ -263,8 +273,6 @@ async fn serve<H: Host>(
     // This reserves capacity only; the host still validates scope and permissions.
     let pool = if protocol::is_integration_revocation(&request.method, &request.args) {
         admission.revocations
-    } else if protocol::is_terminal_io(&request.method) {
-        admission.terminal_io
     } else {
         admission.commands
     };
@@ -274,10 +282,11 @@ async fn serve<H: Host>(
     let result = if request.method == "$events" {
         Ok(events.after(request.args["after"].as_u64().unwrap_or(0)))
     } else {
+        let status = progress::server(&request.args).and_then(|server| host.link_status(server));
         progress::dispatch(
             &mut stream,
             &request.method,
-            &request.args,
+            status,
             host.dispatch(&request.method, request.args.clone()),
         )
         .await?

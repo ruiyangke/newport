@@ -1,5 +1,4 @@
 //! Key-file, agent and password authentication. Explicit key selection never falls through.
-use super::Handler;
 use crate::model::{AuthMethod, Server};
 use anyhow::{Context, Result, bail};
 use russh::{
@@ -19,6 +18,18 @@ impl std::fmt::Display for SelectedAgentUnavailable {
     }
 }
 impl std::error::Error for SelectedAgentUnavailable {}
+
+/// A credential on this computer couldn't be used: an identity file that
+/// can't be read, or a saved password that can't be found. Fixing it is up to
+/// the person, so it isn't retried by itself.
+#[derive(Debug)]
+pub(crate) struct CredentialsUnavailable;
+impl std::fmt::Display for CredentialsUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("This server's SSH credentials couldn't be used on this computer.")
+    }
+}
+impl std::error::Error for CredentialsUnavailable {}
 
 #[derive(Debug)]
 pub(super) struct AgentApprovalRequired;
@@ -44,7 +55,6 @@ fn agent_error(server: &Server, error: anyhow::Error) -> anyhow::Error {
 struct ApprovalSigner<S> {
     inner: S,
     approval: watch::Sender<bool>,
-    server_id: Option<uuid::Uuid>,
 }
 impl<S: russh::Signer + Send> russh::Signer for ApprovalSigner<S>
 where
@@ -58,7 +68,6 @@ where
         hash: Option<russh::keys::ssh_key::HashAlg>,
         data: Vec<u8>,
     ) -> Result<Vec<u8>> {
-        let _wait = self.server_id.map(crate::agent_approval::Wait::begin);
         self.approval.send_replace(true);
         let result = self.inner.auth_sign(key, hash, data).await;
         self.approval.send_replace(false);
@@ -69,38 +78,11 @@ where
     }
 }
 
-pub(super) async fn with_network_deadline<T>(
-    operation: impl std::future::Future<Output = Result<T>>,
-    mut approval: watch::Receiver<bool>,
-    disconnected: &tokio::sync::Notify,
-) -> Result<T> {
-    tokio::pin!(operation);
-    let deadline = tokio::time::sleep(super::CONNECT_TIMEOUT);
-    tokio::pin!(deadline);
-    let mut awaiting_approval = false;
-    loop {
-        tokio::select! {
-            biased;
-            _ = disconnected.notified() => return Err(russh::Error::Disconnect.into()),
-            result = &mut operation => return result,
-            Ok(()) = approval.changed() => {
-                awaiting_approval = *approval.borrow_and_update();
-                deadline.as_mut().reset(tokio::time::Instant::now() + super::CONNECT_TIMEOUT);
-            },
-            _ = &mut deadline, if !awaiting_approval => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "SSH authentication response timed out",
-                ).into());
-            }
-        }
-    }
-}
-
 fn identity_path(path: &str) -> Result<PathBuf> {
     Ok(if let Some(rest) = path.strip_prefix("~/") {
         dirs::home_dir()
-            .context("Cannot find home directory")?
+            .context("Cannot find home directory")
+            .context(CredentialsUnavailable)?
             .join(rest)
     } else {
         path.into()
@@ -117,8 +99,8 @@ async fn read_identity(path: PathBuf) -> Result<PrivateKey> {
     .context("Identity-file reader task failed")?
 }
 
-pub(super) async fn authenticate(
-    handle: &mut client::Handle<Handler>,
+pub(super) async fn authenticate<H: client::Handler>(
+    handle: &mut client::Handle<H>,
     server: &Server,
     approval: watch::Sender<bool>,
 ) -> Result<()> {
@@ -126,7 +108,7 @@ pub(super) async fn authenticate(
         let id = server.id;
         let password = tokio::task::spawn_blocking(move || crate::credentials::get(id))
             .await?
-            .map_err(anyhow::Error::msg)?;
+            .map_err(|error| anyhow::Error::msg(error).context(CredentialsUnavailable))?;
         return password_auth(handle, &server.ssh_user, &password).await;
     }
     let explicit = server
@@ -136,7 +118,11 @@ pub(super) async fn authenticate(
         .map(identity_path)
         .transpose()?;
     let selected = match explicit.as_ref() {
-        Some(path) => Some(read_identity(path.clone()).await?),
+        Some(path) => Some(
+            read_identity(path.clone())
+                .await
+                .map_err(|error| error.context(CredentialsUnavailable))?,
+        ),
         None => None,
     };
     let hash = handle.best_supported_rsa_hash().await?.flatten();
@@ -166,7 +152,6 @@ pub(super) async fn authenticate(
         let mut agent = ApprovalSigner {
             inner: agent,
             approval,
-            server_id: Some(server.id),
         };
         for identity in identities {
             if server
@@ -258,8 +243,8 @@ async fn authenticate_identity<H: client::Handler, S: russh::Signer<Error = anyh
     Ok(false)
 }
 
-async fn password_auth(
-    handle: &mut client::Handle<Handler>,
+async fn password_auth<H: client::Handler>(
+    handle: &mut client::Handle<H>,
     user: &str,
     password: &str,
 ) -> Result<()> {
@@ -316,7 +301,6 @@ mod tests {
     #[derive(Clone, Copy)]
     enum Response {
         Reject,
-        Stall,
         RequestSignature,
     }
     struct TestServer(Response);
@@ -325,11 +309,10 @@ mod tests {
         async fn auth_publickey_offered(
             &mut self,
             _: &str,
-            _: &russh::keys::ssh_key::PublicKey,
+            _: russh::server::PublicKeyOffer<'_>,
         ) -> Result<russh::server::Auth> {
             match self.0 {
                 Response::Reject => Ok(russh::server::Auth::reject()),
-                Response::Stall => std::future::pending().await,
                 Response::RequestSignature => Ok(russh::server::Auth::Accept),
             }
         }
@@ -383,188 +366,48 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn ssh_rejection_is_permanent() {
+    async fn a_rejected_key_is_a_refused_login() {
         let (mut handle, identity, task) = fixture(Response::Reject).await;
-        let (approval, waiting) = watch::channel(false);
+        let (approval, _waiting) = watch::channel(false);
         let mut signer = ApprovalSigner {
             inner: SlowSigner,
             approval,
-            server_id: None,
         };
-        let error = with_network_deadline(
-            authenticate_identity(&mut handle, "user", identity, None, &mut signer, true),
-            waiting,
-            &tokio::sync::Notify::new(),
-        )
-        .await
-        .unwrap_err();
+        let error = authenticate_identity(&mut handle, "user", identity, None, &mut signer, true)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("server rejected"), "{error:#}");
-        assert!(!super::super::is_transient_connection_error(&error));
-        task.abort();
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn stalled_ssh_authentication_times_out_and_can_retry() {
-        let (mut handle, identity, task) = fixture(Response::Stall).await;
-        let (approval, waiting) = watch::channel(false);
-        let mut signer = ApprovalSigner {
-            inner: SlowSigner,
-            approval,
-            server_id: None,
-        };
-        let started = tokio::time::Instant::now();
-        let error = with_network_deadline(
-            authenticate_identity(&mut handle, "user", identity, None, &mut signer, true),
-            waiting,
-            &tokio::sync::Notify::new(),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            error.to_string().contains("response timed out"),
-            "{error:#}"
+        assert_eq!(
+            super::super::link_parts::login_error(&error),
+            newport_ssh::Error::AuthRefused
         );
-        assert_eq!(started.elapsed(), super::super::CONNECT_TIMEOUT);
-        assert!(super::super::is_transient_connection_error(&error));
         task.abort();
     }
 
     #[tokio::test(start_paused = true)]
-    async fn real_ssh_sign_request_can_wait_past_network_deadline() {
+    async fn a_sign_request_reports_its_wait_and_a_decline_waits_for_retry() {
         let (mut handle, identity, task) = fixture(Response::RequestSignature).await;
-        let (approval, waiting) = watch::channel(false);
+        let (approval, mut waiting) = watch::channel(false);
         let mut signer = ApprovalSigner {
             inner: SlowSigner,
             approval,
-            server_id: None,
         };
         let started = tokio::time::Instant::now();
-        let error = with_network_deadline(
-            authenticate_identity(&mut handle, "user", identity, None, &mut signer, true),
-            waiting,
-            &tokio::sync::Notify::new(),
-        )
-        .await
-        .unwrap_err();
+        let sign = authenticate_identity(&mut handle, "user", identity, None, &mut signer, true);
+        tokio::pin!(sign);
+        tokio::select! {
+            _ = &mut sign => panic!("the signer answered at once"),
+            changed = waiting.changed() => changed.unwrap(),
+        }
+        assert!(*waiting.borrow_and_update(), "the wait for approval shows");
+        let error = sign.await.unwrap_err();
         assert!(error.is::<AgentApprovalRequired>(), "{error:#}");
         assert!(started.elapsed() >= Duration::from_secs(60));
-        assert!(!super::super::is_transient_connection_error(&error));
+        assert!(!*waiting.borrow());
+        assert_eq!(
+            super::super::link_parts::login_error(&error),
+            newport_ssh::Error::ApprovalRequired
+        );
         task.abort();
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn request_policy_waits_for_agent_approval_without_repeating_denied_requests() {
-        use std::cell::Cell;
-
-        let attempts = Cell::new(0);
-        let started = tokio::time::Instant::now();
-        let error = super::super::ConnectionPolicy::Request
-            .establish(|| async {
-                attempts.set(attempts.get() + 1);
-                let (mut handle, identity, task) = fixture(Response::RequestSignature).await;
-                let (approval, waiting) = watch::channel(false);
-                let mut signer = ApprovalSigner {
-                    inner: SlowSigner,
-                    approval,
-                    server_id: None,
-                };
-                let result = with_network_deadline(
-                    authenticate_identity(&mut handle, "user", identity, None, &mut signer, true),
-                    waiting,
-                    &tokio::sync::Notify::new(),
-                )
-                .await;
-                task.abort();
-                result
-            })
-            .await
-            .unwrap_err();
-
-        assert!(error.is::<AgentApprovalRequired>(), "{error:#}");
-        assert_eq!(attempts.get(), 1);
-        assert_eq!(started.elapsed(), Duration::from_secs(60));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn request_policy_still_bounds_stalled_network_authentication() {
-        use std::cell::Cell;
-
-        let attempts = Cell::new(0);
-        let started = tokio::time::Instant::now();
-        let error = super::super::ConnectionPolicy::Request
-            .establish(|| async {
-                attempts.set(attempts.get() + 1);
-                let (mut handle, identity, task) = fixture(Response::Stall).await;
-                let (approval, waiting) = watch::channel(false);
-                let mut signer = ApprovalSigner {
-                    inner: SlowSigner,
-                    approval,
-                    server_id: None,
-                };
-                let result = with_network_deadline(
-                    authenticate_identity(&mut handle, "user", identity, None, &mut signer, true),
-                    waiting,
-                    &tokio::sync::Notify::new(),
-                )
-                .await;
-                task.abort();
-                result
-            })
-            .await
-            .unwrap_err();
-
-        assert!(
-            error.to_string().contains("response timed out"),
-            "{error:#}"
-        );
-        assert_eq!(attempts.get(), 3);
-        assert_eq!(started.elapsed(), Duration::from_secs(66));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn network_deadline_resumes_after_approval() {
-        let (approval, waiting) = watch::channel(false);
-        let started = tokio::time::Instant::now();
-        let error = with_network_deadline(
-            async {
-                approval.send_replace(true);
-                tokio::time::sleep(Duration::from_secs(60)).await;
-                approval.send_replace(false);
-                std::future::pending::<Result<()>>().await
-            },
-            waiting,
-            &tokio::sync::Notify::new(),
-        )
-        .await
-        .unwrap_err();
-        assert!(super::super::is_transient_connection_error(&error));
-        assert_eq!(started.elapsed(), Duration::from_secs(80));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn disconnect_interrupts_pending_approval() {
-        let (approval, waiting) = watch::channel(false);
-        let disconnected = tokio::sync::Notify::new();
-        let operation = with_network_deadline(
-            async {
-                approval.send_replace(true);
-                std::future::pending::<Result<()>>().await
-            },
-            waiting,
-            &disconnected,
-        );
-        let disconnect = async {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            disconnected.notify_one();
-        };
-        let started = tokio::time::Instant::now();
-        let (result, _) = tokio::join!(operation, disconnect);
-        let error = result.unwrap_err();
-        assert!(matches!(
-            error.downcast_ref::<russh::Error>(),
-            Some(russh::Error::Disconnect)
-        ));
-        assert!(super::super::is_transient_connection_error(&error));
-        assert_eq!(started.elapsed(), Duration::from_secs(5));
     }
 }

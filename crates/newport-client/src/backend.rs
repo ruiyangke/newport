@@ -915,11 +915,15 @@ impl Backend {
     }
 
     /// Opens a terminal held for as long as the returned stream lives:
-    /// dropping it closes the terminal.
+    /// dropping it closes the terminal. The stream then carries the
+    /// terminal's I/O, which waits on flow control and never times out.
     pub fn open_terminal_lease(&self, args: Value) -> Result<Stream, String> {
-        self.exchange_with_timeout(protocol::TERMINAL_OPEN_LEASE, args, Duration::from_secs(10))
-            .map(|(_, stream)| stream)
-            .map_err(|error| error.message)
+        let (_, stream) = self
+            .exchange_with_timeout(protocol::TERMINAL_OPEN_LEASE, args, Duration::from_secs(10))
+            .map_err(|error| error.message)?;
+        stream.set_read_timeout(None).map_err(|e| e.to_string())?;
+        stream.set_write_timeout(None).map_err(|e| e.to_string())?;
+        Ok(stream)
     }
 
     fn exchange_with_timeout(
@@ -1047,7 +1051,6 @@ fn request_timeout(method: &str) -> Duration {
 /// Error code for an exchange that ended without a complete reply. The
 /// request may or may not have run.
 pub(crate) const INTERRUPTED: &str = "CONNECTION_INTERRUPTED";
-pub(crate) use newport_platform::ipc::protocol::BUSY;
 
 /// Why a reply could not be read. `closed` means the backend had already
 /// closed the connection when the read began.
@@ -1245,6 +1248,22 @@ mod creation_transport_tests {
         child.0.kill().unwrap();
         child.0.wait().unwrap();
         assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_open_terminal_lease_never_times_out() {
+        let host = Host::new();
+        let backend = Backend::at_path(host.path.clone());
+        let task = thread::spawn(move || {
+            let (mut stream, _) = host.receive();
+            Host::reply(&mut stream, Value::Null, None);
+            stream
+        });
+        let lease = backend.open_terminal_lease(json!({})).unwrap();
+        assert_eq!(lease.read_timeout().unwrap(), None);
+        assert_eq!(lease.write_timeout().unwrap(), None);
+        drop(task.join().unwrap());
     }
 
     #[test]

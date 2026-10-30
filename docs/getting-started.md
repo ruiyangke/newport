@@ -27,7 +27,7 @@ Needle, Newport's helper, supports Linux servers with x86_64 or ARM64 processors
 | Containers | Needle and Docker; Compose actions also need Docker Compose |
 | Remote apps | macOS desktop on Apple silicon; Needle, graphical dependencies checked during setup, and trial or Pro access |
 
-Connections that depend on `ProxyJump` or `ProxyCommand` are not currently supported.
+Servers reached through a jump host (`ProxyJump`) or a helper program (`ProxyCommand`) work too. Newport imports both settings from your `~/.ssh/config`.
 
 ## Install Newport
 
@@ -43,9 +43,10 @@ To enter a server yourself:
 
 1. Choose **Add server** or **Add server manually**. Later, open the server-name picker and choose **Add server…**, or use **Server → Add server…**.
 2. Enter the **SSH host**, **SSH port**, and **Username**. Give the connection an optional name you will recognize.
-3. Choose **SSH key / agent** or **Password** under Authentication.
-4. For key authentication, select a key from the **SSH key** menu, or choose **Enter a key-file path…** and provide the path to a private key on your computer, such as `~/.ssh/id_ed25519`. A `.pub` file is the public half of a key and cannot authenticate by itself. For a protected key, follow [Prepare your SSH key](#prepare-your-ssh-key) below, then choose **Refresh agent keys**.
-5. Choose **Save server**.
+3. Under **Connect through**, keep **Direct**, or choose **Jump host** and pick one of your servers to sign in through, or **Proxy command** and enter the command, as in ssh's `ProxyCommand`. In the command, `%h` is the host, `%p` the port and `%r` the username.
+4. Choose **SSH key / agent** or **Password** under Authentication.
+5. For key authentication, select a key from the **SSH key** menu, or choose **Enter a key-file path…** and provide the path to a private key on your computer, such as `~/.ssh/id_ed25519`. A `.pub` file is the public half of a key and cannot authenticate by itself. For a protected key, follow [Prepare your SSH key](#prepare-your-ssh-key) below, then choose **Refresh agent keys**.
+6. Choose **Save server**.
 
 Newport checks the connection. If it fails, use **Edit connection** to correct the details or **Try again** after resolving a network issue. Host keys are trusted on first use; a changed or revoked key stops the connection. See [SSH trust](security.md#trusting-an-ssh-server).
 

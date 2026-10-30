@@ -14,12 +14,42 @@ const PORT: usize = 2;
 const USER: usize = 3;
 const IDENTITY: usize = 4;
 const PASSWORD: usize = 5;
+const PROXY: usize = 6;
+const NO_JUMP_HOSTS: &str = "Add the jump host as a server first, then choose it here.";
 
 /// Where in the connection settings a failed connection is likely fixed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Fix {
     Address,
     SignIn,
+    /// How the server is reached: its jump host or proxy command.
+    Proxy,
+}
+
+/// How the server is reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    Direct,
+    Jump,
+    Command,
+}
+impl Route {
+    fn of(value: &Value) -> Self {
+        if value["proxy"]["jump"].is_string() {
+            Self::Jump
+        } else if value["proxy"]["command"].is_string() {
+            Self::Command
+        } else {
+            Self::Direct
+        }
+    }
+    fn value(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Jump => "jump",
+            Self::Command => "command",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -66,6 +96,12 @@ pub(super) struct ServerForm {
     fields: Vec<Entity<InputState>>,
     authentication: Entity<ChoiceState>,
     key: Entity<ChoiceState>,
+    route: Route,
+    routes: Entity<ChoiceState>,
+    /// The saved servers this one may connect through.
+    jump_hosts: Entity<ChoiceState>,
+    any_jump_hosts: bool,
+    jump: Option<String>,
     keys: Vec<Value>,
     warnings: Vec<String>,
     keys_loading: bool,
@@ -119,11 +155,13 @@ impl Newport {
             self.request(KEYS, "ssh_agent_keys", json!({}));
         }
         let owner = cx.weak_entity();
+        let servers = rows(&self.snapshot["config"]["servers"]);
         let form = cx.new(|cx| {
-            let mut form = ServerForm::new(owner, value, existing, window, cx);
+            let mut form = ServerForm::new(owner, value, existing, &servers, window, cx);
             form.first = match fix {
                 Some(Fix::Address) => HOST,
                 Some(Fix::SignIn) => USER,
+                Some(Fix::Proxy) => PROXY,
                 None => NAME,
             };
             form
@@ -140,6 +178,7 @@ impl ServerForm {
         owner: WeakEntity<Newport>,
         value: Value,
         existing: bool,
+        servers: &[Value],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -150,6 +189,10 @@ impl ServerForm {
             text(&value, "sshUser"),
             value["identityFile"].as_str().unwrap_or_default().into(),
             String::new(),
+            value["proxy"]["command"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
         ]
         .into_iter()
         .zip([
@@ -159,6 +202,7 @@ impl ServerForm {
             "username",
             "~/.ssh/id_ed25519",
             "",
+            "cloudflared access ssh --hostname %h",
         ])
         .enumerate()
         .map(|(index, (value, placeholder))| {
@@ -194,6 +238,38 @@ impl ServerForm {
             state.set_selected_value(&selected, window, cx);
             state
         });
+        let route = Route::of(&value);
+        let routes = cx.new(|cx| {
+            let mut state = SelectState::new(
+                vec![
+                    Choice::new(Route::Direct.value(), "Direct"),
+                    Choice::new(Route::Jump.value(), "Jump host"),
+                    Choice::new(Route::Command.value(), "Proxy command"),
+                ],
+                None,
+                window,
+                cx,
+            );
+            state.set_selected_value(&route.value().to_owned(), window, cx);
+            state
+        });
+        let choices = jump_choices(servers, &value["id"]);
+        let any_jump_hosts = !choices.is_empty();
+        // A saved jump host that can't be chosen any more is chosen again.
+        let jump = match value["proxy"]["jump"].as_str() {
+            Some(saved) => choices
+                .iter()
+                .find(|choice| choice.value == saved)
+                .map(|choice| choice.value.clone()),
+            None => choices.first().map(|choice| choice.value.clone()),
+        };
+        let jump_hosts = cx.new(|cx| {
+            let mut state = SelectState::new(choices, None, window, cx);
+            if let Some(jump) = &jump {
+                state.set_selected_value(jump, window, cx);
+            }
+            state
+        });
         let mut subscriptions: Vec<_> = fields
             .iter()
             .map(|input| {
@@ -224,6 +300,25 @@ impl ServerForm {
                 this.select_key(value, window, cx);
             }
         }));
+        subscriptions.push(
+            cx.subscribe_in(&routes, window, |this, _, event, window, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    this.select_route(value, window, cx);
+                }
+            }),
+        );
+        subscriptions.push(
+            cx.subscribe_in(&jump_hosts, window, |this, _, event, _, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    if this.pending {
+                        return;
+                    }
+                    this.jump = Some(value.clone());
+                    this.error = None;
+                    cx.notify();
+                }
+            }),
+        );
         if let Some(owner) = owner.upgrade() {
             subscriptions.push(cx.observe_in(&owner, window, |this, owner, window, cx| {
                 this.sync_resources(&owner, window, cx);
@@ -235,6 +330,11 @@ impl ServerForm {
             fields,
             authentication,
             key,
+            route,
+            routes,
+            jump_hosts,
+            any_jump_hosts,
+            jump,
             keys: vec![],
             warnings: vec![],
             keys_loading,
@@ -244,7 +344,7 @@ impl ServerForm {
             first: NAME,
             pending: false,
             error: None,
-            scroll: modal::FormScroll::new(10, window, cx),
+            scroll: modal::FormScroll::new(11, window, cx),
             _subscriptions: subscriptions,
         }
     }
@@ -252,7 +352,11 @@ impl ServerForm {
     fn open(form: Entity<Self>, window: &mut Window, cx: &mut App) {
         let focus = {
             let form = form.read(cx);
-            form.fields[form.first].focus_handle(cx)
+            match (form.first, form.route) {
+                (PROXY, Route::Jump) => form.jump_hosts.focus_handle(cx),
+                (PROXY, Route::Direct) => form.routes.focus_handle(cx),
+                (first, _) => form.fields[first].focus_handle(cx),
+            }
         };
         window.open_dialog(cx, move |dialog, window, cx| {
             let pending = form.read(cx).pending;
@@ -442,6 +546,24 @@ impl ServerForm {
         cx.notify();
     }
 
+    fn select_route(&mut self, selected: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending {
+            return;
+        }
+        self.route = match selected {
+            "jump" => Route::Jump,
+            "command" => Route::Command,
+            _ => Route::Direct,
+        };
+        if self.route == Route::Command {
+            // The command field appears below; typing goes there.
+            let focus = self.fields[PROXY].focus_handle(cx);
+            window.defer(cx, move |window, cx| focus.focus(window, cx));
+        }
+        self.error = None;
+        cx.notify();
+    }
+
     fn draft(&self, cx: &App) -> Result<(Value, Value), FormError> {
         let values: Vec<_> = self
             .fields
@@ -471,7 +593,22 @@ impl ServerForm {
         if !password_auth && self.file_mode && values[IDENTITY].trim().is_empty() {
             return Err(invalid(IDENTITY, "Enter an identity-file path."));
         }
+        let proxy = match self.route {
+            Route::Direct => Value::Null,
+            Route::Jump => json!({"jump": self.jump.as_deref().ok_or_else(|| {
+                FormError::general(if self.any_jump_hosts {
+                    "Choose a jump host."
+                } else {
+                    NO_JUMP_HOSTS
+                })
+            })?}),
+            Route::Command if values[PROXY].trim().is_empty() => {
+                return Err(invalid(PROXY, "Enter a proxy command."));
+            }
+            Route::Command => json!({"command": values[PROXY].trim()}),
+        };
         let mut value = self.value.clone();
+        value["proxy"] = proxy;
         for (field, index) in [("name", NAME), ("sshHost", HOST), ("sshUser", USER)] {
             value[field] = json!(values[index].trim());
         }
@@ -528,8 +665,9 @@ impl ServerForm {
                 NAME => 1,
                 HOST | PORT => 2,
                 USER => 3,
-                PASSWORD => 6,
-                IDENTITY => 8,
+                PROXY => 4,
+                PASSWORD => 7,
+                IDENTITY => 9,
                 _ => unreachable!(),
             });
         } else {
@@ -540,11 +678,11 @@ impl ServerForm {
     }
     fn error_row(&self) -> usize {
         if self.value["authMethod"] == "password" {
-            7
-        } else if self.file_mode && self.value["agentKeyFingerprint"].is_null() {
-            9
-        } else {
             8
+        } else if self.file_mode && self.value["agentKeyFingerprint"].is_null() {
+            10
+        } else {
+            9
         }
     }
 
@@ -554,7 +692,10 @@ impl ServerForm {
             .disabled(self.pending)
             .rounded(px(crate::ui::RADIUS))
             .bg(crate::theme::field_background(cx.theme().is_dark()))
-            .border_color(cx.theme().border);
+            .border_color(cx.theme().border)
+            .when(index == PROXY, |input| {
+                input.font_family(cx.theme().mono_font_family.clone())
+            });
         field(title).child(input).when_some(
             self.error
                 .as_ref()
@@ -571,6 +712,30 @@ impl ServerForm {
             .rounded(px(crate::ui::RADIUS))
             .bg(crate::theme::field_background(cx.theme().is_dark()))
             .border_color(cx.theme().border)
+    }
+    /// How the server is reached, with the jump host or command it uses.
+    fn connect_through(&self, cx: &App) -> Div {
+        let through = div().flex().flex_col().gap(px(14.)).child(
+            field("Connect through").child(self.select(&self.routes, "Connect through", cx)),
+        );
+        match self.route {
+            Route::Direct => through,
+            Route::Jump if !self.any_jump_hosts => through.child(help(NO_JUMP_HOSTS, cx)),
+            Route::Jump => through.child(
+                field("Jump host")
+                    .child(self.select(&self.jump_hosts, "Jump host", cx))
+                    .child(help(
+                        "One of your servers. Newport signs in to it first, and uses it for every server behind it.",
+                        cx,
+                    )),
+            ),
+            Route::Command => through.child(
+                self.input_field(PROXY, "Proxy command", cx).child(help(
+                        "Runs on this Mac; SSH goes over its input and output. %h is the host, %p the port, %r the username.",
+                        cx,
+                    )),
+            ),
+        }
     }
     fn footer(form: &Entity<Self>, window: &Window, cx: &App) -> Div {
         let pending = form.read(cx).pending;
@@ -674,12 +839,13 @@ impl Render for ServerForm {
                 ),
             )
             .child(self.scroll.row(3, self.input_field(USER, "Username", cx)))
+            .child(self.scroll.row(4, self.connect_through(cx)))
             .child(self.scroll.row(
-                4,
+                5,
                 legend("Sign in", cx).mt(px(if compact { 2. } else { 6. })),
             ))
             .child(self.scroll.row(
-                5,
+                6,
                 field("Authentication").child(self.select(
                     &self.authentication,
                     "Authentication",
@@ -708,12 +874,12 @@ impl Render for ServerForm {
             }
             body = body
                 .child(self.scroll.row(
-                    6,
+                    7,
                     field("SSH key").child(self.select(&self.key, "SSH key", cx)),
                 ))
                 .child(
                     self.scroll.row(
-                        7,
+                        8,
                         div()
                             .flex()
                             .flex_col()
@@ -753,7 +919,7 @@ impl Render for ServerForm {
                 );
             if self.file_mode && self.value["agentKeyFingerprint"].is_null() {
                 body = body.child(self.scroll.row(
-                    8,
+                    9,
                     self.input_field(IDENTITY, "Identity file", cx).child(help(
                         "Load encrypted keys into your system agent first.",
                         cx,
@@ -762,7 +928,7 @@ impl Render for ServerForm {
             }
         } else {
             body = body.child(self.scroll.row(
-                6,
+                7,
                 self.input_field(PASSWORD, "Password", cx).child(help(
                     if self.existing {
                         "Leave empty to keep the saved password."
@@ -848,6 +1014,25 @@ fn key_choices(value: &Value, keys: &[Value], loading: bool) -> Vec<Choice> {
     }));
     choices
 }
+/// The saved servers `id` may connect through: all but itself and the ones
+/// that already connect through it.
+fn jump_choices(servers: &[Value], id: &Value) -> Vec<Choice> {
+    let mut behind = vec![id.clone()];
+    let mut index = 0;
+    while let Some(jump) = behind.get(index).cloned() {
+        for server in servers {
+            if server["proxy"]["jump"] == jump && !behind.contains(&server["id"]) {
+                behind.push(server["id"].clone());
+            }
+        }
+        index += 1;
+    }
+    servers
+        .iter()
+        .filter(|server| !behind.contains(&server["id"]))
+        .map(|server| Choice::new(text(server, "id"), server_picker::display_name(server)))
+        .collect()
+}
 fn compact(window: &Window) -> bool {
     window.viewport_size().height <= px(560.) || window.viewport_size().width <= px(540.)
 }
@@ -890,7 +1075,10 @@ fn error_message(message: String, cx: &App) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{FormError, HOST, IDENTITY, PASSWORD, PORT, ServerForm, USER, key_choices};
+    use super::{
+        FormError, HOST, IDENTITY, PASSWORD, PORT, PROXY, Route, ServerForm, USER, jump_choices,
+        key_choices,
+    };
     use gpui::{
         AppContext, Context, Entity, Focusable, IntoElement, Render, Styled, WeakEntity, Window,
         div, px,
@@ -910,6 +1098,14 @@ mod tests {
         cx: &mut TestAppContext,
         existing: bool,
     ) -> (Entity<ServerForm>, &mut VisualTestContext) {
+        editor_with(cx, existing, Value::Null, vec![])
+    }
+    fn editor_with(
+        cx: &mut TestAppContext,
+        existing: bool,
+        proxy: Value,
+        servers: Vec<Value>,
+    ) -> (Entity<ServerForm>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::component::init(cx);
             crate::theme::install(false, cx);
@@ -922,8 +1118,8 @@ mod tests {
         cx.simulate_resize(gpui::size(px(500.), px(440.)));
         let form = cx.update(|window,cx| {
             window.activate_window();
-            let value = json!({"id":uuid::Uuid::new_v4(),"name":"","sshHost":"localhost","sshPort":22,"sshUser":"developer","authMethod":"publicKey","identityFile":null,"agentKeyFingerprint":null,"agentSource":null,"clipboardEnabled":true});
-            let form = cx.new(|cx|ServerForm::new(WeakEntity::new_invalid(),value,existing,window,cx));
+            let value = json!({"id":uuid::Uuid::new_v4(),"name":"","sshHost":"localhost","sshPort":22,"sshUser":"developer","authMethod":"publicKey","identityFile":null,"agentKeyFingerprint":null,"agentSource":null,"clipboardEnabled":true,"proxy":proxy});
+            let form = cx.new(|cx|ServerForm::new(WeakEntity::new_invalid(),value,existing,&servers,window,cx));
             form.update(cx, |form,cx| { form.keys_loading=false; form.sync_key_choices(window,cx); });
             ServerForm::open(form.clone(),window,cx);
             form
@@ -976,6 +1172,7 @@ mod tests {
             "form-scroll-row-7",
             "form-scroll-row-8",
             "form-scroll-row-9",
+            "form-scroll-row-10",
         ];
         let bounds = cx.debug_bounds(selectors[row]).unwrap();
         let viewport = form.read_with(cx, |form, _| form.scroll.handle.bounds());
@@ -1080,8 +1277,8 @@ mod tests {
         });
         assert!(form.read_with(cx, |form, _| form.scroll.handle.max_offset().y) > px(0.));
         visible(&form, 1, cx);
-        // Name → host → port → user → auth → SSH key → refresh.
-        for row in [2, 2, 3, 5, 6, 7] {
+        // Name → host → port → user → connect through → auth → SSH key → refresh.
+        for row in [2, 2, 3, 4, 6, 7, 8] {
             key(cx, "tab");
             visible(&form, row, cx);
             assert_eq!(cx.debug_bounds("server-editor-footer").unwrap(), footer);
@@ -1094,7 +1291,7 @@ mod tests {
                 .unwrap();
             assert_eq!(refresh.bounds().size.height, px(34.));
         });
-        for row in [6, 5, 3, 2, 2, 1] {
+        for row in [7, 6, 4, 3, 2, 2, 1] {
             key(cx, "shift-tab");
             visible(&form, row, cx);
         }
@@ -1139,7 +1336,7 @@ mod tests {
         form.update_in(cx, |form, window, cx| form.select_key("file", window, cx));
         draw(cx);
         draw(cx);
-        visible(&form, 8, cx);
+        visible(&form, 9, cx);
         let focused = form.update_in(cx, |form, window, cx| {
             form.fields[IDENTITY].focus_handle(cx).is_focused(window)
         });
@@ -1160,9 +1357,9 @@ mod tests {
             });
         });
         draw(cx);
-        let key_row = cx.debug_bounds("form-scroll-row-6").unwrap();
-        let refresh_row = cx.debug_bounds("form-scroll-row-7").unwrap();
-        let identity_row = cx.debug_bounds("form-scroll-row-8").unwrap();
+        let key_row = cx.debug_bounds("form-scroll-row-7").unwrap();
+        let refresh_row = cx.debug_bounds("form-scroll-row-8").unwrap();
+        let identity_row = cx.debug_bounds("form-scroll-row-9").unwrap();
         let button = cx.update(|window, _| {
             gpui_kit::base::test_support::snapshots(window)
                 .into_iter()
@@ -1175,9 +1372,9 @@ mod tests {
             cx.notify();
         });
         draw(cx);
-        assert_eq!(cx.debug_bounds("form-scroll-row-6").unwrap(), key_row);
-        assert_eq!(cx.debug_bounds("form-scroll-row-7").unwrap(), refresh_row);
-        assert_eq!(cx.debug_bounds("form-scroll-row-8").unwrap(), identity_row);
+        assert_eq!(cx.debug_bounds("form-scroll-row-7").unwrap(), key_row);
+        assert_eq!(cx.debug_bounds("form-scroll-row-8").unwrap(), refresh_row);
+        assert_eq!(cx.debug_bounds("form-scroll-row-9").unwrap(), identity_row);
         cx.update(|window, _| {
             let snapshots = gpui_kit::base::test_support::snapshots(window);
             let refresh = snapshots
@@ -1201,7 +1398,7 @@ mod tests {
             cx.notify();
         });
         draw(cx);
-        let refresh_row = cx.debug_bounds("form-scroll-row-7").unwrap();
+        let refresh_row = cx.debug_bounds("form-scroll-row-8").unwrap();
         let footer = cx.debug_bounds("server-editor-footer").unwrap();
         cx.update(|window, cx| {
             form.update(cx, |form, cx| {
@@ -1213,7 +1410,7 @@ mod tests {
             });
         });
         draw(cx);
-        assert_eq!(cx.debug_bounds("form-scroll-row-7").unwrap(), refresh_row);
+        assert_eq!(cx.debug_bounds("form-scroll-row-8").unwrap(), refresh_row);
         assert_eq!(cx.debug_bounds("server-editor-footer").unwrap(), footer);
     }
 
@@ -1263,7 +1460,8 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (form, cx) = editor(cx, false);
-        for _ in 0..4 {
+        // Past the name, host, port, username and Connect through.
+        for _ in 0..5 {
             key(cx, "tab");
         }
         key(cx, "enter");
@@ -1276,13 +1474,13 @@ mod tests {
         cx.update(|window, cx| assert!(window.has_active_dialog(cx)));
         assert!(!form.read_with(cx, |form, _| form.pending));
         key(cx, "tab");
-        visible(&form, 6, cx);
+        visible(&form, 7, cx);
         click(cx, "Save server");
         assert_eq!(
             form.read_with(cx, |form, _| form.error.as_ref().unwrap().input),
             Some(PASSWORD)
         );
-        visible(&form, 6, cx);
+        visible(&form, 7, cx);
         cx.update(|window, cx| {
             assert!(
                 form.read(cx).fields[PASSWORD]
@@ -1376,7 +1574,7 @@ mod tests {
             })
         });
         draw(cx);
-        visible(&form, 8, cx);
+        visible(&form, 9, cx);
         form.update(cx, |form, cx| {
             form.pending = true;
             cx.notify();
@@ -1411,6 +1609,99 @@ mod tests {
             form.read_with(cx, |form, _| form.error.as_ref().unwrap().input),
             Some(IDENTITY)
         );
-        visible(&form, 8, cx);
+        visible(&form, 9, cx);
+    }
+
+    #[gpui::test]
+    fn connect_through_saves_direct_a_jump_host_or_a_command(cx: &mut TestAppContext) {
+        let (form, cx) = editor(cx, false);
+        cx.update(|window, cx| {
+            form.update(cx, |form, cx| {
+                assert_eq!(form.route, Route::Direct);
+                let (value, _) = form.draft(cx).unwrap_or_else(|_| panic!("direct saves"));
+                assert_eq!(value["proxy"], Value::Null);
+
+                form.select_route("command", window, cx);
+                assert_eq!(form.draft(cx).err().and_then(|e| e.input), Some(PROXY));
+                form.fields[PROXY]
+                    .update(cx, |input, cx| input.set_value(" nc %h %p ", window, cx));
+                let (value, _) = form.draft(cx).unwrap_or_else(|_| panic!("command saves"));
+                assert_eq!(value["proxy"], json!({"command": "nc %h %p"}));
+
+                // No other server is saved, so there is no jump host to choose.
+                form.select_route("jump", window, cx);
+                let error = form.draft(cx).expect_err("a jump host is needed");
+                assert_eq!(error.input, None);
+                assert!(
+                    error
+                        .message
+                        .contains("Add the jump host as a server first")
+                );
+                let bastion = uuid::Uuid::new_v4().to_string();
+                form.jump = Some(bastion.clone());
+                let (value, _) = form.draft(cx).unwrap_or_else(|_| panic!("jump saves"));
+                assert_eq!(value["proxy"], json!({"jump": bastion}));
+
+                form.select_route("direct", window, cx);
+                let (value, _) = form.draft(cx).unwrap_or_else(|_| panic!("direct saves"));
+                assert_eq!(value["proxy"], Value::Null);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_saved_proxy_command_opens_on_its_route_and_text(cx: &mut TestAppContext) {
+        let (form, cx) = editor_with(
+            cx,
+            true,
+            json!({"command": "cloudflared access ssh --hostname %h"}),
+            vec![],
+        );
+        cx.update(|_, cx| {
+            let form = form.read(cx);
+            assert_eq!(form.route, Route::Command);
+            assert_eq!(
+                form.fields[PROXY].read(cx).value().to_string(),
+                "cloudflared access ssh --hostname %h"
+            );
+        });
+    }
+
+    #[test]
+    fn jump_hosts_leave_out_the_server_and_the_ones_behind_it() {
+        let [edited, behind, further, other] = ["a", "b", "c", "d"].map(|id| json!(id));
+        let servers = [
+            json!({"id": edited, "name": "Edited", "proxy": null}),
+            json!({"id": behind, "name": "Behind", "proxy": {"jump": edited}}),
+            json!({"id": further, "name": "", "sshUser": "ops", "sshHost": "inner", "proxy": {"jump": behind}}),
+            json!({"id": other, "name": "Bastion", "proxy": null}),
+        ];
+        let choices: Vec<_> = jump_choices(&servers, &edited)
+            .into_iter()
+            .map(|choice| (choice.value, choice.title.to_string()))
+            .collect();
+        assert_eq!(choices, [("d".to_owned(), "Bastion".to_owned())]);
+        let choices: Vec<_> = jump_choices(&servers, &other)
+            .into_iter()
+            .map(|choice| choice.title.to_string())
+            .collect();
+        assert_eq!(choices, ["Edited", "Behind", "ops@inner"]);
+    }
+
+    #[gpui::test]
+    fn a_saved_jump_host_that_cant_be_chosen_must_be_chosen_again(cx: &mut TestAppContext) {
+        let bastion = json!({"id": "b", "name": "Bastion", "proxy": null});
+        let (form, cx) = editor_with(cx, true, json!({"jump": "gone"}), vec![bastion]);
+        cx.update(|_, cx| {
+            form.update(cx, |form, cx| {
+                assert_eq!(form.route, Route::Jump);
+                assert_eq!(form.jump, None);
+                let error = form.draft(cx).expect_err("the jump host is chosen again");
+                assert_eq!(error.message, "Choose a jump host.");
+                form.jump = Some("b".into());
+                let (value, _) = form.draft(cx).unwrap_or_else(|_| panic!("jump saves"));
+                assert_eq!(value["proxy"], json!({"jump": "b"}));
+            });
+        });
     }
 }

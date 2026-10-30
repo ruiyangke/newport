@@ -57,6 +57,10 @@ impl WorkerStream {
     pub(crate) fn is_draining(&self) -> bool {
         self.worker.runtime.is_draining()
     }
+    /// The fate of the link connection under the worker's channel.
+    pub(crate) fn fate(&self) -> Option<&newport_ssh::Fate> {
+        self.stream.fate()
+    }
     fn check(&self) -> io::Result<()> {
         if self.worker.runtime.is_closed() {
             Err(io::Error::new(

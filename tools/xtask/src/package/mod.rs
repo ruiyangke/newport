@@ -90,6 +90,7 @@ fn cargo_build(
         c.arg("--release");
     }
     c.args(["-p", "newport-app"]);
+    util::with_build_stamp(&mut c);
     if let Some(target) = target {
         c.args(["--target", target]);
     }

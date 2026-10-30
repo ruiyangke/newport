@@ -9,6 +9,7 @@ members = [
     "crates/newport-grammars",
     "crates/newport-release",
     "crates/newport-terminal",
+    "crates/newport-ssh",
 ]
 default-members = ["crates/newport-domain", "crates/newport-client", "crates/newport-platform", "crates/newport-backend", "crates/newport-gpui"]
 # Linux agent and test tooling have independent dependency graphs and lockfiles.
@@ -28,6 +29,9 @@ opt-level = 3
 # GPUI Kit 0.8.0 plus Newport's patch series: the fork's newport/v0.8.0 branch,
 # generated from its newport/patches branch. Cargo.lock pins the commit.
 [patch.crates-io]
+# russh 0.65.0 with per-channel flow control and close confirmations:
+# vendor/russh.newport.patch.
+russh = { path = "vendor/russh" }
 gpui-component = { git = "https://github.com/ruiyangke/gpui-kit", branch = "newport/v0.8.0" }
 gpui-base = { git = "https://github.com/ruiyangke/gpui-kit", branch = "newport/v0.8.0" }
 gpui-kit = { git = "https://github.com/ruiyangke/gpui-kit", branch = "newport/v0.8.0" }

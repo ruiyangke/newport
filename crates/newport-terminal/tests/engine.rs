@@ -240,7 +240,7 @@ fn reconnect_aborts_partial_sequences_and_restores_the_primary_screen() {
             .unwrap();
         engine.advance(unfinished.as_bytes()).unwrap();
         engine.reconnect().unwrap();
-        engine.advance(b"\r\nnew session").unwrap();
+        engine.advance(b"new session").unwrap();
         assert_eq!(
             engine.visible_lines().unwrap(),
             ["retained", "new session"],
@@ -248,6 +248,21 @@ fn reconnect_aborts_partial_sequences_and_restores_the_primary_screen() {
         );
         assert!(engine.encode_focus(true).unwrap().is_empty());
         assert_eq!(engine.encode_paste("text").unwrap(), b"text");
+    }
+}
+
+#[test]
+fn reconnect_starts_the_new_session_below_the_retained_output() {
+    for (old, expected) in [
+        ("one\r\n$ ", ["one", "$", "$ new"]),
+        ("one\r\ntwo\r\n", ["one", "two", "$ new"]),
+        ("\x1b[2;3rone\r\n$ \x1b[?1049hfull", ["one", "$", "$ new"]),
+    ] {
+        let mut engine = Engine::new(30, 4).unwrap();
+        engine.advance(old.as_bytes()).unwrap();
+        engine.reconnect().unwrap();
+        engine.advance(b"$ new").unwrap();
+        assert_eq!(engine.visible_lines().unwrap(), expected, "{old:?}");
     }
 }
 

@@ -20,15 +20,36 @@ pub use stream::Stream;
 pub struct Channel {
     reader: Reader,
     writer: Writer,
+    fate: Option<newport_ssh::Fate>,
 }
+impl From<newport_ssh::Channel> for Channel {
+    fn from(channel: newport_ssh::Channel) -> Self {
+        Self::on_link(channel, false)
+    }
+}
+#[cfg(test)]
 impl From<russh::Channel<client::Msg>> for Channel {
     fn from(channel: russh::Channel<client::Msg>) -> Self {
         Self::new(channel, false)
     }
 }
 impl Channel {
+    fn on_link(channel: newport_ssh::Channel, framed: bool) -> Self {
+        let fate = channel.fate();
+        let (reader, writer) = channel.split();
+        Self::with(reader, writer, framed, Some(fate))
+    }
+    #[cfg(test)]
     fn new(channel: russh::Channel<client::Msg>, framed: bool) -> Self {
         let (reader, writer) = channel.split();
+        Self::with(reader, writer, framed, None)
+    }
+    fn with(
+        reader: russh::ChannelReadHalf,
+        writer: russh::ChannelWriteHalf<client::Msg>,
+        framed: bool,
+        fate: Option<newport_ssh::Fate>,
+    ) -> Self {
         Self {
             reader: Reader {
                 raw: reader,
@@ -44,15 +65,19 @@ impl Channel {
                 closed: AtomicBool::new(false),
                 close_sent: AtomicBool::new(false),
             })),
+            fate,
         }
     }
     /// Once opening bytes may have been sent, no error is safe to replay as an
     /// exec command. The caller may fall back only before entering this method.
     pub(crate) async fn forwarded(
-        channel: russh::Channel<client::Msg>,
+        channel: newport_ssh::Channel,
         open: &wire::Open,
     ) -> Result<Self, String> {
-        let mut channel = Self::new(channel, true);
+        Self::on_link(channel, true).admit(open).await
+    }
+    async fn admit(mut self, open: &wire::Open) -> Result<Self, String> {
+        let channel = &mut self;
         let bytes = open
             .encode()
             .map_err(|_| "Invalid worker stream admission")?;
@@ -87,9 +112,9 @@ impl Channel {
             }
         };
         match tokio::time::timeout(Duration::from_secs(5), exchange).await {
-            Ok(Ok(())) => Ok(channel),
+            Ok(Ok(())) => Ok(self),
             result => {
-                let (reader, writer) = channel.split();
+                let (reader, writer) = self.split();
                 drop(reader);
                 let _ = tokio::time::timeout(Duration::from_secs(1), writer.close()).await;
                 let reason = match result {

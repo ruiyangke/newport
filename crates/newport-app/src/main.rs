@@ -1,6 +1,7 @@
 //! Application composition: the backend and the UI in one process. The UI
 //! crate owns no backend runtime.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+mod build_stamp;
 mod desktop;
 #[cfg(newport_remote_apps)]
 mod graphical;
@@ -51,7 +52,7 @@ fn run() -> Result<(), String> {
             serde_json::json!({
                 "schema": 1, "productName": "Newport", "identifier": "app.newport",
                 "version": env!("CARGO_PKG_VERSION"),
-                "debugAssertions": cfg!(debug_assertions),
+                "debugAssertions": cfg!(debug_assertions), "commit": build_stamp::COMMIT,
                 "os": std::env::consts::OS, "arch": std::env::consts::ARCH,
             })
         );

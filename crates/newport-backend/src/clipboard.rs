@@ -1,7 +1,6 @@
 use crate::desktop_integration::{ClipboardOffer, ClipboardOrigin};
 use crate::model::Server;
 #[cfg(test)]
-use crate::ssh::ExecSession;
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -496,9 +495,82 @@ fn persisted_identity(directory: &std::path::Path, name: &str) -> Result<uuid::U
     }
 }
 
-// Retry transport failures and agent-declared temporary failures (including
-// exhausted disk space), and temporarily unavailable selected SSH agents.
-// Permission, ownership and other authentication failures remain permanent. Each agent owns its files until the SSH channel closes or its lease expires.
+/// Why the integration worker stopped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Interruption {
+    /// The connection under the worker was lost, or no channel could be
+    /// opened. The link recovers; the next attempt waits for it.
+    Link(newport_ssh::Error),
+    /// Needle's runtime upgraded; start again on the new one.
+    Upgraded,
+    /// Needle or its control channel was interrupted; trying again after a
+    /// pause can work.
+    Interrupted(String),
+    /// Trying again won't help, such as an error the agent declared.
+    Failed(String),
+}
+impl std::fmt::Display for Interruption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Interruption::Link(error) => error.fmt(f),
+            Interruption::Upgraded => f.write_str(crate::agent_runtime::UPGRADED),
+            Interruption::Interrupted(message) | Interruption::Failed(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+impl From<crate::agent::Failure> for Interruption {
+    fn from(failure: crate::agent::Failure) -> Self {
+        match failure {
+            crate::agent::Failure::Interrupted(_) => Interruption::Interrupted(failure.to_string()),
+            crate::agent::Failure::Refused(message) => Interruption::Failed(message),
+        }
+    }
+}
+impl From<crate::agent_runtime::Error> for Interruption {
+    fn from(error: crate::agent_runtime::Error) -> Self {
+        use crate::agent_runtime::Error;
+        match error {
+            Error::Link(error) => Interruption::Link(error),
+            Error::Interrupted(message) => Interruption::Interrupted(message),
+            other => Interruption::Failed(other.to_string()),
+        }
+    }
+}
+
+/// What stopped a running integration worker, before it is told apart by
+/// the fate of the worker's channel.
+enum Stop {
+    Needle(crate::agent_runtime::Error),
+    Agent(crate::agent::Failure),
+    Upgraded,
+}
+impl From<crate::agent_runtime::Error> for Stop {
+    fn from(error: crate::agent_runtime::Error) -> Self {
+        Stop::Needle(error)
+    }
+}
+impl From<crate::agent::Failure> for Stop {
+    fn from(failure: crate::agent::Failure) -> Self {
+        Stop::Agent(failure)
+    }
+}
+impl From<String> for Stop {
+    fn from(message: String) -> Self {
+        Stop::Agent(message.into())
+    }
+}
+impl From<&str> for Stop {
+    fn from(message: &str) -> Self {
+        Stop::Agent(message.into())
+    }
+}
+
+// Retry link losses, interrupted runtimes and agent-declared temporary
+// failures (including exhausted disk space). Permission, ownership and other
+// failures the agent declares remain permanent. Each agent owns its files
+// until the SSH channel closes or its lease expires.
 #[cfg(test)]
 async fn recover_connection<F, Fut>(
     attempt: F,
@@ -509,7 +581,7 @@ async fn recover_connection<F, Fut>(
 ) -> Result<(), String>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<(), String>>,
+    Fut: std::future::Future<Output = Result<(), Interruption>>,
 {
     recover_service(attempt, cancel, retrying, delay, changes, None, |_| {}).await
 }
@@ -524,7 +596,7 @@ async fn recover_service<F, Fut>(
 ) -> Result<(), String>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<(), String>>,
+    Fut: std::future::Future<Output = Result<(), Interruption>>,
 {
     let mut wait = delay;
     let mut recovery = crate::recovery::subscribe();
@@ -537,17 +609,6 @@ where
             _ = cancel.changed() => return Ok(()),
             _ = recovery.ready() => {},
         }
-        if let Some(owner) = owner {
-            tokio::select! {
-                biased;
-                _ = cancel.changed() => return Ok(()),
-                result = owner.follow_transport(|error| match error {
-                    Some(error) => blocked(error),
-                    None => retrying(),
-                }) => result?,
-            }
-        }
-        let generation = owner.map(|owner| owner.transport_snapshot().generation);
         let started = tokio::time::Instant::now();
         if let Some(changes) = &mut changes {
             changes.borrow_and_update();
@@ -556,27 +617,29 @@ where
             biased;
             _ = cancel.changed() => return Ok(()),
             result = attempt() => result,
+            // An attempt waiting for the link says why it can't log in.
+            _ = report_login(owner, &blocked) => unreachable!("reporting never ends"),
         };
         let Err(error) = result else { return Ok(()) };
-        if error == crate::agent_runtime::UPGRADED {
-            retrying();
-            continue;
-        }
-        if let Some(owner) = owner
-            && (!owner.has_transport() || Some(owner.transport_snapshot().generation) != generation)
-        {
-            // Transport recovery is owned by the server session. Retain this
-            // service's demand, including when approval needs explicit Retry.
-            // A newer transport also supersedes a late error from the old one.
-            retrying();
-            continue;
+        match &error {
+            Interruption::Upgraded => {
+                retrying();
+                continue;
+            }
+            // The link owns recovery, including when approval needs an
+            // explicit Retry; the next attempt waits for it.
+            Interruption::Link(error) if error.retry() != newport_ssh::Retry::Never => {
+                retrying();
+                continue;
+            }
+            _ => {}
         }
         if let Some(owner) = owner {
             owner.agent_runtime.probe().await;
             let runtime = owner.agent_runtime.snapshot();
             if runtime.status == "failed" {
                 if !runtime.retryable {
-                    return Err(runtime.error.unwrap_or(error));
+                    return Err(runtime.error.unwrap_or_else(|| error.to_string()));
                 }
                 retrying();
                 tokio::select! {
@@ -586,21 +649,7 @@ where
                 continue;
             }
         }
-        let retryable = !error.starts_with("Remote command failed")
-            && !error.starts_with("Agent error:")
-            && (error == crate::agent_runtime::BUSY
-                || error.starts_with("SSH session capacity unavailable")
-                || error.contains("Needle runtime disconnected")
-                || error.starts_with("Needle connection interrupted:")
-                || error == "Needle control request timed out"
-                || error == "Needle runtime control timed out"
-                || error.contains("Needle runtime changed before worker registration")
-                || error.contains("SSH transport interrupted:")
-                || error.starts_with("SSH agent unavailable:")
-                || error.contains(crate::ssh::REQUEST_TIMED_OUT)
-                || error.contains(crate::ssh::START_TIMED_OUT)
-                || error.contains(crate::ssh::CONNECT_TIMED_OUT));
-        if !retryable {
+        if let Interruption::Failed(error) = error {
             log::error!("Integration stopped after a non-retryable error");
             return Err(error);
         }
@@ -622,6 +671,33 @@ where
             _ = recovery.wait(wait) => {}
         }
         wait = (wait * 2).min(Duration::from_secs(30));
+    }
+}
+
+/// Reports each login failure on the session's link, for as long as it runs.
+async fn report_login(
+    owner: Option<&crate::server_session::ServerSession>,
+    blocked: &impl Fn(String),
+) {
+    let Some(owner) = owner else {
+        return std::future::pending().await;
+    };
+    let mut status = owner.link().status();
+    loop {
+        let failure = {
+            let status = status.borrow_and_update();
+            match (&status.reach, &status.login) {
+                (newport_ssh::Reach::Failed(error), _)
+                | (_, Some(newport_ssh::Login::Failed(error))) => Some(error.to_string()),
+                _ => None,
+            }
+        };
+        if let Some(failure) = failure {
+            blocked(failure);
+        }
+        if status.changed().await.is_err() {
+            return std::future::pending().await;
+        }
     }
 }
 
@@ -718,20 +794,25 @@ async fn run_once(
     app: crate::desktop_integration::Desktop,
     mut cancel: watch::Receiver<bool>,
     ready: impl Fn(String, bool),
-) -> Result<(), String> {
+) -> Result<(), Interruption> {
     let _permission_session = owner.permissions.session();
-    let session = tokio::select! {
-        _ = cancel.changed() => return Ok(()),
-        result = owner.acquire(&server) => result?,
-    };
-    let outcome = async {
-        let (stream, installed) = session.launch(
-            crate::agent::Service::Integration {
-                client,
-                clipboard: server.clipboard_enabled,
-                browser: server.browser_enabled,
-            },
-        ).await?;
+    let session = owner
+        .needle(&server)
+        .map_err(|_| Interruption::from(crate::agent_runtime::Error::Stale))?;
+    let mut fate = None;
+    let outcome: Result<(), Stop> = async {
+        let launched = tokio::select! {
+            _ = cancel.changed() => return Ok(()),
+            launched = session.launch(
+                crate::agent::Service::Integration {
+                    client,
+                    clipboard: server.clipboard_enabled,
+                    browser: server.browser_enabled,
+                },
+            ) => launched,
+        };
+        let (stream, installed) = launched?;
+        fate = stream.fate().cloned();
         let path_needed = installed
             .lines()
             .any(|line| line == "NEWPORT_SHIM_PATH=missing");
@@ -739,7 +820,7 @@ async fn run_once(
             stream,
             app.clone(),
             owner.permissions.clone(),
-            session.callbacks(),
+            owner.callbacks(),
         )
         .await?;
         let mut changes = owner.permissions.subscribe();
@@ -927,7 +1008,7 @@ async fn run_once(
                             Ok(reply) if owner.permissions.clipboard_enabled() => replies.push_back(reply),
                             Ok(_) => {},
                             Err(error) if error.is_cancelled() => {},
-                            Err(error) => return Err(error.to_string()),
+                            Err(error) => return Err(error.to_string().into()),
                         }
                     }
                     result = file_reads.join_next(), if !file_reads.is_empty() => {
@@ -937,7 +1018,7 @@ async fn run_once(
                                 if owner.permissions.clipboard_enabled() { replies.push_back(reply); }
                             }
                             Err(error) if error.is_cancelled() => {},
-                            Err(error) => return Err(error.to_string()),
+                            Err(error) => return Err(error.to_string().into()),
                         }
                     }
                     work = async { exports.as_mut().unwrap().next().await }, if exports.is_some() => {
@@ -1014,12 +1095,12 @@ async fn run_once(
                     }
                 }
             }
-            Ok(())
+            Ok::<(), Stop>(())
         };
         let outcome = tokio::select! {
-            _ = session.wait_for_upgrade() => Err(crate::agent_runtime::UPGRADED.into()),
+            _ = session.wait_for_upgrade() => Err(Stop::Upgraded),
             result = traffic => result,
-            result = session.watch_permissions(permission_epoch, || ready("Agent permissions updated.".into(), path_needed)) => result,
+            result = session.watch_permissions(permission_epoch, || ready("Agent permissions updated.".into(), path_needed)) => result.map_err(Stop::Needle),
         };
         reads.abort_all();
         file_reads.abort_all();
@@ -1030,12 +1111,30 @@ async fn run_once(
         outcome
     }
     .await;
+    let outcome = match outcome {
+        Ok(()) => Ok(()),
+        Err(Stop::Upgraded) => Err(Interruption::Upgraded),
+        Err(Stop::Needle(error)) => Err(error.into()),
+        // The agent's stream ends the same way whatever ended it: the
+        // connection under it, its runtime, or the agent itself.
+        Err(Stop::Agent(failure)) => {
+            let lost = match fate.as_ref() {
+                Some(fate) => crate::remote::lost(fate).await,
+                None => None,
+            };
+            Err(match lost {
+                Some(error) => Interruption::Link(error),
+                None if session.is_closed() => Interruption::Interrupted(failure.to_string()),
+                None => failure.into(),
+            })
+        }
+    };
     owner.permissions.disconnected(
         outcome
             .as_ref()
             .err()
-            .filter(|e| e.as_str() != crate::agent_runtime::UPGRADED)
-            .cloned(),
+            .filter(|error| **error != Interruption::Upgraded)
+            .map(ToString::to_string),
     );
     outcome
 }
@@ -1232,16 +1331,12 @@ mod tests {
         })
         .await
         .unwrap();
-        let connection = owner.acquire(&server).await.unwrap();
+        let run =
+            |command: &'static str| crate::remote::command::stdout(owner.link(), command, None);
         // Polling is only for metadata publication after permission acknowledgement.
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if connection
-                    .execute("fixture-clipboard", None)
-                    .await
-                    .as_deref()
-                    == Ok("fixture")
-                {
+                if run("fixture-clipboard").await.as_deref() == Ok("fixture") {
                     break;
                 }
                 changed.changed().await.unwrap();
@@ -1259,9 +1354,9 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(connection.execute("fixture-clipboard", None).await.is_err());
+        assert!(run("fixture-clipboard").await.is_err());
         assert!(owner.permissions.browser_enabled());
-        assert_eq!(connection.execute("printf ok", None).await.unwrap(), "ok");
+        assert_eq!(run("printf ok").await.unwrap(), "ok");
         assert!(
             !task.is_finished(),
             "the same bridge remains running after revocation"
@@ -1350,24 +1445,26 @@ mod tests {
             crate::manager::Manager::new(crate::profile::Store::for_test(directory.path().into()));
         manager.config.servers.push(server.clone());
         let owner = manager.sessions.session(&server, 0);
-        let connection_updates = manager.sessions.connections.subscribe();
         manager
             .prepare_integration(server.id)
             .unwrap()
             .run(Arc::new(TestDesktop::default()))
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while owner.transport_snapshot().status != "failed" {
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        let mut status = owner.link().status();
+        let failed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let newport_ssh::Reach::Failed(error) = &status.borrow_and_update().reach {
+                    break error.clone();
+                }
+                status.changed().await.unwrap();
             }
         })
         .await
         .unwrap();
-        assert!(!owner.transport_snapshot().retryable);
-        assert_eq!(
-            connection_updates.borrow().servers[&server.id].phase,
-            newport_domain::connectivity::Phase::Failed
+        assert!(
+            matches!(failed, newport_ssh::Error::Credentials(_)),
+            "{failed:?}"
         );
         assert!(!owner.permissions.browser_enabled());
         assert!(
@@ -1384,13 +1481,13 @@ mod tests {
         // Restore authentication, then retry from a different SSH consumer.
         // Sharing must recover without a preference toggle or its own restart.
         std::fs::copy(std::env::var("NEWPORT_TEST_IDENTITY").unwrap(), &identity).unwrap();
-        owner.retry_transport_fresh();
-        let lease = owner.acquire(&server).await.unwrap();
+        owner.retry();
         assert_eq!(
-            connection_updates.borrow().servers[&server.id].phase,
-            newport_domain::connectivity::Phase::Connected
+            crate::remote::command::stdout(owner.link(), "printf ok", None)
+                .await
+                .unwrap(),
+            "ok"
         );
-        assert_eq!(lease.execute("printf ok", None).await.unwrap(), "ok");
         let recovered = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let snapshot = manager.snapshot();
@@ -1454,11 +1551,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(owner.permissions.snapshot().session_epoch, epoch);
-        let transport = owner.acquire(&server).await.unwrap();
         owner.permissions.disconnected(None);
         owner.integration.stop().await;
         assert!(!owner.permissions.browser_enabled());
-        assert_eq!(transport.execute("printf ok", None).await.unwrap(), "ok");
+        assert_eq!(
+            crate::remote::command::stdout(owner.link(), "printf ok", None)
+                .await
+                .unwrap(),
+            "ok"
+        );
         assert_eq!(
             owner.agent_runtime.snapshot().hello.unwrap().instance_id,
             runtime
@@ -1501,7 +1602,6 @@ mod tests {
                 .contains_key(&server.id)
         );
         assert!(replacement.integration.snapshot().is_none());
-        drop(transport);
         drop(owner);
         tokio::time::timeout(Duration::from_secs(5), async {
             while weak.upgrade().is_some() {
@@ -1544,7 +1644,7 @@ mod tests {
         for failure in 1..=2 {
             let runtime = owner.agent_runtime.snapshot().hello.unwrap().instance_id;
             let epoch = owner.permissions.snapshot().session_epoch;
-            let git = owner.acquire(&server).await.unwrap();
+            let git = owner.needle(&server).unwrap();
             let (worker, _) = git.launch(crate::agent::Service::Git).await.unwrap();
             let started = tokio::time::Instant::now();
             owner.agent_runtime.stop_remote_for_test().await;
@@ -1573,9 +1673,14 @@ mod tests {
             drop(worker);
             assert!(owner.permissions.snapshot().session_epoch > epoch);
             assert_eq!(owner.agent_runtime.snapshot().failures, failure);
-            assert_eq!(owner.transport_snapshot().generation, 1);
-            let fresh = owner.acquire(&server).await.unwrap();
-            assert_eq!(fresh.execute("printf ok", None).await.unwrap(), "ok");
+            assert_eq!(owner.reached(), 1);
+            assert_eq!(
+                crate::remote::command::stdout(owner.link(), "printf ok", None)
+                    .await
+                    .unwrap(),
+                "ok"
+            );
+            let fresh = owner.needle(&server).unwrap();
             fresh.launch(crate::agent::Service::Git).await.unwrap();
         }
         manager.shutdown().await;
@@ -1622,7 +1727,7 @@ mod tests {
             owner.agent_runtime.snapshot().hello.unwrap().instance_id,
             instance
         );
-        assert_eq!(owner.transport_snapshot().generation, 1);
+        assert_eq!(owner.reached(), 1);
         crate::manager::shutdown(&state).await;
     }
 
@@ -1741,7 +1846,7 @@ mod tests {
             || {
                 attempts += 1;
                 std::future::ready(if attempts < 7 {
-                    Err("SSH transport interrupted: Disconnected".into())
+                    Err(Interruption::Interrupted("Disconnected".into()))
                 } else {
                     Ok(())
                 })
@@ -1766,11 +1871,11 @@ mod tests {
             || {
                 attempts += 1;
                 std::future::ready(match attempts {
-                    1 => Err(format!(
-                        "Clipboard upload failed: {}",
-                        crate::ssh::REQUEST_TIMED_OUT
-                    )),
-                    2 => Err(format!("{} agent", crate::ssh::START_TIMED_OUT)),
+                    1 => Err(crate::agent::Failure::Interrupted(
+                        "clipboard upload timed out".into(),
+                    )
+                    .into()),
+                    2 => Err(Interruption::Link(newport_ssh::Error::TimedOut)),
                     _ => Ok(()),
                 })
             },
@@ -1788,7 +1893,9 @@ mod tests {
             || {
                 attempts += 1;
                 std::future::ready(if attempts < 6 {
-                    Err("SSH transport interrupted: Connection reset by peer".into())
+                    Err(Interruption::Link(newport_ssh::Error::Lost(
+                        "Connection reset by peer".into(),
+                    )))
                 } else {
                     Ok(())
                 })
@@ -1806,9 +1913,9 @@ mod tests {
         let error = recover_connection(
             || {
                 attempts += 1;
-                std::future::ready(Err(
+                std::future::ready(Err(Interruption::Failed(
                     "Clipboard sync is already active for this server account.".into(),
-                ))
+                )))
             },
             rx,
             || panic!("Ownership errors must not retry"),
@@ -1833,7 +1940,7 @@ mod tests {
                     attempts += 1;
                     std::future::ready(if attempts == 1 {
                         changes.send(Some(2)).unwrap();
-                        Err("SSH transport interrupted: No space left on device".into())
+                        Err(Interruption::Interrupted("No space left on device".into()))
                     } else {
                         Ok(())
                     })
@@ -1864,7 +1971,7 @@ mod tests {
             move || {
                 let attempt = count.fetch_add(1, Ordering::SeqCst) + 1;
                 std::future::ready(if attempt < 3 {
-                    Err("SSH transport interrupted: No space left on device".into())
+                    Err(Interruption::Interrupted("No space left on device".into()))
                 } else {
                     Ok(())
                 })
@@ -1914,7 +2021,8 @@ mod tests {
                         b'T',
                         b"No space left on device (os error 28) at path /clipboard/.tmp".to_vec(),
                     )
-                    .unwrap_err())
+                    .unwrap_err()
+                    .into())
                 } else {
                     Ok(())
                 })
@@ -1936,7 +2044,7 @@ mod tests {
         recover_connection(
             || {
                 attempts += 1;
-                std::future::ready(Err(crate::ssh::REQUEST_TIMED_OUT.into()))
+                std::future::ready(Err(Interruption::Interrupted("request timed out".into())))
             },
             rx,
             || {
@@ -1954,7 +2062,7 @@ mod tests {
     async fn disabling_sync_cancels_an_inflight_attempt_without_waiting_for_timeout() {
         let (tx, rx) = watch::channel(false);
         let run = recover_connection(
-            std::future::pending::<Result<(), String>>,
+            std::future::pending::<Result<(), Interruption>>,
             rx,
             || panic!("Cancellation must not retry"),
             Duration::from_secs(60),
@@ -1975,10 +2083,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn needle_connection_losses_and_control_timeouts_recover_automatically() {
         for error in [
-            "SSH session capacity unavailable. The server refused another channel",
-            "Needle connection interrupted: early eof",
-            "Needle control request timed out",
-            "Needle runtime control timed out",
+            Interruption::Link(newport_ssh::Error::Busy),
+            crate::agent::Failure::Interrupted("early eof".into()).into(),
+            crate::agent_runtime::Error::Interrupted("Needle control request timed out".into())
+                .into(),
+            crate::agent_runtime::Error::Interrupted(crate::agent_runtime::BUSY.into()).into(),
         ] {
             let (_tx, rx) = watch::channel(false);
             let mut attempts = 0;
@@ -1987,7 +2096,7 @@ mod tests {
                 || {
                     attempts += 1;
                     std::future::ready(if attempts < 13 {
-                        Err(error.into())
+                        Err(error.clone())
                     } else {
                         Ok(())
                     })
@@ -2012,7 +2121,7 @@ mod tests {
             || {
                 attempts += 1;
                 std::future::ready(if attempts == 1 {
-                    Err("SSH agent unavailable: Unlock the agent".into())
+                    Err(Interruption::Link(newport_ssh::Error::AgentUnavailable))
                 } else {
                     Ok(())
                 })
@@ -2032,9 +2141,12 @@ mod tests {
         let (_tx, rx) = watch::channel(false);
         let error = recover_connection(
             || {
-                std::future::ready(Err(
-                    "Agent error: SSH transport interrupted: disk is read-only".into(),
-                ))
+                std::future::ready(Err(crate::agent::checked_event(
+                    b'E',
+                    b"SSH transport interrupted: disk is read-only".to_vec(),
+                )
+                .unwrap_err()
+                .into()))
             },
             rx,
             || panic!("Permanent agent errors must remain visible"),
@@ -2102,9 +2214,14 @@ mod tests {
             browser_enabled: false,
             agent_install_approved: true,
             setup_complete: true,
+            proxy: None,
         };
-        let session = ExecSession::connect(&server).await.unwrap();
-        let mut stream = session.stream("fixture-agent").await.unwrap();
+        let session = crate::ssh::link(&server, crate::ssh::no_jump_hosts);
+        let run = |command: &'static str| crate::remote::command::stdout(&session, command, None);
+        let mut stream = crate::remote::command::stream(&session, "fixture-agent")
+            .await
+            .unwrap()
+            .into_stream();
         async fn event(stream: &mut (impl tokio::io::AsyncRead + Unpin), kind: u8) -> Vec<u8> {
             let mut header = [0; 5];
             tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut header))
@@ -2129,10 +2246,10 @@ mod tests {
         stream.write_all(&frame).await.unwrap();
         event(&mut stream, b'A').await;
         assert_eq!(
-            session.execute("fixture-clipboard", None).await.unwrap(),
+            run("fixture-clipboard").await.unwrap(),
             "SSH clipboard 世界\n"
         );
-        let (opened, ()) = tokio::join!(session.execute("fixture-open", None), async {
+        let (opened, ()) = tokio::join!(run("fixture-open"), async {
             assert_eq!(
                 crate::agent::wire::parse_browser_request(&event(&mut stream, b'O').await).unwrap(),
                 (1, "https://example.com/login?code=fixture".into())
@@ -2155,8 +2272,7 @@ mod tests {
             .unwrap();
         let mut end = Vec::new();
         stream.read_to_end(&mut end).await.unwrap();
-        assert!(session.execute("fixture-clipboard", None).await.is_err());
-        session.close().await;
+        assert!(run("fixture-clipboard").await.is_err());
     }
     mod remote_tests {
         use super::*;
@@ -2171,8 +2287,8 @@ mod tests {
                 "identityFile": std::env::var("NEWPORT_TEST_IDENTITY").unwrap()
             }))
             .unwrap();
-            let setup = ExecSession::connect(&server).await.unwrap();
-            crate::agent_lifecycle::manage_test(&setup, false, false)
+            let setup = crate::ssh::link(&server, crate::ssh::no_jump_hosts);
+            crate::agent_lifecycle::manage_test(&setup, &server, false, false)
                 .await
                 .unwrap();
             let old_hash = crate::agent_lifecycle::activate_variant_test(&setup).await;
@@ -2181,13 +2297,7 @@ mod tests {
             ));
             manager.config.servers.push(server.clone());
             let owner = manager.sessions.session(&server, 0);
-            owner
-                .acquire(&server)
-                .await
-                .unwrap()
-                .adopt_build_for_test(&old_hash)
-                .await
-                .unwrap();
+            owner.adopt_build_for_test(&old_hash).await.unwrap();
             crate::monitor::snapshot(&owner).await.unwrap();
             assert_eq!(
                 owner.agent_runtime.snapshot().hello.unwrap().build_sha256,
@@ -2208,13 +2318,7 @@ mod tests {
             .unwrap();
             let old_ticket = owner.permissions.browser_ticket().unwrap();
             let old_epoch = owner.permissions.snapshot().session_epoch;
-            owner
-                .acquire(&server)
-                .await
-                .unwrap()
-                .install(false)
-                .await
-                .unwrap();
+            owner.install(&server, false).await.unwrap();
             tokio::time::timeout(Duration::from_secs(10), async {
                 while owner.permissions.snapshot().session_epoch == old_epoch
                     || !owner.permissions.browser_enabled()
@@ -2232,9 +2336,8 @@ mod tests {
             let current = owner.agent_runtime.snapshot();
             assert_ne!(current.hello.unwrap().build_sha256, old_hash);
             assert!(current.instances.iter().all(|i| !i.retiring));
-            assert_eq!(owner.transport_snapshot().generation, 1);
+            assert_eq!(owner.reached(), 1);
             manager.shutdown().await;
-            setup.close().await;
         }
     }
 
@@ -2276,7 +2379,7 @@ mod tests {
         let epoch = owner.permissions.snapshot().session_epoch;
         let previous = owner.agent_runtime.snapshot().hello.unwrap().instance_id;
         owner.agent_runtime.exhaust_registration_budget_for_test();
-        let git = owner.acquire(&server).await.unwrap();
+        let git = owner.needle(&server).unwrap();
         let (stream, _) = git.launch(crate::agent::Service::Git).await.unwrap();
         let (_client, _) = crate::git::client::Client::start(stream).await.unwrap();
         assert_ne!(
@@ -2300,7 +2403,7 @@ mod tests {
         assert!(owner.permissions.browser_enabled());
         assert_eq!(owner.permissions.snapshot().session_epoch, epoch);
         owner.agent_runtime.retry_failed().await;
-        let fresh = owner.acquire(&server).await.unwrap();
+        let fresh = owner.needle(&server).unwrap();
         fresh.launch(crate::agent::Service::Git).await.unwrap();
         assert!(owner.permissions.browser_enabled());
         let replacement = owner.agent_runtime.snapshot().hello.unwrap().instance_id;
@@ -2321,7 +2424,7 @@ mod tests {
             owner.agent_runtime.snapshot().hello.unwrap().instance_id,
             replacement
         );
-        assert_eq!(owner.transport_snapshot().generation, 1);
+        assert_eq!(owner.reached(), 1);
         manager.shutdown().await;
         assert!(!owner.permissions.browser_enabled());
     }

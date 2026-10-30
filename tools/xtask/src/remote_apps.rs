@@ -47,6 +47,8 @@ const CRATES: [&str; 6] = [
 ];
 const GPUI_MANIFEST: &str = "crates/newport-gpui/Cargo.toml";
 const APP_MANIFEST: &str = "crates/newport-app/Cargo.toml";
+/// The files a Remote apps build edits while it runs.
+pub const EDITED: [&str; 3] = [GPUI_MANIFEST, APP_MANIFEST, "Cargo.lock"];
 const COMPOSITION: [(&str, &str); 2] = [
     ("newport-gpui", GPUI_MANIFEST),
     ("newport-app", APP_MANIFEST),

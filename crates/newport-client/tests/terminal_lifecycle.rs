@@ -101,20 +101,19 @@ fn crashed_native_clients_release_ptys_without_closing_other_sessions() -> Resul
             .map_err(|e| format!("Child {round} did not open: {e}"))?;
         child.0.kill().map_err(|e| e.to_string())?;
         child.0.wait().map_err(|e| e.to_string())?;
+        // The crashed child's session ID opens again only once its PTY is gone.
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            match backend.call_with_timeout(
-                "terminal_read",
-                json!({"session":id}),
-                Duration::from_secs(2),
-            ) {
-                Err(error) if error == "Terminal is closed." => break,
+            match backend.open_terminal_lease(json!({"id":server,"session":id,"cols":80,"rows":24}))
+            {
+                Ok(_lease) => break,
+                Err(error) if error == "Terminal session already exists." => {}
                 Err(error) => return Err(error),
-                _ if Instant::now() >= deadline => {
-                    return Err(format!("Child {round} leaked its PTY"));
-                }
-                _ => thread::sleep(Duration::from_millis(10)),
             }
+            if Instant::now() >= deadline {
+                return Err(format!("Child {round} leaked its PTY"));
+            }
+            thread::sleep(Duration::from_millis(10));
         }
         // The unrelated owned terminal must still accept input after each kill.
         let marker = format!("lease-survivor-{round}");

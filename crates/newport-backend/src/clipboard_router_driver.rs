@@ -40,10 +40,10 @@ impl<W: AsyncWrite + Unpin + Send> Transport for Agent<W> {
         self.clipboard_export_lease()
     }
     async fn commit(&mut self, lease: &Lease) -> Result<Commit, String> {
-        self.commit_clipboard_copy(lease).await
+        Ok(self.commit_clipboard_copy(lease).await?)
     }
     async fn read(&mut self, copy: &CommittedCopy, format: &str) -> Result<Read, String> {
-        self.read_clipboard_copy(copy, format).await
+        Ok(self.read_clipboard_copy(copy, format).await?)
     }
 }
 

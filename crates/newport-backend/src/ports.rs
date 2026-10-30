@@ -79,12 +79,9 @@ async fn update_needle(owner: &Arc<ServerSession>) -> String {
         }
         _ => {}
     }
-    let lease = match owner.acquire(owner.server()).await {
-        Ok(lease) => lease,
-        Err(error) => return failed(&error),
-    };
+    let owner = owner.clone();
     tokio::spawn(async move {
-        if let Err(RequiredUpdate::Failed { error, .. }) = lease.update_needle_for_feature().await {
+        if let Err(RequiredUpdate::Failed { error, .. }) = owner.update_needle_for_feature().await {
             log::warn!("Needle update for port discovery did not complete: {error}");
         }
     });

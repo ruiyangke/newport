@@ -207,12 +207,9 @@ impl Documents {
                 return;
             };
             let input = format!("{}\0", input.join("\0"));
-            let check = async {
-                let lease = owner.acquire(owner.server()).await?;
-                lease
-                    .execute(&policy::command(&root), Some(input.as_bytes()))
-                    .await
-            };
+            let command = policy::command(&root);
+            let check =
+                crate::remote::command::stdout(owner.link(), &command, Some(input.as_bytes()));
             let Ok(Ok(output)) = tokio::time::timeout(Duration::from_secs(10), check).await else {
                 return;
             };

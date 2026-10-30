@@ -56,9 +56,6 @@ pub enum Command {
     ComposeJob,
     ComposeCancel,
     ComposeJobs,
-    TerminalRead,
-    TerminalWrite,
-    TerminalResize,
     TerminalClose,
     Snapshot,
 }
@@ -381,30 +378,6 @@ impl Command {
                 crate::commands::compose_jobs(services.manager, argument(args, "id")?)
                     .await
                     .map_err(error)?,
-            ),
-            Self::TerminalRead => encode(
-                crate::commands::terminal_read(services.terminals, argument(args, "session")?)
-                    .await
-                    .map_err(error)?,
-            ),
-            Self::TerminalWrite => encode(
-                crate::commands::terminal_write(
-                    services.terminals,
-                    argument(args, "session")?,
-                    argument(args, "data")?,
-                )
-                .await
-                .map_err(error)?,
-            ),
-            Self::TerminalResize => encode(
-                crate::commands::terminal_resize(
-                    services.terminals,
-                    argument(args, "session")?,
-                    argument(args, "cols")?,
-                    argument(args, "rows")?,
-                )
-                .await
-                .map_err(error)?,
             ),
             Self::TerminalClose => encode(
                 crate::commands::terminal_close(services.terminals, argument(args, "session")?)

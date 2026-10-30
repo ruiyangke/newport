@@ -353,7 +353,7 @@ async fn backend_preflight_cancels_obsolete_identity_without_runtime_or_transpor
         control.apply(identity.clone(), true, true).await,
         Ok(ClipboardRoute::Superseded)
     );
-    assert!(!owner.has_transport());
+    assert!(!owner.has_link());
     assert_eq!(owner.agent_runtime.snapshot().status, "unknown");
     let _replacement = registry.session(&server, 1);
     assert!(owner.is_revoked());

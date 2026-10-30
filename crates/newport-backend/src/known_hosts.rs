@@ -12,6 +12,24 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Newport pins plain host keys; it doesn't trust host certificate authorities.
+pub const CERTIFICATES_UNSUPPORTED: &str =
+    "SSH host certificates are not supported; configure a pinned host key.";
+
+/// The server presented a key other than the one known_hosts holds for it.
+#[derive(Debug)]
+pub struct Changed {
+    /// The SHA-256 fingerprint of the key the server presented.
+    pub fingerprint: String,
+    message: String,
+}
+impl std::fmt::Display for Changed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for Changed {}
+
 pub fn user_path() -> Result<PathBuf> {
     #[cfg(any(test, feature = "test-support"))]
     if let Ok(path) = std::env::var("NEWPORT_TEST_KNOWN_HOSTS") {
@@ -135,9 +153,13 @@ pub fn verify(
         } else {
             "ask your administrator to update the system known_hosts".to_owned()
         };
-        bail!(
-            "SSH host key changed for {host}: it now presents {fingerprint}, which doesn't match the key saved in known_hosts. If you expected this, for example after reinstalling the server, {remedy}"
-        );
+        return Err(Changed {
+            message: format!(
+                "SSH host key changed for {host}: it now presents {fingerprint}, which doesn't match the key saved in known_hosts. If you expected this, for example after reinstalling the server, {remedy}"
+            ),
+            fingerprint: fingerprint.to_string(),
+        }
+        .into());
     }
     // Trust on first use, like `StrictHostKeyChecking=accept-new`.
     file.seek(SeekFrom::End(0))?;

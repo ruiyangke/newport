@@ -27,19 +27,18 @@ async fn full_product_install_opens_registered_gui_and_core_workers() {
         .session(&server, manager.connection_revision(server.id));
     let state = crate::manager::share(manager);
     let registry = state.sessions.clone();
-    let installer = owner.acquire(&server).await.unwrap();
-    installer
-        .execute(
-            r#"legacy="$HOME/.cache/newport-remote/releases/system/legacy/current"
+    crate::remote::command::stdout(
+        owner.link(),
+        r#"legacy="$HOME/.cache/newport-remote/releases/system/legacy/current"
 mkdir -p "$legacy"
 printf '#!/bin/sh\nexit 91\n' > "$legacy/run-agent"
 chmod +x "$legacy/run-agent"
 touch "$legacy/.validated-v1"
 "#,
-            None,
-        )
-        .await
-        .unwrap();
+        None,
+    )
+    .await
+    .unwrap();
     let before = crate::remote_apps::status(&owner).await.unwrap();
     assert!(before["agent"].is_null());
     assert!(before["legacyAgent"].is_string());
@@ -63,15 +62,15 @@ touch "$legacy/.validated-v1"
     );
     assert!(gui_status["legacyAgent"].is_string());
     assert!(crate::remote_apps::catalogue(&owner).await.unwrap()["apps"].is_array());
-    let status = installer.check_installation().await.unwrap();
+    let status = owner.check_installation().await.unwrap();
     assert_eq!(status.installed_variant, Some(Variant::Full));
     assert_eq!(status.build_relation, BuildRelation::Bundled);
-    let monitor_lease = owner.acquire(&server).await.unwrap();
+    let monitor_lease = owner.needle(&server).unwrap();
     let (monitor, _) = monitor_lease.launch(Service::Monitor).await.unwrap();
     let mut monitor = BufReader::new(monitor);
     let runtime = owner.agent_runtime.snapshot().hello.unwrap();
     assert!(runtime.capabilities["product-full"].available);
-    let catalogue_lease = owner.acquire(&server).await.unwrap();
+    let catalogue_lease = owner.needle(&server).unwrap();
     let (mut channel, worker) = catalogue_lease
         .launch_channel(Service::RemoteApps {
             arguments: vec!["--catalog".into()],
@@ -125,7 +124,7 @@ touch "$legacy/.validated-v1"
     .unwrap();
     serving.abort();
     let _ = serving.await;
-    let gui_lease = owner.acquire(&server).await.unwrap();
+    let gui_lease = owner.needle(&server).unwrap();
     let (mut gui, _) = gui_lease
         .launch(Service::RemoteApps {
             arguments: vec!["--display".into(), "private".into()],
@@ -152,11 +151,7 @@ touch "$legacy/.validated-v1"
         runtime.instance_id
     );
     assert_eq!(
-        installer
-            .check_installation()
-            .await
-            .unwrap()
-            .installed_variant,
+        owner.check_installation().await.unwrap().installed_variant,
         Some(Variant::Full)
     );
     drop(monitor);
@@ -193,7 +188,10 @@ impl crate::rpc::Host for GuiHost {
     ) -> Result<serde_json::Value, serde_json::Value> {
         Err(serde_json::json!("Unexpected general dispatch"))
     }
-    async fn open_terminal(&self, _: crate::rpc::TerminalOpen) -> Result<Box<dyn Send>, String> {
+    async fn open_terminal(
+        &self,
+        _: crate::rpc::TerminalOpen,
+    ) -> Result<crate::rpc::TerminalChannel, String> {
         Err("Unexpected terminal".into())
     }
     async fn open_remote_apps(
@@ -202,7 +200,7 @@ impl crate::rpc::Host for GuiHost {
         arguments: Vec<String>,
     ) -> Result<crate::rpc::RemoteChannel, String> {
         assert_eq!(server, self.0.server().id);
-        let lease = self.0.acquire(self.0.server()).await?;
+        let lease = self.0.needle(self.0.server())?;
         let (channel, worker) = lease
             .launch_channel(Service::RemoteApps { arguments })
             .await?;

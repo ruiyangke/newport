@@ -7,7 +7,6 @@
 use crate::{
     containers::{self, ContainerVerb, ProjectVerb, PruneTarget},
     model::Server,
-    ssh::ExecSession,
 };
 use serde_json::{Value, json};
 use tokio::time::{Duration, sleep};
@@ -29,14 +28,14 @@ fn now() -> i64 {
 
 /// A test's own containers, volumes, networks and Compose project.
 pub(super) struct Scratch {
-    shell: ExecSession,
+    shell: crate::remote::Shell,
     pub(super) tag: String,
 }
 impl Scratch {
     pub(super) async fn new(server: &Server) -> Self {
         let tag = Uuid::new_v4().simple().to_string()[..10].to_owned();
         Self {
-            shell: ExecSession::connect(server).await.unwrap(),
+            shell: crate::remote::Shell::new(server),
             tag,
         }
     }
@@ -83,7 +82,6 @@ impl Scratch {
              rm -rf ~/{project}; true"
         ))
         .await;
-        self.shell.close().await;
     }
 }
 

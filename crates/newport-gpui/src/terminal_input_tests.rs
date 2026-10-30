@@ -6,6 +6,7 @@ use gpui_kit::{
     VisualTestContext,
 };
 use newport_client::backend::Backend;
+use newport_platform::ipc::protocol::terminal::{self as wire, ToApp, ToBackend};
 use newport_platform::ipc::protocol::{Request, Response, TERMINAL_OPEN_LEASE, VERSION};
 use newport_platform::ipc::{Listener, Stream};
 use serde_json::{Value, json};
@@ -39,9 +40,15 @@ impl Peer {
         let stopped = Arc::new(AtomicBool::new(false));
         let (output, input, stop) = (events.clone(), writes.clone(), stopped.clone());
         let worker = thread::spawn(move || {
-            let mut lease = None;
-            let mut session = None;
+            let mut lease: Option<Stream> = None;
+            let mut reader = None;
             while !stop.load(Ordering::Acquire) {
+                if let Some(stream) = &mut lease {
+                    while let Some(event) = output.lock().unwrap().pop_front() {
+                        // A view can close while its final event is in flight.
+                        let _ = stream.write_all(&frame(event).encode());
+                    }
+                }
                 let (mut stream, _) = match listener.accept() {
                     Ok(pair) => pair,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -59,30 +66,27 @@ impl Peer {
                     .unwrap();
                 let request = request(&mut stream);
                 assert_eq!(request.version, VERSION);
-                if request.method == TERMINAL_OPEN_LEASE {
-                    assert!(lease.is_none(), "one owned session per fixture");
-                    session = Some(request.args["session"].clone());
-                    reply(&mut stream, Value::Null);
-                    lease = Some(stream);
-                    continue;
-                }
-                assert_eq!(Some(&request.args["session"]), session.as_ref());
-                let result = match request.method.as_str() {
-                    "terminal_read" => {
-                        // Bound idle polling while allowing writes to reach this peer.
-                        thread::sleep(Duration::from_millis(2));
-                        output.lock().unwrap().pop_front().unwrap_or(Value::Null)
+                assert_eq!(request.method, TERMINAL_OPEN_LEASE);
+                assert!(lease.is_none(), "one owned session per fixture");
+                reply(&mut stream, Value::Null);
+                stream.set_read_timeout(None).unwrap();
+                let mut incoming = stream.try_clone().unwrap();
+                let input = input.clone();
+                reader = Some(thread::spawn(move || {
+                    while let Ok(Some((kind, payload))) = wire::read(&mut incoming) {
+                        if let Ok(ToBackend::Input { data, .. }) = ToBackend::decode(kind, payload)
+                        {
+                            input.lock().unwrap().push(data);
+                        }
                     }
-                    "terminal_write" => {
-                        let bytes: Vec<u8> =
-                            serde_json::from_value(request.args["data"].clone()).unwrap();
-                        input.lock().unwrap().push(bytes);
-                        Value::Null
-                    }
-                    "terminal_resize" => Value::Null,
-                    other => panic!("unexpected terminal method: {other}"),
-                };
-                reply(&mut stream, result);
+                }));
+                lease = Some(stream);
+            }
+            if let Some(stream) = lease {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+            if let Some(reader) = reader {
+                reader.join().unwrap();
             }
         });
         Self {
@@ -128,6 +132,15 @@ fn request(stream: &mut Stream) -> Request {
     rmp_serde::from_slice(&bytes).unwrap()
 }
 
+/// A fixture event, written as the terminal stream carries it.
+fn frame(event: Value) -> ToApp {
+    if event["type"] == "data" {
+        ToApp::Output(serde_json::from_value(event["data"].clone()).unwrap())
+    } else {
+        ToApp::Event(serde_json::from_value::<wire::Event>(event).unwrap())
+    }
+}
+
 fn reply(stream: &mut Stream, result: Value) {
     let bytes = rmp_serde::to_vec_named(&Response {
         version: VERSION,
@@ -135,7 +148,7 @@ fn reply(stream: &mut Stream, result: Value) {
         error: None,
     })
     .unwrap();
-    // A view can close while its final read is in flight.
+    // A view can close before its open completes.
     let _ = stream
         .write_all(&(bytes.len() as u32).to_be_bytes())
         .and_then(|_| stream.write_all(&bytes));
@@ -412,6 +425,46 @@ fn workspace_bindings_preserve_terminal_flow_control_and_history(cx: &mut TestAp
     let expected = b"\x11\x12\x06\x0e\x10\x13\x17\x18\x13\x18\x17\x00\x1b\x1e\x1f\x7f\x1b[27;5;9~\x1b[27;6;9~\x1b[15~\x1b[23~\x1b[2;5~\x1b[2;2~\x1b\x06\x1b\x02";
     wait(&view, cx, |_| peer.written().len() >= expected.len());
     assert_eq!(peer.written(), expected);
+}
+
+#[gpui::test]
+fn tab_number_shortcuts_select_tabs_from_a_focused_terminal(cx: &mut TestAppContext) {
+    let selected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|cx| {
+        crate::navigation::install_desktop_commands(cx);
+        let selected = selected.clone();
+        cx.on_action(move |action: &crate::navigation::SelectTab, _| {
+            selected.borrow_mut().push(action.number)
+        });
+    });
+    let peer = Peer::new();
+    let (view, cx) = connect(&peer, cx);
+    let tabs = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl-alt"
+    };
+    cx.simulate_keystrokes(&format!("{tabs}-2 {tabs}-9 ctrl-a"));
+    wait(&view, cx, |_| !peer.written().is_empty());
+    assert_eq!(*selected.borrow(), [2, 9]);
+    assert_eq!(peer.written(), b"\x01", "only Ctrl+A reached the shell");
+}
+
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn cmd_t_opens_a_terminal_from_a_focused_terminal(cx: &mut TestAppContext) {
+    let opened = std::rc::Rc::new(std::cell::Cell::new(0));
+    cx.update(|cx| {
+        crate::navigation::install_desktop_commands(cx);
+        let opened = opened.clone();
+        cx.on_action(move |_: &crate::navigation::NewTerminal, _| opened.set(opened.get() + 1));
+    });
+    let peer = Peer::new();
+    let (view, cx) = connect(&peer, cx);
+    cx.simulate_keystrokes("cmd-t ctrl-a");
+    wait(&view, cx, |_| !peer.written().is_empty());
+    assert_eq!(opened.get(), 1);
+    assert_eq!(peer.written(), b"\x01", "only Ctrl+A reached the shell");
 }
 
 #[gpui::test]

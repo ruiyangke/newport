@@ -58,6 +58,11 @@ pub(super) struct SelectTab {
     pub number: usize,
 }
 
+/// Opens a terminal tab on the Terminal page, as its + button does.
+#[derive(Action, Clone, PartialEq, serde::Deserialize)]
+#[action(namespace = newport, no_json)]
+pub(super) struct NewTerminal;
+
 /// Tab `number` among `count`: 1–8 by position, 9 the last, as browsers and
 /// terminals number tabs.
 pub(super) fn tab_index(number: usize, count: usize) -> Option<usize> {
@@ -88,6 +93,7 @@ pub(super) fn install_desktop_commands(cx: &mut App) {
     items.push(MenuItem::separator());
     items.push(MenuItem::action("Show/hide sidebar", ToggleSidebar));
     items.push(MenuItem::separator());
+    items.push(MenuItem::action("New terminal", NewTerminal));
     items.push(MenuItem::action("Next tab", crate::project_editor::NextTab));
     items.push(MenuItem::action(
         "Previous tab",
@@ -210,6 +216,20 @@ pub(super) fn install_workspace_shortcuts(cx: &mut App) {
         "ctrl-shift-i"
     };
     cx.bind_keys([KeyBinding::new(inspector, gpui::NoAction, None)]);
+    // Tabs by number, as each platform's terminals have them. Cmd keys never
+    // reach a shell on macOS; elsewhere Alt alone is readline's argument.
+    let tabs = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl-alt"
+    };
+    cx.bind_keys(
+        (1..=9)
+            .map(|number| KeyBinding::new(&format!("{tabs}-{number}"), SelectTab { number }, None)),
+    );
+    // Elsewhere terminals open tabs with Ctrl+Shift+T, which stays the shell's.
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([KeyBinding::new("cmd-t", NewTerminal, None)]);
     install_editor_shortcuts(primary, cx);
 }
 
@@ -255,6 +275,15 @@ pub(super) fn views(cx: &App) -> Vec<(Page, IconName)> {
 impl Newport {
     /// Tab `number` of the current page, if it has tabs: the terminal's, or
     /// the open project's editor. Other pages have none and ignore it.
+    pub(super) fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) || self.server_form.is_some() || self.page != Page::Terminal
+        {
+            return;
+        }
+        if let Some(workspace) = self.terminals.get(&self.server).cloned() {
+            workspace.update(cx, |workspace, cx| workspace.new_tab(window, cx));
+        }
+    }
     pub(super) fn select_tab(
         &mut self,
         number: usize,
@@ -439,7 +468,9 @@ mod tests {
     use gpui_kit as gpui;
 
     #[gpui::test]
-    fn terminal_contexts_only_reserve_find_in_the_keymap(cx: &mut gpui::TestAppContext) {
+    fn terminal_contexts_only_reserve_find_and_tab_numbers_in_the_keymap(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|cx| {
             gpui_kit::component::init(cx);
             super::install_desktop_commands(cx);
@@ -509,7 +540,7 @@ mod tests {
                 .into_iter()
                 .map(String::from)
                 .chain((1..=9).flat_map(|number| {
-                    ["ctrl", "cmd", "ctrl-shift", "ctrl-cmd"]
+                    ["ctrl", "alt", "ctrl-shift", "ctrl-cmd"]
                         .map(|modifiers| format!("{modifiers}-{number}"))
                 })) {
                     let (bindings, pending) = keymap
@@ -528,6 +559,23 @@ mod tests {
                     keymap.bindings_for_input(&[gpui::Keystroke::parse(find).unwrap()], &contexts);
                 assert!(!pending && bindings.len() == 1);
                 assert!(bindings[0].action().as_any().is::<crate::FindInTerminal>());
+                let tabs = if cfg!(target_os = "macos") {
+                    "cmd"
+                } else {
+                    "ctrl-alt"
+                };
+                for number in 1..=9 {
+                    let key = format!("{tabs}-{number}");
+                    let (bindings, pending) = keymap
+                        .bindings_for_input(&[gpui::Keystroke::parse(&key).unwrap()], &contexts);
+                    assert!(!pending && bindings.len() == 1, "{key}");
+                    let action = bindings[0].action().as_any();
+                    assert!(
+                        action.downcast_ref::<super::SelectTab>()
+                            == Some(&super::SelectTab { number }),
+                        "{key}"
+                    );
+                }
             }
         });
     }

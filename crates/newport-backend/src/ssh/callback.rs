@@ -1,5 +1,6 @@
-//! Temporary loopback listeners for remote browser authentication.
-use super::Connection;
+//! Temporary loopback listeners for remote browser authentication, relayed
+//! to the server's loopback over the server's link.
+use newport_ssh::{Link, Open};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
@@ -87,13 +88,13 @@ impl Drop for Lease {
 }
 
 pub struct Callbacks {
-    connection: Arc<Connection>,
+    link: Link,
     leases: Vec<Lease>,
 }
 impl Callbacks {
-    pub(super) fn new(connection: Arc<Connection>) -> Self {
+    pub(crate) fn new(link: Link) -> Self {
         Self {
-            connection,
+            link,
             leases: Vec::new(),
         }
     }
@@ -122,17 +123,29 @@ impl Callbacks {
             return Err("Too many pending browser logins. Wait for them to expire.".into());
         }
         let listeners = bind(&endpoint).await?;
-        let connection = self.connection.clone();
+        let link = self.link.clone();
         self.leases.push(Lease(tokio::spawn(async move {
             let mut workers = JoinSet::new();
             for listener in listeners {
-                let connection = connection.clone();
+                let link = link.clone();
                 let host = endpoint.host.clone();
+                let port = endpoint.port;
+                let open = move |_: SocketAddr| {
+                    let link = link.clone();
+                    let open = Open::DirectTcpip {
+                        host: host.clone(),
+                        port,
+                    };
+                    async move {
+                        link.open(open)
+                            .await
+                            .ok()
+                            .map(newport_ssh::Channel::into_stream)
+                    }
+                };
                 workers.spawn(super::relay::serve(
                     listener,
-                    connection,
-                    host,
-                    endpoint.port,
+                    open,
                     super::relay::Policy::CALLBACK,
                 ));
             }
@@ -218,14 +231,14 @@ mod tests {
     #[ignore = "Run with cargo xtask test ssh"]
     async fn callback_uses_existing_ssh_and_releases_listener_on_drop() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let session =
-            super::super::ExecSession::connect(&super::super::integration_tests::server())
-                .await
-                .unwrap();
+        let link = super::super::link(
+            &super::super::integration_tests::server(),
+            crate::ssh::no_jump_hosts,
+        );
         let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = reservation.local_addr().unwrap().port();
         drop(reservation);
-        let mut callbacks = session.callbacks();
+        let mut callbacks = Callbacks::new(link.clone());
         callbacks
             .prepare(Endpoint {
                 host: "127.0.0.1".into(),
@@ -256,7 +269,10 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(session.execute("true", None).await.is_ok());
-        session.close().await;
+        assert!(
+            crate::remote::command::run(&link, "true", None)
+                .await
+                .is_ok()
+        );
     }
 }

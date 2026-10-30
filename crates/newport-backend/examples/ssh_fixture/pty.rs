@@ -1,4 +1,7 @@
-use russh::{Channel, ChannelMsg, server::Msg};
+use russh::{
+    Channel, ChannelMsg,
+    server::{self, Msg},
+};
 use std::{
     fs::File,
     io,
@@ -71,6 +74,7 @@ impl Pty {
     pub fn start(
         &mut self,
         channel: Channel<Msg>,
+        session: server::Handle,
         home: PathBuf,
         integration: Option<uuid::Uuid>,
         terminal: Option<newport_backend::ssh::TerminalIdentity>,
@@ -121,7 +125,17 @@ impl Pty {
         let master = self.master.clone();
         Ok(tokio::spawn(async move {
             let _group = group;
+            let id = channel.id();
             let (mut reader, writer) = channel.split();
+            // Output before the request's reply, as a login banner sends it.
+            // It goes through the channel's writer, which counts the window:
+            // `Session::data` doesn't, so the writer would later overrun the
+            // window and hold up the session's other channels.
+            if writer.data(&b"early shell output\r\n"[..]).await.is_err()
+                || session.channel_success(id).await.is_err()
+            {
+                return;
+            }
             let mut bytes = [0; 32768];
             loop {
                 tokio::select! {

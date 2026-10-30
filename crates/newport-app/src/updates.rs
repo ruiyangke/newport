@@ -226,7 +226,7 @@ impl<P: Package> Service<P> {
     pub fn status(&self) -> Value {
         let state = self.state();
         let error = state.error.as_ref().or(state.failure.as_ref());
-        json!({"enabled":self.source.is_some() && !self.closed(),"currentVersion":env!("CARGO_PKG_VERSION"),"phase":state.phase,"version":state.version,"downloaded":state.downloaded,"total":state.total,"error":error})
+        json!({"enabled":self.source.is_some() && !self.closed(),"currentVersion":env!("CARGO_PKG_VERSION"),"build":crate::build_stamp::status(),"phase":state.phase,"version":state.version,"downloaded":state.downloaded,"total":state.total,"error":error})
     }
 
     pub async fn check(&self) -> Result<(), String> {

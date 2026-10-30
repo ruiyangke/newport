@@ -2,6 +2,7 @@
 //! A frame is a big-endian u32 byte length followed by one MessagePack value.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub mod terminal;
 pub const VERSION: u32 = 1;
 pub const DEFAULT_MAX_REQUEST: usize = 1024 * 1024;
 // Whole-document saves need room for the largest editable text plus the request envelope.
@@ -15,8 +16,8 @@ pub fn request_limit(method: &str) -> usize {
     }
 }
 pub const MAX_RESPONSE: usize = 32 * 1024 * 1024;
-/// Successful open keeps this socket alive as the PTY's ownership lease.
-/// EOF releases the PTY; terminal data still uses the ordinary read/write RPCs.
+/// Successful open keeps this socket alive as the PTY's ownership lease, and
+/// the socket then carries the terminal's I/O ([`terminal`]). EOF releases the PTY.
 pub const TERMINAL_OPEN_LEASE: &str = "$terminal_open_lease";
 /// Error code for a request the backend refused before running it, because
 /// too many requests were open. Repeating it is always safe.
@@ -36,16 +37,6 @@ pub const REMOTE_STREAM_EXIT: u8 = 1;
 pub const LSP_OPEN: &str = "$lsp_open";
 /// Raise the existing application window without creating another profile owner.
 pub const ACTIVATE_WINDOW: &str = "native.activate";
-/// Terminal input and output, admitted apart from other commands so that a
-/// backlog elsewhere, such as requests waiting for a server to reconnect,
-/// cannot stall an open terminal.
-pub fn is_terminal_io(method: &str) -> bool {
-    matches!(
-        method,
-        "terminal_read" | "terminal_write" | "terminal_resize"
-    )
-}
-
 /// Admission priority only; callers still require normal connection validation.
 /// Only explicit off requests may use capacity reserved for revocation.
 pub fn is_integration_revocation(method: &str, args: &Value) -> bool {

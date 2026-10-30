@@ -4,12 +4,12 @@
 const LIMIT: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Ack {
+pub(crate) enum Ack {
     Ready,
     Unavailable,
 }
 
-pub(super) struct Readiness {
+pub(crate) struct Readiness {
     nonce: uuid::Uuid,
     ready: Vec<u8>,
     unavailable: Vec<u8>,

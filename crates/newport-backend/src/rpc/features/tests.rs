@@ -27,8 +27,11 @@ impl rpc::Host for FeatureHost {
             .await
     }
     /// Validation only: these fixtures open no SSH session.
-    async fn open_terminal(&self, request: rpc::TerminalOpen) -> Result<Box<dyn Send>, String> {
-        crate::commands::terminal_open(
+    async fn open_terminal(
+        &self,
+        request: rpc::TerminalOpen,
+    ) -> Result<rpc::TerminalChannel, String> {
+        let io = crate::commands::terminal_open(
             &self.manager,
             &self.terminals,
             request.id,
@@ -37,7 +40,10 @@ impl rpc::Host for FeatureHost {
             request.rows,
         )
         .await?;
-        Ok(Box::new(()))
+        Ok(rpc::TerminalChannel {
+            io,
+            guard: Box::new(()),
+        })
     }
 }
 
@@ -240,16 +246,6 @@ async fn native_feature_routes_preserve_validation_before_any_remote_action() {
             json!({"id":id,"job":"../bad"}),
             "Not a valid Compose command",
         ),
-        (
-            "terminal_resize",
-            json!({"session":session,"cols":80,"rows":301}),
-            "Invalid terminal dimensions",
-        ),
-        (
-            "terminal_write",
-            json!({"session":session,"data":vec![0;65537]}),
-            "Terminal input is too large",
-        ),
         ("fixture.unknown", json!({}), "Unknown command"),
     ] {
         let error = fixture.call(method, args).await.unwrap_err();
@@ -266,12 +262,6 @@ async fn native_feature_routes_preserve_validation_before_any_remote_action() {
     .unwrap()
     .unwrap_err();
     assert!(refused.contains("Invalid terminal dimensions"), "{refused}");
-    // Rejected terminal opens did not insert a session or start SSH.
-    let error = fixture
-        .call("terminal_read", json!({"session":session}))
-        .await
-        .unwrap_err();
-    assert!(error.contains("Terminal is closed"), "{error}");
     assert_eq!(
         fixture
             .call("terminal_close", json!({"session":session}))

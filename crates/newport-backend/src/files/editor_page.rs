@@ -9,11 +9,15 @@ pub struct Page {
     pub reason: &'static str,
 }
 
-pub(super) async fn bytes(sftp: &Sftp, handle: &str, offset: u64, limit: usize) -> Result<Vec<u8>> {
+pub(super) async fn bytes(
+    session: &Session,
+    handle: &str,
+    offset: u64,
+    limit: usize,
+) -> Result<Vec<u8>> {
     let mut bytes = Vec::with_capacity(limit);
     while bytes.len() < limit {
-        match sftp
-            .session
+        match session
             .read(
                 handle,
                 offset + bytes.len() as u64,
@@ -68,31 +72,30 @@ fn page_text(mut bytes: Vec<u8>, more: bool) -> Result<String> {
     super::valid_text(bytes)
 }
 pub async fn read_document(
-    sftp: &Sftp,
+    session: &Session,
     path: &str,
     offset: Option<u64>,
     expected: Option<&str>,
 ) -> Result<Document> {
-    let attrs = sftp.session.lstat(path).await?.attrs;
+    let attrs = session.lstat(path).await?.attrs;
     ensure!(attrs.is_regular(), "Only regular files can be displayed.");
     let size = attrs
         .size
         .context("The server did not return this file's size.")?;
     if size <= LIMIT as u64 && offset.is_none() {
-        let (document, _) = super::read(sftp, path).await?;
+        let (document, _) = super::read(session, path).await?;
         if !newport_domain::text_file::has_long_lines(&document.content) {
             return Ok(document);
         }
     }
     let start = offset.unwrap_or(0);
     ensure!(start < size, "The file size changed. Reload the file.");
-    let handle = sftp
-        .session
+    let handle = session
         .open(path, OpenFlags::READ, FileAttributes::empty())
         .await?
         .handle;
     let result = async {
-        let prefix = bytes(sftp, &handle, 0, size.min(4096) as usize).await?;
+        let prefix = bytes(session, &handle, 0, size.min(4096) as usize).await?;
         ensure!(
             !newport_domain::text_file::has_binary_signature(&prefix)
                 && !newport_domain::text_file::has_binary_controls(&prefix),
@@ -106,14 +109,14 @@ pub async fn read_document(
             );
         }
         let count = (size - start).min(PAGE_SIZE as u64) as usize;
-        let raw = bytes(sftp, &handle, start, count).await?;
+        let raw = bytes(session, &handle, start, count).await?;
         ensure!(
             raw.len() == count,
             "The file changed while being read. Reload it."
         );
         let content = page_text(raw, start + (count as u64) < size)?;
-        let after = sftp.session.fstat(&handle).await?.attrs;
-        let after_prefix = bytes(sftp, &handle, 0, size.min(4096) as usize).await?;
+        let after = session.fstat(&handle).await?.attrs;
+        let after_prefix = bytes(session, &handle, 0, size.min(4096) as usize).await?;
         ensure!(
             revision == self::revision(&after, &after_prefix),
             "The file changed while being read. Reload it."
@@ -138,7 +141,7 @@ pub async fn read_document(
         })
     }
     .await;
-    let closed = sftp.session.close(handle).await;
+    let closed = session.close(handle).await;
     let document = result?;
     closed?;
     Ok(document)
@@ -149,12 +152,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "Run with cargo xtask test ssh -- files::editor"]
     async fn large_files_are_bounded_readonly_and_complete_over_sftp() {
-        let server: crate::model::Server = serde_json::from_value(serde_json::json!({
-            "id":Uuid::new_v4(),"name":"Paged editor fixture","sshUser":"fixture","sshHost":"127.0.0.1",
-            "sshPort":std::env::var("NEWPORT_TEST_SSH_PORT").unwrap().parse::<u16>().unwrap(),
-            "identityFile":std::env::var("NEWPORT_TEST_IDENTITY").unwrap(),"agentInstallApproved":false
-        })).unwrap();
-        let sftp = Arc::new(Sftp::connect(&server).await.unwrap());
+        use super::super::super::integration_tests as fixture;
+        let server = fixture::server();
+        let remote = fixture::remote(&server);
+        let session = remote.sftp.shared().await.unwrap();
         let path = format!("/Documents/large-{}.txt", Uuid::new_v4());
         // A multibyte character straddles the first boundary, and the final page is partial.
         let source = format!(
@@ -162,8 +163,7 @@ mod tests {
             "x".repeat(PAGE_SIZE - 1),
             "hello 世界\r\n".repeat(LIMIT / 10)
         );
-        let handle = sftp
-            .session
+        let handle = session
             .open(
                 &path,
                 OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE,
@@ -173,17 +173,17 @@ mod tests {
             .unwrap()
             .handle;
         for (i, chunk) in source.as_bytes().chunks(32 * 1024).enumerate() {
-            sftp.session
+            session
                 .write(&handle, (i * 32 * 1024) as u64, chunk.to_vec())
                 .await
                 .unwrap();
         }
-        sftp.session.close(handle).await.unwrap();
-        let first = read_document(&sftp, &path, None, None).await.unwrap();
+        session.close(handle).await.unwrap();
+        let first = read_document(&session, &path, None, None).await.unwrap();
         assert!(first.content.len() <= PAGE_SIZE);
         assert!(first.page.is_some());
         // The editable reader and saving protocol cannot mistake a page for a complete file.
-        assert!(super::super::read(&sftp, &path).await.is_err());
+        assert!(super::super::read(&session, &path).await.is_err());
         let request = Request {
             id: server.id,
             operation: Uuid::new_v4(),
@@ -196,21 +196,21 @@ mod tests {
             allow_cached: false,
         };
         assert!(
-            save(&Operations::default(), sftp.clone(), &request)
+            save(&Operations::default(), &remote, &session, &request)
                 .await
                 .unwrap_err()
                 .to_string()
                 .contains("read-only")
         );
         assert!(
-            read_document(&sftp, &path, Some(0), Some("stale"))
+            read_document(&session, &path, Some(0), Some("stale"))
                 .await
                 .is_err()
         );
         let mut assembled = first.content.clone();
         let mut next = first.page.as_ref().unwrap().next;
         while let Some(offset) = next {
-            let page = read_document(&sftp, &path, Some(offset), Some(&first.revision))
+            let page = read_document(&session, &path, Some(offset), Some(&first.revision))
                 .await
                 .unwrap();
             assert!(page.content.len() <= PAGE_SIZE);
@@ -219,7 +219,7 @@ mod tests {
         }
         assert_eq!(assembled, source);
         assert_eq!(
-            read_document(&sftp, &path, Some(0), Some(&first.revision))
+            read_document(&session, &path, Some(0), Some(&first.revision))
                 .await
                 .unwrap()
                 .content,
@@ -227,7 +227,7 @@ mod tests {
         );
         assert!(
             read_document(
-                &sftp,
+                &session,
                 &path,
                 Some(source.len() as u64),
                 Some(&first.revision)
@@ -236,34 +236,33 @@ mod tests {
             .is_err()
         );
         // An observed replacement invalidates the old viewer; PDF stays out of the text path.
-        let handle = sftp
-            .session
+        let handle = session
             .open(&path, OpenFlags::WRITE, FileAttributes::empty())
             .await
             .unwrap()
             .handle;
-        sftp.session
+        session
             .write(&handle, 0, b"changed".to_vec())
             .await
             .unwrap();
         assert!(
-            read_document(&sftp, &path, Some(0), Some(&first.revision))
+            read_document(&session, &path, Some(0), Some(&first.revision))
                 .await
                 .is_err()
         );
-        sftp.session
+        session
             .write(&handle, 0, b"%PDF-1.7".to_vec())
             .await
             .unwrap();
         assert!(
-            read_document(&sftp, &path, None, None)
+            read_document(&session, &path, None, None)
                 .await
                 .unwrap_err()
                 .to_string()
                 .contains("binary")
         );
-        sftp.session.close(handle).await.unwrap();
-        sftp.session.remove(&path).await.unwrap();
+        session.close(handle).await.unwrap();
+        session.remove(&path).await.unwrap();
     }
     #[test]
     fn page_boundaries_preserve_utf8_crlf_and_long_lines() {

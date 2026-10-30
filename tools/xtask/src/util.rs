@@ -299,6 +299,46 @@ pub fn without_release_secrets(c: &mut Command) -> &mut Command {
     c
 }
 
+/// Tells the app what it was built from, for its Settings: the commit, with
+/// `+` when a local checkout had changes, and whether it was built outside CI.
+pub fn with_build_stamp(c: &mut Command) -> &mut Command {
+    let local = env::var_os("GITHUB_ACTIONS").is_none();
+    match build_commit(&root(), local) {
+        Some(commit) => c.env("NEWPORT_BUILD_COMMIT", commit),
+        None => c.env_remove("NEWPORT_BUILD_COMMIT"),
+    };
+    if local {
+        c.env("NEWPORT_BUILD_LOCAL", "1");
+    } else {
+        c.env_remove("NEWPORT_BUILD_LOCAL");
+    }
+    c
+}
+
+/// The checkout's short commit, with `+` when a local checkout has changes.
+/// CI builds the commit as it is, and the files a Remote apps build edits
+/// itself aren't changes.
+fn build_commit(repo: &Path, local: bool) -> Option<String> {
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    let commit = git(&["rev-parse", "--short=8", "HEAD"])?;
+    let excluded = crate::remote_apps::EDITED.map(|path| format!(":(exclude){path}"));
+    let mut status = vec!["status", "--porcelain", "--", "."];
+    status.extend(excluded.iter().map(String::as_str));
+    let changed = local && git(&status).is_some_and(|status| !status.is_empty());
+    Some(format!("{commit}{}", if changed { "+" } else { "" }))
+}
+
 /// Where the update signing key comes from.
 #[derive(Debug, PartialEq, Eq)]
 pub enum KeySource {
@@ -365,6 +405,50 @@ pub fn append_github_file(variable: &str, text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_build_commit_is_marked_only_for_real_local_changes() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(repo.path())
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "{args:?}"
+            );
+        };
+        git(&["init", "-q"]);
+        for file in ["Cargo.lock", "src.rs"] {
+            fs::write(repo.path().join(file), "one").unwrap();
+        }
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "one",
+        ]);
+        let clean = build_commit(repo.path(), true).unwrap();
+        assert!(!clean.ends_with('+'), "{clean}");
+        // A Remote apps build edits the lockfile itself.
+        fs::write(repo.path().join("Cargo.lock"), "two").unwrap();
+        assert_eq!(build_commit(repo.path(), true).unwrap(), clean);
+        fs::write(repo.path().join("src.rs"), "two").unwrap();
+        assert_eq!(
+            build_commit(repo.path(), true).unwrap(),
+            format!("{clean}+")
+        );
+        // CI builds the commit as it is.
+        assert_eq!(build_commit(repo.path(), false).unwrap(), clean);
+    }
     use std::collections::HashMap;
 
     fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {

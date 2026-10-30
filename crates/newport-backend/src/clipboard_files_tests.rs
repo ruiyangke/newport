@@ -65,9 +65,11 @@ impl Disk {
             .count()
     }
     pub(crate) async fn until(&self, condition: impl Fn(&Self) -> bool) {
+        // Sleeping rather than yielding lets paused time advance, so timers
+        // and this timeout still fire in tests that pause the clock.
         tokio::time::timeout(Duration::from_secs(5), async {
             while !condition(self) {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })
         .await
@@ -964,11 +966,11 @@ async fn a_running_upload_refreshes_its_partial_before_other_sweeps_find_it_stal
     disk.until(|disk| disk.names().is_empty()).await;
 }
 
-/// The real [`crate::ssh::sftp::Sftp`] against the fixture of
+/// Clipboard files over a real SFTP session, against the fixture of
 /// `cargo xtask test ssh`, whose SFTP server works in a real directory.
 pub(crate) mod fixture {
     use super::*;
-    use crate::ssh::sftp::Sftp;
+    use crate::clipboard_files::Remote as Sftp;
     use russh_sftp::client::error::Error;
     use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 
@@ -976,8 +978,21 @@ pub(crate) mod fixture {
     impl Connect for Fixture {
         type Remote = Sftp;
         async fn connect(&self) -> Result<Arc<Sftp>> {
-            Ok(Arc::new(Sftp::connect(&server()).await?))
+            Ok(Arc::new(Sftp(
+                crate::remote::Sftp::new(crate::ssh::link(&server(), crate::ssh::no_jump_hosts))
+                    .dedicated()
+                    .await?,
+            )))
         }
+    }
+    /// A session of its own on a new link to the fixture.
+    pub(crate) async fn connect() -> Sftp {
+        Sftp(
+            crate::remote::Sftp::new(crate::ssh::link(&server(), crate::ssh::no_jump_hosts))
+                .dedicated()
+                .await
+                .unwrap(),
+        )
     }
     pub(crate) fn server() -> crate::model::Server {
         serde_json::from_value(serde_json::json!({
@@ -991,7 +1006,7 @@ pub(crate) mod fixture {
 
     /// A connection with an empty clipboard cache.
     async fn clean() -> (Arc<Sftp>, String) {
-        let sftp = Arc::new(Sftp::connect(&server()).await.unwrap());
+        let sftp = Arc::new(connect().await);
         let root = root_of(&sftp.home().await.unwrap());
         remove_tree(&*sftp, &root).await.unwrap();
         (sftp, root)
@@ -1010,31 +1025,24 @@ pub(crate) mod fixture {
     }
     async fn read(sftp: &Sftp, path: &str) -> Vec<u8> {
         let handle = sftp
-            .session
+            .0
             .open(path, OpenFlags::READ, FileAttributes::empty())
             .await
             .unwrap()
             .handle;
         let mut bytes = Vec::new();
         loop {
-            match sftp.session.read(&handle, bytes.len() as u64, 65536).await {
+            match sftp.0.read(&handle, bytes.len() as u64, 65536).await {
                 Ok(data) => bytes.extend(data.data),
                 Err(Error::Status(status)) if status.status_code == StatusCode::Eof => break,
                 Err(error) => panic!("{error}"),
             }
         }
-        sftp.session.close(handle).await.unwrap();
+        sftp.0.close(handle).await.unwrap();
         bytes
     }
     async fn mode(sftp: &Sftp, path: &str) -> u32 {
-        sftp.session
-            .stat(path)
-            .await
-            .unwrap()
-            .attrs
-            .permissions
-            .unwrap()
-            & 0o777
+        sftp.0.stat(path).await.unwrap().attrs.permissions.unwrap() & 0o777
     }
     async fn upload(copied: &Copied) -> Option<Vec<u8>> {
         let files = Files::new(Fixture, Mode::LongRead);
@@ -1107,10 +1115,10 @@ pub(crate) mod fixture {
         );
         // The link was stored as written, then reads through to its target.
         let link = format!("{folder}/docs/link");
-        let target = sftp.session.readlink(&link).await.unwrap().files;
+        let target = sftp.0.readlink(&link).await.unwrap().files;
         assert_eq!(target[0].filename, "nested/deep.txt");
         assert_eq!(sftp.kind(&link).await.unwrap(), Some(Kind::File));
-        assert!(sftp.session.lstat(&link).await.unwrap().attrs.is_symlink());
+        assert!(sftp.0.lstat(&link).await.unwrap().attrs.is_symlink());
         assert_eq!(read(&sftp, &link).await, b"deep");
         let named = format!("{folder}/名前 1.txt");
         assert_eq!(read(&sftp, &named).await, vec![7u8; 100_000]);
@@ -1214,14 +1222,14 @@ pub(crate) mod fixture {
             mtime: Some(1_000_000_000),
             ..FileAttributes::empty()
         };
-        sftp.session.setstat(&partial, old).await.unwrap();
+        sftp.0.setstat(&partial, old).await.unwrap();
         let mtime = |attrs: FileAttributes| attrs.mtime.unwrap();
         assert_eq!(
-            mtime(sftp.session.stat(&partial).await.unwrap().attrs),
+            mtime(sftp.0.stat(&partial).await.unwrap().attrs),
             1_000_000_000
         );
         sftp.touch(&partial).await.unwrap();
-        let modified = mtime(sftp.session.stat(&partial).await.unwrap().attrs);
+        let modified = mtime(sftp.0.stat(&partial).await.unwrap().attrs);
         let now = now
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()

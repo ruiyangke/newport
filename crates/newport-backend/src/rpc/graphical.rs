@@ -251,7 +251,7 @@ mod tests {
             "{refused}"
         );
         let (_, owner) = manager.current(server.id).unwrap();
-        assert!(owner.connected_lease().await.is_none());
+        assert!(!owner.has_link());
         assert!(owner.graphical_sessions().is_empty());
         assert_eq!(desktop.0.load(Ordering::SeqCst), 0);
         // Local RPC remains strict about unknown launch requirements.

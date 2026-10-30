@@ -44,9 +44,14 @@ impl Host for TestHost {
             _ => Err(json!({"code":"UNKNOWN_METHOD", "message":"Unknown fixture method"})),
         }
     }
-    async fn open_terminal(&self, _: TerminalOpen) -> Result<Box<dyn Send>, String> {
+    async fn open_terminal(&self, _: TerminalOpen) -> Result<TerminalChannel, String> {
         self.terminals.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::new(Terminal(self.terminals.clone())))
+        let (input, inputs) = tokio::sync::mpsc::channel(1);
+        let (outputs, output) = tokio::sync::mpsc::channel(1);
+        Ok(TerminalChannel {
+            io: crate::terminal::Io { input, output },
+            guard: Box::new((Terminal(self.terminals.clone()), inputs, outputs)),
+        })
     }
     async fn open_remote_apps(
         &self,
@@ -416,15 +421,15 @@ async fn requests_over_capacity_are_refused_with_busy_instead_of_closed() {
         let mut stream = connection(path.clone());
         request(&mut stream, "fixture.echo", json!({}));
         let refused = response(&mut stream);
-        // Terminal I/O has its own admission and is not refused.
+        // A terminal opens on its own connection, outside command admission.
         let mut terminal = connection(path.clone());
         request(
             &mut terminal,
-            "terminal_read",
-            json!({"session": uuid::Uuid::nil()}),
+            protocol::TERMINAL_OPEN_LEASE,
+            json!({"id":Uuid::new_v4(),"session":Uuid::new_v4(),"cols":80,"rows":24}),
         );
-        let error = response(&mut terminal).error.unwrap_or_default();
-        assert_ne!(error["code"], newport_platform::ipc::protocol::BUSY);
+        assert!(response(&mut terminal).error.is_none());
+        drop(terminal);
         // Idle connections fill the remaining connection slots; the next
         // connection is refused before its request is read.
         let idle: Vec<_> = (0..super::CONNECTIONS - super::COMMANDS)

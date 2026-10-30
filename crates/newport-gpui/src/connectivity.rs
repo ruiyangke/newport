@@ -62,12 +62,13 @@ pub fn scoped<'a>(id: &str, snapshot: &serde_json::Value, cx: &'a App) -> Option
 }
 
 pub fn for_scope<'a>(scope: &serde_json::Value, cx: &'a App) -> Option<&'a ServerState> {
+    use newport_domain::connection_scope::{instance, revision};
     let store = cx.try_global::<Connectivity>()?;
-    if scope[9].as_str()? != store.snapshot.instance_id.to_string() {
+    if instance(scope)? != store.snapshot.instance_id.to_string() {
         return None;
     }
     server(scope[0].as_str()?, cx)
-        .filter(|state| state.connection_revision == scope[8].as_u64().unwrap_or(0))
+        .filter(|state| state.connection_revision == revision(scope).unwrap_or(0))
 }
 
 /// Subscribe once for an entity, scoped to the server it currently displays.
@@ -177,5 +178,40 @@ mod tests {
         connected.revision = 99;
         cx.update(|cx| publish(connected, cx));
         assert!(cx.read(|cx| server(&id.to_string(), cx).is_none()));
+    }
+
+    #[gpui::test]
+    fn a_scope_finds_its_server_from_the_identity_the_app_makes(cx: &mut gpui::TestAppContext) {
+        let id = Uuid::new_v4();
+        let instance = Uuid::new_v4();
+        cx.update(|cx| {
+            install(cx);
+            publish(
+                Snapshot {
+                    instance_id: instance,
+                    revision: 1,
+                    servers: [(
+                        id,
+                        ServerState {
+                            connection_revision: 3,
+                            phase: Phase::Connected,
+                            ..Default::default()
+                        },
+                    )]
+                    .into(),
+                },
+                cx,
+            )
+        });
+        // Reached through a jump host, as every connection field counts.
+        let server = serde_json::json!({"id":id,"sshHost":"h","sshUser":"u","sshPort":22,"proxy":{"jump":"j"}});
+        let snapshot = |revision: u64| serde_json::json!({"instanceId":instance,"runtime":{"connectionRevisions":{id.to_string():revision}}});
+        let scope = newport_domain::connection_scope::connection(&server, &snapshot(3));
+        assert_eq!(
+            cx.read(|cx| for_scope(&scope, cx).map(|state| state.phase)),
+            Some(Phase::Connected)
+        );
+        let stale = newport_domain::connection_scope::connection(&server, &snapshot(2));
+        assert!(cx.read(|cx| for_scope(&stale, cx).is_none()));
     }
 }

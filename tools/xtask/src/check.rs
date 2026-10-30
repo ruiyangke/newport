@@ -147,6 +147,7 @@ pub fn dev(args: &[OsString], remote_apps: bool) -> Result<()> {
         let prepared = crate::remote_apps::prepare()?;
         let mut cargo = command("cargo");
         cargo.args(["build", "-p", "newport-app"]);
+        util::with_build_stamp(&mut cargo);
         util::run(util::without_release_secrets(prepared.apply(&mut cargo)))?;
         drop(prepared);
         // Launch as `cargo run` would, through the development runner.
@@ -155,6 +156,7 @@ pub fn dev(args: &[OsString], remote_apps: bool) -> Result<()> {
     }
     let mut cargo = command("cargo");
     cargo.args(["run", "--locked", "-p", "newport-app"]);
+    util::with_build_stamp(&mut cargo);
     if !args.is_empty() {
         cargo.arg("--").args(args);
     }
@@ -195,6 +197,7 @@ pub fn build(args: &BuildArgs, remote_apps: bool) -> Result<()> {
     let mut cargo = command("cargo");
     // Remote apps change the lockfile for the build, so it can't be locked.
     cargo.args(["build", "-p", "newport-app"]);
+    util::with_build_stamp(&mut cargo);
     match &prepared {
         Some(prepared) => {
             prepared.apply(&mut cargo);

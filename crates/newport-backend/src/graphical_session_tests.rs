@@ -827,7 +827,7 @@ async fn registry_keeps_profiles_and_saved_entries_separate_and_shutdown_stops_o
     let b = first.session(&duplicate, 0);
     let c = second.session(&server, 0);
     for owner in [&a, &b, &c] {
-        assert!(!owner.has_transport());
+        assert!(!owner.has_link());
         assert!(owner.graphical_sessions().is_empty());
     }
     let mut fixtures = Vec::new();

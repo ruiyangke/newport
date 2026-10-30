@@ -1,5 +1,5 @@
-use super::{Operations, canonical, child, path_valid, status};
-use crate::{manager::Shared, ssh::sftp::Sftp};
+use super::{Operations, Remote, canonical, child, path_valid, status};
+use crate::manager::Shared;
 use anyhow::{Context, Result, bail};
 use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use std::{
@@ -41,13 +41,6 @@ pub async fn native_transfer(
     if !local.is_absolute() {
         return Err("A selected local path and captured connection are required".into());
     }
-    let _invalidate = if uploading {
-        Some(ListingInvalidation(
-            crate::server_session::resolve(state, request.id).await?,
-        ))
-    } else {
-        None
-    };
     let expected_connection = serde_json::Value::Array(request.expected_connection);
     operations
         .run_with_connection(
@@ -55,10 +48,11 @@ pub async fn native_transfer(
             request.id,
             request.operation,
             Some(&expected_connection),
-            async |server| {
+            async |_server, owner| {
+                let remote = owner.files.remote(&owner);
+                let _invalidate = uploading.then(|| ListingInvalidation(owner));
                 path_valid(&request.path)?;
-                let sftp = Arc::new(Sftp::connect(&server).await?);
-                operations.retry_upload_cleanup(sftp.clone());
+                operations.retry_upload_cleanup(remote.clone());
                 let name = if uploading {
                     local
                         .file_name()
@@ -76,11 +70,11 @@ pub async fn native_transfer(
                 let progress =
                     |done, total| operations.progress(request.operation, &name, done, total);
                 if uploading {
-                    upload(operations, sftp, &local, &request.path, progress)
+                    upload(operations, &remote, &local, &request.path, progress)
                         .await
                         .map(Some)
                 } else {
-                    download(operations, &sftp, &request.path, &local, progress).await?;
+                    download(operations, &remote, &request.path, &local, progress).await?;
                     Ok(Some(local.to_string_lossy().into_owned()))
                 }
             },
@@ -88,11 +82,11 @@ pub async fn native_transfer(
         .await
 }
 
-// Cancellation drops the operation future. Keep its transport alive just long
-// enough to remove the staging file; never publish an incomplete upload.
+// Cancellation drops the operation future. Remove the staging file over the
+// server's shared session; never publish an incomplete upload.
 pub(super) struct RemoteTemp<'a> {
     pub(super) operations: &'a Operations,
-    pub(super) sftp: Arc<Sftp>,
+    pub(super) remote: Remote,
     pub(super) record: Option<super::operations::recovery::Upload>,
     pub(super) created: bool,
 }
@@ -100,14 +94,16 @@ impl Drop for RemoteTemp<'_> {
     fn drop(&mut self) {
         if let Some(record) = self.record.take() {
             self.operations
-                .cleanup_upload(self.sftp.clone(), record, self.created);
+                .cleanup_upload(self.remote.clone(), record, self.created);
         }
     }
 }
 
+/// Uploads `local` into `folder` on an SFTP session of its own, so it never
+/// holds up other file operations.
 pub async fn upload(
     operations: &Operations,
-    sftp: Arc<Sftp>,
+    remote: &Remote,
     local: &Path,
     folder: &str,
     progress: impl Fn(u64, Option<u64>),
@@ -116,9 +112,11 @@ pub async fn upload(
         .file_name()
         .and_then(|name| name.to_str())
         .context("File name must be valid Unicode")?;
-    let folder = canonical(&sftp, folder).await?;
+    let session = remote.sftp.dedicated().await?;
+    let session = &session;
+    let folder = canonical(session, folder).await?;
     let destination = child(&folder, name)?;
-    match sftp.session.lstat(&destination).await {
+    match session.lstat(&destination).await {
         Ok(_) => bail!(
             "A remote item named {name} already exists. Rename your local file before uploading."
         ),
@@ -133,16 +131,15 @@ pub async fn upload(
     let total = metadata.len();
     let staging = child(&folder, &format!(".newport-upload-{}", Uuid::new_v4()))?;
     let record = operations
-        .track_upload(sftp.cleanup_scope().clone(), staging.clone())
+        .track_upload(remote.cleanup_scope()?, staging.clone())
         .await?;
     let mut cleanup = RemoteTemp {
         operations,
-        sftp: sftp.clone(),
+        remote: remote.clone(),
         record: Some(record),
         created: false,
     };
-    let handle = sftp
-        .session
+    let handle = session
         .open(
             &staging,
             OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE,
@@ -166,7 +163,6 @@ pub async fn upload(
         }
     };
     cleanup.created = true;
-    let session = &sftp.session;
     let open = &handle;
     let offset = write_file(
         &mut source,
@@ -177,7 +173,7 @@ pub async fn upload(
         |offset| progress(offset, Some(total)),
     )
     .await?;
-    sftp.session.close(handle).await?;
+    session.close(handle).await?;
     if offset != total
         || !same_source(&metadata, &source.metadata().await?)?
         || !same_source(
@@ -190,7 +186,7 @@ pub async fn upload(
         bail!("Local file changed during upload. Please try again.");
     }
     // Standard SFTP v3 rename must fail when the destination already exists.
-    sftp.session
+    session
         .rename(&staging, &destination)
         .await
         .context("Could not finish upload; destination may already exist")?;
@@ -432,31 +428,35 @@ where
             }
         })
 }
+/// Downloads `path` to `local` on an SFTP session of its own, so it never
+/// holds up other file operations.
 pub async fn download(
     operations: &Operations,
-    sftp: &Sftp,
-    remote: &str,
+    remote: &Remote,
+    path: &str,
     local: &Path,
     progress: impl Fn(u64, Option<u64>),
 ) -> Result<()> {
-    path_valid(remote)?;
-    let attrs = sftp.session.stat(remote).await?.attrs;
+    path_valid(path)?;
+    let session = remote.sftp.dedicated().await?;
+    let session = &session;
+    let attrs = session.stat(path).await?.attrs;
     if !attrs.is_regular() {
         bail!("Only regular files can be downloaded");
     }
     let parent = local
         .parent()
         .context("Download destination has no parent folder")?;
-    let mut cleanup = operations.stage_download(sftp.server_id(), parent).await?;
+    let mut cleanup = operations
+        .stage_download(remote.server_id(), parent)
+        .await?;
     let result = async {
         let mut destination =
             tokio::fs::File::from_std(cleanup.staging.as_ref().unwrap().reopen()?);
-        let handle = sftp
-            .session
-            .open(remote, OpenFlags::READ, FileAttributes::empty())
+        let handle = session
+            .open(path, OpenFlags::READ, FileAttributes::empty())
             .await?
             .handle;
-        let session = &sftp.session;
         let open = &handle;
         let offset = read_download(
             &mut destination,
@@ -471,8 +471,8 @@ pub async fn download(
             |offset| progress(offset, attrs.size),
         )
         .await?;
-        sftp.session.close(handle).await?;
-        let after = sftp.session.stat(remote).await?.attrs;
+        session.close(handle).await?;
+        let after = session.stat(path).await?.attrs;
         if attrs.size.is_some_and(|size| size != offset)
             || attrs.size != after.size
             || attrs.mtime != after.mtime
