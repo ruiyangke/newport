@@ -165,7 +165,7 @@ impl Newport {
             .count();
         let importing = self.importing();
         let any_importable = hosts.iter().any(|h| h["importable"] == true);
-        let offer_import = reading || error.is_some() || !hosts.is_empty();
+        let offer_import = error.is_some() || !hosts.is_empty();
 
         let title = crate::controls::page_title(
             "Welcome to Newport",
@@ -289,9 +289,6 @@ impl Newport {
                             }),
                     ),
             )
-            .when(reading, |v| {
-                v.child(crate::empty::compact(format!("Reading {path}…"), cx))
-            })
             .when_some(error, |v, error| {
                 v.child(
                     div()
@@ -435,24 +432,28 @@ impl Newport {
                     .items_center()
                     .justify_center()
                     .p(px(24.))
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(560.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(20.))
-                            .child(title)
-                            .when(offer_import, |v| v.child(card))
-                            .child(manual)
-                            .child(features)
-                            .child(
-                                div()
-                                    .text_size(px(crate::ui::FONT_SIZE))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Servers are saved on this Mac. The first time you open one, Newport asks before installing its small helper there."),
-                            ),
-                    ),
+                    // The local config read settles within a frame or two; the
+                    // centred column waits for it so it is laid out only once.
+                    .when(!reading, |page| {
+                        page.child(
+                            div()
+                                .w_full()
+                                .max_w(px(560.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(20.))
+                                .child(title)
+                                .when(offer_import, |v| v.child(card))
+                                .child(manual)
+                                .child(features)
+                                .child(
+                                    div()
+                                        .text_size(px(crate::ui::FONT_SIZE))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Servers are saved on this Mac. The first time you open one, Newport asks before installing its small helper there."),
+                                ),
+                        )
+                    }),
             )
             .into_any_element()
     }

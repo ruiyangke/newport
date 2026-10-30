@@ -423,7 +423,8 @@ impl Newport {
                 )
             })
             .when(
-                self.git.changes.searching() || self.initial_loading("git-list"),
+                self.git.changes.searching()
+                    || self.initial_loading("git-list") && self.placeholder_due("git-list"),
                 |view| view.child(project_loading::listing("changed files", 0, 8)),
             )
             .when(self.git.changes.filtering(), |view| {

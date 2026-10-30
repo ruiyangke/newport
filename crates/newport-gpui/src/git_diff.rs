@@ -636,6 +636,7 @@ impl Newport {
                 // Use the same full-width column as loaded diff lines. The
                 // centered empty-state wrapper adds gutters that don't belong
                 // to the file content and makes the skeleton jump on arrival.
+                let placeholder = self.git.changes.searching() || self.placeholder_due("git-list");
                 return div()
                     .flex_1()
                     .min_w_0()
@@ -643,7 +644,7 @@ impl Newport {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .child(project_loading::diff())
+                    .when(placeholder, |view| view.child(project_loading::diff()))
                     .into_any_element();
             }
             let content = if self.git_is_inspection() {

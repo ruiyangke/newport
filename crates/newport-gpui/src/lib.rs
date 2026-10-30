@@ -303,6 +303,8 @@ struct Newport {
     work: request_dispatch::Dispatcher,
     replies: mpsc::Receiver<Completion>,
     last_refresh: Instant,
+    /// The tick's last check for loading placeholders that fell due.
+    placeholders_checked_at: Instant,
     window_visible: bool,
     focus: FocusHandle,
     navigation_focus: Vec<FocusHandle>,
@@ -561,6 +563,7 @@ impl Newport {
             work,
             replies,
             last_refresh: Instant::now(),
+            placeholders_checked_at: Instant::now(),
             window_visible: window.is_visible(),
             focus: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
@@ -1071,7 +1074,12 @@ impl Newport {
                 self.refresh();
             }
         }
-        changed |= self.poll_connections(Instant::now());
+        let now = Instant::now();
+        changed |= self.poll_connections(now);
+        changed |= self
+            .resources
+            .placeholder_became_due(self.placeholders_checked_at, now);
+        self.placeholders_checked_at = now;
         let editor = self.code_workspace();
         if editor.as_ref().is_none_or(|e| {
             let e = e.read(cx);
@@ -1275,7 +1283,7 @@ impl Newport {
         if let Some(error) = &r.error {
             return error_banner(format!("{key}-error"), error.clone(), cx).into_any_element();
         }
-        if r.pending && (r.value.is_null() || key.ends_with("-more")) {
+        if r.pending && (r.value.is_null() || key.ends_with("-more")) && r.placeholder_due() {
             if self.page == Page::Projects
                 && (key.starts_with("git-") || key.starts_with("project-") || key == "repository")
             {

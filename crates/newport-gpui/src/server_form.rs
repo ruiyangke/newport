@@ -244,7 +244,7 @@ impl ServerForm {
             first: NAME,
             pending: false,
             error: None,
-            scroll: modal::FormScroll::new(11, window, cx),
+            scroll: modal::FormScroll::new(10, window, cx),
             _subscriptions: subscriptions,
         }
     }
@@ -529,7 +529,7 @@ impl ServerForm {
                 HOST | PORT => 2,
                 USER => 3,
                 PASSWORD => 6,
-                IDENTITY => 9,
+                IDENTITY => 8,
                 _ => unreachable!(),
             });
         } else {
@@ -542,9 +542,9 @@ impl ServerForm {
         if self.value["authMethod"] == "password" {
             7
         } else if self.file_mode && self.value["agentKeyFingerprint"].is_null() {
-            10
-        } else {
             9
+        } else {
+            8
         }
     }
 
@@ -687,15 +687,14 @@ impl Render for ServerForm {
                 )),
             ));
         if key_auth {
-            let initial_keys_loading =
-                self.keys_loading && self.key_revision.is_none() && self.keys.is_empty();
-            let has_key_info = self.keys.is_empty()
+            // The spinner beside Refresh shows the first load; an empty list is
+            // only reported once the agent has answered, so no row comes and goes.
+            let no_keys = self.keys.is_empty() && self.key_revision.is_some();
+            let has_key_info = no_keys
                 || !self.warnings.is_empty()
                 || self.value["agentKeyFingerprint"].is_string();
             let mut info = div().flex().flex_col().gap(px(14.));
-            if initial_keys_loading {
-                info = info.child(crate::loading::lines("agent keys", 1));
-            } else if self.keys.is_empty() {
+            if no_keys {
                 info = info.child(help(
                     "No keys found. Unlock your SSH agent and refresh, or use a key file.",
                     cx,
@@ -717,38 +716,44 @@ impl Render for ServerForm {
                         7,
                         div()
                             .flex()
-                            .items_center()
-                            .gap(px(7.))
-                            .child(
-                                crate::controls::form_button("refresh-agent-keys")
-                                    .label("Refresh agent keys")
-                                    .rounded(px(crate::ui::RADIUS))
-                                    .disabled(self.pending || self.keys_loading)
-                                    .on_click(cx.listener(|this, _, _, cx| this.refresh_keys(cx))),
-                            )
+                            .flex_col()
+                            .gap(px(14.))
                             .child(
                                 div()
-                                    .id("refresh-agent-keys-progress")
-                                    .size(px(14.))
-                                    .flex_shrink_0()
-                                    .when(self.keys_loading, |slot| {
-                                        slot.role(accesskit::Role::Status)
-                                            .aria_label("Refreshing agent keys")
-                                            .child(
-                                                Spinner::new()
-                                                    .with_size(px(14.))
-                                                    .color(cx.theme().muted_foreground),
-                                            )
-                                    }),
-                            ),
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.))
+                                    .child(
+                                        crate::controls::form_button("refresh-agent-keys")
+                                            .label("Refresh agent keys")
+                                            .rounded(px(crate::ui::RADIUS))
+                                            .disabled(self.pending || self.keys_loading)
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.refresh_keys(cx)),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("refresh-agent-keys-progress")
+                                            .size(px(14.))
+                                            .flex_shrink_0()
+                                            .when(self.keys_loading, |slot| {
+                                                slot.role(accesskit::Role::Status)
+                                                    .aria_label("Refreshing agent keys")
+                                                    .child(
+                                                        Spinner::new()
+                                                            .with_size(px(14.))
+                                                            .color(cx.theme().muted_foreground),
+                                                    )
+                                            }),
+                                    ),
+                            )
+                            .when(has_key_info, |row| row.child(info)),
                     ),
                 );
-            if has_key_info {
-                body = body.child(self.scroll.row(8, info));
-            }
             if self.file_mode && self.value["agentKeyFingerprint"].is_null() {
                 body = body.child(self.scroll.row(
-                    9,
+                    8,
                     self.input_field(IDENTITY, "Identity file", cx).child(help(
                         "Load encrypted keys into your system agent first.",
                         cx,
@@ -971,7 +976,6 @@ mod tests {
             "form-scroll-row-7",
             "form-scroll-row-8",
             "form-scroll-row-9",
-            "form-scroll-row-10",
         ];
         let bounds = cx.debug_bounds(selectors[row]).unwrap();
         let viewport = form.read_with(cx, |form, _| form.scroll.handle.bounds());
@@ -1135,7 +1139,7 @@ mod tests {
         form.update_in(cx, |form, window, cx| form.select_key("file", window, cx));
         draw(cx);
         draw(cx);
-        visible(&form, 9, cx);
+        visible(&form, 8, cx);
         let focused = form.update_in(cx, |form, window, cx| {
             form.fields[IDENTITY].focus_handle(cx).is_focused(window)
         });
@@ -1158,7 +1162,7 @@ mod tests {
         draw(cx);
         let key_row = cx.debug_bounds("form-scroll-row-6").unwrap();
         let refresh_row = cx.debug_bounds("form-scroll-row-7").unwrap();
-        let identity_row = cx.debug_bounds("form-scroll-row-9").unwrap();
+        let identity_row = cx.debug_bounds("form-scroll-row-8").unwrap();
         let button = cx.update(|window, _| {
             gpui_kit::base::test_support::snapshots(window)
                 .into_iter()
@@ -1173,7 +1177,7 @@ mod tests {
         draw(cx);
         assert_eq!(cx.debug_bounds("form-scroll-row-6").unwrap(), key_row);
         assert_eq!(cx.debug_bounds("form-scroll-row-7").unwrap(), refresh_row);
-        assert_eq!(cx.debug_bounds("form-scroll-row-9").unwrap(), identity_row);
+        assert_eq!(cx.debug_bounds("form-scroll-row-8").unwrap(), identity_row);
         cx.update(|window, _| {
             let snapshots = gpui_kit::base::test_support::snapshots(window);
             let refresh = snapshots
@@ -1186,6 +1190,31 @@ mod tests {
             form.read_with(cx, |form, cx| form.key.read(cx).selected_value().cloned()),
             Some("file".to_owned())
         );
+    }
+
+    #[gpui::test]
+    fn loading_agent_keys_keeps_form_geometry(cx: &mut TestAppContext) {
+        let (form, cx) = editor(cx, false);
+        cx.simulate_resize(gpui::size(px(1000.), px(900.)));
+        form.update(cx, |form, cx| {
+            form.keys_loading = true;
+            cx.notify();
+        });
+        draw(cx);
+        let refresh_row = cx.debug_bounds("form-scroll-row-7").unwrap();
+        let footer = cx.debug_bounds("server-editor-footer").unwrap();
+        cx.update(|window, cx| {
+            form.update(cx, |form, cx| {
+                form.keys_loading = false;
+                form.key_revision = Some(std::time::Instant::now());
+                form.keys = vec![json!({"source":"system", "fingerprint":"SHA256:fixture", "comment":"Fixture key"})];
+                form.sync_key_choices(window, cx);
+                cx.notify();
+            });
+        });
+        draw(cx);
+        assert_eq!(cx.debug_bounds("form-scroll-row-7").unwrap(), refresh_row);
+        assert_eq!(cx.debug_bounds("server-editor-footer").unwrap(), footer);
     }
 
     #[gpui::test]
@@ -1347,7 +1376,7 @@ mod tests {
             })
         });
         draw(cx);
-        visible(&form, 9, cx);
+        visible(&form, 8, cx);
         form.update(cx, |form, cx| {
             form.pending = true;
             cx.notify();
@@ -1382,6 +1411,6 @@ mod tests {
             form.read_with(cx, |form, _| form.error.as_ref().unwrap().input),
             Some(IDENTITY)
         );
-        visible(&form, 9, cx);
+        visible(&form, 8, cx);
     }
 }

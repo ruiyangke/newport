@@ -242,9 +242,10 @@ impl Newport {
                     .text_size(px(crate::ui::FONT_SIZE)),
                 )
             })
-            .when(loading && !has_page, |view| {
-                view.child(project_loading::listing("commit files", 0, 8))
-            })
+            .when(
+                loading && !has_page && self.placeholder_due("git-history-files"),
+                |view| view.child(project_loading::listing("commit files", 0, 8)),
+            )
             .when(
                 has_page && entries.is_empty() && !first_failed && !loading,
                 |view| {

@@ -1307,7 +1307,13 @@ impl Newport {
             .flex_1()
             .min_h_0()
             .child(self.files_toolbar(browser, &path, cx))
-            .child(self.status("file-project", cx))
+            // The row's own button shows progress; only a failure takes a row here.
+            .when(
+                self.resources
+                    .get("file-project")
+                    .is_some_and(|r| r.error.is_some()),
+                |view| view.child(self.status("file-project", cx)),
+            )
             .when_some(browser.reads.listing_error(), |view, error| {
                 let (attempted, named) = listing_target(browser.reads.attempted_path());
                 let message = format!("Couldn’t open {named}: {error}");

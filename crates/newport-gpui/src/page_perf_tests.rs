@@ -76,6 +76,7 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
         work: work.into(),
         replies,
         last_refresh: Instant::now(),
+        placeholders_checked_at: Instant::now(),
         window_visible: window.is_visible(),
         focus: cx.focus_handle(),
         sidebar_focus: cx.focus_handle(),

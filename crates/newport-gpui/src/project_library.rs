@@ -89,23 +89,9 @@ fn library_feedback(notice: LibraryNotice<'_>, cx: &App) -> AnyElement {
             };
             empty::pane(icon, title, description, cx).into_any_element()
         }
-        LibraryNotice::Refreshing => {
-            let message = "Refreshing projects…";
-            div()
-                .id("project-library-feedback")
-                .role(accesskit::Role::Status)
-                .aria_label(message)
-                .w_full()
-                .min_w_0()
-                .px(px(crate::controls::PAGE_PADDING))
-                .pt(px(8.))
-                .text_size(px(crate::ui::FONT_SIZE))
-                .text_color(cx.theme().muted_foreground)
-                .child(message)
-                .into_any_element()
-        }
-        // Errors sit directly below the toolbar; see `library_error`.
-        LibraryNotice::Error { .. } => div().into_any_element(),
+        // The Refresh button shows progress, and errors sit directly below
+        // the toolbar; see `library_error`.
+        LibraryNotice::Refreshing | LibraryNotice::Error { .. } => div().into_any_element(),
     }
 }
 
@@ -488,7 +474,7 @@ impl Newport {
             .child(div().id("projects-scroll").flex_1().min_h_0().flex().flex_col().gap_3()
             .when(self.project_create.is_none() && self.project_creation_save_owner.as_ref().is_some_and(|(_,server)| server == &self.server) && self.resources.get("project-created-save").is_some_and(|r|r.error.is_some()), |v|v.child(div().px(px(crate::controls::PAGE_PADDING)).pt(px(8.)).flex().flex_col().gap_2().child(label("Repository created, but Newport couldn’t save its bookmark. Add the existing repository; don’t repeat creation.")).child(self.status("project-created-save",cx))))
             .when(empty_library, |view| view.child(self.empty_library(busy || form_open, cx)))
-            .when_some(notice.filter(|notice| *notice != LibraryNotice::Loading && !matches!(notice, LibraryNotice::Error { .. }) && !empty_library), |view, notice| view.child(div().flex_1().flex().flex_col().child(library_feedback(notice,cx))))
+            .when_some(notice.filter(|notice| matches!(notice, LibraryNotice::Empty(_)) && !empty_library), |view, notice| view.child(div().flex_1().flex().flex_col().child(library_feedback(notice,cx))))
             .when(loading,|view|view.child(div().px(px(crate::controls::PAGE_PADDING)).pt(px(8.)).child(project_loading::library(self.content_width.min(1240.) - crate::controls::PAGE_PADDING * 2.,cx))))
             .when(!loading && count > 0,|view|view.child(div().flex().flex_col().min_h_0().overflow_hidden()
                 .flex_1()

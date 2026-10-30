@@ -7,6 +7,11 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+/// How long a read stays pending before its placeholder is drawn. Local
+/// replies usually land sooner and go straight to their content, so a
+/// placeholder never flashes in and out ahead of a small empty state.
+pub const PLACEHOLDER_DELAY: Duration = Duration::from_millis(150);
+
 #[derive(Default)]
 pub struct Resource {
     pub value: Value,
@@ -31,6 +36,8 @@ pub struct Resource {
     pub finished_at: Option<Instant>,
     /// Last successful response; a failed refresh does not make old data fresh.
     pub updated_at: Option<Instant>,
+    /// When the pending read was dispatched.
+    pub started_at: Option<Instant>,
     poll_checked_at: Option<Instant>,
     generation: u64,
     presentation: Option<Presentation>,
@@ -54,6 +61,18 @@ impl Resource {
     /// Explicit refreshes and initial reads still expose their activity.
     pub fn display_pending(&self) -> bool {
         self.pending && (self.manual_pending || self.updated_at.is_none())
+    }
+
+    /// Whether this read has been pending long enough to draw a placeholder.
+    pub fn placeholder_due(&self) -> bool {
+        self.placeholder_due_at(Instant::now())
+    }
+    /// Background refreshes keep their content and never fall due.
+    fn placeholder_due_at(&self, now: Instant) -> bool {
+        self.display_pending()
+            && self
+                .started_at
+                .is_some_and(|started| now.saturating_duration_since(started) >= PLACEHOLDER_DELAY)
     }
 
     /// Settle a read whose generation has already been validated by its owner.
@@ -292,12 +311,19 @@ impl Resources {
         self.next += 1;
         row.generation = self.next;
         row.pending = true;
+        row.started_at = Some(Instant::now());
         row.manual_pending = manual || row.refreshing && row.manual_pending;
         if !preserve_stale_error || row.updated_at.is_none() {
             row.error = None;
             row.error_code = None;
         }
         Some(self.next)
+    }
+    /// Whether a pending read's placeholder fell due between two redraw checks.
+    pub fn placeholder_became_due(&self, since: Instant, now: Instant) -> bool {
+        self.rows
+            .values()
+            .any(|row| row.placeholder_due_at(now) && !row.placeholder_due_at(since))
     }
     pub fn complete(&mut self, key: &str, generation: u64, result: Result<Value, String>) -> bool {
         self.complete_at(key, generation, result, Instant::now())
@@ -438,6 +464,25 @@ impl Resources {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_placeholder_falls_due_once_after_the_delay_and_never_for_a_settled_read() {
+        let mut resources = Resources::default();
+        let generation = resources.begin("list").unwrap();
+        let started = resources.get("list").unwrap().started_at.unwrap();
+        let early = started + PLACEHOLDER_DELAY / 2;
+        let due = started + PLACEHOLDER_DELAY;
+        assert!(!resources.get("list").unwrap().placeholder_due_at(early));
+        assert!(!resources.placeholder_became_due(started, early));
+        assert!(resources.placeholder_became_due(early, due));
+        assert!(!resources.placeholder_became_due(due, due + PLACEHOLDER_DELAY));
+        resources.complete("list", generation, Ok(json!([])));
+        assert!(!resources.get("list").unwrap().placeholder_due_at(due));
+        assert!(!resources.placeholder_became_due(early, due));
+        resources.begin_refresh("list", false).unwrap();
+        let started = resources.get("list").unwrap().started_at.unwrap();
+        assert!(!resources.placeholder_became_due(started, started + PLACEHOLDER_DELAY));
+    }
 
     #[test]
     fn cached_prefix_retains_values_and_errors_but_retires_pending_generations() {
