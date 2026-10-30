@@ -103,7 +103,6 @@ pub(super) struct ServerForm {
     any_jump_hosts: bool,
     jump: Option<String>,
     keys: Vec<Value>,
-    warnings: Vec<String>,
     keys_loading: bool,
     key_revision: Option<Instant>,
     file_mode: bool,
@@ -336,7 +335,6 @@ impl ServerForm {
             any_jump_hosts,
             jump,
             keys: vec![],
-            warnings: vec![],
             keys_loading,
             key_revision: None,
             file_mode,
@@ -467,17 +465,8 @@ impl ServerForm {
         if let Some((value, error, revision)) = key_result {
             self.key_revision = revision;
             self.keys_loading = false;
-            if let Some(error) = error {
-                self.warnings = vec![format!("Couldn’t read agent keys: {error}")];
-            } else {
+            if error.is_none() {
                 self.keys = rows(&value["keys"]);
-                self.warnings = value["warnings"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect();
             }
             self.sync_key_choices(window, cx);
             cx.notify();
@@ -853,25 +842,7 @@ impl Render for ServerForm {
                 )),
             ));
         if key_auth {
-            // The spinner beside Refresh shows the first load; an empty list is
-            // only reported once the agent has answered, so no row comes and goes.
-            let no_keys = self.keys.is_empty() && self.key_revision.is_some();
-            let has_key_info = no_keys
-                || !self.warnings.is_empty()
-                || self.value["agentKeyFingerprint"].is_string();
-            let mut info = div().flex().flex_col().gap(px(14.));
-            if no_keys {
-                info = info.child(help(
-                    "No keys found. Unlock your SSH agent and refresh, or use a key file.",
-                    cx,
-                ));
-            }
-            for warning in &self.warnings {
-                info = info.child(help(warning.clone(), cx));
-            }
-            if let Some(fingerprint) = self.value["agentKeyFingerprint"].as_str() {
-                info = info.child(help(format!("Selected key: {fingerprint}"), cx));
-            }
+            let fingerprint = self.value["agentKeyFingerprint"].as_str();
             body = body
                 .child(self.scroll.row(
                     7,
@@ -914,7 +885,9 @@ impl Render for ServerForm {
                                             }),
                                     ),
                             )
-                            .when(has_key_info, |row| row.child(info)),
+                            .when_some(fingerprint, |row, fingerprint| {
+                                row.child(help(format!("Selected key: {fingerprint}"), cx))
+                            }),
                     ),
                 );
             if self.file_mode && self.value["agentKeyFingerprint"].is_null() {
