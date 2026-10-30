@@ -369,6 +369,38 @@ pub async fn delete_tunnel(state: &Shared, id: Uuid) -> Result<(), String> {
     }
     Ok(())
 }
+/// Delete several forwards of one server in a single configuration edit. Every
+/// forward must still match what the caller confirmed, or none is deleted.
+pub async fn delete_tunnels(state: &Shared, expected: Vec<Tunnel>) -> Result<(), String> {
+    let Some(server) = expected.first().map(|t| t.server_id) else {
+        return Ok(());
+    };
+    if expected.iter().any(|t| t.server_id != server) {
+        return Err("Forwards from different servers can’t be deleted together.".into());
+    }
+    let owner = state.owner(server)?;
+    let ids: Vec<Uuid> = expected.iter().map(|t| t.id).collect();
+    let deleted = ids.clone();
+    state
+        .edit_configuration(None, move |m| {
+            validate_forward_owner(m, &owner)?;
+            for tunnel in &expected {
+                if !m.config.tunnels.contains(tunnel) {
+                    return Err("Some forwards changed or were deleted meanwhile. Review the list and try again.".into());
+                }
+            }
+            let mut config = m.config.clone();
+            config.tunnels.retain(|t| !deleted.contains(&t.id));
+            Ok((config, ()))
+        })
+        .await?;
+    for id in ids {
+        if let Some(cleanup) = state.tunnel_cleanup(id) {
+            cleanup.wait().await;
+        }
+    }
+    Ok(())
+}
 pub async fn set_tunnel_connected(state: &Shared, id: Uuid, connected: bool) -> Result<(), String> {
     if connected {
         state.connect_tunnel(id)

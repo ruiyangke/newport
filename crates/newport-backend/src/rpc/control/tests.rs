@@ -518,6 +518,54 @@ async fn native_forward_edits_and_browser_opening_reject_stale_requests() {
     fixture.stop().await;
 }
 
+#[tokio::test]
+async fn deleting_several_forwards_is_all_or_nothing() {
+    let fixture = Fixture::start().await;
+    let server = server();
+    fixture
+        .call("save_server", json!({"server":server}))
+        .await
+        .unwrap();
+    let mut tunnels = Vec::new();
+    for (remote, local) in [(3000, 9000), (3001, 9001), (3002, 9002)] {
+        let mut tunnel =
+            newport_domain::forwarding::discovered_tunnel(&[], server.id, "127.0.0.1", remote)
+                .unwrap();
+        tunnel.local_port = local;
+        fixture
+            .call("save_tunnel", json!({"tunnel":tunnel}))
+            .await
+            .unwrap();
+        tunnels.push(tunnel);
+    }
+    let mut stale = tunnels[1].clone();
+    stale.name = "Seen before an edit".into();
+    let error = fixture
+        .call("delete_tunnels", json!({"tunnels":[tunnels[0], stale]}))
+        .await
+        .unwrap_err();
+    assert!(error.contains("changed"), "{error}");
+    assert_eq!(fixture.manager.lock().await.config.tunnels.len(), 3);
+    fixture
+        .call(
+            "delete_tunnels",
+            json!({"tunnels":[tunnels[0], tunnels[1]]}),
+        )
+        .await
+        .unwrap();
+    let remaining: Vec<_> = fixture
+        .manager
+        .lock()
+        .await
+        .config
+        .tunnels
+        .iter()
+        .map(|t| t.id)
+        .collect();
+    assert_eq!(remaining, vec![tunnels[2].id]);
+    fixture.stop().await;
+}
+
 mod remote_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

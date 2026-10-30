@@ -54,6 +54,11 @@ pub enum Action {
         connection: Value,
     },
     Delete(Tunnel),
+    /// Delete one server's forwards together; any changed since being shown keeps all.
+    DeleteMany {
+        server: Uuid,
+        tunnels: Vec<Tunnel>,
+    },
     Open(Tunnel),
     /// Open the exact discovered destination within a saved port range.
     OpenPort {
@@ -79,6 +84,7 @@ impl Action {
             }
             Self::Update { tunnel, .. } => tunnel.server_id,
             Self::SetConnected { server, .. }
+            | Self::DeleteMany { server, .. }
             | Self::ForwardBatch { server, .. }
             | Self::Forward { server, .. }
             | Self::ForwardAndOpen { server, .. } => *server,
@@ -91,7 +97,7 @@ impl Action {
             Self::ForwardBatch { .. } => Kind::ForwardBatch,
             Self::Forward { .. } => Kind::Forward,
             Self::ForwardAndOpen { .. } => Kind::ForwardAndOpen,
-            Self::Delete(_) => Kind::Delete,
+            Self::Delete(_) | Self::DeleteMany { .. } => Kind::Delete,
             Self::Open(_) | Self::OpenPort { .. } => Kind::Open,
         }
     }
@@ -112,7 +118,7 @@ impl Action {
                 std::slice::from_ref(t)
             }
             Self::Update { tunnel, .. } => std::slice::from_ref(tunnel),
-            Self::SetConnected { tunnels, .. } => tunnels,
+            Self::SetConnected { tunnels, .. } | Self::DeleteMany { tunnels, .. } => tunnels,
             Self::ForwardBatch {
                 server,
                 create,
@@ -256,6 +262,9 @@ impl Action {
                 connection,
             } => forward_open::execute(*server, address, *port, name, connection, call),
             Self::Delete(t) => call("delete_tunnel", json!({"id":t.id})).map(|_| ()),
+            Self::DeleteMany { tunnels, .. } => {
+                call("delete_tunnels", json!({"tunnels":tunnels})).map(|_| ())
+            }
             Self::Open(t) => call("open_tunnel", json!({"id":t.id})).map(|_| ()),
             Self::OpenPort {
                 tunnel,

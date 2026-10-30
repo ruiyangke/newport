@@ -50,6 +50,14 @@ pub fn local_endpoint(
     ))
 }
 
+/// Whether a destination is the server itself, where discovery can see its
+/// listeners. Other hosts are reached through the server and never listed.
+pub fn on_server(address: &str) -> bool {
+    host(address)
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
 pub fn host(address: &str) -> String {
     let value = address.trim_end_matches('.').to_lowercase();
     match value.as_str() {
@@ -130,8 +138,25 @@ pub fn discovered_tunnel(
 
 #[cfg(test)]
 mod tests {
-    use super::{discovered_tunnel, host, local_endpoint, reaches, validate_update};
+    use super::{discovered_tunnel, host, local_endpoint, on_server, reaches, validate_update};
     use serde_json::json;
+
+    #[test]
+    fn only_loopback_destinations_are_on_the_server() {
+        for address in [
+            "127.0.0.1",
+            "localhost",
+            "LOCALHOST.",
+            "0.0.0.0",
+            "::1",
+            "127.0.0.2",
+        ] {
+            assert!(on_server(address), "{address}");
+        }
+        for address in ["db.internal", "10.0.0.5", "172.17.0.2", "fd00::5", ""] {
+            assert!(!on_server(address), "{address}");
+        }
+    }
 
     #[test]
     fn edits_require_an_unchanged_saved_target_without_blocking_unrelated_changes() {

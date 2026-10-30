@@ -28,6 +28,7 @@ pub enum Command {
     SaveTunnel,
     UpdateTunnel,
     DeleteTunnel,
+    DeleteTunnels,
     SetTunnelConnected,
     SetClipboardEnabled,
     SetIntegrationEnabled,
@@ -139,6 +140,11 @@ impl Command {
             ),
             Self::DeleteTunnel => encode(
                 crate::commands::delete_tunnel(services.manager, argument(args, "id")?)
+                    .await
+                    .map_err(error)?,
+            ),
+            Self::DeleteTunnels => encode(
+                crate::commands::delete_tunnels(services.manager, argument(args, "tunnels")?)
                     .await
                     .map_err(error)?,
             ),

@@ -363,6 +363,31 @@ fn entry_needs_attention(runtime: &Value, entry: &Entry) -> bool {
         .any(|t| trouble_for(runtime, t, remote_port))
 }
 
+/// Saved forwards whose rows read "Nothing listening": not reverse forwards,
+/// switched off, not failing, and with no listener in the discovery reading.
+/// Only destinations on the server itself count, since discovery can't see
+/// the listeners of other hosts reached through it.
+pub(super) fn dead_forwards(groups: &[Project], runtime: &Value) -> Vec<Value> {
+    groups
+        .iter()
+        .flat_map(|group| &group.entries)
+        .filter(|entry| {
+            entry.saved
+                && entry.port["direction"] != "remote"
+                && !entry_needs_attention(runtime, entry)
+        })
+        .flat_map(|entry| &entry.forwards)
+        .filter(|t| {
+            newport_domain::forwarding::on_server(string(t, "remoteHost"))
+                && !matches!(
+                    string(&runtime["tunnels"][string(t, "id")], "status"),
+                    "connected" | "connecting" | "reconnecting"
+                )
+        })
+        .cloned()
+        .collect()
+}
+
 /// Group only real port rows. Heading controls remain siblings of the list,
 /// rather than becoming extra items announced in its row count.
 fn port_rows_list(project: &str, section: &str, name: &str, rows: Vec<AnyElement>) -> AnyElement {
@@ -493,6 +518,15 @@ impl Newport {
         }
     }
 
+    /// Only a current, successful reading of a connected server can show that
+    /// nothing listens behind a forward.
+    pub(super) fn listeners_known(&self, cx: &App) -> bool {
+        self.resources.get("page").is_some_and(|r| {
+            r.value.is_array() && r.error.is_none() && !r.stale && r.updated_at.is_some()
+        }) && !self.needle_missing()
+            && self.connection_down(cx).is_none()
+    }
+
     pub(super) fn grouped_ports(&self, cx: &mut Context<Self>) -> AnyElement {
         ConnectionsPage {
             owner: cx.weak_entity(),
@@ -549,6 +583,7 @@ impl Newport {
         let initial_loading =
             !needle_missing && !has_reading && resource.is_none_or(|r| r.error.is_none());
         let manual_pending = resource.is_some_and(|r| r.manual_pending);
+        let cleanable = self.cleanable_forwards(&groups, cx).len();
         let filter = if state.filter == 2 && attention == 0 {
             0
         } else {
@@ -860,6 +895,19 @@ impl Newport {
                     .flex()
                     .items_center()
                     .gap_2()
+                    // Like the Needs attention filter, shown only when it applies.
+                    .when(cleanable > 0, |actions| {
+                        actions.child(
+                            crate::controls::icon_button("clean-up-forwards")
+                                .ghost()
+                                .icon(IconName::BroomSparkles)
+                                .accessibility_label("Clean up forwards")
+                                .tooltip("Clean up forwards with nothing listening")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.confirm_clean_up_forwards(window, cx)
+                                })),
+                        )
+                    })
                     .child(
                         crate::controls::icon_button("discover")
                             .ghost()
@@ -1954,6 +2002,35 @@ mod tests {
         assert!(trouble_for(&runtime, &tunnel, Some(8080)));
         runtime["tunnels"]["t"] = json!({"status":"disconnected"});
         assert!(!trouble_for(&runtime, &tunnel, Some(8079)));
+    }
+
+    #[test]
+    fn only_switched_off_healthy_local_forwards_without_a_listener_are_dead() {
+        let ports =
+            vec![json!({"port": 3000, "pid": 1, "address": "127.0.0.1", "process": "node"})];
+        let forward = |id: &str, remote: u16, direction: &str| {
+            json!({
+                "id": id, "serverId": "fixture", "direction": direction, "name": "",
+                "remotePort": remote, "localPort": remote + 6000, "remoteHost": "127.0.0.1"
+            })
+        };
+        let saved = vec![
+            forward("listening", 3000, "local"),
+            forward("dead", 4000, "local"),
+            forward("waiting", 4001, "local"),
+            forward("failed", 4002, "local"),
+            forward("reverse", 4003, "remote"),
+        ];
+        let groups = newport_domain::port_grouping::group(ports, &saved, "fixture", &[]);
+        let runtime = json!({"tunnels": {
+            "waiting": {"status": "connecting"},
+            "failed": {"status": "error", "errorMessage": "Cannot bind local port"},
+        }});
+        let ids: Vec<_> = super::dead_forwards(&groups, &runtime)
+            .iter()
+            .map(|t| t["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(ids, ["dead"]);
     }
 
     #[test]

@@ -1503,6 +1503,10 @@ pub(super) fn connections_fixture(
             view.page = Page::Ports;
             put(&mut view,"page",Value::Array((0..500).map(|i|json!({"port":8000+i,"pid":i+1,"address":"127.0.0.1","processName":"node","projectRoot":"/srv/project-0"})).collect()));
             view.sync_connections(window,cx);
+            // Settle the first project read; left pending, its placeholder
+            // delay would redraw the page partway through a test.
+            view.resources.invalidate("connection-projects");
+            put(&mut view, "connection-projects", json!([]));
             view.connections_state.get_mut("fixture").unwrap().table = table;
             view
         });

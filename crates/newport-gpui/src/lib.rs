@@ -167,6 +167,7 @@ mod terminal_view;
 mod terminal_workspace;
 mod theme;
 mod tunnel_actions;
+mod tunnel_clean;
 mod tunnel_delete;
 mod tunnel_form;
 mod ui_state;
