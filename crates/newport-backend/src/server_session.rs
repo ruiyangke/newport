@@ -1395,6 +1395,7 @@ mod tests {
     /// An SSH agent with the fixture agent's keys that never answers a sign
     /// request, like one waiting for the person to approve it. Counts the
     /// sign requests it holds.
+    #[cfg(unix)]
     async fn unapproving_agent(
         socket: &std::path::Path,
         upstream: std::path::PathBuf,
@@ -1442,6 +1443,7 @@ mod tests {
         signs
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     #[ignore = "Run with cargo xtask test ssh -- server_session::tests"]
     async fn a_routine_retry_keeps_a_login_waiting_for_approval_and_a_fresh_one_replaces_it() {

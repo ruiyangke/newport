@@ -139,8 +139,12 @@ fn buttons(maximized: bool, active: bool, font: &'static str, cx: &App) -> AnyEl
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use gpui::{TestAppContext, VisualTestContext};
+    use super::{WIDTH, buttons};
+    use gpui::{
+        Context, IntoElement, ParentElement, Render, Styled, TestAppContext, VisualTestContext,
+        Window, div, px,
+    };
+    use gpui_kit as gpui;
 
     struct Host(bool);
     impl Render for Host {

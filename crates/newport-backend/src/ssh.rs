@@ -242,13 +242,12 @@ mod integration_tests {
     }
 }
 
-#[cfg(test)]
+// Servers are Linux; on Windows `bash` may be the WSL launcher, not a shell.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    /// As sshd runs it for an account whose login shell is `shell`. Servers are
-    /// Linux; on Windows `bash` may be the WSL launcher rather than a shell.
-    #[cfg(unix)]
+    /// As sshd runs it for an account whose login shell is `shell`.
     fn through_login_shell(shell: &str, command: &str) -> Option<std::process::Output> {
         std::process::Command::new(shell)
             .arg("-c")
@@ -257,7 +256,6 @@ mod tests {
             .ok()
     }
 
-    #[cfg(unix)]
     #[test]
     fn commands_keep_posix_meaning_under_any_login_shell() {
         let empty = tempfile::tempdir().unwrap();
