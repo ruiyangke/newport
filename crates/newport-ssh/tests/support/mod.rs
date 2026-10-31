@@ -298,6 +298,10 @@ impl server::Handler for Connection {
     }
 }
 
+/// A port no connection reaches. Every platform refuses it at once, where a
+/// closed port takes Windows about two seconds to refuse.
+pub const REFUSED: u16 = 0;
+
 /// Dials test servers in turn (the last one repeats) and can sever every
 /// connection it made, as a network failure would.
 #[derive(Default)]

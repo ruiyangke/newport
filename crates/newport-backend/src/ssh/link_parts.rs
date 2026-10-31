@@ -411,14 +411,17 @@ mod tests {
     #[tokio::test]
     async fn a_proxy_command_runs_with_the_servers_tokens_and_name() {
         use tokio::io::AsyncReadExt;
-        let server = server(Some(Proxy::Command("printf %n-%h-%p-%r".into())));
+        // Each platform's shell runs the command: `sh` has `printf`, `cmd`
+        // its `echo`, which ends the line.
+        let print = if cfg!(windows) { "echo" } else { "printf" };
+        let server = server(Some(Proxy::Command(format!("{print} %n-%h-%p-%r"))));
         let dialer = dialer(&server, no_jump);
         let approval = watch::channel(false).0;
         let target = dial_target(&server);
         let mut dialed = dialer.dial(&target, &approval).await.unwrap();
         let mut output = String::new();
         dialed.stream.read_to_string(&mut output).await.unwrap();
-        assert_eq!(output, "Inner-127.0.0.1-22-ops");
+        assert_eq!(output.trim_end(), "Inner-127.0.0.1-22-ops");
     }
 
     #[tokio::test]

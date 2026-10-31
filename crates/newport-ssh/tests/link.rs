@@ -29,14 +29,9 @@ fn connections(leases: &[Channel]) -> usize {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_request_unless_failing_fails_with_the_login_it_waited_for_only() {
     let server = server(Behaviour::default(), &HOST_A).await;
-    let closed = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
     // The first login fails; the next reaches the server.
     let link = link(
-        TestDialer::new(&[closed, server.port]),
+        TestDialer::new(&[REFUSED, server.port]),
         TestAuthenticator::accepting(),
         limits(),
     );
@@ -451,12 +446,8 @@ async fn an_unused_connection_closes_after_the_idle_time() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unreachable_server_is_retried_with_backoff() {
-    let closed = {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap().port()
-    };
     let server = server(Behaviour::default(), &HOST_A).await;
-    let dialer = TestDialer::new(&[closed, server.port]);
+    let dialer = TestDialer::new(&[REFUSED, server.port]);
     let link = link(dialer.clone(), TestAuthenticator::accepting(), limits());
     let opening = {
         let link = link.clone();
@@ -500,10 +491,6 @@ async fn a_lease_dropped_on_another_thread_still_closes_its_session() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_server_without_sessions_is_recognised_after_a_failed_first_dial() {
-    let closed = {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap().port()
-    };
     let server = server(
         Behaviour {
             max_sessions: 0,
@@ -513,7 +500,7 @@ async fn a_server_without_sessions_is_recognised_after_a_failed_first_dial() {
     )
     .await;
     let link = link(
-        TestDialer::new(&[closed, server.port]),
+        TestDialer::new(&[REFUSED, server.port]),
         TestAuthenticator::accepting(),
         limits(),
     );
@@ -731,10 +718,6 @@ async fn a_server_without_sessions_is_recognised_after_a_forwarding_connection_i
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_healthy_connection_ends_a_run_of_login_failures() {
-    let closed = {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap().port()
-    };
     let server = server(
         Behaviour {
             max_sessions: 1,
@@ -743,7 +726,7 @@ async fn a_healthy_connection_ends_a_run_of_login_failures() {
         &HOST_A,
     )
     .await;
-    let dialer = TestDialer::new(&[closed, closed, server.port, closed]);
+    let dialer = TestDialer::new(&[REFUSED, REFUSED, server.port, REFUSED]);
     let limits = newport_ssh::Limits {
         healthy: Duration::from_millis(300),
         backoff_min: Duration::from_millis(200),

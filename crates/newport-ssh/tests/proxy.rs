@@ -6,7 +6,6 @@ use newport_ssh::{
 };
 use russh::keys::{self, HashAlg, PublicKeyOrCertificate};
 use std::{
-    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -14,7 +13,7 @@ use std::{
     time::Duration,
 };
 use support::{proxy::*, *};
-use tokio::{io::AsyncReadExt, sync::Notify, sync::watch};
+use tokio::{sync::Notify, sync::watch};
 
 fn through(dialer: Arc<dyn Dialer>, port: u16, host_keys: Arc<dyn HostKeys>) -> Link {
     through_with(dialer, port, host_keys, limits())
@@ -37,6 +36,7 @@ fn through_with(
     )
 }
 
+#[cfg(unix)]
 fn no_approval() -> watch::Sender<bool> {
     watch::channel(false).0
 }
@@ -87,7 +87,8 @@ fn has_nc() -> bool {
 }
 
 /// A file the proxy command writes its process ID to.
-fn pid_file(name: &str) -> PathBuf {
+#[cfg(unix)]
+fn pid_file(name: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!(
         "newport-ssh-proxy-{}-{name}.pid",
         std::process::id()
@@ -96,7 +97,8 @@ fn pid_file(name: &str) -> PathBuf {
     path
 }
 
-async fn pid_in(path: &PathBuf) -> String {
+#[cfg(unix)]
+async fn pid_in(path: &std::path::Path) -> String {
     eventually("the proxy command to start", || {
         std::fs::read_to_string(path).is_ok_and(|pid| pid.ends_with('\n'))
     })
@@ -105,6 +107,7 @@ async fn pid_in(path: &PathBuf) -> String {
 }
 
 /// Whether the process exists, as a zombie too.
+#[cfg(unix)]
 fn exists(pid: &str) -> bool {
     std::process::Command::new("kill")
         .args(["-0", pid])
@@ -240,6 +243,7 @@ async fn a_link_through_a_proxy_command_opens_sessions_that_echo() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_proxy_command_that_exits_early_fails_with_its_output() {
+    use tokio::io::AsyncReadExt;
     let pid = pid_file("early");
     let command = format!(
         "sh -c 'echo $$ > {}; echo \"bastion: Name or service not known\" >&2; exit 255'",
@@ -277,6 +281,7 @@ async fn a_proxy_command_that_exits_early_fails_with_its_output() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_silent_proxy_command_reports_how_it_ended() {
+    use tokio::io::AsyncReadExt;
     let mut dialed = CommandDialer::new("sh -c 'exit 3'")
         .dial(&target(), &no_approval())
         .await
@@ -352,10 +357,6 @@ async fn a_link_through_a_jump_host_opens_sessions_on_the_target() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refused_jump_forward_is_an_unreachable_target() {
     let jump = jump_server(&HOST_A).await;
-    let closed = {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap().port()
-    };
     let jump_link = link(
         TestDialer::new(&[jump.port]),
         TestAuthenticator::accepting(),
@@ -363,7 +364,7 @@ async fn a_refused_jump_forward_is_an_unreachable_target() {
     );
     let link = through(
         Arc::new(JumpDialer::new(jump_link)),
-        closed,
+        REFUSED,
         Arc::new(AnyHostKey),
     );
     let error = failed_login(&link).await;
@@ -372,7 +373,7 @@ async fn a_refused_jump_forward_is_an_unreachable_target() {
     };
     assert!(
         reason.contains(&format!(
-            "the jump host couldn't connect to 127.0.0.1:{closed}"
+            "the jump host couldn't connect to 127.0.0.1:{REFUSED}"
         )),
         "{reason}"
     );
@@ -429,13 +430,8 @@ async fn a_busy_jump_host_is_retried_with_backoff() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_jump_host_that_cant_be_reached_fails_the_dial_and_says_so() {
-    let closed = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
     let jump_link = link(
-        TestDialer::new(&[closed]),
+        TestDialer::new(&[REFUSED]),
         TestAuthenticator::accepting(),
         limits(),
     );
@@ -507,14 +503,10 @@ async fn a_jump_host_waiting_for_approval_holds_the_dial_and_shows_the_wait() {
 async fn a_jump_host_slower_to_log_in_than_the_dial_limit_still_carries_the_dial() {
     let jump = jump_server(&HOST_A).await;
     let server = server(Behaviour::default(), &HOST_B).await;
-    let closed = {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap().port()
-    };
     // The jump host's first dial fails, and its backoff outlasts the dial
     // limit below.
     let jump_link = link(
-        TestDialer::new(&[closed, jump.port]),
+        TestDialer::new(&[REFUSED, jump.port]),
         TestAuthenticator::accepting(),
         Limits {
             backoff_min: Duration::from_millis(600),
