@@ -108,7 +108,9 @@ impl newport_ssh::Authenticator for Login {
 /// The link's class for a failed login. The cause is logged here because
 /// the classes carry no text of their own.
 pub(super) fn login_error(error: &anyhow::Error) -> Error {
-    let class = if error.is::<auth::AgentApprovalRequired>() {
+    let class = if error.is::<auth::AgentInterrupted>() {
+        Error::Lost(format!("{error:#}"))
+    } else if error.is::<auth::AgentApprovalRequired>() {
         Error::ApprovalRequired
     } else if error.is::<auth::SelectedAgentUnavailable>() {
         Error::AgentUnavailable

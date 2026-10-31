@@ -42,6 +42,30 @@ impl std::fmt::Display for AgentApprovalRequired {
 }
 impl std::error::Error for AgentApprovalRequired {}
 
+/// The SSH agent's socket broke during a sign request, so the agent never
+/// answered. Like a dropped connection, trying again later can help. Worded
+/// as the cause a lost connection gives.
+#[derive(Debug)]
+pub(super) struct AgentInterrupted;
+impl std::fmt::Display for AgentInterrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the SSH agent stopped answering")
+    }
+}
+impl std::error::Error for AgentInterrupted {}
+
+/// Whether a sign request failed because the agent's socket broke, rather
+/// than because the agent answered no.
+fn agent_broke(error: &anyhow::Error) -> bool {
+    use russh::keys::Error as KeyError;
+    matches!(
+        error.downcast_ref::<russh::AgentAuthError>(),
+        Some(russh::AgentAuthError::Key(
+            KeyError::IO(_) | KeyError::AgentProtocolError
+        ))
+    )
+}
+
 fn agent_error(server: &Server, error: anyhow::Error) -> anyhow::Error {
     if server.agent_key_fingerprint.is_some() {
         error.context(SelectedAgentUnavailable)
@@ -74,7 +98,15 @@ where
         // Retrying a declined/expired sign request in the background can hide
         // the next prompt and trigger the agent's repeated-denial throttling.
         // Keep the cause for diagnostics, but require an explicit user retry.
-        result.map_err(|error| error.into().context(AgentApprovalRequired))
+        // A broken socket isn't a decline: nobody was asked.
+        result.map_err(|error| {
+            let error = error.into();
+            if agent_broke(&error) {
+                error.context(AgentInterrupted)
+            } else {
+                error.context(AgentApprovalRequired)
+            }
+        })
     }
 }
 
@@ -408,6 +440,43 @@ mod tests {
             super::super::link_parts::login_error(&error),
             newport_ssh::Error::ApprovalRequired
         );
+        task.abort();
+    }
+
+    struct BrokenSigner;
+    impl russh::Signer for BrokenSigner {
+        type Error = anyhow::Error;
+        async fn auth_sign(
+            &mut self,
+            _: &AgentIdentity,
+            _: Option<russh::keys::ssh_key::HashAlg>,
+            _: Vec<u8>,
+        ) -> Result<Vec<u8>> {
+            let broken = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+            Err(russh::AgentAuthError::Key(russh::keys::Error::IO(broken)).into())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_broken_agent_socket_is_a_lost_connection_not_a_decline() {
+        let (mut handle, identity, task) = fixture(Response::RequestSignature).await;
+        let (approval, _waiting) = watch::channel(false);
+        let mut signer = ApprovalSigner {
+            inner: BrokenSigner,
+            approval,
+        };
+        let error = authenticate_identity(&mut handle, "user", identity, None, &mut signer, true)
+            .await
+            .unwrap_err();
+        assert!(!error.is::<AgentApprovalRequired>(), "{error:#}");
+        let class = super::super::link_parts::login_error(&error);
+        assert!(
+            class
+                .to_string()
+                .starts_with("The connection was lost: the SSH agent stopped answering: "),
+            "{class}"
+        );
+        assert_eq!(class.retry(), newport_ssh::Retry::Backoff);
         task.abort();
     }
 }
