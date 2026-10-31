@@ -1134,7 +1134,7 @@ mod tests {
         draw(cx);
     }
 
-    fn key(cx: &mut VisualTestContext, value: &str) {
+    fn key(cx: &mut VisualTestContext, value: &'static str) {
         let keystroke = Keystroke::parse(value).unwrap();
         cx.simulate_event(KeyDownEvent {
             physical_key: None,

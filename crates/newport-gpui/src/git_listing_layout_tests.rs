@@ -41,7 +41,7 @@ fn modal_body_scrolls_actions_into_short_narrow_panes(cx: &mut TestAppContext) {
     visual.simulate_resize(size(px(260.), px(160.)));
     visual.update(|window, cx| window.draw(cx).clear(cx));
     assert!(visual.debug_bounds("submit-row").unwrap().top() > px(160.));
-    visual.simulate_event(gpui::ScrollWheelEvent {
+    visual.simulate_event(gpui::ScrollEvent {
         position: gpui::point(px(120.), px(80.)),
         delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-2000.))),
         ..Default::default()

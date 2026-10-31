@@ -1,7 +1,7 @@
 use super::{Preferences, Selection, ServicesPanel, tests};
 use gpui_kit::{
     self as gpui, AppContext, Context, Entity, IntoElement, ParentElement, Render, ScrollDelta,
-    ScrollWheelEvent, Styled, TestAppContext, VisualTestContext, Window, div, point, px, size,
+    ScrollEvent, Styled, TestAppContext, VisualTestContext, Window, div, point, px, size,
 };
 use newport_domain::services::{ServiceUnit, ServicesSnapshot};
 
@@ -108,7 +108,7 @@ fn refreshed_snapshot_preserves_scroll_away_from_restored_selection(cx: &mut Tes
     let original = panel.read_with(cx, |panel, _| {
         panel.list_scroll.0.borrow().base_handle.offset()
     });
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: selected.center(),
         delta: ScrollDelta::Pixels(point(px(0.), px(1400.))),
         ..Default::default()

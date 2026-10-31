@@ -86,7 +86,7 @@ impl Newport {
                 .p(px(24.))
                 .rounded(px(crate::ui::RADIUS))
                 .border_0()
-                .centered(true)
+                .centered()
                 .overlay_closable(false)
                 .on_ok(|_, _, _| false)
                 .child(form.clone())

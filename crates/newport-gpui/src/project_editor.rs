@@ -3217,7 +3217,7 @@ mod interaction_tests {
         // What a trackpad sends: a phased drag, then phaseless momentum.
         let gesture = |cx: &mut VisualTestContext, dy: f32, moves: usize, momentum: usize| {
             let mut send = |dy: f32, touch_phase| {
-                cx.simulate_event(gpui::ScrollWheelEvent {
+                cx.simulate_event(gpui::ScrollEvent {
                     position: at,
                     delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(dy))),
                     touch_phase,
@@ -4153,7 +4153,7 @@ mod interaction_tests {
                     .bounds()
                     .center()
             });
-            cx.simulate_event(gpui::ScrollWheelEvent {
+            cx.simulate_event(gpui::ScrollEvent {
                 position,
                 delta: gpui::ScrollDelta::Pixels(gpui::point(px(dx), px(dy))),
                 ..Default::default()

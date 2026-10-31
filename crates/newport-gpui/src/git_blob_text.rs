@@ -91,17 +91,14 @@ impl Render for BlobText {
                 canvas(
                     |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
                     move |_, hitbox, window, _| {
-                        window.on_mouse_event(
-                            move |event: &ScrollWheelEvent, phase, window, cx| {
-                                if phase.capture()
-                                    && hitbox.id.should_handle_scroll(window)
-                                    && event.delta.pixel_delta(px(20.)).y < px(0.)
-                                {
-                                    let _ =
-                                        owner.update(cx, |this, _| this.scroll_demand.set(true));
-                                }
-                            },
-                        );
+                        window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
+                            if phase.capture()
+                                && hitbox.id.should_handle_scroll(window)
+                                && event.delta.pixel_delta(px(20.)).y < px(0.)
+                            {
+                                let _ = owner.update(cx, |this, _| this.scroll_demand.set(true));
+                            }
+                        });
                     },
                 )
                 .absolute()
@@ -128,7 +125,7 @@ impl Render for BlobText {
 mod tests {
     use super::BlobText;
     use gpui::{
-        Context, Entity, IntoElement, Render, ScrollDelta, ScrollWheelEvent, TestAppContext,
+        Context, Entity, IntoElement, Render, ScrollDelta, ScrollEvent, TestAppContext,
         VisualTestContext, Window, div, point, prelude::*, px, size,
     };
     use gpui_kit as gpui;
@@ -206,14 +203,14 @@ mod tests {
         draw(cx);
         assert!(!view.read_with(cx, |v, cx| v.take_scroll_demand(cx)));
         // Ordinary scrolling in the middle must not fetch the next page.
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(250.), px(150.)),
             delta: ScrollDelta::Pixels(point(px(0.), px(-100.))),
             ..Default::default()
         });
         draw(cx);
         assert!(!view.read_with(cx, |v, cx| v.take_scroll_demand(cx)));
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(250.), px(150.)),
             delta: ScrollDelta::Pixels(point(px(0.), px(-10000.))),
             ..Default::default()
@@ -227,7 +224,7 @@ mod tests {
             (point(px(250.), px(150.)), point(px(-100.), px(0.))),
             (point(px(250.), px(150.)), point(px(0.), px(1.))),
         ] {
-            cx.simulate_event(ScrollWheelEvent {
+            cx.simulate_event(ScrollEvent {
                 position,
                 delta: ScrollDelta::Pixels(delta),
                 ..Default::default()
@@ -278,7 +275,7 @@ mod tests {
                 cx.notify();
             });
             draw(cx);
-            cx.simulate_event(ScrollWheelEvent {
+            cx.simulate_event(ScrollEvent {
                 position: point(px(250.), px(150.)),
                 delta: ScrollDelta::Pixels(point(px(0.), px(-100.))),
                 ..Default::default()
@@ -304,7 +301,7 @@ mod tests {
         cx.update(|window, _| window.resize(size(px(500.), px(300.))));
         draw(cx);
         assert!(!view.read_with(cx, |v, cx| v.take_scroll_demand(cx)));
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(250.), px(150.)),
             delta: ScrollDelta::Pixels(point(px(0.), px(-100.))),
             ..Default::default()

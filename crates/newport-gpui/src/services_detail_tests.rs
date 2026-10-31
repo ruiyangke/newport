@@ -16,7 +16,7 @@ fn click(cx: &mut VisualTestContext, label: &str) {
     cx.simulate_click(point, Default::default());
     tests::draw(cx);
 }
-fn key(cx: &mut VisualTestContext, key: &str) {
+fn key(cx: &mut VisualTestContext, key: &'static str) {
     cx.simulate_event(KeyDownEvent {
         physical_key: None,
         key_metadata: None,

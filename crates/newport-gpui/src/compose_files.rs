@@ -401,7 +401,7 @@ impl Files {
                     .min_h(px(280.))
                     .min_w_0()
                     .overflow_hidden()
-                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    .on_scroll(|_, _, cx| cx.stop_propagation())
                     .child(
                         Editor::new(&self.editor)
                             .readonly(true)

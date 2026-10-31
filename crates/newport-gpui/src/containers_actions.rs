@@ -445,7 +445,7 @@ impl ContainersPanel {
                 .p(px(24.))
                 .rounded(px(crate::ui::RADIUS))
                 .border_0()
-                .centered(true)
+                .centered()
                 .overlay_closable(false)
                 .keyboard(!pending)
                 .close_button(!pending)

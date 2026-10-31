@@ -766,7 +766,7 @@ impl Launchpad {
     }
 
     /// Turns pages with horizontal or vertical scrolling.
-    fn scrolled(&mut self, event: &ScrollWheelEvent, pages: usize, cx: &mut Context<Self>) {
+    fn scrolled(&mut self, event: &ScrollEvent, pages: usize, cx: &mut Context<Self>) {
         if pages < 2 {
             return;
         }
@@ -3122,7 +3122,7 @@ fn full_error(title: String, output: String, window: &mut Window, cx: &mut App) 
             .p(px(24.))
             .rounded(px(crate::ui::RADIUS))
             .border_0()
-            .centered(true)
+            .centered()
             .child(
                 div()
                     .flex()
@@ -3364,43 +3364,44 @@ impl Render for Launchpad {
             }
         };
         let owner = cx.entity().downgrade();
-        let grid = div()
-            .id("remote-apps-grid")
-            .debug_selector(|| "remote-apps-grid".into())
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .relative()
-            .overflow_hidden()
-            .p(px(crate::controls::PAGE_PADDING))
-            .pb(px(8.))
-            .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
-                this.scrolled(event, pages, cx)
-            }))
-            .child(
-                canvas(
-                    move |bounds, window, cx| {
-                        let padding = px(crate::controls::PAGE_PADDING);
-                        let area = size(
-                            bounds.size.width - padding * 2.,
-                            bounds.size.height - padding - px(8.),
-                        );
-                        let _ = owner.update(cx, |this, cx| {
-                            if this.area != area {
-                                this.area = area;
-                                window.refresh();
-                                cx.notify();
-                            }
-                        });
-                    },
-                    |_, _, _, _| {},
+        let grid =
+            div()
+                .id("remote-apps-grid")
+                .debug_selector(|| "remote-apps-grid".into())
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .relative()
+                .overflow_hidden()
+                .p(px(crate::controls::PAGE_PADDING))
+                .pb(px(8.))
+                .on_scroll(cx.listener(move |this, event: &ScrollEvent, _, cx| {
+                    this.scrolled(event, pages, cx)
+                }))
+                .child(
+                    canvas(
+                        move |bounds, window, cx| {
+                            let padding = px(crate::controls::PAGE_PADDING);
+                            let area = size(
+                                bounds.size.width - padding * 2.,
+                                bounds.size.height - padding - px(8.),
+                            );
+                            let _ = owner.update(cx, |this, cx| {
+                                if this.area != area {
+                                    this.area = area;
+                                    window.refresh();
+                                    cx.notify();
+                                }
+                            });
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full()
+                    .left_0()
+                    .top_0(),
                 )
-                .absolute()
-                .size_full()
-                .left_0()
-                .top_0(),
-            )
-            .child(content);
+                .child(content);
         let panel = self.preferences_open.then(|| self.preferences(cx));
         root = root.child(div().flex_1().min_h_0().flex().child(grid).children(panel));
         self.with_terminal(root, cx)
@@ -4441,7 +4442,7 @@ mod tests {
 
     #[gpui::test]
     fn each_swipe_turns_one_page_and_momentum_is_ignored(cx: &mut TestAppContext) {
-        use gpui::{ScrollDelta, ScrollWheelEvent, TouchPhase, point, px};
+        use gpui::{ScrollDelta, ScrollEvent, TouchPhase, point, px};
         let (view, visual) = page(cx, Some((560., 400.)));
         feed(&view, visual, ready(), Some(catalogue()));
         // The first frame measures the grid; the next lays it out.
@@ -4449,7 +4450,7 @@ mod tests {
         assert!(visual.debug_bounds("remote-apps-page-1").is_some());
         let at = visual.debug_bounds("remote-apps-grid").unwrap().center();
         let scroll = |visual: &mut VisualTestContext, x: f32, phase: TouchPhase| {
-            visual.simulate_event(ScrollWheelEvent {
+            visual.simulate_event(ScrollEvent {
                 position: at,
                 delta: ScrollDelta::Pixels(point(px(x), px(0.))),
                 touch_phase: phase,
@@ -4476,7 +4477,7 @@ mod tests {
         assert_eq!(page(visual), 0);
         // After a pause, a mouse wheel notch turns a page.
         std::thread::sleep(super::GESTURE_GAP + std::time::Duration::from_millis(50));
-        visual.simulate_event(ScrollWheelEvent {
+        visual.simulate_event(ScrollEvent {
             position: at,
             delta: ScrollDelta::Lines(point(0., -1.)),
             ..Default::default()

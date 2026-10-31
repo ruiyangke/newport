@@ -616,7 +616,7 @@ mod tests {
             let doc = view.read_with(cx, |v, _| v.documents[usize::from(split)].clone());
             let row = if split { 1 } else { 2 };
             let before = doc.borrow().selection.text_position(row, 0).unwrap();
-            cx.simulate_event(gpui::ScrollWheelEvent {
+            cx.simulate_event(gpui::ScrollEvent {
                 position: point(px(700.), px(200.)),
                 delta: gpui::ScrollDelta::Pixels(point(px(-300.), px(0.))),
                 ..Default::default()

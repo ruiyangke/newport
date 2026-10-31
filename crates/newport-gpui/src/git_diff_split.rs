@@ -476,7 +476,7 @@ mod scroll_tests {
     use super::render;
     use crate::git_diff::{Presentation, Row};
     use gpui_kit::{
-        self as gpui, Context, IntoElement, Render, ScrollDelta, ScrollWheelEvent, TestAppContext,
+        self as gpui, Context, IntoElement, Render, ScrollDelta, ScrollEvent, TestAppContext,
         UniformListScrollHandle, VisualTestContext, Window, div, point, prelude::*, px, size,
     };
     use std::{cell::OnceCell, rc::Rc};
@@ -535,13 +535,13 @@ mod scroll_tests {
         draw(cx);
         for (step, pane) in ["diff-new-pane", "diff-old-pane"].into_iter().enumerate() {
             let bounds = cx.debug_bounds(pane).unwrap();
-            cx.simulate_event(ScrollWheelEvent {
+            cx.simulate_event(ScrollEvent {
                 position: bounds.center(),
                 delta: ScrollDelta::Pixels(point(px(-300.), px(0.))),
                 ..Default::default()
             });
             draw(cx);
-            cx.simulate_event(ScrollWheelEvent {
+            cx.simulate_event(ScrollEvent {
                 position: bounds.center(),
                 delta: ScrollDelta::Pixels(point(px(0.), px(-200.))),
                 ..Default::default()

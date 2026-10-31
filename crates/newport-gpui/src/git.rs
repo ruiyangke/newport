@@ -1718,7 +1718,7 @@ impl Newport {
                                 .collect()
                         }),
                     )
-                    .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, _| {
+                    .on_scroll(cx.listener(move |this, event: &ScrollEvent, _, _| {
                         if event.delta.pixel_delta(px(20.)).y < px(0.) {
                             this.git.listing.demand.arm(scroll_key.clone());
                         }

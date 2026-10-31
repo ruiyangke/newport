@@ -194,7 +194,7 @@ mod tests {
             cx.debug_bounds("hover-detail-content").is_some(),
             "entering the popup keeps it open"
         );
-        cx.simulate_event(gpui_kit::ScrollWheelEvent {
+        cx.simulate_event(gpui_kit::ScrollEvent {
             position: viewport.center(),
             delta: gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-100_000.))),
             ..Default::default()

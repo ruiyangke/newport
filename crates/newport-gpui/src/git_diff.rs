@@ -813,13 +813,11 @@ impl Newport {
                         .flex_1()
                         .min_h_0()
                         .min_w_0()
-                        .on_scroll_wheel(cx.listener(
-                            move |this, event: &ScrollWheelEvent, _, _| {
-                                if event.delta.pixel_delta(px(22.)).y < px(0.) {
-                                    this.git.diff_demand.arm(scroll_key.clone());
-                                }
-                            },
-                        ))
+                        .on_scroll(cx.listener(move |this, event: &ScrollEvent, _, _| {
+                            if event.delta.pixel_delta(px(22.)).y < px(0.) {
+                                this.git.diff_demand.arm(scroll_key.clone());
+                            }
+                        }))
                         .child(content),
                 )
             })

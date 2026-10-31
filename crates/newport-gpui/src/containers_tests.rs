@@ -692,7 +692,7 @@ pub(super) fn click(cx: &mut VisualTestContext, label: &str) {
     cx.simulate_click(at, Default::default());
     draw(cx);
 }
-fn key(cx: &mut VisualTestContext, key: &str) {
+fn key(cx: &mut VisualTestContext, key: &'static str) {
     cx.simulate_event(KeyDownEvent {
         physical_key: None,
         key_metadata: None,
@@ -1774,7 +1774,7 @@ fn lifecycle_dialog_keyboard_confirmation_keeps_project_ids_and_submits_once(
 
 #[gpui::test]
 fn container_and_project_logs_fill_available_height_and_contain_scrolling(cx: &mut TestAppContext) {
-    use gpui::{ScrollDelta, ScrollWheelEvent, point};
+    use gpui::{ScrollDelta, ScrollEvent, point};
     let (panel, cx, backend) = fixture_with_size(cx, 980., 900.);
     let output = "Container stack-web-1 started\n";
     let mut job = json!({
@@ -1858,7 +1858,7 @@ fn container_and_project_logs_fill_available_height_and_contain_scrolling(cx: &m
             "short window must show the log area"
         );
         cx.simulate_mouse_move(position, None, Default::default());
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position,
             delta: ScrollDelta::Pixels(point(px(0.), px(-80.))),
             ..Default::default()
@@ -2191,14 +2191,14 @@ fn disk_image_inventory_keeps_rendered_rows_bounded(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn compact_disk_confirmation_is_visible_focused_and_enter_dispatches_once(cx: &mut TestAppContext) {
-    use gpui::{ScrollDelta, ScrollWheelEvent, point};
+    use gpui::{ScrollDelta, ScrollEvent, point};
     let (panel, cx, backend) = fixture_with_size(cx, 560., 360.);
     select(&panel, cx, "disk");
     backend.hold_actions();
     let viewport = cx.debug_bounds("containers-disk").unwrap();
     // The summary is taller than this deliberately short viewport. Reveal the
     // opener through the inventory's real scroll path before activating it.
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: viewport.center(),
         delta: ScrollDelta::Pixels(point(px(0.), px(-100.))),
         ..Default::default()

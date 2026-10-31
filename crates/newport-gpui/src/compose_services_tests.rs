@@ -102,7 +102,7 @@ fn click_button_id(cx: &mut VisualTestContext, id: &str) {
     cx.simulate_click(at, Default::default());
     draw(cx);
 }
-fn key(cx: &mut VisualTestContext, key: &str) {
+fn key(cx: &mut VisualTestContext, key: &'static str) {
     let keystroke = Keystroke::parse(key).unwrap();
     cx.simulate_event(KeyDownEvent {
         physical_key: None,
@@ -281,7 +281,7 @@ fn natural_columns_preserve_long_names_replicas_alignment_and_narrow_actions(
         cx.simulate_resize(size(px(width), px(1200.)));
         draw(cx);
         let scroll = cx.debug_bounds("compose-services-scroll").unwrap();
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: scroll.center(),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(10_000.), px(0.))),
             ..Default::default()
@@ -343,7 +343,7 @@ fn natural_columns_preserve_long_names_replicas_alignment_and_narrow_actions(
         assert!((span.left() - by_id(cx, "compose-head-state").bounds().left()).abs() <= px(1.));
         assert!((span.right() - by_id(cx, "compose-head-ports").bounds().right()).abs() <= px(1.));
 
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: scroll.center(),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(-10_000.), px(0.))),
             ..Default::default()
@@ -564,7 +564,7 @@ fn service_pages_share_detail_scroll_and_bound_rendering_across_refreshes(cx: &m
     // A wheel gesture on the service table must move the page, not a nested list.
     let row = element(cx, "Open container worker-000").bounds();
     let before = panel.read_with(cx, |p, _| p.detail_scroll.offset());
-    cx.simulate_event(gpui::ScrollWheelEvent {
+    cx.simulate_event(gpui::ScrollEvent {
         position: row.center(),
         delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-100.))),
         ..Default::default()

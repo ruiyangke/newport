@@ -389,7 +389,7 @@ impl Newport {
                             580.
                         }))
                         .max_w((window.viewport_size().width - px(32.)).max(px(240.)))
-                        .centered(true)
+                        .centered()
                         .rounded(px(crate::ui::RADIUS))
                         .border_0()
                         .p_4()

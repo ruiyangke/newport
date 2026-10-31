@@ -191,23 +191,15 @@ pub(super) fn install_desktop_commands(cx: &mut App) {
 /// terminal's input surface. Keep ordinary control navigation and text
 /// editing scoped to their own widgets.
 pub(super) fn install_workspace_shortcuts(cx: &mut App) {
-    let primary = if cfg!(target_os = "macos") {
-        "cmd"
-    } else {
-        "ctrl"
-    };
-    cx.bind_keys([
-        KeyBinding::new(
-            &format!("{primary}-shift-f"),
-            FindInTerminal,
-            Some("Terminal"),
-        ),
+    let terminal = vec![
+        binding("secondary-shift-f", FindInTerminal, Some("Terminal"), cx),
         // Disable inherited Root bindings so raw input reaches the terminal,
         // even if another view retains a text selection.
         KeyBinding::new("tab", gpui::NoAction, Some("Terminal")),
         KeyBinding::new("shift-tab", gpui::NoAction, Some("Terminal")),
-        KeyBinding::new(&format!("{primary}-c"), gpui::NoAction, Some("Terminal")),
-    ]);
+        binding("secondary-c", gpui::NoAction, Some("Terminal"), cx),
+    ];
+    cx.bind_keys(terminal);
     // Kit installs a global inspector shortcut in debug builds. Newport has
     // no default binding for it, including when a terminal owns focus.
     let inspector = if cfg!(target_os = "macos") {
@@ -223,34 +215,43 @@ pub(super) fn install_workspace_shortcuts(cx: &mut App) {
     } else {
         "ctrl-alt"
     };
-    cx.bind_keys(
-        (1..=9)
-            .map(|number| KeyBinding::new(&format!("{tabs}-{number}"), SelectTab { number }, None)),
-    );
+    let tabs: Vec<_> = (1..=9)
+        .map(|number| binding(&format!("{tabs}-{number}"), SelectTab { number }, None, cx))
+        .collect();
+    cx.bind_keys(tabs);
     // Elsewhere terminals open tabs with Ctrl+Shift+T, which stays the shell's.
     #[cfg(target_os = "macos")]
     cx.bind_keys([KeyBinding::new("cmd-t", NewTerminal, None)]);
-    install_editor_shortcuts(primary, cx);
+    install_editor_shortcuts(cx);
+}
+
+/// A key binding built at runtime. `secondary-` is Cmd on macOS and Ctrl
+/// elsewhere.
+fn binding(keystrokes: &str, action: impl Action, context: Option<&str>, cx: &App) -> KeyBinding {
+    let context = context
+        .map(|context| std::rc::Rc::new(gpui::KeyBindingContextPredicate::parse(context).unwrap()));
+    KeyBinding::load(keystrokes, Box::new(action), context, false, None, cx).unwrap()
 }
 
 /// The code editor's usual shortcuts. They apply only while the editor has
 /// focus, never in a terminal, including the one inside a project.
-fn install_editor_shortcuts(primary: &str, cx: &mut App) {
+fn install_editor_shortcuts(cx: &mut App) {
     use crate::project_editor::*;
     const EDITOR: &str = "ProjectEditor && !Terminal";
-    cx.bind_keys([
-        KeyBinding::new(&format!("{primary}-s"), SaveFile, Some(EDITOR)),
-        KeyBinding::new(&format!("{primary}-w"), CloseTab, Some(EDITOR)),
-        KeyBinding::new(&format!("{primary}-p"), QuickOpen, Some(EDITOR)),
-        KeyBinding::new(&format!("{primary}-b"), ToggleFiles, Some(EDITOR)),
-        KeyBinding::new(&format!("{primary}-shift-e"), FocusExplorer, Some(EDITOR)),
+    let editor = vec![
+        binding("secondary-s", SaveFile, Some(EDITOR), cx),
+        binding("secondary-w", CloseTab, Some(EDITOR), cx),
+        binding("secondary-p", QuickOpen, Some(EDITOR), cx),
+        binding("secondary-b", ToggleFiles, Some(EDITOR), cx),
+        binding("secondary-shift-e", FocusExplorer, Some(EDITOR), cx),
         KeyBinding::new("ctrl-tab", NextTab, Some(EDITOR)),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(EDITOR)),
         KeyBinding::new("ctrl-`", ToggleTerminal, Some(EDITOR)),
         KeyBinding::new("f2", RenameSymbol, Some(EDITOR)),
         KeyBinding::new("shift-f12", FindReferences, Some(EDITOR)),
         KeyBinding::new("shift-alt-f", FormatDocument, Some(EDITOR)),
-    ]);
+    ];
+    cx.bind_keys(editor);
 }
 const VIEWS: [(Page, IconName); 8] = [
     (Page::Overview, IconName::Activity),
@@ -467,6 +468,11 @@ mod tests {
     use super::destination;
     use gpui_kit as gpui;
 
+    /// Parses a key built at runtime, as this app's OS reads it.
+    fn parse(key: &str, cx: &gpui::App) -> gpui::Keystroke {
+        gpui::Keystroke::parse_with_os(key, cx.platform_info().os).unwrap()
+    }
+
     #[gpui::test]
     fn terminal_contexts_only_reserve_find_and_tab_numbers_in_the_keymap(
         cx: &mut gpui::TestAppContext,
@@ -543,8 +549,8 @@ mod tests {
                     ["ctrl", "alt", "ctrl-shift", "ctrl-cmd"]
                         .map(|modifiers| format!("{modifiers}-{number}"))
                 })) {
-                    let (bindings, pending) = keymap
-                        .bindings_for_input(&[gpui::Keystroke::parse(&key).unwrap()], &contexts);
+                    let (bindings, pending) =
+                        keymap.bindings_for_input(&[parse(&key, cx)], &contexts);
                     assert!(
                         bindings.is_empty() && !pending,
                         "{key} was intercepted in {names:?}"
@@ -566,8 +572,8 @@ mod tests {
                 };
                 for number in 1..=9 {
                     let key = format!("{tabs}-{number}");
-                    let (bindings, pending) = keymap
-                        .bindings_for_input(&[gpui::Keystroke::parse(&key).unwrap()], &contexts);
+                    let (bindings, pending) =
+                        keymap.bindings_for_input(&[parse(&key, cx)], &contexts);
                     assert!(!pending && bindings.len() == 1, "{key}");
                     let action = bindings[0].action().as_any();
                     assert!(
@@ -603,7 +609,7 @@ mod tests {
             let save = format!("{primary}-s");
             let close = format!("{primary}-w");
             for key in [save.as_str(), close.as_str(), "ctrl-tab", "f2"] {
-                let input = [gpui::Keystroke::parse(key).unwrap()];
+                let input = [parse(key, cx)];
                 let (bindings, _) =
                     keymap.bindings_for_input(&input, &contexts(&["Root", "ProjectEditor"]));
                 assert_eq!(bindings.len(), 1, "{key} in the editor");
@@ -613,10 +619,8 @@ mod tests {
                 let (bindings, _) = keymap.bindings_for_input(&input, &contexts(&["Root"]));
                 assert!(bindings.is_empty(), "{key} outside the editor");
             }
-            let (bindings, _) = keymap.bindings_for_input(
-                &[gpui::Keystroke::parse(&save).unwrap()],
-                &contexts(&["Root", "ProjectEditor"]),
-            );
+            let (bindings, _) = keymap
+                .bindings_for_input(&[parse(&save, cx)], &contexts(&["Root", "ProjectEditor"]));
             assert!(
                 bindings[0]
                     .action()

@@ -321,7 +321,7 @@ impl Form {
                 .gap_0()
                 .rounded(px(crate::ui::RADIUS))
                 .border_0()
-                .centered(true)
+                .centered()
                 .on_cancel(move |_, _, cx| !cancel_form.read(cx).pending)
                 .on_ok(move |_, window, cx| {
                     submit_form.update(cx, |form, cx| form.save(window, cx));
@@ -1106,7 +1106,7 @@ mod tests {
         (controls, cx)
     }
 
-    fn key(cx: &mut VisualTestContext, value: &str) {
+    fn key(cx: &mut VisualTestContext, value: &'static str) {
         let keystroke = Keystroke::parse(value).unwrap();
         cx.simulate_event(KeyDownEvent {
             physical_key: None,

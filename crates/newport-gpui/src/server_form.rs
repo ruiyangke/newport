@@ -401,7 +401,7 @@ impl ServerForm {
                 .gap_0()
                 .rounded(px(crate::ui::RADIUS))
                 .border_0()
-                .centered(true)
+                .centered()
                 .on_cancel(move |_, _, cx| !cancel.read(cx).pending)
                 .on_close(move |_, _, cx| Self::cleanup(&cleanup, cx))
                 .on_ok(move |_, window, cx| {
@@ -1105,7 +1105,7 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.update(|window, cx| window.draw(cx).clear(cx));
     }
-    fn key(cx: &mut VisualTestContext, value: &str) {
+    fn key(cx: &mut VisualTestContext, value: &'static str) {
         let keystroke = Keystroke::parse(value).unwrap();
         cx.simulate_event(KeyDownEvent {
             physical_key: None,

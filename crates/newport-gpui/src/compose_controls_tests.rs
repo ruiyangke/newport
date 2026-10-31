@@ -15,7 +15,7 @@ use std::{thread, time::Duration};
 fn has(cx: &mut VisualTestContext, label: &str) -> bool {
     cx.update(|window, _| snapshots(window).iter().any(|e| e.label() == Some(label)))
 }
-fn key(cx: &mut VisualTestContext, name: &str) {
+fn key(cx: &mut VisualTestContext, name: &'static str) {
     cx.simulate_event(KeyDownEvent {
         physical_key: None,
         key_metadata: None,

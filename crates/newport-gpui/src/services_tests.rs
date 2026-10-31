@@ -423,7 +423,7 @@ fn click(cx: &mut VisualTestContext, label: &str) {
     cx.simulate_click(at, Default::default());
     draw(cx);
 }
-fn key(cx: &mut VisualTestContext, key: &str) {
+fn key(cx: &mut VisualTestContext, key: &'static str) {
     cx.simulate_event(KeyDownEvent {
         physical_key: None,
         key_metadata: None,
@@ -1147,7 +1147,7 @@ fn failed_service_heading_survives_real_shell_constraints_and_post_load_resize(
 
 #[gpui::test]
 fn scrolling_journal_does_not_scroll_the_service_heading(cx: &mut TestAppContext) {
-    use gpui::{ScrollDelta, ScrollWheelEvent, point};
+    use gpui::{ScrollDelta, ScrollEvent, point};
     let (panel, cx, _backend) = fixture_with_size(cx, snapshot(), 898., 500.);
     let viewport = cx.debug_bounds("services-detail").unwrap();
     let logs = cx.debug_bounds("services-log-region").unwrap();
@@ -1160,7 +1160,7 @@ fn scrolling_journal_does_not_scroll_the_service_heading(cx: &mut TestAppContext
     cx.simulate_mouse_move(position, None, Default::default());
     // Leave the tail first, so the journal can consume the following downward
     // wheel rather than treating it as an intentional boundary overscroll.
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position,
         delta: ScrollDelta::Pixels(point(px(0.), px(80.))),
         ..Default::default()
@@ -1174,7 +1174,7 @@ fn scrolling_journal_does_not_scroll_the_service_heading(cx: &mut TestAppContext
         panel.read_with(cx, |p, _| p.detail_scroll.offset().y),
         px(0.)
     );
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position,
         delta: ScrollDelta::Pixels(point(px(0.), px(-22.))),
         ..Default::default()
@@ -1191,7 +1191,7 @@ fn scrolling_journal_does_not_scroll_the_service_heading(cx: &mut TestAppContext
 
     // Repeated gestures at either journal boundary stay in that scroll area.
     for delta in [-10_000., -22., 10_000., 22.] {
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position,
             delta: ScrollDelta::Pixels(point(px(0.), px(delta))),
             ..Default::default()
@@ -1207,7 +1207,7 @@ fn scrolling_journal_does_not_scroll_the_service_heading(cx: &mut TestAppContext
     // The page remains independently scrollable outside the nested journal.
     let outside = heading.center();
     cx.simulate_mouse_move(outside, None, Default::default());
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: outside,
         delta: ScrollDelta::Pixels(point(px(0.), px(-22.))),
         ..Default::default()

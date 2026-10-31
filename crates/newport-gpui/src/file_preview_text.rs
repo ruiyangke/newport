@@ -109,7 +109,7 @@ impl PreviewText {
             .min_h_0()
             .min_w_0()
             .overflow_hidden()
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .on_scroll(|_, _, cx| cx.stop_propagation())
             .child(if let Some(code) = &self.code {
                 Editor::new(code)
                     .readonly(true)

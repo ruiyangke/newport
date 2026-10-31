@@ -994,12 +994,7 @@ impl TerminalView {
         self.update_selection(event.position);
         cx.notify();
     }
-    fn mouse_scroll(
-        &mut self,
-        event: &ScrollWheelEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn mouse_scroll(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         if window.has_active_dialog(cx) {
             return;
         }
@@ -1349,7 +1344,7 @@ impl Render for TerminalView {
                 view.cursor_pointer()
                     .hover_path("Ctrl-click or Cmd-click to open", url)
             })
-            .on_scroll_wheel(cx.listener(Self::mouse_scroll))
+            .on_scroll(cx.listener(Self::mouse_scroll))
             .when_some(grid, |view, grid| view.child(grid))
             .when(!self.composition.is_empty(), |div| {
                 let cursor = self.cursor_bounds().origin - self.bounds.origin;
@@ -1411,7 +1406,7 @@ impl Render for TerminalView {
                         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                         .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
                         .on_mouse_move(|_, _, cx| cx.stop_propagation())
-                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                        .on_scroll(|_, _, cx| cx.stop_propagation())
                         .child(card),
                 )
             })

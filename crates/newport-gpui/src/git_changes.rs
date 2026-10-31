@@ -595,7 +595,7 @@ impl Newport {
                             .collect()
                     }),
                 )
-                .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, _| {
+                .on_scroll(cx.listener(move |this, event: &ScrollEvent, _, _| {
                     // A short list counts as "at the end". With a group folded,
                     // a new page may add no visible rows, so the list never grows
                     // and every wheel event would fetch another page.

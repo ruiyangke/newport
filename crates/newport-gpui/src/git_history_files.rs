@@ -271,7 +271,7 @@ impl Newport {
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
-                    .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, _| {
+                    .on_scroll(cx.listener(move |this, event: &ScrollEvent, _, _| {
                         if event.delta.pixel_delta(px(28.)).y < px(0.) {
                             this.git.history.file_demand.arm(scroll_key.clone());
                         }

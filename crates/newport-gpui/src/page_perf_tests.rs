@@ -636,14 +636,14 @@ fn integration_scrolls_to_the_bottom_in_short_windows(cx: &mut TestAppContext) {
     for width in [900., 420.] {
         visual.simulate_resize(size(px(width), px(360.)));
         frame(visual);
-        visual.simulate_event(gpui::ScrollWheelEvent {
+        visual.simulate_event(gpui::ScrollEvent {
             position: gpui::point(px(8.), px(100.)),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(10000.))),
             ..Default::default()
         });
         frame(visual);
         let before = visual.debug_bounds("needle-status").unwrap();
-        visual.simulate_event(gpui::ScrollWheelEvent {
+        visual.simulate_event(gpui::ScrollEvent {
             position: gpui::point(px(8.), px(100.)),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-10000.))),
             ..Default::default()
@@ -1463,7 +1463,7 @@ fn benchmark_overview_core_history_frames(cx: &mut TestAppContext) {
         host.update(visual, |_, cx| cx.notify());
         frame(visual);
         for (position, delta) in [("top", 100000.), ("bottom", -100000.)] {
-            visual.simulate_event(gpui::ScrollWheelEvent {
+            visual.simulate_event(gpui::ScrollEvent {
                 position: gpui::point(px(1000.), px(600.)),
                 delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(delta))),
                 ..Default::default()

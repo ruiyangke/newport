@@ -221,7 +221,7 @@ impl ContainersPanel {
                 .p(px(if compact { 18. } else { 24. }))
                 .rounded(px(crate::ui::RADIUS))
                 .border_0()
-                .centered(true)
+                .centered()
                 .overlay_closable(false)
                 .on_cancel(move |_, _, cx| {
                     cancel

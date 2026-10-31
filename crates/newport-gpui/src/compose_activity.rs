@@ -324,7 +324,7 @@ impl ContainersPanel {
                 .when(self.activity.unseen>0&&!pinned, |v|v.child(div().absolute().bottom(px(12.)).left_0().right_0().flex().justify_center().child(
                     super::logs::new_lines_button("compose-output-latest",self.activity.unseen as u64,cx)
                         .on_click(cx.listener(|this,_,_,cx| {this.activity.list.set_follow_mode(FollowMode::Tail);this.activity.unseen=0;cx.notify();})))))
-                .on_scroll_wheel(|_,_,cx| cx.stop_propagation()))
+                .on_scroll(|_,_,cx| cx.stop_propagation()))
             .child(div().id("compose-output-footer").debug_selector(|| "compose-output-footer".into()).flex_shrink_0().child(crate::controls::pane_status_bar(cx)
                 .left(quiet(footer.clone(),cx).text_size(px(crate::ui::FONT_SIZE)).id("compose-output-status").role(accesskit::Role::Status).aria_label(footer))
                 .right(crate::controls::compact_icon_button("compose-output-copy").ghost().icon(IconName::Copy).accessibility_label("Copy command output").disabled(count==0)
@@ -463,7 +463,7 @@ impl ContainersPanel {
                                 },
                             ))
                         }))
-                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation()),
+                        .on_scroll(|_, _, cx| cx.stop_propagation()),
                 )
             })
             .into_any_element()

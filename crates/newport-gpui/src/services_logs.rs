@@ -477,7 +477,7 @@ impl ServicesPanel {
                             ),
                         )
                     })
-                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation()),
+                    .on_scroll(|_, _, cx| cx.stop_propagation()),
             )
             .child(
                 div()
@@ -640,7 +640,7 @@ fn log_line(
 #[cfg(test)]
 mod tests {
     use super::{LogRow, log_rows};
-    use gpui::{ListOffset, ScrollDelta, ScrollWheelEvent, TestAppContext, point, px};
+    use gpui::{ListOffset, ScrollDelta, ScrollEvent, TestAppContext, point, px};
     use gpui_kit as gpui;
     use newport_domain::services::JournalEntry;
     fn lines() -> Vec<JournalEntry> {
@@ -740,7 +740,7 @@ mod tests {
         });
         draw(cx);
         let outer = panel.read_with(cx, |panel, _| panel.detail_scroll.offset());
-        let key = |key: &str, cx: &mut gpui::VisualTestContext| {
+        let key = |key: &'static str, cx: &mut gpui::VisualTestContext| {
             cx.simulate_event(KeyDownEvent {
                 physical_key: None,
                 key_metadata: None,
@@ -877,7 +877,7 @@ mod tests {
         let before = panel.read_with(cx, |panel, _| panel.logs.list.logical_scroll_top());
         // Scroll directly over the repeated date. It is decorative and must
         // leave wheel events with the existing virtual list.
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: sticky.center(),
             delta: ScrollDelta::Pixels(point(px(0.), px(-80.))),
             ..Default::default()

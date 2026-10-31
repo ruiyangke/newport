@@ -252,7 +252,7 @@ impl Newport {
                 .p(px(24.))
                 .rounded(px(crate::ui::RADIUS))
                 .border_0()
-                .centered(true)
+                .centered()
                 .overlay_closable(false)
                 // Bare Enter must neither dismiss nor implicitly approve a
                 // destructive operation; the explicit button owns submission.
