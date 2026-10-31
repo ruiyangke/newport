@@ -17,7 +17,7 @@ fn main() -> anyhow::Result<()> {
             Event::Wake => {
                 WAKE.fetch_add(1, Ordering::SeqCst);
             }
-            Event::NetworkChanged => {}
+            Event::NetworkChanged | Event::Unlocked => {}
         }
     }
 

@@ -7,8 +7,10 @@ pub fn install(notify: fn(Event)) -> anyhow::Result<()> {
         string::CFString,
     };
     use objc2_app_kit::{
-        NSWorkspace, NSWorkspaceDidWakeNotification, NSWorkspaceWillSleepNotification,
+        NSWorkspace, NSWorkspaceDidWakeNotification, NSWorkspaceSessionDidBecomeActiveNotification,
+        NSWorkspaceWillSleepNotification,
     };
+    use objc2_foundation::{NSDistributedNotificationCenter, NSString};
     use system_configuration::dynamic_store::{
         SCDynamicStoreBuilder, SCDynamicStoreCallBackContext,
     };
@@ -62,6 +64,22 @@ pub fn install(notify: fn(Event)) -> anyhow::Result<()> {
                 &callback,
             );
         }
+        // The person is back: the screen unlocked, or they switched back to
+        // this login session. The screen lock reports through the distributed
+        // notification center.
+        let unlocked = RcBlock::new(move |_| {
+            log::info!("Session unlocked; notifying recovery tasks");
+            notify(Event::Unlocked);
+        });
+        let _observer = center.addObserverForName_object_queue_usingBlock(
+            Some(NSWorkspaceSessionDidBecomeActiveNotification),
+            None,
+            None,
+            &unlocked,
+        );
+        let screen = NSString::from_str("com.apple.screenIsUnlocked");
+        let _observer = NSDistributedNotificationCenter::defaultCenter()
+            .addObserverForName_object_queue_usingBlock(Some(&screen), None, None, &unlocked);
         CFRunLoop::get_current().add_source(&source, kCFRunLoopCommonModes);
     }
     // The run loop retains the source, which retains its dynamic store context.

@@ -170,7 +170,8 @@ impl Context {
 
 /// What the tunnel shows: `bound` when every remote forward is registered,
 /// `connected` once the tunnel has been connected, and `lost` why its
-/// connection closed.
+/// connection closed. A link stopped until something retries it doesn't end
+/// the tunnel: it waits, says why, and comes back with the link.
 fn tunnel_state(
     status: &newport_ssh::Status,
     bound: bool,
@@ -178,23 +179,27 @@ fn tunnel_state(
     auto_reconnect: bool,
     lost: Option<&Error>,
 ) -> ConnectionState {
-    if let Reach::Failed(error) = &status.reach {
+    let stopped = match &status.reach {
+        Reach::Failed(error) => Some(error),
+        _ => None,
+    };
+    if let Some(error) = stopped.filter(|error| error.retry() == Retry::Never) {
         return ConnectionState::error(wording(error));
     }
     let ready = matches!(status.reach, Reach::Ready { .. });
     if ready && bound {
         return ConnectionState::new(Status::Connected);
     }
-    let login_failure = match &status.login {
+    let login_failure = stopped.or(match &status.login {
         Some(Login::Failed(error)) => Some(error),
         _ => None,
-    };
+    });
     if !auto_reconnect && connected {
         return ConnectionState::error(lost.or(login_failure).map_or_else(|| LOST.into(), wording));
     }
     if !auto_reconnect
         && !ready
-        && let Some(error) = login_failure
+        && let Some(error) = login_failure.filter(|error| error.retry() != Retry::OnRetry)
     {
         return ConnectionState::error(wording(error));
     }
@@ -479,30 +484,42 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_link_fails_the_tunnel_with_the_agent_wording() {
+    fn a_stopped_link_keeps_the_tunnel_waiting_with_the_agent_wording() {
+        for auto_reconnect in [true, false] {
+            let state = tunnel_state(
+                &link(Reach::Failed(Error::ApprovalRequired), None),
+                true,
+                false,
+                auto_reconnect,
+                None,
+            );
+            assert_eq!(state.status, Status::Connecting);
+            assert_eq!(
+                state.error_message,
+                Some(auth::AgentApprovalRequired.to_string())
+            );
+        }
         let state = tunnel_state(
-            &link(Reach::Failed(Error::ApprovalRequired), None),
+            &link(Reach::Failed(Error::AuthRefused), None),
+            false,
+            true,
+            true,
+            None,
+        );
+        assert_eq!(state.status, Status::Reconnecting);
+        assert_eq!(
+            state.error_message.as_deref(),
+            Some("The server refused the login.")
+        );
+        // Retrying can't help a server without sessions.
+        let state = tunnel_state(
+            &link(Reach::Failed(Error::SessionsDisabled), None),
             true,
             true,
             true,
             None,
         );
         assert_eq!(state.status, Status::Error);
-        assert_eq!(
-            state.error_message,
-            Some(auth::AgentApprovalRequired.to_string())
-        );
-        let state = tunnel_state(
-            &link(Reach::Failed(Error::AuthRefused), None),
-            false,
-            false,
-            true,
-            None,
-        );
-        assert_eq!(
-            state.error_message.as_deref(),
-            Some("The server refused the login.")
-        );
     }
 
     #[test]

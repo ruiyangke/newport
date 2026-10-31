@@ -100,7 +100,7 @@ fn publish(events: &watch::Sender<State>, event: Event) {
             state.sleeping = matches!(event, Event::Sleep);
             state.sleep_epoch = state.sleep_epoch.wrapping_add(1);
         }
-        Event::NetworkChanged => {}
+        Event::NetworkChanged | Event::Unlocked => {}
     });
 }
 

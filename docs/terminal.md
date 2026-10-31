@@ -57,7 +57,9 @@ For graphical applications, complete [Remote apps setup](terminal-gui.md). Once 
 
 ## If a terminal will not connect
 
-Check the server address, authentication, and connection status. Unlock your SSH agent if it needs approval, then retry. Use **Reconnect** from the tab menu when available.
+Check the server address, authentication, and connection status. Use **Reconnect** from the tab menu when available.
+
+If your SSH agent doesn't approve the login, the tab waits for the server. Press **Return** in the tab to ask again. The tab also connects when anything else reconnects the server, such as **Server → Test connection** or a new tab, and when your computer wakes, unlocks, or changes network.
 
 See [Troubleshooting](troubleshooting.md) for SSH and helper errors.
 

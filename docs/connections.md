@@ -67,6 +67,8 @@ Keep the listen address at `127.0.0.1` to restrict access to the server itself. 
 
 Enable **Always on** to connect when Newport starts and retry after a dropped connection. Newport retries up to ten times. If the connection remains down, resolve the problem and start it again.
 
+If your SSH agent doesn't approve the login, a forward waits for the server and shows why. It connects as soon as the server does: after **Server → Test connection**, a new terminal tab, or when your computer wakes, unlocks, or changes network.
+
 Closing the main window keeps forwards running. Quitting Newport stops them. Disconnect a forward when you are done; removing a saved forward also removes its saved configuration.
 
 Local forwards listen only on your computer's loopback interface. They do not publish a service to other computers on your network.

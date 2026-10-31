@@ -79,6 +79,16 @@ pub(crate) async fn run(
                 // The link already waited for a connection; an open that timed
                 // out on one waits again.
                 Err(error) if error.retry() == Retry::Backoff => continue,
+                // The link stopped until something retries it. The tab waits
+                // with the server, and comes back when anything brings the
+                // link back; Return in the tab asks again.
+                Err(error) if error.retry() == Retry::OnRetry => {
+                    output.send(reconnecting(&link, &error)).await?;
+                    tokio::select! {
+                        result = link.open(Open::Session) => result?,
+                        _ = retry_on_return(&owner, &mut input, &mut size) => return Ok(()),
+                    }
+                }
                 Err(error) => return Err(error.into()),
             };
             let attempt = shell
@@ -149,7 +159,7 @@ pub(crate) async fn run(
 }
 
 /// A session channel, waiting in the link's queue while it can't reach the
-/// server, but not past a failure only Retry can clear: the tab ends with it.
+/// server, but not past a failure only Retry can clear: the tab hears of it.
 async fn open(link: &Link) -> Result<newport_ssh::Channel, newport_ssh::Error> {
     link.open_unless_stopped(Open::Session).await
 }
@@ -166,6 +176,22 @@ fn reconnecting(link: &Link, lost: &newport_ssh::Error) -> Event {
         _ => lost.to_string(),
     };
     Event::Reconnecting { attempt, message }
+}
+
+/// While the link is stopped, Return is the person asking to connect again;
+/// other keystrokes are discarded. Ends when the tab closes its input.
+async fn retry_on_return(
+    owner: &ServerSession,
+    input: &mut mpsc::Receiver<Input>,
+    size: &mut (u32, u32),
+) {
+    while let Some(command) = input.recv().await {
+        match command {
+            Input::Resize(cols, rows) => *size = (cols, rows),
+            Input::Data(data) if data.contains(&b'\r') => owner.retry_fresh(),
+            Input::Data(_) => {}
+        }
+    }
 }
 
 /// Discard keystrokes for an unavailable shell, but keep the window size.

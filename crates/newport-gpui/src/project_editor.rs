@@ -170,6 +170,11 @@ pub(super) struct CodeWorkspace {
     /// A definition to move to once its file's tab opens.
     pending_jump: Option<lsp::Jump>,
     language_tools: lsp::ToolState,
+    /// Whether the server was connected when its state last changed, and
+    /// whether it has come back since the last render.
+    connected: bool,
+    reconnected: bool,
+    _connectivity: Subscription,
     #[cfg(test)]
     test_rpc: Option<TestRpc>,
 }
@@ -218,8 +223,45 @@ impl CodeWorkspace {
             language_servers: Default::default(),
             pending_jump: None,
             language_tools: Default::default(),
+            connected: true,
+            reconnected: false,
+            _connectivity: crate::connectivity::observe(
+                cx,
+                |this: &Self| &this.server,
+                |this, cx| {
+                    let connected = crate::connectivity::for_scope(&this.connection, cx)
+                        .is_some_and(|state| state.phase == crate::connectivity::Phase::Connected);
+                    if connected && !this.connected {
+                        this.reconnected = true;
+                        cx.notify();
+                    }
+                    this.connected = connected;
+                },
+            ),
             #[cfg(test)]
             test_rpc: None,
+        }
+    }
+    /// The server is connected again, so what failed with the connection
+    /// tries again. Open files heal through the watch; a folder that never
+    /// loaded and the language servers that stopped with it don't.
+    fn recover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.available {
+            return;
+        }
+        match self.failed_read.clone() {
+            Some(("folder", path)) => self.list(path, window, cx),
+            Some((_, path)) => self.open(path, window, cx),
+            None => {}
+        }
+        let stopped: Vec<_> = self
+            .language_servers
+            .values()
+            .filter(|server| matches!(*server.status.borrow(), lsp::Status::Stopped(_)))
+            .map(|server| (server.id, server.envrc))
+            .collect();
+        for (id, envrc) in stopped {
+            self.restart_language_server(id, envrc, window, cx);
         }
     }
     pub(super) fn show_review(&mut self, cx: &mut Context<Self>) {
@@ -1685,7 +1727,10 @@ impl CodeWorkspace {
     }
 }
 impl Render for CodeWorkspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.reconnected) {
+            self.recover(window, cx);
+        }
         let pane = self.editor_pane(true, cx);
         let content = if self.narrow && self.show_tree {
             self.tree(true, cx)
@@ -2183,6 +2228,75 @@ mod interaction_tests {
             }));
         });
         (view, cx, calls)
+    }
+    #[gpui::test]
+    fn a_reconnect_loads_a_folder_that_failed_with_the_connection(cx: &mut TestAppContext) {
+        use crate::connectivity::{Phase, ServerState, Snapshot};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (id, instance) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let scope = newport_domain::connection_scope::connection(
+            &json!({"id": id.to_string()}),
+            &json!({"instanceId": instance.to_string()}),
+        );
+        cx.update(|cx| {
+            gpui::component::init(cx);
+            crate::theme::install(false, cx);
+        });
+        let online = Arc::new(AtomicBool::new(false));
+        let lists = Arc::new(Mutex::new(0));
+        let (reachable, listed) = (online.clone(), lists.clone());
+        let retained = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let saved = retained.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let view = cx.new(|cx| {
+                let mut view = CodeWorkspace::new(id.to_string(), "/repo".into(), scope, cx);
+                view.test_rpc = Some(Arc::new(move |method, args| {
+                    assert_eq!(method, "files_list");
+                    *listed.lock().unwrap() += 1;
+                    if !reachable.load(Ordering::SeqCst) {
+                        return Err("The connection was lost.".into());
+                    }
+                    Ok(json!({"path": args["path"], "entries": [
+                        {"name": "main.rs", "path": "/repo/main.rs", "kind": "file"}
+                    ]}))
+                }));
+                view
+            });
+            *saved.borrow_mut() = Some(view.clone());
+            gpui::base::Root::new(view, window, cx)
+        });
+        let view = retained.borrow_mut().take().unwrap();
+        let publish = |cx: &mut VisualTestContext, revision, phase| {
+            cx.update(|_, cx| {
+                crate::connectivity::publish(
+                    Snapshot {
+                        instance_id: instance,
+                        revision,
+                        servers: [(
+                            id,
+                            ServerState {
+                                phase,
+                                ..Default::default()
+                            },
+                        )]
+                        .into(),
+                    },
+                    cx,
+                )
+            });
+            draw(cx);
+        };
+        publish(cx, 1, Phase::Connected);
+        view.update_in(cx, |view, window, cx| view.list("/repo".into(), window, cx));
+        draw(cx);
+        assert!(view.read_with(cx, |v, _| v.failed_read.is_some()));
+        publish(cx, 2, Phase::Reconnecting);
+        assert_eq!(*lists.lock().unwrap(), 1, "nothing retries while away");
+        online.store(true, Ordering::SeqCst);
+        publish(cx, 3, Phase::Connected);
+        assert_eq!(*lists.lock().unwrap(), 2);
+        assert!(view.read_with(cx, |v, _| v.failed_read.is_none()
+            && v.directories.contains_key("/repo")));
     }
     #[gpui::test]
     fn the_language_server_shows_in_the_header_tab_and_notice(cx: &mut TestAppContext) {

@@ -214,15 +214,24 @@ impl Link {
     }
 
     /// The computer woke: check every connection, give up a login started
-    /// before sleep, and stop waiting out the backoff.
+    /// before sleep, stop waiting out the backoff, and try again after a
+    /// login the system may now let through ([`Error::eased_by_system`]).
     pub fn wake(&self) {
         let _ = self.commands.send(Command::Wake);
     }
 
-    /// The network changed: check every connection, and stop waiting out the
-    /// backoff.
+    /// The network changed: check every connection, stop waiting out the
+    /// backoff, and try again after a login the system may now let through.
+    /// A login waiting for approval keeps its prompt.
     pub fn network_changed(&self) {
         let _ = self.commands.send(Command::NetworkChanged);
+    }
+
+    /// The person unlocked the computer: as [`Link::network_changed`], and a
+    /// login waiting for approval, whose prompt may have gone unseen while it
+    /// was locked, is replaced with a fresh one.
+    pub fn unlocked(&self) {
+        let _ = self.commands.send(Command::Unlocked);
     }
 }
 
@@ -270,6 +279,7 @@ enum Command {
     Sleep,
     Wake,
     NetworkChanged,
+    Unlocked,
 }
 
 /// How long a request waits for a connection.
@@ -542,14 +552,28 @@ impl Actor {
                 {
                     self.cancel_attempt();
                 }
-                self.backoff_until = None;
-                self.probe_all();
+                self.system_changed();
             }
-            Command::NetworkChanged => {
-                self.backoff_until = None;
-                self.probe_all();
+            Command::NetworkChanged => self.system_changed(),
+            Command::Unlocked => {
+                if self.approving() {
+                    self.cancel_attempt();
+                }
+                self.system_changed();
             }
         }
+    }
+
+    /// Something on this computer changed: check every connection, stop
+    /// waiting out the backoff, and lift a stop the change may have fixed.
+    fn system_changed(&mut self) {
+        if self.blocked.as_ref().is_some_and(Error::eased_by_system) {
+            self.blocked = None;
+            self.login_error = None;
+            self.failures = 0;
+        }
+        self.backoff_until = None;
+        self.probe_all();
     }
 
     fn event(&mut self, event: Event) {
@@ -864,13 +888,17 @@ impl Actor {
         self.queue.retain(Request::waiting);
         let abandoned = std::mem::take(&mut self.abandoned) || self.queue.len() < waiting;
         let mut waiting = VecDeque::new();
+        let mut served = false;
         while let Some(request) = self.queue.pop_front() {
             if request.want.session() && self.sessions_disabled {
                 request.fail(Error::SessionsDisabled);
                 continue;
             }
             match (self.place(&request.want), &self.blocked) {
-                (Some(index), _) => self.start(index, request),
+                (Some(index), _) => {
+                    served = true;
+                    self.start(index, request);
+                }
                 (None, Some(error)) if request.patience != Patience::Retries => {
                     request.fail(error.clone())
                 }
@@ -884,8 +912,9 @@ impl Actor {
         }
         if self.queue.is_empty() && self.attempt.is_some() {
             // Asking again by itself would bring back a prompt the person
-            // walked away from.
-            if abandoned && self.approving() {
+            // walked away from. A queue emptied by a connection with room
+            // wasn't walked away from.
+            if abandoned && !served && self.approving() {
                 self.blocked = Some(Error::ApprovalRequired);
                 self.login_error = Some(Error::ApprovalRequired);
             }

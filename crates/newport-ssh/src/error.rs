@@ -79,6 +79,14 @@ impl Error {
         }
     }
 
+    /// Whether a change on this computer, such as a wake, a network change
+    /// or the person unlocking it, may let a login that stopped on this error
+    /// succeed: the agent can ask for approval again, or offer keys it held
+    /// back while locked. A host key needs the person to check it.
+    pub fn eased_by_system(&self) -> bool {
+        matches!(self, Error::ApprovalRequired | Error::AuthRefused)
+    }
+
     /// A stable name for the error, for the app to word it.
     pub fn code(&self) -> &'static str {
         match self {

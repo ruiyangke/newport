@@ -342,22 +342,39 @@ async fn link_failure(
 }
 
 /// Passes a sleep on at once. A wake or network change waits for [`SETTLE`],
-/// and the events of a burst pass on as one: a wake when there was one.
-/// Ends once `forward` returns false.
+/// and the events of a burst pass on as one: a wake when there was one. An
+/// unlock settles the same way on its own, so a system that reports one
+/// unlock twice brings one fresh prompt. Ends once `forward` returns false.
 async fn settle(
     mut events: tokio::sync::mpsc::UnboundedReceiver<crate::recovery::Event>,
     mut forward: impl FnMut(crate::recovery::Event) -> bool,
 ) {
     use crate::recovery::Event;
     let mut held: Option<(Event, tokio::time::Instant)> = None;
+    let mut unlock: Option<tokio::time::Instant> = None;
     loop {
-        let event = match held {
-            Some((event, at)) => tokio::select! {
+        let due = match (held.map(|(_, at)| at), unlock) {
+            (Some(held), Some(unlock)) => Some(held.min(unlock)),
+            (held, unlock) => held.or(unlock),
+        };
+        let event = match due {
+            Some(due) => tokio::select! {
                 next = events.recv() => next,
-                _ = tokio::time::sleep_until(at) => {
-                    held = None;
-                    if !forward(event) {
-                        return;
+                _ = tokio::time::sleep_until(due) => {
+                    // A wake passes before the unlock that came with it.
+                    if let Some((event, at)) = held
+                        && at <= due
+                    {
+                        held = None;
+                        if !forward(event) {
+                            return;
+                        }
+                    }
+                    if unlock.is_some_and(|at| at <= due) {
+                        unlock = None;
+                        if !forward(Event::Unlocked) {
+                            return;
+                        }
                     }
                     continue;
                 }
@@ -367,13 +384,19 @@ async fn settle(
         let Some(event) = event else {
             return;
         };
-        let at = held.map_or_else(|| tokio::time::Instant::now() + SETTLE, |(_, at)| at);
+        let now = tokio::time::Instant::now();
+        let at = held.map_or(now + SETTLE, |(_, at)| at);
         held = match (event, held) {
             (Event::Sleep, _) => {
+                unlock = None;
                 if !forward(Event::Sleep) {
                     return;
                 }
                 None
+            }
+            (Event::Unlocked, held) => {
+                unlock.get_or_insert(now + SETTLE);
+                held
             }
             (Event::NetworkChanged, Some((Event::Wake, _))) | (Event::Wake, _) => {
                 Some((Event::Wake, at))
@@ -394,6 +417,7 @@ fn forward(entries: &StdMutex<HashMap<Uuid, Published>>, event: crate::recovery:
             Event::Sleep => link.sleep(),
             Event::Wake => link.wake(),
             Event::NetworkChanged => link.network_changed(),
+            Event::Unlocked => link.unlocked(),
         }
     }
 }
@@ -1390,6 +1414,33 @@ mod tests {
         let after = seen();
         assert_eq!(after.len(), 2, "{after:?}");
         assert_eq!(after[1].0, "Sleep");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unlock_reported_twice_reaches_the_links_once_after_its_wake() {
+        use crate::recovery::Event;
+        let (events, received) = tokio::sync::mpsc::unbounded_channel();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        tokio::spawn(settle(received, {
+            let seen = seen.clone();
+            move |event| {
+                seen.lock().unwrap().push(format!("{event:?}"));
+                true
+            }
+        }));
+        let seen = || seen.lock().unwrap().clone();
+        events.send(Event::Wake).unwrap();
+        events.send(Event::Unlocked).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        events.send(Event::Unlocked).unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert_eq!(seen(), ["Wake", "Unlocked"]);
+
+        // A sleep drops an unlock that hasn't settled.
+        events.send(Event::Unlocked).unwrap();
+        events.send(Event::Sleep).unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert_eq!(seen(), ["Wake", "Unlocked", "Sleep"]);
     }
 
     /// An SSH agent with the fixture agent's keys that never answers a sign

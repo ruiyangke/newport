@@ -376,6 +376,11 @@ async fn a_changed_host_key_stops_new_connections() {
     })
     .await;
     assert_eq!(status.borrow().reach, Reach::Ready { connections: 1 });
+    // Only the person can vouch for a new host key: no change on this
+    // computer lifts the stop.
+    link.wake();
+    link.network_changed();
+    link.unlocked();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
         dialer.dials.load(Ordering::SeqCst),

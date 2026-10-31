@@ -1,8 +1,9 @@
 //! The login rules learned from Newport's earlier transport: one prompt at a
 //! time, an explicit Retry replaces a stale prompt while a routine one keeps
 //! it, a prompt the person walked away from doesn't come back by itself,
-//! sleep never leaves a stale login behind, and the login's network deadline
-//! never counts the approval wait.
+//! sleep never leaves a stale login behind, the login's network deadline
+//! never counts the approval wait, and a change on the computer tries a
+//! declined login again.
 mod support;
 
 use newport_ssh::{Error, Limits, Login, Open, Reach};
@@ -397,4 +398,77 @@ async fn an_open_unless_stopped_sent_right_after_retry_never_sees_the_cleared_fa
         .expect("the request is taken after the retry");
         round_trip(&mut channel).await;
     }
+}
+
+/// A change on the computer the link hears about.
+type Change = (&'static str, fn(&newport_ssh::Link));
+
+const CHANGES: [Change; 3] = [
+    ("wake", |link| link.wake()),
+    ("network change", |link| link.network_changed()),
+    ("unlock", |link| link.unlocked()),
+];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_on_the_computer_logs_in_again_after_a_decline() {
+    let server = server(Behaviour::default(), &HOST_A).await;
+    for (change, apply) in CHANGES {
+        let authenticator = TestAuthenticator::new(vec![Step::Decline, Step::Accept]);
+        let link = link(
+            TestDialer::new(&[server.port]),
+            authenticator.clone(),
+            limits(),
+        );
+        let opening = {
+            let link = link.clone();
+            tokio::spawn(async move { link.open(Open::Session).await })
+        };
+        let status = link.status();
+        eventually("the stopped link", || {
+            status.borrow().reach == Reach::Failed(Error::ApprovalRequired)
+        })
+        .await;
+        apply(&link);
+        let mut channel = tokio::time::timeout(Duration::from_secs(5), opening)
+            .await
+            .unwrap_or_else(|_| panic!("a {change} logs in again"))
+            .unwrap()
+            .unwrap();
+        round_trip(&mut channel).await;
+        assert_eq!(authenticator.attempts.load(Ordering::SeqCst), 2, "{change}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unlock_replaces_a_login_waiting_for_approval_and_a_network_change_keeps_it() {
+    let server = server(Behaviour::default(), &HOST_A).await;
+    let authenticator = TestAuthenticator::new(vec![never_approved(), Step::Accept]);
+    let link = link(
+        TestDialer::new(&[server.port]),
+        authenticator.clone(),
+        limits(),
+    );
+    let opening = {
+        let link = link.clone();
+        tokio::spawn(async move { link.open(Open::Session).await })
+    };
+    let status = link.status();
+    eventually("the approval wait", || {
+        status.borrow().login == Some(Login::WaitingForApproval)
+    })
+    .await;
+    link.network_changed();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        authenticator.attempts.load(Ordering::SeqCst),
+        1,
+        "one prompt"
+    );
+    link.unlocked();
+    tokio::time::timeout(Duration::from_secs(5), opening)
+        .await
+        .expect("a fresh login after unlock")
+        .unwrap()
+        .unwrap();
+    assert_eq!(authenticator.attempts.load(Ordering::SeqCst), 2);
 }

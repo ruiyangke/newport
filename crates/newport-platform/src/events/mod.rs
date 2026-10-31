@@ -6,6 +6,8 @@ pub enum Event {
     Sleep,
     Wake,
     NetworkChanged,
+    /// The person unlocked the screen or switched back to this session.
+    Unlocked,
 }
 
 #[cfg(target_os = "macos")]

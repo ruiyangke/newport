@@ -684,12 +684,16 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "Run with cargo xtask test ssh -- terminal::tests"]
-    async fn a_link_that_stopped_trying_ends_the_tab_with_its_error() {
-        // A refused login waits for Retry; a server without sessions can't
-        // run a shell at all. Neither tab waits or reconnects.
-        for (user, error) in [
-            ("nobody", newport_ssh::Error::AuthRefused),
-            ("fixture-no-sessions", newport_ssh::Error::SessionsDisabled),
+    async fn a_stopped_link_keeps_the_tab_waiting_and_no_sessions_ends_it() {
+        // A refused login waits for something to retry the link, and the tab
+        // waits with it; a server without sessions can't run a shell at all.
+        for (user, error, waits) in [
+            ("nobody", newport_ssh::Error::AuthRefused, true),
+            (
+                "fixture-no-sessions",
+                newport_ssh::Error::SessionsDisabled,
+                false,
+            ),
         ] {
             let sessions = Sessions::default();
             let mut server = fixture();
@@ -701,7 +705,10 @@ mod tests {
                 .await
                 .unwrap()
             {
-                Event::Error(message) => assert_eq!(message, error.to_string()),
+                Event::Reconnecting { message, .. } if waits => {
+                    assert_eq!(message, error.to_string())
+                }
+                Event::Error(message) if !waits => assert_eq!(message, error.to_string()),
                 event => panic!("Unexpected {event:?}"),
             }
             sessions.close_server(None).await;
