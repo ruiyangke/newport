@@ -427,11 +427,14 @@ mod tests {
             fs::write(repo.path().join(file), "one").unwrap();
         }
         git(&["add", "."]);
+        // A throwaway commit: no signing, which may wait on a key prompt.
         git(&[
             "-c",
             "user.name=t",
             "-c",
             "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
             "commit",
             "-qm",
             "one",
