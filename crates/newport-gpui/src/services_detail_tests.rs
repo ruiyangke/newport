@@ -160,7 +160,8 @@ fn detail_bar_keeps_height_and_right_aligns_controls_across_tabs(cx: &mut TestAp
         assert_eq!(panel.read_with(cx, |panel, _| panel.width), width);
         let before = cx.debug_bounds("service-detail-bar").unwrap();
         let controls = cx.debug_bounds("service-detail-controls").unwrap();
-        let search = element(cx, "Search logs").bounds();
+        let search = element(cx, "Search logs");
+        let search = cx.update(|window, _| crate::field_frame(window, &search));
         assert!(
             (search.right() - controls.right()).abs() <= gpui::px(1.),
             "controls not aligned at {width}: {search:?} {controls:?}"

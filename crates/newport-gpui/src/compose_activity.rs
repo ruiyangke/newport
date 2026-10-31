@@ -320,7 +320,7 @@ impl ContainersPanel {
                     list(self.activity.list.clone(),cx.processor(move |this,index:usize,_,cx| {
                         let row=&rows[index];
                         log_line::render("compose-output",index, log_line::LogLine { at:None,time:None,source:"",message:&row.message,styles:None,tone:row.tone },"",&this.activity.selection,cx)
-                    })).size_full().px(px(10.)).py(px(8.)))))
+                    })).absolute().inset_0().px(px(10.)).py(px(8.)))))
                 .when(self.activity.unseen>0&&!pinned, |v|v.child(div().absolute().bottom(px(12.)).left_0().right_0().flex().justify_center().child(
                     super::logs::new_lines_button("compose-output-latest",self.activity.unseen as u64,cx)
                         .on_click(cx.listener(|this,_,_,cx| {this.activity.list.set_follow_mode(FollowMode::Tail);this.activity.unseen=0;cx.notify();})))))

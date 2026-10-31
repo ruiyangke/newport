@@ -1661,14 +1661,14 @@ mod tests {
         );
         assert!(workspace.read_with(cx, |workspace, _| workspace.rename.is_some()));
         let editor = cx.update(|window, _| {
-            gpui::base::test_support::snapshots(window)
+            let input = gpui::base::test_support::snapshots(window)
                 .into_iter()
                 .find(|node| {
                     node.label() == Some("Rename Terminal 1")
                         && node.role() == Some(gpui::Role::TextInput)
                 })
-                .expect("inline rename input")
-                .bounds()
+                .expect("inline rename input");
+            crate::field_frame(window, &input)
         });
         assert_eq!(editor.size, size(px(132.), px(26.)));
         cx.simulate_keystrokes("cmd-a");

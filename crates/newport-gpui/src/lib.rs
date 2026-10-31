@@ -140,6 +140,23 @@ mod screens;
 mod selectable_log;
 mod server_form;
 
+/// A text input's whole field. Kit's accessibility snapshot of a text input is
+/// its inner text area; the field is the input element around it.
+#[cfg(test)]
+fn field_frame(
+    window: &gpui_kit::Window,
+    input: &gpui_kit::base::test_support::ElementSnapshot,
+) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    let path = input.path();
+    let at = path
+        .iter()
+        .rposition(|id| matches!(id, gpui_kit::ElementId::NamedInteger(name, _) if name == "input"))
+        .expect("text input inside an input field");
+    gpui_kit::base::test_support::find(window, &path[..at], &path[at])
+        .expect("rendered input field")
+        .bounds()
+}
+
 /// Exercise the platform's real editing bindings in shared UI fixtures.
 #[cfg(test)]
 fn test_shortcuts(cx: &mut gpui_kit::VisualTestContext, mac_keys: &str) {

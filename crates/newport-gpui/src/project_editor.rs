@@ -3499,9 +3499,11 @@ mod interaction_tests {
                     .iter()
                     .find(|e| e.label() == Some(label))
                     .unwrap_or_else(|| panic!("missing {label}"))
-                    .bounds()
             };
-            (find("Changes"), find("Find a changed file"))
+            (
+                find("Changes").bounds(),
+                crate::field_frame(window, find("Find a changed file")),
+            )
         });
         assert_eq!(tab.left(), search.left(), "{tab:?} {search:?}");
         assert_eq!(

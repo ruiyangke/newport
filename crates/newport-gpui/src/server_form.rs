@@ -1236,7 +1236,11 @@ mod tests {
                     .iter()
                     .find(|e| e.label() == Some(label) && e.role() == Some(gpui::Role::TextInput))
                     .unwrap();
-                assert_eq!(field.bounds().size.height, px(34.), "{label}");
+                assert_eq!(
+                    crate::field_frame(window, field).size.height,
+                    px(34.),
+                    "{label}"
+                );
             }
             for label in ["Cancel", "Save server"] {
                 let button = snapshots.iter().find(|e| e.label() == Some(label)).unwrap();

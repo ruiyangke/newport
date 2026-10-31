@@ -445,7 +445,11 @@ impl ContainersPanel {
                                         log_line::track_row(index, content, row_geometry.clone())
                                     }),
                                 )
-                                .size_full()
+                                // Fill the box explicitly. With a percentage height
+                                // the list sizes itself to the rows it has laid
+                                // out, which is none on the first frame.
+                                .absolute()
+                                .inset_0()
                                 .px(px(10.))
                                 .py(px(8.)),
                             ),

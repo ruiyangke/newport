@@ -448,7 +448,9 @@ impl ServicesPanel {
                                         )
                                     }),
                                 )
-                                .size_full()
+                                // Fill the box explicitly, as in container logs.
+                                .absolute()
+                                .inset_0()
                                 .px(px(10.))
                                 .py(px(8.))
                                 .when(placeholder, |v| v.opacity(0.55)),

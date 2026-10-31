@@ -620,10 +620,15 @@ impl Newport {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .flex()
+            .flex_col()
             .child(
+                // Grows to the viewport's height, so the active step centers
+                // in it, and past it with the content.
                 div()
                     .w_full()
-                    .min_h_full()
+                    .flex_grow(1.)
+                    .flex_shrink_0()
                     .flex()
                     .flex_col()
                     .items_center()

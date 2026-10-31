@@ -856,7 +856,11 @@ mod tests {
                             && element.role() == Some(gpui::Role::TextInput)
                     })
                     .unwrap_or_else(|| panic!("missing rendered input: {label}"));
-                assert_eq!(input.bounds().size.height, px(34.), "{label}: {input:?}");
+                assert_eq!(
+                    crate::field_frame(window, input).size.height,
+                    px(34.),
+                    "{label}: {input:?}"
+                );
             }
             for label in ["Cancel", "Save forward"] {
                 let button = snapshots.iter().find(|e| e.label() == Some(label)).unwrap();
