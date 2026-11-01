@@ -3034,7 +3034,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.8.1"
-source = "git+https://github.com/ruiyangke/gpui-kit?branch=newport%2Fv0.8.1#7eb19a55328b9107de5c6841a616456439b5112d"
+source = "git+https://github.com/ruiyangke/gpui-kit?branch=newport%2Fv0.8.1#c2add38c9e3ed41100770e3c472350841a16279b"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3044,9 +3044,9 @@ dependencies = [
  "data-url",
  "futures",
  "gpui-fast",
- "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-macros 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-sum-tree 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-macros 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-sum-tree 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
  "html5ever",
  "instant",
  "itertools 0.13.0",
@@ -3075,7 +3075,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.8.1"
-source = "git+https://github.com/ruiyangke/gpui-kit?branch=newport%2Fv0.8.1#7eb19a55328b9107de5c6841a616456439b5112d"
+source = "git+https://github.com/ruiyangke/gpui-kit?branch=newport%2Fv0.8.1#c2add38c9e3ed41100770e3c472350841a16279b"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3085,9 +3085,9 @@ dependencies = [
  "gpui-component-macros",
  "gpui-fast",
  "gpui-kit-assets",
- "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-macros 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-sum-tree 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-macros 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-sum-tree 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
  "instant",
  "itertools 0.13.0",
  "log",
@@ -3124,7 +3124,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.8.1"
-source = "git+https://github.com/ruiyangke/gpui-kit?branch=newport%2Fv0.8.1#7eb19a55328b9107de5c6841a616456439b5112d"
+source = "git+https://github.com/ruiyangke/gpui-kit?branch=newport%2Fv0.8.1#c2add38c9e3ed41100770e3c472350841a16279b"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -3447,15 +3447,15 @@ dependencies = [
 [[package]]
 name = "gpui-kit"
 version = "0.8.1"
-source = "git+https://github.com/ruiyangke/gpui-kit?branch=newport%2Fv0.8.1#7eb19a55328b9107de5c6841a616456439b5112d"
+source = "git+https://github.com/ruiyangke/gpui-kit?branch=newport%2Fv0.8.1#c2add38c9e3ed41100770e3c472350841a16279b"
 dependencies = [
  "gpui-base",
  "gpui-component",
  "gpui-fast",
  "gpui-fast-platform",
  "gpui-kit-assets",
- "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-macros 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-macros 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
  "gpui-pre-platform",
  "gpui-pre-web",
 ]
@@ -3463,10 +3463,10 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.8.1"
-source = "git+https://github.com/ruiyangke/gpui-kit?branch=newport%2Fv0.8.1#7eb19a55328b9107de5c6841a616456439b5112d"
+source = "git+https://github.com/ruiyangke/gpui-kit?branch=newport%2Fv0.8.1#c2add38c9e3ed41100770e3c472350841a16279b"
 dependencies = [
  "anyhow",
- "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
  "gpui-pre-reqwest",
  "log",
  "rust-embed",
@@ -3540,7 +3540,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3556,14 +3556,14 @@ dependencies = [
  "futures",
  "futures-concurrency",
  "getrandom 0.3.4",
- "gpui-pre-collections 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-http-client 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-macros 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-refineable 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-scheduler 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-shared-string 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-sum-tree 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-util 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre-collections 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-http-client 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-macros 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-refineable 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-scheduler 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-shared-string 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-sum-tree 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-util 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
  "heapless",
  "image",
  "inventory",
@@ -3650,7 +3650,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-apple"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
  "anyhow",
  "async-task",
@@ -3665,9 +3665,9 @@ dependencies = [
  "etagere",
  "foreign-types 0.5.0",
  "futures",
- "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-collections 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-util 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-collections 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-util 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
  "image",
  "libc",
  "log",
@@ -3702,9 +3702,9 @@ dependencies = [
 [[package]]
 name = "gpui-pre-collections"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
- "gpui-pre-util 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre-util 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
  "indexmap",
  "rustc-hash 2.1.3",
 ]
@@ -3723,7 +3723,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-derive-refineable"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3752,7 +3752,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-http-client"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3792,13 +3792,13 @@ dependencies = [
 [[package]]
 name = "gpui-pre-ios"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
  "futures",
- "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-apple 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-apple 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
  "log",
  "objc2 0.6.5",
  "objc2-core-foundation",
@@ -3813,7 +3813,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-linux"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -3825,10 +3825,10 @@ dependencies = [
  "calloop-wayland-source",
  "filedescriptor",
  "futures",
- "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-collections 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-http-client 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-util 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-collections 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-http-client 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-util 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
  "gpui-pre-wgpu",
  "libc",
  "log",
@@ -3857,7 +3857,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-macos"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -3870,11 +3870,11 @@ dependencies = [
  "dispatch2",
  "foreign-types 0.5.0",
  "futures",
- "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-apple 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-collections 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-scheduler 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-util 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-apple 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-collections 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-scheduler 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-util 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
  "image",
  "itertools 0.14.0",
  "log",
@@ -3908,7 +3908,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-macros"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
  "heck 0.5.0",
  "proc-macro-crate",
@@ -3920,12 +3920,12 @@ dependencies = [
 [[package]]
 name = "gpui-pre-platform"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
- "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-ios 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-ios 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
  "gpui-pre-linux",
  "gpui-pre-macos",
  "gpui-pre-web",
@@ -3945,9 +3945,9 @@ dependencies = [
 [[package]]
 name = "gpui-pre-refineable"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
- "gpui-pre-derive-refineable 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre-derive-refineable 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
 ]
 
 [[package]]
@@ -4020,7 +4020,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-scheduler"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
  "async-task",
  "backtrace",
@@ -4047,7 +4047,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-shared-string"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
  "schemars",
  "serde",
@@ -4069,9 +4069,9 @@ dependencies = [
 [[package]]
 name = "gpui-pre-sum-tree"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
- "gpui-pre-ztracing 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre-ztracing 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
  "heapless",
  "rayon",
  "tracing",
@@ -4091,7 +4091,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-util"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
  "anyhow",
  "log",
@@ -4101,15 +4101,15 @@ dependencies = [
 [[package]]
 name = "gpui-pre-web"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
  "anyhow",
  "async-channel",
  "console_error_panic_hook",
  "futures",
- "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-http-client 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-scheduler 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-http-client 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-scheduler 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
  "gpui-pre-wgpu",
  "js-sys",
  "log",
@@ -4130,15 +4130,15 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
  "anyhow",
  "bytemuck",
  "cosmic-text",
  "etagere",
- "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-collections 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-util 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-collections 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-util 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
  "image",
  "itertools 0.14.0",
  "log",
@@ -4157,7 +4157,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-windows"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -4165,10 +4165,10 @@ dependencies = [
  "dunce",
  "etagere",
  "futures",
- "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-collections 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-scheduler 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
- "gpui-pre-util 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-collections 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-scheduler 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
+ "gpui-pre-util 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
  "image",
  "itertools 0.14.0",
  "log",
@@ -4196,9 +4196,9 @@ dependencies = [
 [[package]]
 name = "gpui-pre-ztracing"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 dependencies = [
- "gpui-pre-ztracing-macro 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef)",
+ "gpui-pre-ztracing-macro 0.3.10 (git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7)",
  "tracing",
 ]
 
@@ -4211,7 +4211,7 @@ checksum = "e0f9dae92b9bc15baa6e530c90bdd4c689d3710bd4d18c3566deb1d6ae182daf"
 [[package]]
 name = "gpui-pre-ztracing-macro"
 version = "0.3.10"
-source = "git+https://github.com/ruiyangke/gpui-kit?rev=5814f2465c8c4a5fcd01687abd3163d6c35860ef#5814f2465c8c4a5fcd01687abd3163d6c35860ef"
+source = "git+https://github.com/ruiyangke/gpui-kit?rev=3fbff52749d7da6de620446f1a635e6e61c135f7#3fbff52749d7da6de620446f1a635e6e61c135f7"
 
 [[package]]
 name = "granit-parser"
