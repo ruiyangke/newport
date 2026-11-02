@@ -961,14 +961,14 @@ fn background_agent_activity_only_invalidates_its_visible_feature(cx: &mut TestA
             cx.notify();
         });
         frame(visual);
-        // Settings redraws for the updater's periodic read. Read again now so
-        // the next one cannot come due while notifications are counted.
-        view.update(visual, |view, _| view.settings_state.refresh());
-        settle_update_check(&view, visual);
-        notices.update(visual, |count, _| *count = 0);
+        let mut redraws = 0;
         for reading in 1..=3 {
+            // Count only what the reading changes: the page's own timers, such
+            // as placeholders and the updater's poll, redraw while settling.
+            view.update(visual, |view, _| view.last_refresh = Instant::now());
+            settle_update_check(&view, visual);
+            notices.update(visual, |count, _| *count = 0);
             let (generation, mut snapshot) = view.update(visual, |view, _| {
-                view.last_refresh = Instant::now();
                 (
                     view.resources.begin_refresh("snapshot", false).unwrap(),
                     view.snapshot.clone(),
@@ -991,9 +991,10 @@ fn background_agent_activity_only_invalidates_its_visible_feature(cx: &mut TestA
                 .unwrap();
             view.update(visual, |view, cx| view.tick(cx));
             frame(visual);
+            redraws += notices.read_with(visual, |count, _| *count);
         }
         assert_eq!(
-            notices.read_with(visual, |count, _| *count),
+            redraws,
             if page == Page::Integration { 3 } else { 0 },
             "{label}"
         );
