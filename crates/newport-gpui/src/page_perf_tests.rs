@@ -961,6 +961,9 @@ fn background_agent_activity_only_invalidates_its_visible_feature(cx: &mut TestA
             cx.notify();
         });
         frame(visual);
+        // Settings redraws for the updater's periodic read. Read again now so
+        // the next one cannot come due while notifications are counted.
+        view.update(visual, |view, _| view.settings_state.refresh());
         settle_update_check(&view, visual);
         notices.update(visual, |count, _| *count = 0);
         for reading in 1..=3 {
