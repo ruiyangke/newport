@@ -1,0 +1,88 @@
+syntax = "proto3";
+package newport.desktop.git;
+import "newport/git.proto";
+import "newport/wire.proto";
+
+message CollectedDiff {
+  optional string snapshot = 1;
+  newport.git.Diff diff = 2;
+}
+
+message GitResult {
+  oneof value {
+    newport.git.Reply reply = 1;
+    newport.desktop.git.CollectedDiff diff = 2;
+  }
+}
+
+message Refreshed {
+  optional string repo_id = 1;
+}
+
+enum ReceiptState {
+  RECEIPT_STATE_UNSPECIFIED = 0;
+  RECEIPT_STATE_PENDING = 1;
+  RECEIPT_STATE_SUCCEEDED = 2;
+  RECEIPT_STATE_FAILED = 3;
+  RECEIPT_STATE_REJECTED = 4;
+  RECEIPT_STATE_NEEDS_RESOLUTION = 5;
+  RECEIPT_STATE_OUTCOME_UNKNOWN = 6;
+  RECEIPT_STATE_REVIEWED_UNKNOWN = 7;
+}
+
+message Receipt {
+  optional string operation_id = 1;
+  optional string server = 2;
+  optional string action = 3;
+  optional newport.desktop.git.ReceiptState state = 4;
+}
+
+message Receipts {
+  repeated newport.desktop.git.Receipt receipts = 1;
+}
+
+message RequestArgs {
+  optional string server = 1;
+  newport.git.Request request = 2;
+  // Absence uses the source API default.
+  optional bool retry_connection = 3;
+}
+
+message RefreshRepositoryArgs {
+  optional string server = 1;
+  optional string repo_id = 2;
+}
+
+message PendingOperationsArgs {
+  optional string server = 1;
+}
+
+message AcknowledgeOperationArgs {
+  optional string server = 1;
+  optional string operation_id = 2;
+}
+
+message ReviewOperationArgs {
+  optional string server = 1;
+  optional string operation_id = 2;
+}
+
+message Operation {
+  oneof value {
+    newport.desktop.git.RequestArgs request = 1;
+    newport.desktop.git.RefreshRepositoryArgs refresh_repository = 2;
+    newport.desktop.git.PendingOperationsArgs pending_operations = 3;
+    newport.desktop.git.AcknowledgeOperationArgs acknowledge_operation = 4;
+    newport.desktop.git.ReviewOperationArgs review_operation = 5;
+  }
+}
+
+message Reply {
+  oneof value {
+    newport.desktop.git.GitResult request = 1;
+    newport.desktop.git.Refreshed refresh_repository = 2;
+    newport.desktop.git.Receipts pending_operations = 3;
+    newport.wire.Present acknowledge_operation = 4;
+    newport.wire.Present review_operation = 5;
+  }
+}

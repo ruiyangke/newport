@@ -1,0 +1,42 @@
+name: Needle agents
+description: Waits for this run's Needle package, which jobs that started alongside the Needle build embed, then downloads it to resources/agents.
+inputs:
+  working-directory:
+    description: Where the repository is checked out
+    required: false
+    default: .
+runs:
+  using: composite
+  steps:
+    - uses: actions/github-script@v9
+      with:
+        script: |
+          const { owner, repo } = context.repo;
+          const run_id = context.runId;
+          const deadline = Date.now() + 30 * 60 * 1000;
+          for (;;) {
+            const { data } = await github.rest.actions.listWorkflowRunArtifacts({
+              owner, repo, run_id, name: 'linux-agents',
+            });
+            if (data.total_count > 0) return;
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner, repo, run_id, filter: 'latest', per_page: 100,
+            });
+            const packaging = jobs.find((job) => job.name.endsWith('Needle: package'));
+            if (packaging?.status === 'completed' && packaging.conclusion !== 'success') {
+              core.setFailed(`Needle: package ended without the agents (${packaging.conclusion})`);
+              return;
+            }
+            if (Date.now() > deadline) {
+              core.setFailed('The Needle package did not arrive within 30 minutes');
+              return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 15000));
+          }
+    - uses: actions/download-artifact@v8
+      with:
+        name: linux-agents
+        path: ${{ inputs.working-directory }}/resources/agents
+    - shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: chmod +x resources/agents/newport-agent-x86_64 resources/agents/newport-agent-aarch64

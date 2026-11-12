@@ -1,0 +1,15 @@
+#!/bin/sh
+# Reject commit messages longer than 150 characters or with a Co-authored-by line.
+message=$(sed '/^# -\{24\} >8 -\{24\}$/,$d' "$1" | git stripspace --strip-comments)
+
+# Count characters, not bytes: drop UTF-8 continuation bytes before counting.
+length=$(printf '%s' "$message" | LC_ALL=C tr -d '\200-\277' | wc -c)
+if [ "$length" -gt 150 ]; then
+  echo "Commit message is longer than 150 characters." >&2
+  exit 1
+fi
+
+if printf '%s\n' "$message" | grep -qi 'co-authored-by'; then
+  echo "Remove the Co-authored-by line from the commit message." >&2
+  exit 1
+fi

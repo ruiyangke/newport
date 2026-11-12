@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package newport.worker;
+
+import "newport/wire.proto";
+
+// Each carried service reserves field 127 of its directional oneof for
+// these controls. The runtime consumes them before dispatching service data.
+// Operation tags are disjoint across directions to detect misrouted controls.
+message ClientControl {
+  oneof operation {
+    newport.wire.Present input_complete = 1;
+    uint32 signal = 2;
+  }
+}
+
+message ServerControl {
+  oneof operation {
+    bytes stderr = 3;
+    Exit exit = 4;
+  }
+}
+
+message Exit {
+  oneof outcome {
+    uint32 status = 1;
+    uint32 signal = 2;
+  }
+}
+
+// Only registered external byte streams use these messages. Their bytes
+// retain the external protocol's framing, including partial headers.
+message OpaqueClientFrame {
+  oneof message {
+    bytes data = 1;
+    ClientControl worker_control = 127;
+  }
+}
+
+message OpaqueServerFrame {
+  oneof message {
+    bytes data = 1;
+    ServerControl worker_control = 127;
+  }
+}

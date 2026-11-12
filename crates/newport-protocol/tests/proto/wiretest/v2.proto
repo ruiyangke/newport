@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+// The protocol in v1.proto as a newer peer knows it: a field and a oneof
+// case more.
+package wiretest.v2;
+
+import "newport/wire.proto";
+
+message Envelope {
+  oneof kind {
+    Chunk chunk = 1;
+    newport.wire.Error error = 2;
+    Login login = 3;
+    Nested nested = 4;
+    newport.wire.Present present = 5;
+    Ping ping = 6;
+  }
+}
+
+message Chunk {
+  uint64 id = 1;
+  bytes data = 2;
+  string name = 3;
+  repeated bytes parts = 4;
+  map<string, bytes> attachments = 5;
+  map<string, Nested> children = 6;
+  string note = 7;
+}
+
+message Login {
+  string user = 1;
+  newport.wire.Secret password = 2;
+}
+
+message Nested {
+  Nested child = 1;
+  bytes data = 2;
+}
+
+message Ping {
+  uint64 sent = 1;
+}

@@ -1,0 +1,124 @@
+syntax = "proto3";
+package newport.desktop.containers;
+import "newport/monitor.proto";
+
+enum DiskPart {
+  DISK_PART_UNSPECIFIED = 0;
+  DISK_PART_FULL = 1;
+  DISK_PART_QUICK = 2;
+  DISK_PART_VOLUMES = 3;
+}
+
+message SnapshotArgs {
+  optional string server = 1;
+  // Absence uses the source API default.
+  optional bool refresh = 2;
+}
+
+message InspectArgs {
+  optional string server = 1;
+  optional string container = 2;
+  // Absence uses the source API default.
+  optional bool refresh = 3;
+}
+
+message LogsArgs {
+  optional string server = 1;
+  newport.monitor.ContainersLogsRequest request = 2;
+}
+
+message ActionArgs {
+  optional string server = 1;
+  optional string container = 2;
+  optional newport.monitor.ContainersContainerVerb verb = 3;
+}
+
+message ProjectActionArgs {
+  optional string server = 1;
+  optional string project = 2;
+  optional newport.monitor.ContainersProjectVerb verb = 3;
+  repeated string expected_ids = 4;
+}
+
+message RemoveArgs {
+  optional string server = 1;
+  repeated string containers = 2;
+}
+
+message DiskArgs {
+  optional string server = 1;
+  // Absence uses the source API default.
+  optional newport.desktop.containers.DiskPart part = 2;
+  // Absence uses the source API default.
+  optional bool refresh = 3;
+}
+
+message PruneArgs {
+  optional string server = 1;
+  optional newport.monitor.ContainersPruneTarget what = 2;
+}
+
+message ComposeProjectArgs {
+  optional string server = 1;
+  optional string project = 2;
+  // Absence uses the source API default.
+  optional bool refresh = 3;
+}
+
+message ComposeRunArgs {
+  optional string server = 1;
+  optional string project = 2;
+  newport.monitor.ComposeAction action = 3;
+}
+
+message ComposeJobArgs {
+  optional string server = 1;
+  optional string job = 2;
+  // Absence uses the source API default.
+  optional uint64 offset = 3;
+}
+
+message ComposeCancelArgs {
+  optional string server = 1;
+  optional string job = 2;
+}
+
+message ComposeJobsArgs {
+  optional string server = 1;
+}
+
+message Operation {
+  oneof value {
+    newport.desktop.containers.SnapshotArgs snapshot = 1;
+    newport.desktop.containers.InspectArgs inspect = 2;
+    newport.desktop.containers.LogsArgs logs = 3;
+    newport.desktop.containers.ActionArgs action = 4;
+    newport.desktop.containers.ProjectActionArgs project_action = 5;
+    newport.desktop.containers.RemoveArgs remove = 6;
+    newport.desktop.containers.DiskArgs disk = 7;
+    newport.desktop.containers.PruneArgs prune = 8;
+    newport.desktop.containers.ComposeProjectArgs compose_project = 9;
+    newport.desktop.containers.ComposeRunArgs compose_run = 10;
+    newport.desktop.containers.ComposeJobArgs compose_job = 11;
+    newport.desktop.containers.ComposeCancelArgs compose_cancel = 12;
+    newport.desktop.containers.ComposeJobsArgs compose_jobs = 13;
+  }
+}
+
+message Reply {
+  oneof value {
+    newport.monitor.ContainersContainersSnapshot snapshot = 1;
+    newport.monitor.ContainersContainerInspect inspect = 2;
+    newport.monitor.ContainersContainerLogPage logs = 3;
+    newport.monitor.ContainersDone action = 4;
+    newport.monitor.ContainersDone project_action = 5;
+    newport.monitor.ContainersRemoved remove = 6;
+    newport.monitor.ContainersDockerDisk disk = 7;
+    newport.monitor.ContainersPruned prune = 8;
+    newport.monitor.ComposeProject compose_project = 9;
+    newport.monitor.ComposeStarted compose_run = 10;
+    newport.monitor.ComposeJob compose_job = 11;
+    newport.monitor.ComposeDone compose_cancel = 12;
+    newport.monitor.ComposeJobs compose_jobs = 13;
+  }
+}

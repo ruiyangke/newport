@@ -1,0 +1,995 @@
+syntax = "proto3";
+
+// Remote Apps, protocol 1: Newport and the account's display, over the
+// relayed stream. Each frame is one `ClientFrame` or `ServerFrame`.
+//
+// Session IDs are unpredictable, so they are `fixed64`. Frames, input and
+// acknowledgments, the messages sent most, hold field numbers 1 to 15.
+package newport.remote.apps;
+
+import "newport/wire.proto";
+import "newport/worker.proto";
+import "newport/remote/display.proto";
+
+// Everything a client sends.
+message ClientFrame {
+  oneof message {
+    Input input = 1;
+    Ack ack = 2;
+    Heartbeat heartbeat = 3;
+    Request request = 4;
+    TextInput text_input = 5;
+    Drag drag = 6;
+    ReverseDrag reverse_drag = 7;
+    ReverseDragExit reverse_drag_exit = 8;
+    FileUpload file_upload = 9;
+    ReverseFiles reverse_files = 10;
+    Launch launch = 11;
+    StopApplication stop_application = 12;
+    Lifecycle.Presented application_presented = 13;
+    License license = 14;
+    Quit quit = 15;
+    Hello hello = 16;
+    newport.worker.ClientControl worker_control = 127;
+  }
+
+  // Input for one surface of a window.
+  message Input {
+    fixed64 session = 1;
+    WindowId window = 2;
+    uint64 surface = 3;
+    .newport.remote.apps.Input input = 4;
+  }
+  // A frame was applied; it returns the frame's credit.
+  message Ack {
+    fixed64 session = 1;
+    WindowId window = 2;
+    uint64 surface = 3;
+    uint64 sequence = 4;
+  }
+  // The client is still there.
+  message Heartbeat {
+    fixed64 session = 1;
+  }
+  // An operation on a window, answered by an `OperationResult`.
+  message Request {
+    fixed64 session = 1;
+    uint64 request = 2;
+    WindowId window = 3;
+    Operation operation = 4;
+  }
+  message TextInput {
+    fixed64 session = 1;
+    .newport.remote.apps.TextInput.Client message = 2;
+  }
+  message Drag {
+    fixed64 session = 1;
+    .newport.remote.apps.Drag.Client message = 2;
+  }
+  message ReverseDrag {
+    fixed64 session = 1;
+    .newport.remote.apps.ReverseDrag.Client message = 2;
+  }
+  // The pointer left the viewport during a press, before the display
+  // offered a drag.
+  message ReverseDragExit {
+    fixed64 session = 1;
+    uint64 gesture = 2;
+    WindowId window = 3;
+    uint64 surface = 4;
+  }
+  message FileUpload {
+    fixed64 session = 1;
+    Upload.Client message = 2;
+  }
+  message ReverseFiles {
+    fixed64 session = 1;
+    .newport.remote.apps.ReverseFiles.Client message = 2;
+  }
+  message Launch {
+    fixed64 session = 1;
+    uint64 request = 2;
+    LaunchTarget target = 3;
+  }
+  // Stops the owned group of one launch, never the display.
+  message StopApplication {
+    fixed64 session = 1;
+    uint64 request = 2;
+  }
+  // A renewed license for the running session.
+  message License {
+    fixed64 session = 1;
+    newport.wire.Secret token = 2;
+  }
+  message Quit {
+    fixed64 session = 1;
+  }
+  // The client's first message.
+  message Hello {
+    // The protocol versions the client speaks.
+    repeated uint32 versions = 1;
+    // What the client will do in this session.
+    Features features = 2;
+    PerformanceSettings performance = 3;
+    DisplayProfile display = 4;
+    // The Newport Pro license the agent checks before `Welcome`.
+    newport.wire.Secret license = 5;
+  }
+}
+
+// Everything the display sends.
+message ServerFrame {
+  oneof message {
+    Frame frame = 1;
+    Audio audio = 2;
+    Cursor cursor = 3;
+    SurfaceChanged surface_changed = 4;
+    WindowUpdated window_updated = 5;
+    WindowCreated window_created = 6;
+    WindowDestroyed window_destroyed = 7;
+    WindowAction window_action = 8;
+    OperationResult operation_result = 9;
+    TextInput text_input = 10;
+    AudioState audio_state = 11;
+    Drag drag = 12;
+    ReverseDrag reverse_drag = 13;
+    FileUpload file_upload = 14;
+    ReverseFiles reverse_files = 15;
+    Welcome welcome = 16;
+    Rejected rejected = 17;
+    Ended ended = 18;
+    Closed closed = 19;
+    Error error = 20;
+    Lifecycle.Update application_lifecycle = 21;
+    SessionApplications session_applications = 22;
+    SessionActivity session_activity = 23;
+    LaunchResult launch_result = 24;
+    newport.worker.ServerControl worker_control = 127;
+  }
+
+  // The changed tiles of one surface.
+  message Frame {
+    fixed64 session = 1;
+    WindowId window = 2;
+    uint64 surface = 3;
+    uint64 sequence = 4;
+    bool keyframe = 5;
+    repeated Tile tiles = 6;
+    MediaTime captured = 7;
+    FrameDiagnostics diagnostics = 8;
+  }
+  // One Opus packet.
+  message Audio {
+    fixed64 session = 1;
+    uint64 sequence = 2;
+    uint64 sample_time = 3;
+    bytes data = 4;
+    MediaTime captured = 5;
+    bool hole = 6;
+    // The stream this packet belongs to, numbered from one.
+    uint64 epoch = 7;
+  }
+  // The cursor a window wants while the pointer is over it.
+  message Cursor {
+    fixed64 session = 1;
+    WindowId window = 2;
+    .newport.remote.apps.Cursor cursor = 3;
+  }
+  message SurfaceChanged {
+    fixed64 session = 1;
+    WindowId window = 2;
+    Surface surface = 3;
+  }
+  message WindowUpdated {
+    fixed64 session = 1;
+    Window window = 2;
+  }
+  message WindowCreated {
+    fixed64 session = 1;
+    Window window = 2;
+    Surface surface = 3;
+    // The window was on the display before this viewer took it over, and
+    // takes no focus.
+    bool moved = 4;
+  }
+  message WindowDestroyed {
+    fixed64 session = 1;
+    WindowId window = 2;
+  }
+  // An operation the display asks of the client's window.
+  message WindowAction {
+    fixed64 session = 1;
+    WindowId window = 2;
+    Operation action = 3;
+  }
+  message OperationResult {
+    fixed64 session = 1;
+    uint64 request = 2;
+    WindowId window = 3;
+    bool applied = 4;
+    optional string message = 5;
+  }
+  message TextInput {
+    fixed64 session = 1;
+    .newport.remote.apps.TextInput.Server message = 2;
+  }
+  // Whether the session's audio plays.
+  message AudioState {
+    fixed64 session = 1;
+    oneof state {
+      // No sound server plays for the session yet, or it stopped.
+      Waiting waiting = 2;
+      newport.wire.Present playing = 3;
+    }
+    message Waiting {
+      string reason = 1;
+    }
+  }
+  message Drag {
+    fixed64 session = 1;
+    .newport.remote.apps.Drag.Server message = 2;
+  }
+  message ReverseDrag {
+    fixed64 session = 1;
+    .newport.remote.apps.ReverseDrag.Server message = 2;
+  }
+  message FileUpload {
+    fixed64 session = 1;
+    Upload.Server message = 2;
+  }
+  message ReverseFiles {
+    fixed64 session = 1;
+    .newport.remote.apps.ReverseFiles.Server message = 2;
+  }
+  // The answer to `Hello`: what this session has.
+  message Welcome {
+    fixed64 session = 1;
+    uint32 version = 2;
+    Features features = 3;
+    PerformanceSettings performance = 4;
+  }
+  // Sent instead of `Welcome` when the session can't start. The code is
+  // stable; the message is for people. `display` names the display when it
+  // refused the relay.
+  message Rejected {
+    newport.wire.Error error = 1;
+    .newport.remote.display.DisplayIdentity display = 2;
+  }
+  // The display ended a running session; the session closes next.
+  message Ended {
+    fixed64 session = 1;
+    string reason = 2;
+    string message = 3;
+    // After `taken-over`: the computer showing the display now.
+    optional string computer = 4;
+    // That computer's Newport session.
+    optional string computer_session = 5;
+  }
+  // The answer to `Quit`.
+  message Closed {
+    fixed64 session = 1;
+  }
+  // A failure that ends the session.
+  message Error {
+    fixed64 session = 1;
+    newport.wire.Error error = 2;
+  }
+  message SessionApplications {
+    fixed64 session = 1;
+    Applications snapshot = 2;
+  }
+  message SessionActivity {
+    fixed64 session = 1;
+    Activity activity = 2;
+  }
+  message LaunchResult {
+    fixed64 session = 1;
+    uint64 request = 2;
+    LaunchOutcome outcome = 3;
+  }
+}
+
+// What a session can do beyond the base protocol. A missing field is no; a
+// sub-feature is a field of its parent.
+message Features {
+  // Input method composition.
+  newport.wire.Present text_input = 1;
+  // Files and folders from the client, by picking or dropping.
+  newport.wire.Present upload = 2;
+  // Text and images dragged out of remote apps.
+  DragOut drag_out = 3;
+  // Opus streams with their state, and capture times on frames and audio.
+  newport.wire.Present audio = 4;
+}
+
+message DragOut {
+  // Files and folders too.
+  newport.wire.Present files = 1;
+}
+
+// How the display encodes for this session.
+message PerformanceSettings {
+  CodecMode codec_mode = 1;
+  // Per-window frame rate goal and ceiling.
+  uint32 max_fps = 2;
+  // Ceiling for photographic tiles, also mapped to AV1 quantization.
+  uint32 jpeg_quality = 3;
+  // A bounded low-CPU codec trial, for local transports.
+  bool fast_trial = 4;
+}
+
+enum CodecMode {
+  CODEC_MODE_AUTO = 0;
+  CODEC_MODE_ADAPTIVE = 1;
+  CODEC_MODE_FAST = 2;
+  CODEC_MODE_LOSSLESS = 3;
+}
+
+// The client's display metrics.
+message DisplayProfile {
+  Scale scale = 1;
+  // Usable screen size in logical points, excluding system UI.
+  Size work_area = 2;
+}
+
+// The usable screen relative to a toplevel's content origin, in logical
+// points.
+message PopupBounds {
+  Point origin = 1;
+  Size size = 2;
+}
+
+message Point {
+  sint32 x = 1;
+  sint32 y = 2;
+}
+
+// A point within a surface, in its pixels.
+message Location {
+  uint32 x = 1;
+  uint32 y = 2;
+}
+
+message Size {
+  uint32 width = 1;
+  uint32 height = 2;
+}
+
+message Rect {
+  uint32 x = 1;
+  uint32 y = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+}
+
+message Scale {
+  uint32 numerator = 1;
+  uint32 denominator = 2;
+}
+
+message WindowId {
+  uint64 id = 1;
+  uint64 generation = 2;
+}
+
+message Surface {
+  uint64 generation = 1;
+  uint32 logical_width = 2;
+  uint32 logical_height = 3;
+  uint32 pixel_width = 4;
+  uint32 pixel_height = 5;
+  Scale scale = 6;
+}
+
+enum WindowKind {
+  WINDOW_KIND_NORMAL = 0;
+  WINDOW_KIND_DIALOG = 1;
+  WINDOW_KIND_MENU = 2;
+  WINDOW_KIND_TOOLTIP = 3;
+}
+
+enum Decoration {
+  DECORATION_CLIENT = 0;
+  DECORATION_SERVER = 1;
+  DECORATION_NONE = 2;
+}
+
+message Actions {
+  bool close = 1;
+  bool minimize = 2;
+  bool maximize = 3;
+  bool resize = 4;
+  bool fullscreen = 5;
+}
+
+// ICCCM size hints in surface pixels.
+message PixelConstraints {
+  Size min = 1;
+  Size max = 2;
+  Size base = 3;
+  Size increment = 4;
+  // The least and most width to height, each as width and height.
+  AspectRange aspect = 5;
+}
+
+message AspectRange {
+  Size min = 1;
+  Size max = 2;
+}
+
+message Constraints {
+  PixelConstraints physical = 1;
+  Size min = 2;
+  Size max = 3;
+}
+
+// Which Linux application owns a window.
+message WindowApplication {
+  optional string app_id = 1;
+  optional string desktop_id = 2;
+  optional uint64 request = 3;
+}
+
+message Window {
+  WindowId key = 1;
+  WindowId parent = 2;
+  WindowKind kind = 3;
+  bool modal = 4;
+  // Logical, relative to the parent for popups, the session's otherwise.
+  Point position = 5;
+  string title = 6;
+  Decoration decoration = 7;
+  Actions actions = 8;
+  Constraints constraints = 9;
+  bool minimized = 10;
+  bool maximized = 11;
+  bool fullscreen = 12;
+  WindowApplication application = 13;
+}
+
+// Microseconds from the session's media epoch.
+message MediaTime {
+  sint64 earliest_us = 1;
+  sint64 latest_us = 2;
+}
+
+message FrameDiagnostics {
+  uint32 target_fps = 1;
+  bool fast_codec = 2;
+  double ack_ms = 3;
+  double work_ms = 4;
+  double capture_ms = 5;
+  double dispatch_ms = 6;
+}
+
+message Tile {
+  uint32 id = 1;
+  Codec codec = 2;
+  bytes data = 3;
+  // The patch within the tile the data covers; the whole tile when absent.
+  Rect rect = 4;
+  // Rows copied from the previous frame before the data is applied.
+  TileCopy copy = 5;
+  // The AV1 group header, on the group's first tile only.
+  VideoGroup video = 6;
+}
+
+enum Codec {
+  CODEC_SOLID = 0;
+  CODEC_RAW_BGRA = 1;
+  CODEC_LZ4 = 2;
+  CODEC_ZLIB = 3;
+  CODEC_PNG = 4;
+  CODEC_JPEG = 5;
+  CODEC_COPY = 6;
+  CODEC_AV1 = 7;
+}
+
+message TileCopy {
+  oneof source {
+    // Surface row of the previous frame, in this tile's column.
+    uint32 source_y = 1;
+    // Row of this tile in the previous frame.
+    uint32 sy = 2;
+  }
+  uint32 dy = 3;
+  uint32 h = 4;
+}
+
+message VideoGroup {
+  Rect rect = 1;
+  uint64 stream = 2;
+  uint64 sequence = 3;
+  bool keyframe = 4;
+}
+
+message Operation {
+  oneof action {
+    newport.wire.Present activate = 1;
+    newport.wire.Present move = 2;
+    newport.wire.Present close = 3;
+    newport.wire.Present minimize = 4;
+    newport.wire.Present maximize = 5;
+    newport.wire.Present restore = 6;
+    // Whether the window should be fullscreen.
+    bool fullscreen = 7;
+    // Where to show the window menu, in logical window coordinates.
+    Point show_window_menu = 8;
+    ResizeEdge start_resize = 9;
+    Resize resize = 10;
+    DisplayProfile set_display = 11;
+    PopupBounds set_popup_bounds = 12;
+  }
+  message Resize {
+    uint32 logical_width = 1;
+    uint32 logical_height = 2;
+    Scale scale = 3;
+  }
+}
+
+enum ResizeEdge {
+  RESIZE_EDGE_TOP = 0;
+  RESIZE_EDGE_BOTTOM = 1;
+  RESIZE_EDGE_LEFT = 2;
+  RESIZE_EDGE_RIGHT = 3;
+  RESIZE_EDGE_TOP_LEFT = 4;
+  RESIZE_EDGE_TOP_RIGHT = 5;
+  RESIZE_EDGE_BOTTOM_LEFT = 6;
+  RESIZE_EDGE_BOTTOM_RIGHT = 7;
+}
+
+// The Linux modifiers held during an event.
+message Modifiers {
+  bool shift = 1;
+  bool control = 2;
+  bool alt = 3;
+  bool super = 4;
+  bool caps_lock = 5;
+}
+
+enum MouseButton {
+  MOUSE_BUTTON_LEFT = 0;
+  MOUSE_BUTTON_MIDDLE = 1;
+  MOUSE_BUTTON_RIGHT = 2;
+  MOUSE_BUTTON_BACK = 3;
+  MOUSE_BUTTON_FORWARD = 4;
+}
+
+enum ScrollPhase {
+  SCROLL_PHASE_WHEEL = 0;
+  SCROLL_PHASE_BEGIN = 1;
+  SCROLL_PHASE_UPDATE = 2;
+  SCROLL_PHASE_END = 3;
+  SCROLL_PHASE_MOMENTUM = 4;
+  SCROLL_PHASE_MOMENTUM_END = 5;
+}
+
+// Pointer coordinates and scroll deltas are surface pixels.
+message Input {
+  oneof kind {
+    // Motion; it also means the pointer is in the window.
+    Pointer pointer = 1;
+    // The pointer while a press in this window is held.
+    HeldPointer held_pointer = 2;
+    Button button = 3;
+    Scroll scroll = 4;
+    Key key = 5;
+    newport.wire.Present focus = 6;
+    newport.wire.Present blur = 7;
+    newport.wire.Present leave = 8;
+  }
+  message Pointer {
+    uint32 x = 1;
+    uint32 y = 2;
+    Modifiers modifiers = 3;
+  }
+  message HeldPointer {
+    sint32 x = 1;
+    sint32 y = 2;
+    Modifiers modifiers = 3;
+  }
+  message Button {
+    MouseButton button = 1;
+    bool down = 2;
+    Modifiers modifiers = 3;
+  }
+  message Scroll {
+    double dx = 1;
+    double dy = 2;
+    // Wheel notches in 1/120 steps, for mouse wheels.
+    Point discrete = 3;
+    ScrollPhase phase = 4;
+    Modifiers modifiers = 5;
+    // Required pointer position in surface pixels, delivered in the same frame.
+    Location position = 6;
+  }
+  message Key {
+    // What the key means on the client's keyboard.
+    string key = 1;
+    // The physical key as a Linux evdev code.
+    uint32 code = 2;
+    bool down = 3;
+    bool repeat = 4;
+    Modifiers modifiers = 5;
+  }
+}
+
+message Cursor {
+  oneof kind {
+    newport.wire.Present hidden = 1;
+    CursorShape shape = 2;
+  }
+}
+
+// The shapes `wp_cursor_shape_device_v1` names.
+enum CursorShape {
+  CURSOR_SHAPE_DEFAULT = 0;
+  CURSOR_SHAPE_CONTEXT_MENU = 1;
+  CURSOR_SHAPE_HELP = 2;
+  CURSOR_SHAPE_POINTER = 3;
+  CURSOR_SHAPE_PROGRESS = 4;
+  CURSOR_SHAPE_WAIT = 5;
+  CURSOR_SHAPE_CELL = 6;
+  CURSOR_SHAPE_CROSSHAIR = 7;
+  CURSOR_SHAPE_TEXT = 8;
+  CURSOR_SHAPE_VERTICAL_TEXT = 9;
+  CURSOR_SHAPE_ALIAS = 10;
+  CURSOR_SHAPE_COPY = 11;
+  CURSOR_SHAPE_MOVE = 12;
+  CURSOR_SHAPE_NO_DROP = 13;
+  CURSOR_SHAPE_NOT_ALLOWED = 14;
+  CURSOR_SHAPE_GRAB = 15;
+  CURSOR_SHAPE_GRABBING = 16;
+  CURSOR_SHAPE_E_RESIZE = 17;
+  CURSOR_SHAPE_N_RESIZE = 18;
+  CURSOR_SHAPE_NE_RESIZE = 19;
+  CURSOR_SHAPE_NW_RESIZE = 20;
+  CURSOR_SHAPE_S_RESIZE = 21;
+  CURSOR_SHAPE_SE_RESIZE = 22;
+  CURSOR_SHAPE_SW_RESIZE = 23;
+  CURSOR_SHAPE_W_RESIZE = 24;
+  CURSOR_SHAPE_EW_RESIZE = 25;
+  CURSOR_SHAPE_NS_RESIZE = 26;
+  CURSOR_SHAPE_NESW_RESIZE = 27;
+  CURSOR_SHAPE_NWSE_RESIZE = 28;
+  CURSOR_SHAPE_COL_RESIZE = 29;
+  CURSOR_SHAPE_ROW_RESIZE = 30;
+  CURSOR_SHAPE_ALL_SCROLL = 31;
+  CURSOR_SHAPE_ZOOM_IN = 32;
+  CURSOR_SHAPE_ZOOM_OUT = 33;
+}
+
+// Input method composition, with `features.text_input`.
+message TextInput {
+  message Context {
+    WindowId window = 1;
+    uint64 revision = 2;
+    // The first revision of this focus.
+    uint64 focus_epoch = 3;
+    bool preedit = 4;
+    // At the caret's bottom edge, in surface pixels; absent when unknown.
+    Point caret = 5;
+  }
+  message Preedit {
+    uint64 request = 1;
+    Context context = 2;
+    string text = 3;
+    uint32 cursor = 4;
+  }
+  message Commit {
+    uint64 request = 1;
+    Context context = 2;
+    string text = 3;
+  }
+  message Client {
+    oneof kind {
+      Preedit preedit = 1;
+      Commit commit = 2;
+    }
+  }
+  // Absent context: no text field has focus.
+  message Focus {
+    Context context = 1;
+  }
+  message Result {
+    uint64 request = 1;
+    bool applied = 2;
+  }
+  message Server {
+    oneof kind {
+      Focus focus = 1;
+      Result result = 2;
+    }
+  }
+}
+
+// A file or folder of an upload's tree; parents come before children.
+message FileTreeEntry {
+  optional uint32 parent = 1;
+  string name = 2;
+  oneof contents {
+    newport.wire.Present directory = 3;
+    // A file of this many bytes.
+    uint64 file = 4;
+  }
+}
+
+// Stop-and-wait file transfers: uploads with `features.upload`, and the files
+// of a drag out with `drag_out.files`, which go the other way.
+message Upload {
+  message File {
+    string name = 1;
+    uint64 bytes = 2;
+  }
+  message Begin {
+    uint64 transfer = 1;
+    repeated File files = 2;
+  }
+  message BeginTree {
+    uint64 transfer = 1;
+    repeated FileTreeEntry entries = 2;
+  }
+  message Chunk {
+    uint64 transfer = 1;
+    uint32 file = 2;
+    uint64 offset = 3;
+    bytes data = 4;
+  }
+  message Transfer {
+    uint64 transfer = 1;
+  }
+  message Client {
+    oneof kind {
+      Chunk chunk = 1;
+      Begin begin = 2;
+      BeginTree begin_tree = 3;
+      Transfer finish = 4;
+      Transfer cancel = 5;
+    }
+  }
+  // Only this file and offset may be sent next.
+  message Ack {
+    uint64 transfer = 1;
+    uint32 file = 2;
+    uint64 offset = 3;
+  }
+  message Rejected {
+    uint64 transfer = 1;
+    string reason = 2;
+  }
+  message Server {
+    oneof kind {
+      Ack ack = 1;
+      Transfer ready = 2;
+      Transfer cancelled = 3;
+      Rejected rejected = 4;
+    }
+  }
+}
+
+// Dropping an upload into a window, with `features.upload`.
+message Drag {
+  message Begin {
+    uint64 drag = 1;
+    uint64 transfer = 2;
+    WindowId window = 3;
+    uint64 surface = 4;
+    Location point = 5;
+  }
+  message Motion {
+    uint64 drag = 1;
+    Location point = 2;
+  }
+  message Ref {
+    uint64 drag = 1;
+  }
+  message Client {
+    oneof kind {
+      Motion motion = 1;
+      Begin begin = 2;
+      Ref drop = 3;
+      Ref cancel = 4;
+    }
+  }
+  message Status {
+    uint64 drag = 1;
+    uint64 revision = 2;
+    bool accepted = 3;
+  }
+  message Finished {
+    uint64 drag = 1;
+    bool copied = 2;
+    string reason = 3;
+  }
+  message Server {
+    oneof kind {
+      Status status = 1;
+      Finished finished = 2;
+    }
+  }
+}
+
+// Dragging text and images out of remote apps, with `features.drag_out`.
+message ReverseDrag {
+  message Ref {
+    uint64 drag = 1;
+  }
+  message Read {
+    uint64 drag = 1;
+    uint32 offset = 2;
+  }
+  message Complete {
+    uint64 drag = 1;
+    bool copied = 2;
+  }
+  message Client {
+    oneof kind {
+      Read read = 1;
+      // The preview is installed in a native drag.
+      Ref ready = 2;
+      Complete complete = 3;
+      Ref cancel = 4;
+    }
+  }
+  message Offer {
+    uint64 drag = 1;
+    uint64 gesture = 2;
+    WindowId window = 3;
+    uint64 surface = 4;
+    string mime = 5;
+    uint32 bytes = 6;
+  }
+  message Chunk {
+    uint64 drag = 1;
+    uint32 offset = 2;
+    bytes data = 3;
+  }
+  // The exit of a gesture can't apply.
+  message ExitRefused {
+    uint64 gesture = 1;
+  }
+  message Server {
+    oneof kind {
+      Chunk chunk = 1;
+      Offer offer = 2;
+      Ref drop = 3;
+      Ref cancel = 4;
+      ExitRefused exit_refused = 5;
+    }
+  }
+}
+
+// The files of a drag out, with `drag_out.files`: upload messages the other
+// way, each for the drag it belongs to.
+message ReverseFiles {
+  message Context {
+    uint64 drag = 1;
+    uint64 gesture = 2;
+    WindowId window = 3;
+    uint64 surface = 4;
+  }
+  message Server {
+    Context context = 1;
+    Upload.Client message = 2;
+  }
+  message Client {
+    Context context = 1;
+    Upload.Server message = 2;
+  }
+}
+
+message LaunchTarget {
+  oneof kind {
+    Command command = 1;
+    Desktop desktop = 2;
+  }
+  // Literal arguments, with no shell expansion.
+  message Command {
+    repeated string argv = 1;
+  }
+  message Desktop {
+    string id = 1;
+    repeated string uris = 2;
+    optional string action = 3;
+  }
+}
+
+// An owned launcher started; it says nothing of windows.
+message LaunchOutcome {
+  oneof status {
+    newport.wire.Present accepted = 1;
+    Failed failed = 2;
+  }
+  message Failed {
+    string message = 1;
+  }
+}
+
+// Launch groups the display owns for this session.
+message Applications {
+  uint64 revision = 1;
+  repeated Application applications = 2;
+  message Application {
+    uint64 request = 1;
+    oneof state {
+      newport.wire.Present opening = 2;
+      WindowId window = 3;
+      newport.wire.Present stopping = 4;
+    }
+  }
+}
+
+message Activity {
+  uint64 revision = 1;
+  // Supervised application groups, with or without windows.
+  uint32 applications = 2;
+}
+
+// How a launch starts up, apart from the groups the display owns.
+message Lifecycle {
+  enum Stage {
+    STAGE_PREPARING = 0;
+    STAGE_SERVICE_LOOKUP = 1;
+    STAGE_SERVICE_REGISTRATION = 2;
+    STAGE_ACTIVATION_CALL = 3;
+    STAGE_COMMAND = 4;
+    STAGE_AWAITING_WINDOW = 5;
+    STAGE_AWAITING_PRESENTATION = 6;
+  }
+  message Window {
+    WindowId window = 1;
+    uint64 surface = 2;
+    // The launch ended on a window of an instance already running.
+    bool existing_instance = 3;
+  }
+  message Outcome {
+    oneof kind {
+      Window presented = 1;
+      CompletedWithoutPresentation completed_without_presentation = 2;
+      // Another process took the launch.
+      newport.wire.Present handed_off = 3;
+      Failed failed = 4;
+      TimedOut timed_out = 5;
+      Cancelled cancelled = 6;
+    }
+    message CompletedWithoutPresentation {
+      // The end of what the launch wrote.
+      optional string output = 1;
+    }
+    message Failed {
+      Stage stage = 1;
+      string message = 2;
+      bool outcome_unknown = 3;
+    }
+    message TimedOut {
+      Stage stage = 1;
+      bool outcome_unknown = 2;
+    }
+    message Cancelled {
+      bool outcome_unknown = 1;
+    }
+  }
+  message State {
+    oneof kind {
+      Stage starting = 1;
+      // The startup budget passed while the launch's processes run, after
+      // this many milliseconds.
+      uint64 background = 2;
+      Window window = 3;
+      Outcome finished = 4;
+    }
+  }
+  message Update {
+    fixed64 session = 1;
+    uint64 request = 2;
+    uint64 revision = 3;
+    State state = 4;
+  }
+  // The client applied the exact offered surface.
+  message Presented {
+    fixed64 session = 1;
+    uint64 request = 2;
+    WindowId window = 3;
+    uint64 surface = 4;
+  }
+}

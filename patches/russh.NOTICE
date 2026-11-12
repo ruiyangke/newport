@@ -1,0 +1,13 @@
+russh 0.65.0
+Upstream: https://github.com/Eugeny/russh
+License: Apache-2.0; the upstream LICENSE is distributed with russh.
+
+Newport modifies russh's channel and session code to add per-channel flow
+control: a channel's receive window reopens only as its reader takes data,
+and output waiting on a peer's window is held back per channel instead of
+blocking the session. It also confirms channel closes to the handler. The
+changed files are src/channels/channel_ref.rs, src/channels/io/rx.rs,
+src/channels/mod.rs, src/client/encrypted.rs, src/client/mod.rs,
+src/client/session.rs, src/deferred.rs, src/lib_inner.rs,
+src/server/encrypted.rs, src/server/mod.rs, src/server/session.rs and
+src/session.rs. All other published package files remain unchanged.

@@ -1,0 +1,35 @@
+[package]
+name = "newport-clipboard"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["sync", "time"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+newport-protocol = { path = "../newport-protocol", features = ["protobuf"] }
+dirs = "7"
+libc = "0.2"
+log = "0.4"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSImage", "NSBitmapImageRep"] }
+objc2-foundation = "0.3"
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+newport-protocol = { path = "../newport-protocol", features = ["tokio"] }
+newport-win32 = { path = "../newport-win32" }
+clipboard-win = { version = "5.4", features = ["std"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "png"] }
+log = "0.4"
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "io-util"] }
+uuid = { version = "1", features = ["v4"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_DataExchange", "Win32_System_JobObjects", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "rt"] }

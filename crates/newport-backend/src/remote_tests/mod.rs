@@ -1,0 +1,798 @@
+//! Real Linux feature checks for the backend.
+//! Run serially with `cargo xtask test remote`; the Rust harness owns the fixtures.
+use crate::{
+    model::{Server, Tunnel},
+    ssh::{self, forward::Forward},
+};
+use newport_protocol::{
+    clipboard::imports::{self, Encoding},
+    common::Retry,
+    integration::{
+        self, BrowserReply, BrowserRequest, Call, ClientMessage, Reply, Request, ServerMessage,
+        wire::Message,
+    },
+};
+use serde_json::json;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    time::{Duration, timeout},
+};
+use uuid::Uuid;
+
+mod arboard;
+mod boundaries;
+mod compose;
+mod containers;
+mod git;
+mod lsp;
+mod monitor;
+mod opencode;
+mod ports;
+mod recovery;
+mod services;
+mod ssh_config;
+mod terminals;
+
+// Standalone clipboard fixtures address their own protocol servers explicitly;
+// ordinary shell startup must not advertise them as rendering displays.
+fn native_clipboard_environment(backend: &str) -> &'static str {
+    match backend {
+        "x11" => {
+            r#"set -eu
+unset DISPLAY XAUTHORITY WAYLAND_DISPLAY WAYLAND_SOCKET
+root="$HOME/.cache/newport/clipboard"
+test -S "$root/agent.sock"
+DISPLAY=$(cat "$root/display")
+XAUTHORITY="$root/Xauthority"
+test -n "$DISPLAY" && test -f "$XAUTHORITY"
+export DISPLAY XAUTHORITY
+"#
+        }
+        "wayland" => {
+            r#"set -eu
+unset DISPLAY XAUTHORITY WAYLAND_DISPLAY WAYLAND_SOCKET
+root="$HOME/.cache/newport/clipboard"
+test -S "$root/agent.sock"
+WAYLAND_DISPLAY="$root/wayland.sock"
+test -S "$WAYLAND_DISPLAY"
+export WAYLAND_DISPLAY
+"#
+        }
+        // Both, as a terminal's clipboard display names them.
+        "both" => {
+            r#"set -eu
+unset DISPLAY XAUTHORITY WAYLAND_DISPLAY WAYLAND_SOCKET
+root="$HOME/.cache/newport/clipboard"
+test -S "$root/agent.sock"
+DISPLAY=$(cat "$root/display")
+XAUTHORITY="$root/Xauthority"
+WAYLAND_DISPLAY="$root/wayland.sock"
+test -n "$DISPLAY" && test -f "$XAUTHORITY" && test -S "$WAYLAND_DISPLAY"
+export DISPLAY XAUTHORITY WAYLAND_DISPLAY
+"#
+        }
+        _ => panic!("unknown clipboard fixture backend"),
+    }
+}
+
+fn owner(server: &Server) -> std::sync::Arc<crate::server_session::ServerSession> {
+    static SESSIONS: std::sync::LazyLock<crate::server_session::Registry> =
+        std::sync::LazyLock::new(Default::default);
+    SESSIONS.session(server, 0)
+}
+
+fn server() -> Server {
+    let mut server = test_server("NEWPORT_TEST_SSH_PORT", "Disposable Linux", "fixture");
+    // The fixture account consents to explicit deployment commands. Feature
+    // startup must still never deploy implicitly, even with stored consent.
+    server.agent_install_approved = true;
+    server
+}
+
+fn test_server(port_variable: &str, name: &str, user: &str) -> Server {
+    serde_json::from_value(json!({
+        "id": Uuid::new_v4(), "name": name, "sshUser": user,
+        "sshHost": "127.0.0.1",
+        "sshPort": std::env::var(port_variable).unwrap().parse::<u16>().unwrap(),
+        "identityFile": std::env::var("NEWPORT_TEST_IDENTITY").unwrap()
+    }))
+    .unwrap()
+}
+
+/// The first login failure on a new link to `server`, while the link may
+/// keep trying.
+async fn login_failure(server: &Server) -> newport_ssh::Error {
+    use newport_ssh::{Login, Open, Reach};
+    let link = ssh::link(server, crate::ssh::no_jump_hosts);
+    let mut status = link.status();
+    let open = link.open(Open::Session);
+    tokio::pin!(open);
+    timeout(Duration::from_secs(15), async {
+        loop {
+            tokio::select! {
+                result = &mut open => panic!("the login succeeded: {:?}", result.err()),
+                changed = status.changed() => {
+                    changed.unwrap();
+                    let current = status.borrow_and_update();
+                    match (&current.reach, &current.login) {
+                        (Reach::Failed(error), _) | (_, Some(Login::Failed(error))) => {
+                            return error.clone();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("a login to fail")
+}
+
+/// Each test explicitly prepares its account, including permission-denied
+/// accounts. Feature reads must never implicitly install the remote agent.
+async fn installed_server(port_variable: &str, name: &str, user: &str) -> Server {
+    let mut server = test_server(port_variable, name, user);
+    server.agent_install_approved = true;
+    let session = crate::remote::Shell::new(&server);
+    let installed = crate::agent_lifecycle::manage_test(&session.0, &server, false, false).await;
+    installed.expect("Deploying agent to disposable test account");
+    server
+}
+
+#[tokio::test]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
+async fn authentication_exec_sftp_and_metrics() {
+    let mut server = server();
+    let session = crate::remote::Shell::new(&server);
+    crate::agent_lifecycle::manage_test(&session.0, &server, false, false)
+        .await
+        .unwrap();
+    let payload = vec![b'x'; 512 * 1024];
+    assert_eq!(
+        session
+            .execute("wc -c", Some(&payload))
+            .await
+            .unwrap()
+            .trim(),
+        payload.len().to_string()
+    );
+    assert_eq!(
+        session.execute("printf 'remote 世界'", None).await.unwrap(),
+        "remote 世界"
+    );
+    let failed = crate::remote::Shell::new(&server)
+        .execute("printf denied >&2; exit 7", None)
+        .await
+        .unwrap_err();
+    assert!(failed.contains("status 7") && failed.contains("denied"));
+    session
+        .execute("printf 'sftp-data' > ~/roundtrip.txt", None)
+        .await
+        .unwrap();
+    let sftp = crate::remote::Sftp::new(ssh::link(&server, crate::ssh::no_jump_hosts))
+        .dedicated()
+        .await
+        .unwrap();
+    assert_eq!(
+        sftp.stat("/home/fixture/roundtrip.txt")
+            .await
+            .unwrap()
+            .attrs
+            .size,
+        Some(9)
+    );
+    sftp.remove("/home/fixture/roundtrip.txt").await.unwrap();
+    assert!(
+        session
+            .execute("test -e ~/roundtrip.txt", None)
+            .await
+            .is_err()
+    );
+    let metrics = crate::cockpit::collect(
+        &crate::remote_tests::owner(&server),
+        crate::cockpit::Section::Overview,
+    )
+    .await
+    .unwrap();
+    assert!(
+        metrics["hostname"]
+            .as_str()
+            .is_some_and(|name| !name.is_empty())
+    );
+    assert!(metrics["cpu"].is_number());
+    // Every online core reports its own usage, keyed by the kernel's id.
+    let cores = metrics["cpus"].as_array().unwrap();
+    assert_eq!(cores.len() as u64, metrics["cores"].as_u64().unwrap());
+    assert!(cores.iter().all(|core| {
+        core["id"].is_u64()
+            && core["usage"]
+                .as_f64()
+                .is_some_and(|u| (0.0..=100.0).contains(&u))
+    }));
+    server.identity_file = None;
+    server.agent_source = Some("system".into());
+    assert_eq!(
+        crate::remote::Shell::new(&server)
+            .execute("printf agent-ok", None)
+            .await
+            .unwrap(),
+        "agent-ok"
+    );
+    server.agent_key_fingerprint = Some("SHA256:missing-key".into());
+    assert_eq!(
+        login_failure(&server).await,
+        newport_ssh::Error::AgentUnavailable
+    );
+}
+
+#[tokio::test]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
+async fn forwarding_roundtrip_and_shutdown() {
+    let server = server();
+    let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let tunnel: Tunnel = serde_json::from_value(serde_json::json!({
+        "id":Uuid::new_v4(), "serverId":server.id, "name":"HTTP fixture",
+        "localPort":local, "remoteHost":"127.0.0.1", "remotePort":8080
+    }))
+    .unwrap();
+    let forwarding = Forward::start(ssh::link(&server, crate::ssh::no_jump_hosts), &tunnel, true)
+        .await
+        .unwrap();
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", local))
+        .await
+        .unwrap();
+    stream
+        .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = String::new();
+    timeout(
+        Duration::from_secs(10),
+        stream.read_to_string(&mut response),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.contains("200 OK") && response.contains("newport remote fixture"));
+    forwarding.shutdown().await;
+    let _released = TcpListener::bind(("127.0.0.1", local)).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
+async fn deploy_reinstall_and_agent_protocol() {
+    let server = server();
+    let session = crate::remote::Shell::new(&server);
+    crate::agent::install(&session.0, &server).await.unwrap();
+    let hash = session
+        .execute("sha256sum ~/.local/bin/newport-agent", None)
+        .await
+        .unwrap();
+    crate::agent::install(&session.0, &server).await.unwrap();
+    crate::agent::reinstall(&session.0, &server).await.unwrap();
+    assert_eq!(
+        session
+            .execute("sha256sum ~/.local/bin/newport-agent", None)
+            .await
+            .unwrap(),
+        hash
+    );
+    let mut stream = session
+        .stream(&format!(
+            "exec ~/.local/bin/newport-agent serve {} --clipboard --browser",
+            Uuid::new_v4()
+        ))
+        .await
+        .unwrap();
+    ready(&mut stream).await;
+    let mut archive = tar::Builder::new(Vec::new());
+    for (name, data) in [
+        ("text/plain", "container clipboard 世界\n"),
+        ("TARGETS", "text/plain\nTARGETS\n"),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o600);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, name, data.as_bytes())
+            .unwrap();
+    }
+    let bytes = archive.into_inner().unwrap();
+    frame(
+        &mut stream,
+        call(Request::Snapshot((bytes).to_vec().into())),
+    )
+    .await;
+    response(&mut stream).await;
+    assert_eq!(
+        session
+            .execute("~/.local/bin/newport-agent clipboard -o", None)
+            .await
+            .unwrap(),
+        "container clipboard 世界\n"
+    );
+    let (opened, ()) = tokio::join!(
+        session.execute(
+            "~/.local/bin/xdg-open 'https://example.com/login?code=fixture'",
+            None
+        ),
+        async {
+            let BrowserRequest { id, url } = browser_request(&mut stream).await;
+            assert_eq!(url, "https://example.com/login?code=fixture");
+            frame(
+                &mut stream,
+                ClientMessage::Browser(BrowserReply {
+                    id,
+                    success: true,
+                    message: None,
+                }),
+            )
+            .await;
+        }
+    );
+    opened.unwrap();
+    frame(&mut stream, ClientMessage::Quit).await;
+    timeout(Duration::from_secs(10), stream.read_to_end(&mut Vec::new()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        session
+            .execute("~/.local/bin/newport-agent clipboard -o", None)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
+async fn interactive_shell_resize_and_exit() {
+    use crate::terminal::{Event, Input};
+    let (input, receiver) = tokio::sync::mpsc::channel(8);
+    let (output, mut events) = tokio::sync::mpsc::channel(32);
+    let task = tokio::spawn(async move {
+        let server = server();
+        let registry = crate::server_session::Registry::default();
+        let owner = registry.session(&server, 0);
+        let result = crate::terminal::shell_channel::run(
+            owner,
+            &server,
+            uuid::Uuid::new_v4(),
+            (80, 24),
+            receiver,
+            &output,
+            Default::default(),
+        )
+        .await;
+        registry.shutdown().await;
+        result
+    });
+    timeout(Duration::from_secs(15), async {
+        assert!(matches!(events.recv().await, Some(Event::Ready)));
+        input.send(Input::Resize(100, 40)).await.unwrap();
+        input
+            .send(Input::Data(
+                b"stty size; printf 'pty-%s\\n' roundtrip; exit 0\n".to_vec(),
+            ))
+            .await
+            .unwrap();
+        let mut text = Vec::new();
+        loop {
+            match events.recv().await.unwrap() {
+                Event::Data(bytes) => text.extend(bytes),
+                Event::Exit(code) => {
+                    assert_eq!(code, Some(0));
+                    break;
+                }
+                Event::Error(error) => panic!("{error}"),
+                Event::Ready => panic!("Duplicate ready event"),
+                // The tab is its shell's one computer, so always active.
+                Event::Active(true) => {}
+                Event::Reconnecting { attempt, message } => {
+                    panic!("Unexpected reconnect {attempt}: {message}")
+                }
+                event => panic!("Unexpected event {event:?}"),
+            }
+        }
+        let text = String::from_utf8_lossy(&text);
+        assert!(text.contains("40 100"), "PTY size missing: {text}");
+        assert!(
+            text.contains("pty-roundtrip"),
+            "Shell output missing: {text}"
+        );
+    })
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
+async fn changed_host_key_is_rejected_and_restoration_recovers() {
+    struct Restore(std::path::PathBuf, Vec<u8>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            std::fs::write(&self.0, &self.1).unwrap();
+        }
+    }
+    let path = std::path::PathBuf::from(std::env::var("NEWPORT_TEST_KNOWN_HOSTS").unwrap());
+    let restore = Restore(path.clone(), std::fs::read(&path).unwrap());
+    let wrong = std::fs::read_to_string(format!(
+        "{}.pub",
+        std::env::var("NEWPORT_TEST_IDENTITY").unwrap()
+    ))
+    .unwrap();
+    std::fs::write(&path, format!("[127.0.0.1]:{} {wrong}", server().ssh_port)).unwrap();
+    let error = login_failure(&server()).await;
+    assert!(
+        matches!(error, newport_ssh::Error::HostKeyChanged { .. }),
+        "Expected host-key rejection: {error}"
+    );
+    drop(restore);
+    assert_eq!(
+        crate::remote::Shell::new(&server())
+            .execute("printf recovered", None)
+            .await
+            .unwrap(),
+        "recovered"
+    );
+}
+
+#[tokio::test]
+#[ignore = "Requires cargo xtask test remote"]
+async fn shell_setup_is_idempotent_and_respects_protected_files() {
+    let session = crate::remote::Shell::new(&server());
+    crate::agent::install(&session.0, &server()).await.unwrap();
+    let output = session
+        .execute("newport-test-fixture shell-setup", None)
+        .await
+        .unwrap();
+    for shell in ["bash", "zsh", "fish"] {
+        assert!(
+            output.contains(&format!("{shell}: repeated install")),
+            "{output}"
+        );
+    }
+}
+
+fn call(request: Request) -> ClientMessage {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    ClientMessage::Call(Call {
+        id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        request,
+    })
+}
+async fn frame(stream: &mut (impl tokio::io::AsyncWrite + Unpin), message: ClientMessage) {
+    stream.write_all(&message.encode().unwrap()).await.unwrap();
+}
+async fn receive(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> ServerMessage {
+    timeout(Duration::from_secs(15), async {
+        // Read exactly one frame so fixture callers retain subsequent bytes.
+        let mut length = newport_protocol::encoding::protobuf::LengthDecoder::default();
+        let length = loop {
+            let byte = stream.read_u8().await.unwrap();
+            if let Some(length) = length
+                .push(byte, integration::SERVER_LIMITS.message)
+                .unwrap()
+            {
+                break length;
+            }
+        };
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).await.unwrap();
+        ServerMessage::decode(body.into()).unwrap()
+    })
+    .await
+    .unwrap()
+}
+async fn ready(stream: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin)) {
+    let ClientMessage::Call(call) = call(Request::Heartbeat) else {
+        unreachable!()
+    };
+    frame(stream, ClientMessage::Call(call.clone())).await;
+    let ServerMessage::Response(response) = receive(stream).await else {
+        panic!("expected heartbeat response")
+    };
+    response.validate_for(&call).unwrap();
+}
+async fn response(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> Reply {
+    let ServerMessage::Response(response) = receive(stream).await else {
+        panic!("expected response")
+    };
+    response.reply
+}
+async fn clipboard_request(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> imports::Request {
+    let ServerMessage::ClipboardRequest(request) = receive(stream).await else {
+        panic!("expected clipboard request")
+    };
+    request
+}
+async fn browser_request(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> BrowserRequest {
+    let ServerMessage::Browser(request) = receive(stream).await else {
+        panic!("expected browser request")
+    };
+    request
+}
+async fn failed(stream: &mut (impl tokio::io::AsyncRead + Unpin), retry: Retry) -> String {
+    let ServerMessage::Failed(error) = receive(stream).await else {
+        panic!("expected failure")
+    };
+    assert_eq!(error.retry, retry);
+    error.message
+}
+
+#[tokio::test]
+#[ignore = "Requires cargo xtask test remote"]
+async fn demand_clipboard_compression_freshness_and_failed_transfer_recovery() {
+    use std::io::Write;
+    let session = crate::remote::Shell::new(&server());
+    crate::agent::install(&session.0, &server()).await.unwrap();
+    let mut stream = session
+        .stream(&format!(
+            "exec ~/.local/bin/newport-agent serve {} --clipboard",
+            Uuid::new_v4()
+        ))
+        .await
+        .unwrap();
+    ready(&mut stream).await;
+    // A new offer invalidates the old cache. A failed transfer of that revision
+    // must be retryable without another clipboard change.
+    for (revision, corrupt) in [(100i64, false), (101, true), (101, false)] {
+        frame(
+            &mut stream,
+            call(Request::ClipboardOffer(imports::Offer {
+                revision,
+                formats: vec!["text/plain"].into_iter().map(String::from).collect(),
+            })),
+        )
+        .await;
+        response(&mut stream).await;
+        let content = format!("revision {revision}: 世界\n").repeat(8192);
+        let (read, ()) = tokio::join!(
+            session.execute("~/.local/bin/newport-agent clipboard -o", None),
+            async {
+                let imports::Request {
+                    id,
+                    revision: received_revision,
+                    format,
+                } = clipboard_request(&mut stream).await;
+                assert_eq!(received_revision, revision);
+                assert_eq!(format, "text/plain");
+                let chunks: Vec<_> = content.as_bytes().chunks(64 * 1024).collect();
+                for (index, chunk) in chunks.iter().enumerate() {
+                    let mut encoder =
+                        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+                    encoder.write_all(chunk).unwrap();
+                    let bytes = if corrupt {
+                        b"invalid zlib".to_vec()
+                    } else {
+                        encoder.finish().unwrap()
+                    };
+                    let response = imports::Reply {
+                        id,
+                        revision,
+                        encoding: Encoding::Zlib,
+                        done: (corrupt || index + 1 == chunks.len()),
+                        bytes: bytes.to_vec(),
+                    };
+                    frame(&mut stream, ClientMessage::Clipboard(response)).await;
+                    if corrupt {
+                        break;
+                    }
+                }
+            }
+        );
+        if corrupt {
+            assert!(read.is_err());
+            // Failed reads are coalesced for one second to avoid request storms.
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+        } else {
+            assert_eq!(read.unwrap(), content);
+            // Cache hit finishes without servicing another demand request.
+            assert_eq!(
+                timeout(
+                    Duration::from_secs(5),
+                    session.execute("~/.local/bin/newport-agent clipboard -o", None)
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+                content
+            );
+        }
+        frame(&mut stream, call(Request::Heartbeat)).await;
+        response(&mut stream).await;
+    }
+    frame(&mut stream, ClientMessage::Quit).await;
+    timeout(Duration::from_secs(10), stream.read_to_end(&mut Vec::new()))
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "Requires cargo xtask test remote"]
+async fn files_transfer_roundtrip_and_existing_file_protection() {
+    use crate::files::{Operations, Remote, transfer};
+    let server = server();
+    let files = Remote::new(
+        server.clone(),
+        crate::ssh::link(&server, crate::ssh::no_jump_hosts),
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join(format!("世界-{}.bin", Uuid::new_v4()));
+    let bytes: Vec<u8> = (0..524_288).map(|n| (n % 251) as u8).collect();
+    std::fs::write(&source, &bytes).unwrap();
+    let operations = Operations::default();
+    let remote = transfer::upload(&operations, &files, &source, "/home/fixture", |_, _| {})
+        .await
+        .unwrap();
+    assert!(
+        transfer::upload(&operations, &files, &source, "/home/fixture", |_, _| {})
+            .await
+            .is_err()
+    );
+    let destination = temp.path().join("download.bin");
+    transfer::download(
+        &crate::files::Operations::default(),
+        &files,
+        &remote,
+        &destination,
+        |_, _| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+    let sftp = files.sftp.shared().await.unwrap();
+    sftp.remove(remote).await.unwrap();
+    operations.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "Requires cargo xtask test remote"]
+async fn browser_callback_http_roundtrip_conflict_and_cleanup() {
+    let session = crate::remote::Shell::new(&server());
+    let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    let url = url::Url::parse(&format!(
+        "https://login.example/authorize?redirect_uri=http://127.0.0.1:{port}/callback"
+    ))
+    .unwrap();
+    let mut callbacks = crate::ssh::callback::Callbacks::new(session.0.clone());
+    assert!(
+        callbacks
+            .prepare(ssh::callback::endpoint(&url).unwrap().unwrap())
+            .await
+            .is_err()
+    );
+    drop(reservation);
+    // A real remote HTTP receiver stands in for the CLI's login callback.
+    let mut receiver = session
+        .stream(&format!("newport-test-fixture callback {port}"))
+        .await
+        .unwrap();
+    let mut ready = [0; 6];
+    timeout(Duration::from_secs(10), receiver.read_exact(&mut ready))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&ready, b"ready\n");
+    callbacks
+        .prepare(ssh::callback::endpoint(&url).unwrap().unwrap())
+        .await
+        .unwrap();
+    let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    socket
+        .write_all(b"GET /callback?code=fixture&state=nonce HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = String::new();
+    timeout(
+        Duration::from_secs(10),
+        socket.read_to_string(&mut response),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.ends_with("logged-in"), "{response}");
+    drop(socket);
+    drop(callbacks);
+    timeout(Duration::from_secs(3), async {
+        loop {
+            if TcpListener::bind(("127.0.0.1", port)).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        session
+            .execute("printf still-connected", None)
+            .await
+            .unwrap(),
+        "still-connected"
+    );
+}
+
+#[tokio::test]
+#[ignore = "Requires cargo xtask test remote"]
+async fn native_x11_and_wayland_clients_fetch_png_on_demand() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use sha2::{Digest, Sha256};
+    let png = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB1sAAAAASUVORK5CYII=").unwrap();
+    let expected: String = Sha256::digest(&png)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let session = crate::remote::Shell::new(&server());
+    crate::agent::install(&session.0, &server()).await.unwrap();
+    let mut stream = session
+        .stream(&format!(
+            "exec ~/.local/bin/newport-agent serve {} --clipboard",
+            Uuid::new_v4()
+        ))
+        .await
+        .unwrap();
+    ready(&mut stream).await;
+    for (revision, backend, client) in [
+        (
+            200i64,
+            "x11",
+            "/usr/bin/xclip -selection clipboard -t image/png -o",
+        ),
+        (
+            201,
+            "wayland",
+            "/usr/bin/wl-paste --type image/png --no-newline",
+        ),
+    ] {
+        frame(
+            &mut stream,
+            call(Request::ClipboardOffer(imports::Offer {
+                revision,
+                formats: vec!["image/png"].into_iter().map(String::from).collect(),
+            })),
+        )
+        .await;
+        response(&mut stream).await;
+        let command = format!(
+            "{}{client} | sha256sum",
+            native_clipboard_environment(backend)
+        );
+        let (output, ()) = tokio::join!(session.execute(&command, None), async {
+            let imports::Request {
+                id,
+                revision: received_revision,
+                format,
+            } = clipboard_request(&mut stream).await;
+            assert_eq!(received_revision, revision);
+            assert_eq!(format, "image/png");
+            let response = imports::Reply {
+                id,
+                revision,
+                encoding: Encoding::Raw,
+                done: true,
+                bytes: png.to_vec(),
+            };
+            frame(&mut stream, ClientMessage::Clipboard(response)).await;
+        });
+        assert_eq!(
+            output.unwrap().split_whitespace().next().unwrap(),
+            expected,
+            "{client}"
+        );
+    }
+    frame(&mut stream, ClientMessage::Quit).await;
+    timeout(Duration::from_secs(10), stream.read_to_end(&mut Vec::new()))
+        .await
+        .unwrap()
+        .unwrap();
+}

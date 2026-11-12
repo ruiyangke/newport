@@ -1,0 +1,84 @@
+syntax = "proto3";
+package newport.clipboard.service;
+
+import "newport/wire.proto";
+import "newport/clipboard.proto";
+import "newport/integration.proto";
+
+// The server speaks first. A client must verify version and runtime before
+// sending Authenticate. All protocol/capability versions remain 1.
+message Hello { uint32 version = 1; string runtime = 2; }
+message Offer {
+  string runtime = 1;
+  int64 revision = 2;
+  oneof origin {
+    newport.wire.Present empty = 3;
+    newport.wire.Present host = 4;
+    newport.clipboard.NativeOrigin native = 5;
+  }
+  repeated string formats = 6;
+}
+message ProviderLease { string runtime = 1; string worker = 2; uint64 epoch = 3; }
+message NativeRequest { ProviderLease lease = 1; uint64 id = 2; uint64 revision = 3; string format = 4; }
+message ProviderPoll { ProviderLease lease = 1; Offer offer = 2; repeated NativeRequest requests = 3; }
+message Read {
+  string runtime = 1;
+  int64 revision = 2;
+  string format = 3;
+  uint64 offset = 4;
+  uint32 limit = 5;
+  oneof export {
+    newport.clipboard.ExportOffer focused = 6;
+    newport.clipboard.CopyLease committed = 7;
+  }
+}
+message Enabled { bool value = 1; }
+message NativePublish {
+  ProviderLease lease = 1;
+  string expected_runtime = 2;
+  int64 expected_revision = 3;
+  uint64 revision = 4;
+  repeated string formats = 5;
+}
+message NativeReply { NativeRequest request = 1; newport.clipboard.Chunk chunk = 2; }
+message Requests { repeated newport.integration.ClipboardRequest requests = 1; }
+message Published { bool accepted = 1; }
+message Export { newport.clipboard.ExportOffer offer = 1; }
+message Copy { newport.clipboard.CopyLease copy = 1; }
+
+// Exactly one request and reply at a time. Authenticate must be first and
+// cannot be repeated. Range reads, publications and copy mutations are never
+// replayed after an uncertain transport failure.
+message ClientFrame {
+  oneof request {
+    newport.clipboard.Access authenticate = 1;
+    newport.wire.Present offer = 2;
+    Read read = 3;
+    newport.wire.Present claim = 4;
+    Enabled enabled = 5;
+    newport.integration.ClipboardOffer publish = 6;
+    newport.wire.Present poll = 7;
+    newport.integration.ClipboardReply reply = 8;
+    newport.wire.Present native_poll = 9;
+    NativePublish native_publish = 10;
+    NativeReply native_reply = 11;
+    newport.wire.Present export_offer = 12;
+    newport.clipboard.ExportOffer commit_copy = 13;
+    newport.wire.Present copy_status = 14;
+    newport.clipboard.CopyLease release_copy = 15;
+  }
+}
+message ServerFrame {
+  oneof response {
+    Hello hello = 1;
+    newport.wire.Present ready = 2;
+    Offer offer = 3;
+    newport.clipboard.Chunk chunk = 4;
+    Requests requests = 5;
+    ProviderPoll provider = 6;
+    Published published = 7;
+    Export export = 8;
+    Copy copy = 9;
+    newport.wire.Error error = 10;
+  }
+}

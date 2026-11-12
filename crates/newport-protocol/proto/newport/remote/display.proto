@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+// Credential-free display preparation, followed by typed clipboard admission.
+package newport.remote.display;
+
+import "newport/wire.proto";
+import "newport/clipboard.proto";
+
+// The first frame a connection to the display sends.
+message Envelope {
+  // What the connection asks for: "prepare-clipboard-attach".
+  string op = 1;
+  // The sender's protocol revision.
+  uint32 revision = 2;
+  // The sender's build, for diagnostics only.
+  string build = 3;
+  // Empty for preparation; no credentials precede Ready.
+  bytes body = 4;
+}
+
+// The display's answer to an `Envelope`, before anything else.
+message EnvelopeReply {
+  oneof result {
+    newport.wire.Present accepted = 1;
+    Refused refused = 2;
+    DisplayIdentity ready = 3;
+  }
+}
+
+// Why the display refused an envelope: `display-revision` when the sender's
+// revision isn't the display's, `unknown-op`, or `refused`.
+message Refused {
+  newport.wire.Error error = 1;
+  DisplayIdentity display = 2;
+}
+
+// Which display answered, so a peer knows which side is older.
+message DisplayIdentity {
+  uint32 revision = 1;
+  string build = 2;
+}
+
+// The next frame after Ready, on the same connection. After authentication
+// the display answers Accepted or Refused. Only then may Remote Apps follow.
+message Attach {
+  // The relay's Newport session.
+  string session = 1;
+  // The name of the relay's computer; empty when Newport didn't give one.
+  string computer = 2;
+  // Access issued by the runtime for this worker.
+  newport.clipboard.Access clipboard = 3;
+}

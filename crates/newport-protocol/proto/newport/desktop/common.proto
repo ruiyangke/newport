@@ -1,0 +1,44 @@
+syntax = "proto3";
+package newport.desktop.common;
+import "newport/desktop/account.proto";
+import "newport/wire.proto";
+
+message Hello {
+  optional uint32 version = 1;
+  optional string contract_id = 2;
+}
+
+message Ready {
+  optional uint32 version = 1;
+  optional string backend_instance = 2;
+  optional string contract_id = 3;
+}
+
+message FailureDetail {
+  oneof value {
+    newport.desktop.account.RefusalReason license_refusal = 1;
+  }
+}
+
+message Failure {
+  newport.wire.Error error = 1;
+  newport.desktop.common.FailureDetail detail = 2;
+}
+
+message AgentApproval {
+  optional string server = 1;
+  optional bool awaiting = 2;
+}
+
+message ProgressState {
+  oneof value {
+    newport.desktop.common.AgentApproval agent_approval = 2;
+  }
+}
+
+message Progress {
+  optional uint64 id = 1;
+  oneof state {
+    newport.desktop.common.AgentApproval agent_approval = 2;
+  }
+}

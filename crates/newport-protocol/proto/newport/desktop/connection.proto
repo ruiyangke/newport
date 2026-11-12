@@ -1,0 +1,162 @@
+syntax = "proto3";
+package newport.desktop.connection;
+import "newport/desktop/configuration.proto";
+import "newport/wire.proto";
+import "newport/discovery.proto";
+
+message Discovery {
+  newport.discovery.Snapshot current = 1;
+  repeated newport.discovery.Snapshot retained = 2;
+  newport.discovery.Report retention = 3;
+}
+
+message SetupInspection {
+  optional string os = 1;
+  optional string architecture = 2;
+  optional uint64 cores = 3;
+  optional uint64 memory_kib = 4;
+  optional uint64 free_kib = 5;
+  optional bool installed = 6;
+  optional uint64 total = 7;
+}
+
+message OptionalNotice {
+  optional string notice = 1;
+}
+
+message AgentKey {
+  optional string source = 1;
+  optional string comment = 2;
+  optional string fingerprint = 3;
+  optional string algorithm = 4;
+}
+
+message AgentKeyList {
+  repeated newport.desktop.connection.AgentKey keys = 1;
+  repeated string warnings = 2;
+}
+
+message ConfigHost {
+  optional string id = 1;
+  optional string alias = 2;
+  optional string host = 3;
+  optional string user = 4;
+  optional uint32 port = 5;
+  optional string identity_file = 6;
+  newport.desktop.configuration.Proxy proxy = 7;
+  repeated string through = 8;
+  optional bool importable = 9;
+  optional bool suggested = 10;
+  optional string note = 11;
+}
+
+// A host to look up with `ssh -G`.
+message SshResolveArgs {
+  optional string host = 1;
+}
+
+// What the SSH config sets for a host, as OpenSSH resolves it. A field is set
+// only when the config changes it from OpenSSH's default.
+message SshResolved {
+  optional string hostname = 1;
+  optional string user = 2;
+  optional uint32 port = 3;
+  optional string identity_file = 4;
+  // As written, with %h, %p, %r and %n unexpanded.
+  optional string proxy_command = 5;
+  optional string proxy_jump = 6;
+}
+
+message ConfigHosts {
+  optional string path = 1;
+  repeated newport.desktop.connection.ConfigHost hosts = 2;
+}
+
+message PortsObservation {
+  reserved 1;
+  reserved "data";
+  newport.desktop.connection.Discovery discovery = 7;
+  optional string error = 2;
+  optional bool fetching = 3;
+  optional bool stale = 4;
+  optional uint64 revision = 5;
+  optional uint64 updated_at = 6;
+}
+
+message UninstallOutput {
+  optional string text = 1;
+}
+
+message SetupInspectArgs {
+  newport.desktop.configuration.Server expected_server = 1;
+}
+
+message SetupInstallArgs {
+  newport.desktop.configuration.Server expected_server = 1;
+}
+
+message SetupFinishArgs {
+  newport.desktop.configuration.Server expected_server = 1;
+  optional bool browser = 2;
+  optional bool clipboard = 3;
+}
+
+message SetupSkipArgs {
+  newport.desktop.configuration.Server expected_server = 1;
+}
+
+message TestConnectionArgs {
+  optional string server = 1;
+}
+
+message ConnectionsQueryArgs {
+  optional string server = 1;
+  // Absence uses the source API default.
+  optional bool refresh = 2;
+}
+
+message ReinstallAgentArgs {
+  optional string server = 1;
+}
+
+message UninstallAgentArgs {
+  newport.desktop.configuration.Server expected_server = 1;
+}
+
+message InspectAgentArgs {
+  newport.desktop.configuration.Server expected_server = 1;
+}
+
+message Operation {
+  oneof value {
+    newport.desktop.connection.SetupInspectArgs setup_inspect = 1;
+    newport.desktop.connection.SetupInstallArgs setup_install = 2;
+    newport.desktop.connection.SetupFinishArgs setup_finish = 3;
+    newport.desktop.connection.SetupSkipArgs setup_skip = 4;
+    newport.wire.Present ssh_agent_keys = 5;
+    newport.wire.Present ssh_config_hosts = 6;
+    newport.desktop.connection.TestConnectionArgs test_connection = 7;
+    newport.desktop.connection.ConnectionsQueryArgs connections_query = 8;
+    newport.desktop.connection.ReinstallAgentArgs reinstall_agent = 9;
+    newport.desktop.connection.UninstallAgentArgs uninstall_agent = 10;
+    newport.desktop.connection.InspectAgentArgs inspect_agent = 11;
+    newport.desktop.connection.SshResolveArgs ssh_resolve = 12;
+  }
+}
+
+message Reply {
+  oneof value {
+    newport.desktop.connection.SetupInspection setup_inspect = 1;
+    newport.wire.Present setup_install = 2;
+    newport.desktop.connection.OptionalNotice setup_finish = 3;
+    newport.wire.Present setup_skip = 4;
+    newport.desktop.connection.AgentKeyList ssh_agent_keys = 5;
+    newport.desktop.connection.ConfigHosts ssh_config_hosts = 6;
+    newport.wire.Present test_connection = 7;
+    newport.desktop.connection.PortsObservation connections_query = 8;
+    newport.wire.Present reinstall_agent = 9;
+    newport.desktop.connection.UninstallOutput uninstall_agent = 10;
+    newport.desktop.configuration.InstallationStatus inspect_agent = 11;
+    newport.desktop.connection.SshResolved ssh_resolve = 12;
+  }
+}

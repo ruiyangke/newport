@@ -1,0 +1,101 @@
+syntax = "proto3";
+package newport.runtime;
+import "newport/wire.proto";
+import "newport/clipboard.proto";
+
+message ClientFrame { oneof message { Request request = 1; } }
+message ServerFrame { oneof message { Hello hello = 1; Reply reply = 2; } }
+
+enum Product { PRODUCT_UNKNOWN = 0; PRODUCT_CORE = 1; PRODUCT_FULL = 2; }
+message Capability {
+  repeated uint32 versions = 1;
+  optional string unavailable = 2;
+  optional string contract_id = 3;
+}
+message Limits {
+  uint32 max_control_bytes = 1;
+  uint32 max_inflight = 2;
+  uint32 max_workers = 3;
+  uint32 max_registrations = 4;
+}
+message Hello {
+  repeated uint32 versions = 1;
+  string instance_id = 2;
+  string build_sha256 = 3;
+  string worker_socket = 4;
+  Product product = 5;
+  map<string, Capability> services = 6;
+  map<string, bool> dependencies = 7;
+  Limits limits = 8;
+  optional string agent_version = 9;
+}
+message Permissions { uint64 revision = 1; bool clipboard = 2; bool browser = 3; }
+message Applied { Permissions permissions = 1; optional newport.wire.Error error = 2; }
+message ClipboardRoute {
+  uint64 revision = 1;
+  optional string worker_id = 2;
+  bool exports = 3;
+  bool focused = 4;
+}
+enum RouteOutcome { ROUTE_OUTCOME_UNKNOWN = 0; ROUTE_OUTCOME_APPLIED = 1; ROUTE_OUTCOME_RETIRED = 2; }
+message RouteReply { uint64 revision = 1; optional string worker_id = 2; RouteOutcome outcome = 3; }
+message Endpoint { string path = 1; newport.wire.Secret ticket = 2; }
+
+message Request {
+  uint64 id = 1;
+  string runtime_id = 2;
+  oneof operation {
+    Initialize initialize = 3;
+    PrepareWorkerStream prepare_worker_stream = 4;
+    WorkerPermissionUpdate permissions = 5;
+    ClipboardRoute clipboard_route = 6;
+    newport.wire.Present ping = 7;
+    newport.wire.Present shutdown = 8;
+  }
+  message Initialize { uint32 version = 1; string session_id = 2; uint64 transport_generation = 3; }
+  message PrepareWorkerStream {
+    string worker_id = 1;
+    string service = 2;
+    uint32 version = 3;
+    optional string contract_id = 4;
+  }
+  message WorkerPermissionUpdate { string worker_id = 1; Permissions permissions = 2; }
+}
+message Reply {
+  uint64 id = 1;
+  string runtime_id = 2;
+  oneof result {
+    newport.wire.Present accepted = 3;
+    Endpoint worker_stream = 4;
+    Applied permissions = 5;
+    RouteReply clipboard_route = 6;
+    newport.wire.Error error = 7;
+  }
+}
+
+// Registration-authenticated local lease channel, independent of service stdin.
+message LeaseWorkerFrame { oneof message { Attach attach = 1; Applied applied = 2; } }
+message LeaseRuntimeFrame { oneof message { Attached attached = 1; WorkerPermissions permissions = 2; } }
+message Attach { string runtime_id = 1; string worker_id = 2; string build_sha256 = 3; string service = 4; }
+message Lease { string session_id = 1; optional newport.clipboard.Access clipboard = 2; }
+message Attached {
+  string runtime_id = 1;
+  string worker_id = 2;
+  oneof result { Lease lease = 3; newport.wire.Error error = 4; }
+}
+message WorkerPermissions { string runtime_id = 1; string worker_id = 2; Permissions permissions = 3; }
+
+message AdmissionClientFrame { oneof message { Open open = 1; } }
+message AdmissionServerFrame { oneof result { Started started = 1; newport.wire.Error error = 2; } }
+message Open {
+  uint32 version = 1;
+  string runtime_id = 2;
+  string worker_id = 3;
+  string build_sha256 = 4;
+  newport.wire.Secret ticket = 5;
+  string service = 6;
+  uint32 service_version = 7;
+  repeated string arguments = 8;
+  optional string contract_id = 9;
+}
+message Started { string runtime_id = 1; string worker_id = 2; string build_sha256 = 3; }

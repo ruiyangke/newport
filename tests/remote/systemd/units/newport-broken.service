@@ -1,0 +1,8 @@
+[Unit]
+Description=Newport broken job
+
+[Service]
+ExecStart=/bin/sh -c 'echo broken on purpose >&2; exit 3'
+
+[Install]
+WantedBy=multi-user.target

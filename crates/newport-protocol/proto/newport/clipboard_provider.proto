@@ -1,0 +1,35 @@
+syntax = "proto3";
+package newport.clipboard.provider;
+import "newport/wire.proto";
+message Greeting { uint32 version = 1; newport.wire.Secret nonce = 2; }
+message Identity { uint32 sequence = 1; uint64 owner = 2; }
+enum PublicationStage {
+ SOURCE = 0; QUEUE = 1; OBSERVE = 2; BASELINE = 3; FORMATS = 4; GENERATION = 5;
+ OPEN = 6; VALIDATE = 7; ADMISSION = 8; EMPTY = 9; DELAYED_FORMATS = 10; CONCEALMENT = 11; REPLY = 12;
+}
+message PublicationRejection { PublicationStage stage = 1; int64 expected = 2; optional int64 observed = 3; optional uint32 native_error = 4; }
+message Preparation { int64 revision = 1; Identity identity = 2; }
+message Committed { int64 revision = 1; bool complete = 2; }
+message FileWrite { oneof outcome { newport.wire.Present unchanged = 1; Committed committed = 2; newport.wire.Present uncertain = 3; } }
+message Snapshot { int64 revision = 1; Identity identity = 2; repeated string formats = 3; optional uint64 origin = 4; }
+message ReadResult { int64 revision = 1; Identity identity = 2; bytes data = 3; }
+message Published { uint64 generation = 1; uint64 owner = 2; Preparation preparation = 3; }
+message Outcome { oneof result {
+ PublicationRejection publication_rejected = 1; Snapshot snapshot = 2; ReadResult read = 3; Published published = 4; FileWrite attached = 5;
+} }
+message Id { uint64 id = 1; }
+message Read { uint64 id = 1; int64 revision = 2; string format = 3; }
+message Publish { uint64 id = 1; int64 expected = 2; repeated string formats = 3; }
+// Exact little-endian UTF-16 code units, including unpaired surrogates. No normalization.
+message Attach { uint64 id = 1; uint64 generation = 2; bytes folder_utf16le = 3; }
+message Done { uint64 id = 1; Outcome outcome = 2; }
+message Admit { uint64 id = 1; uint64 source = 2; bool preparation = 3; }
+message Admitted { uint64 id = 1; bool accepted = 2; }
+message Demand { uint64 id = 1; uint64 source = 2; string format = 3; }
+message Data { uint64 id = 1; bool present = 2; bytes data = 3; }
+message Source { uint64 source = 1; }
+message Frame { oneof message {
+ Greeting hello = 1; Greeting ready = 2; Id snapshot = 3; Read read = 4; Publish publish = 5;
+ Attach attach = 6; Done done = 7; Admit admit = 8; Admitted admitted = 9;
+ Demand demand = 10; Data data = 11; Id consumed = 12; Source revoke = 13; Source revoked = 14; newport.wire.Present stop = 15;
+} }

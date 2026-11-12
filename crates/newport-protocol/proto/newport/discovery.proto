@@ -1,0 +1,187 @@
+syntax = "proto3";
+package newport.discovery;
+
+import "newport/wire.proto";
+
+message Request { bool refresh = 1; }
+
+// A finite scan or project enrichment. The caller retains its control pipe.
+message HelperRequest {
+  optional string contract_id = 1;
+  uint64 generation = 2;
+  // Only the unprivileged projects command accepts filesystem enrichment.
+  Snapshot projects = 3;
+}
+message HelperReply {
+  optional string contract_id = 1;
+  uint64 generation = 2;
+  oneof result {
+    Snapshot snapshot = 3;
+    newport.wire.Error error = 4;
+  }
+}
+
+// All identifiers and observations are scoped to one scan on one server.
+message Snapshot {
+  uint64 generation = 1;
+  optional uint64 started_at_ms = 2;
+  optional uint64 elapsed_ms = 3;
+  Scope scope = 4;
+  repeated Socket sockets = 5;
+  repeated Process processes = 6;
+  repeated Service services = 7;
+  repeated Publication publications = 8;
+  Coverage coverage = 9;
+  // Stable identity, including empty inventories. Absence prevents complete coverage.
+  optional string container_engine = 10;
+  Diagnostics diagnostics = 11;
+}
+
+// Selected inventory sources remain identifiable when an inventory is empty.
+message Diagnostics {
+  optional SocketSource ipv4_source = 1;
+  optional SocketSource ipv6_source = 2;
+}
+
+message Namespace { optional uint64 device = 1; uint64 inode = 2; }
+message Scope {
+  Namespace network = 1;
+  Namespace processes = 2;
+  optional string boot_id = 3;
+}
+// Address is exactly four or sixteen network-order bytes. Interface is remote.
+message Endpoint { bytes address = 1; uint32 port = 2; optional uint32 interface = 3; }
+
+enum SocketSource {
+  SOCKET_SOURCE_UNSPECIFIED = 0;
+  SOCKET_SOURCE_DIAGNOSTIC = 1;
+  SOCKET_SOURCE_PROC = 2;
+}
+enum HolderState {
+  HOLDER_STATE_UNSPECIFIED = 0;
+  HOLDER_STATE_UNRESOLVED = 1;
+  HOLDER_STATE_OBSERVED = 2;
+  HOLDER_STATE_CHANGED = 3;
+}
+message Cgroup { uint64 id = 1; optional string path = 2; }
+message Association {
+  uint32 service = 1;
+  oneof relation {
+    newport.wire.Present socket_cgroup = 2;
+    uint32 holder = 3;
+  }
+}
+message Socket {
+  uint32 id = 1;
+  Endpoint endpoint = 2;
+  SocketSource source = 3;
+  optional uint64 inode = 4;
+  optional uint64 cookie = 5;
+  optional uint32 uid = 6;
+  optional string account = 7;
+  optional bool ipv6_only = 8;
+  Cgroup cgroup = 9;
+  repeated uint32 holders = 10 [packed = false];
+  HolderState holder_state = 11;
+  bool holders_truncated = 12;
+  repeated Association services = 13;
+}
+
+message ProcessIdentity { uint32 pid = 1; optional uint64 start_ticks = 2; }
+message ObservedPath { string value = 1; bool deleted = 2; bool lossy = 3; }
+message Project {
+  string root = 1;
+  string marker = 2;
+  optional string worktree = 3;
+  optional string branch = 4;
+  optional bool main = 5;
+}
+message Details {
+  ObservedPath executable = 1;
+  ObservedPath directory = 2;
+  repeated string arguments = 3;
+  Project project = 4;
+}
+message Process {
+  uint32 id = 1;
+  ProcessIdentity identity = 2;
+  optional string name = 3;
+  optional string executable_name = 4;
+  optional uint32 uid = 5;
+  optional string account = 6;
+  Details details = 7;
+  Report metadata = 8;
+}
+
+message Manager {
+  oneof scope {
+    newport.wire.Present system = 1;
+    uint32 user_uid = 2;
+  }
+}
+message Service {
+  uint32 id = 1;
+  Manager manager = 2;
+  string unit = 3;
+  optional string description = 4;
+  string control_group = 5;
+  optional uint32 main_pid = 6;
+  repeated string triggers = 7;
+}
+enum ContainerState {
+  CONTAINER_STATE_UNSPECIFIED = 0;
+  CONTAINER_STATE_RUNNING = 1;
+  CONTAINER_STATE_STOPPED = 2;
+  CONTAINER_STATE_UNKNOWN = 3;
+}
+message Compose {
+  optional string project = 1;
+  optional string service = 2;
+  optional string directory = 3;
+  Project directory_project = 4;
+}
+// Publication is an engine observation, not proof of a host listening socket.
+message Publication {
+  // Unknown identity requires partial container coverage and cannot prove absence.
+  optional string engine = 1;
+  string container = 2;
+  string name = 3;
+  optional string image = 4;
+  ContainerState state = 5;
+  Endpoint host = 6;
+  uint32 target_port = 7;
+  optional bytes target_address = 8;
+  Compose compose = 9;
+}
+
+enum Outcome {
+  OUTCOME_UNSPECIFIED = 0;
+  OUTCOME_NOT_ATTEMPTED = 1;
+  OUTCOME_COMPLETE = 2;
+  OUTCOME_PARTIAL = 3;
+  OUTCOME_UNAVAILABLE = 4;
+  OUTCOME_NOT_APPLICABLE = 5;
+}
+enum IssueKind {
+  ISSUE_KIND_UNSPECIFIED = 0;
+  ISSUE_KIND_PERMISSION_DENIED = 1;
+  ISSUE_KIND_UNSUPPORTED = 2;
+  ISSUE_KIND_TIMED_OUT = 3;
+  ISSUE_KIND_INTERRUPTED = 4;
+  ISSUE_KIND_BUDGET_EXCEEDED = 5;
+  ISSUE_KIND_IO = 6;
+  ISSUE_KIND_INVALID_RESPONSE = 7;
+  ISSUE_KIND_UNAVAILABLE = 8;
+}
+message Issue { IssueKind kind = 1; uint64 count = 2; string message = 3; }
+message Report { Outcome outcome = 1; repeated Issue issues = 2; }
+message Coverage {
+  Report ipv4 = 1;
+  Report ipv6 = 2;
+  Report processes = 3;
+  Report cgroups = 4;
+  Report services = 5;
+  Report containers = 6;
+  Report elevation = 7;
+  Report details = 8;
+}

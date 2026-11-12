@@ -1,0 +1,51 @@
+name: Remote apps source
+description: The private Remote apps source at remote/, at the tag named like this release, fetched with a read-only GitHub App token that lasts only this job.
+inputs:
+  client-id:
+    description: The GitHub App's client ID
+    required: true
+  private-key:
+    description: The GitHub App's private key
+    required: true
+  repository:
+    description: The private repository's name, under this repository's owner
+    required: true
+  tag:
+    description: The release tag; the private repository has a tag of the same name
+    required: true
+  working-directory:
+    description: Where this repository is checked out
+    required: false
+    default: .
+outputs:
+  commit:
+    description: The private commit checked out
+    value: ${{ steps.commit.outputs.commit }}
+runs:
+  using: composite
+  steps:
+    # Read access to the one private repository; revoked when the job ends.
+    - id: token
+      uses: actions/create-github-app-token@v3
+      with:
+        client-id: ${{ inputs.client-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: ${{ github.repository_owner }}
+        repositories: ${{ inputs.repository }}
+        permission-contents: read
+    - uses: actions/checkout@v7
+      with:
+        repository: ${{ github.repository_owner }}/${{ inputs.repository }}
+        ref: refs/tags/${{ inputs.tag }}
+        path: ${{ inputs.working-directory }}/remote
+        token: ${{ steps.token.outputs.token }}
+        persist-credentials: false
+    # Later steps read the commit from NEWPORT_REMOTE_REVISION, since neither
+    # checkout has tags.
+    - id: commit
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        commit=$(git -C remote rev-parse HEAD)
+        echo "NEWPORT_REMOTE_REVISION=$commit" >> "$GITHUB_ENV"
+        echo "commit=$commit" >> "$GITHUB_OUTPUT"

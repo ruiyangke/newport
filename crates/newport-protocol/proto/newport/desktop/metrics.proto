@@ -1,0 +1,128 @@
+syntax = "proto3";
+package newport.desktop.metrics;
+import "newport/monitor.proto";
+import "newport/wire.proto";
+
+enum Section {
+  SECTION_UNSPECIFIED = 0;
+  SECTION_OVERVIEW = 1;
+}
+
+message Reading {
+  newport.monitor.MetricsSnapshot sample = 1;
+  optional int64 sampled_at = 2;
+  optional string collection_error = 3;
+  optional string history_error = 4;
+}
+
+message NumericMeasures {
+  optional double cpu = 1;
+  optional double memory_used = 2;
+  optional double memory_total = 3;
+  optional double swap_used = 4;
+  optional double swap_total = 5;
+  optional double load_one = 6;
+  optional double load_five = 7;
+  optional double load_fifteen = 8;
+}
+
+message NetworkHistory {
+  optional string name = 1;
+  optional uint64 received = 2;
+  optional uint64 sent = 3;
+  optional double rx = 4;
+  optional double tx = 5;
+  optional double rx_peak = 6;
+  optional double tx_peak = 7;
+}
+
+message ChartBucket {
+  optional uint64 resolution_ms = 1;
+  optional uint64 sample_count = 2;
+  optional bool gap = 3;
+  newport.desktop.metrics.NumericMeasures means = 4;
+  newport.desktop.metrics.NumericMeasures peaks = 5;
+  repeated newport.desktop.metrics.NetworkHistory network = 6;
+}
+
+message HistoricalDisk {
+  optional string mount = 1;
+  optional string device = 2;
+  optional uint64 total = 3;
+  optional uint64 used = 4;
+  optional int64 available = 5;
+}
+
+message HistoricalDisks {
+  repeated HistoricalDisk items = 1;
+}
+
+message HistoricalNetwork {
+  repeated NetworkHistory items = 1;
+}
+
+message HistoricalRaw {
+  NumericMeasures measures = 1;
+  optional double uptime = 2;
+  // Required wrapper distinguishes a missing network observation from an empty list.
+  HistoricalNetwork network = 3;
+  HistoricalDisks disks = 4;
+}
+
+message MinuteRollup {
+  ChartBucket summary = 1;
+  optional double uptime = 2;
+  HistoricalDisks disks = 3;
+}
+
+message SampleValue {
+  oneof value {
+    newport.desktop.metrics.HistoricalRaw raw = 1;
+    newport.desktop.metrics.MinuteRollup minute = 2;
+    newport.desktop.metrics.ChartBucket chart = 3;
+  }
+}
+
+message Sample {
+  optional int64 at = 1;
+  newport.desktop.metrics.SampleValue value = 2;
+}
+
+message History {
+  repeated newport.desktop.metrics.Sample samples = 1;
+}
+
+message CacheInfo {
+  optional uint64 bytes = 1;
+  optional uint64 samples = 2;
+}
+
+message CollectArgs {
+  optional string server = 1;
+  // Absence uses the source API default.
+  optional bool refresh = 2;
+  optional newport.desktop.metrics.Section section = 3;
+}
+
+message HistoryArgs {
+  optional string server = 1;
+  optional uint32 minutes = 2;
+}
+
+message Operation {
+  oneof value {
+    newport.desktop.metrics.CollectArgs collect = 1;
+    newport.desktop.metrics.HistoryArgs history = 2;
+    newport.wire.Present cache = 3;
+    newport.wire.Present clear_cache = 4;
+  }
+}
+
+message Reply {
+  oneof value {
+    newport.desktop.metrics.Reading collect = 1;
+    newport.desktop.metrics.History history = 2;
+    newport.desktop.metrics.CacheInfo cache = 3;
+    newport.desktop.metrics.CacheInfo clear_cache = 4;
+  }
+}

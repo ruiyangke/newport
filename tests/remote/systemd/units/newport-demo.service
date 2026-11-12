@@ -1,0 +1,10 @@
+[Unit]
+Description=Newport demo worker
+
+[Service]
+User=nobody
+ExecStart=/bin/sh -c 'while :; do echo demo tick; sleep 2; done'
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

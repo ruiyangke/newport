@@ -1,0 +1,406 @@
+syntax = "proto3";
+package newport.desktop.configuration;
+import "newport/runtime.proto";
+import "newport/wire.proto";
+
+enum AuthMethod {
+  AUTH_METHOD_UNSPECIFIED = 0;
+  AUTH_METHOD_PUBLIC_KEY = 1;
+  AUTH_METHOD_PASSWORD = 2;
+}
+
+enum Direction {
+  DIRECTION_UNSPECIFIED = 0;
+  DIRECTION_LOCAL = 1;
+  DIRECTION_REMOTE = 2;
+}
+
+enum Feature {
+  FEATURE_UNSPECIFIED = 0;
+  FEATURE_CLIPBOARD = 1;
+  FEATURE_BROWSER = 2;
+}
+
+message Proxy {
+  oneof value {
+    string command = 1;
+    string jump = 2;
+  }
+}
+
+message Server {
+  optional string id = 1;
+  optional string name = 2;
+  optional string ssh_user = 3;
+  optional string ssh_host = 4;
+  optional uint32 ssh_port = 5;
+  optional string identity_file = 6;
+  optional string agent_source = 7;
+  optional string agent_key_fingerprint = 8;
+  optional newport.desktop.configuration.AuthMethod auth_method = 9;
+  optional bool clipboard_enabled = 10;
+  optional bool browser_enabled = 11;
+  optional bool agent_install_approved = 12;
+  optional bool setup_complete = 13;
+  newport.desktop.configuration.Proxy proxy = 14;
+}
+
+message Tunnel {
+  optional string id = 1;
+  optional string name = 2;
+  optional string server_id = 3;
+  optional uint32 local_port = 4;
+  optional uint32 local_port_end = 5;
+  optional string remote_host = 6;
+  optional uint32 remote_port = 7;
+  optional uint32 remote_port_end = 8;
+  optional bool auto_connect = 9;
+  optional bool auto_reconnect = 10;
+  optional newport.desktop.configuration.Direction direction = 11;
+  optional string project = 12;
+}
+
+message Config {
+  repeated newport.desktop.configuration.Server servers = 1;
+  repeated newport.desktop.configuration.Tunnel tunnels = 2;
+}
+
+message ConnectionSettings {
+  optional string server_id = 1;
+  optional string ssh_host = 2;
+  optional string ssh_user = 3;
+  optional uint32 ssh_port = 4;
+  optional newport.desktop.configuration.AuthMethod auth_method = 5;
+  optional string identity_file = 6;
+  optional string agent_source = 7;
+  optional string agent_key_fingerprint = 8;
+  newport.desktop.configuration.Proxy proxy = 9;
+}
+
+message ConnectionScope {
+  newport.desktop.configuration.ConnectionSettings settings = 1;
+  optional uint64 connection_revision = 2;
+  optional string backend_instance = 3;
+}
+
+enum TransportStatus {
+  TRANSPORT_STATUS_UNSPECIFIED = 0;
+  TRANSPORT_STATUS_DISCONNECTED = 1;
+  TRANSPORT_STATUS_CONNECTING = 2;
+  TRANSPORT_STATUS_CONNECTED = 3;
+  TRANSPORT_STATUS_RECOVERING = 4;
+  TRANSPORT_STATUS_FAILED = 5;
+}
+
+message Transport {
+  optional newport.desktop.configuration.TransportStatus status = 1;
+  optional uint64 generation = 2;
+  optional uint64 waiting = 3;
+}
+
+enum RuntimeStatus {
+  RUNTIME_STATUS_UNSPECIFIED = 0;
+  RUNTIME_STATUS_UNKNOWN = 1;
+  RUNTIME_STATUS_STARTING = 2;
+  RUNTIME_STATUS_READY = 3;
+  RUNTIME_STATUS_FAILED = 4;
+}
+
+message RuntimeInstance {
+  optional string instance_id = 1;
+  optional string build_sha256 = 2;
+  optional uint64 generation = 3;
+  optional bool retiring = 4;
+  optional bool draining = 5;
+  optional bool connected = 6;
+  optional uint64 registrations = 7;
+  optional uint64 worker_leases = 8;
+}
+
+message RuntimeSnapshot {
+  optional newport.desktop.configuration.RuntimeStatus status = 1;
+  optional uint64 generation = 2;
+  newport.runtime.Hello hello = 3;
+  optional string error = 4;
+  optional bool retryable = 5;
+  optional uint32 failures = 6;
+  repeated newport.desktop.configuration.RuntimeInstance instances = 7;
+}
+
+message PermissionsSnapshot {
+  newport.runtime.Permissions desired = 1;
+  newport.runtime.Permissions effective = 2;
+  optional string error = 3;
+  optional uint64 clipboard_epoch = 4;
+  optional uint64 browser_epoch = 5;
+  optional uint64 session_epoch = 6;
+}
+
+enum BuildRelation {
+  BUILD_RELATION_UNSPECIFIED = 0;
+  BUILD_RELATION_UNKNOWN = 1;
+  BUILD_RELATION_MISSING = 2;
+  BUILD_RELATION_BUNDLED = 3;
+  BUILD_RELATION_DIFFERENT = 4;
+  BUILD_RELATION_OLDER = 5;
+  BUILD_RELATION_NEWER = 6;
+  BUILD_RELATION_SAME_RELEASE = 7;
+}
+
+message UpdateOutcome {
+  optional uint64 at = 1;
+  optional string from = 2;
+  optional string to = 3;
+  optional string error = 4;
+}
+
+message InstallationStatus {
+  optional bool installed = 1;
+  optional bool update_available = 2;
+  optional newport.desktop.configuration.BuildRelation build_relation = 3;
+  optional string installed_hash = 4;
+  optional string bundled_hash = 5;
+  optional string installed_version = 6;
+  optional string bundled_version = 7;
+  optional newport.runtime.Product installed_variant = 8;
+  optional newport.runtime.Product bundled_variant = 9;
+  optional bool installed_running = 10;
+  optional bool bundled_staged = 11;
+  optional uint64 checked_at = 12;
+  optional string error = 13;
+  newport.desktop.configuration.UpdateOutcome automatic_update = 14;
+}
+
+enum InstallStage {
+  INSTALL_STAGE_UNSPECIFIED = 0;
+  INSTALL_STAGE_PREPARING = 1;
+  INSTALL_STAGE_UPLOADING = 2;
+  INSTALL_STAGE_INSTALLING = 3;
+  INSTALL_STAGE_VERIFYING = 4;
+  INSTALL_STAGE_ACTIVATING = 5;
+  INSTALL_STAGE_READY = 6;
+  INSTALL_STAGE_ERROR = 7;
+}
+
+message InstallProgress {
+  optional newport.desktop.configuration.InstallStage stage = 1;
+  optional uint64 sent = 2;
+  optional uint64 total = 3;
+  optional string error = 4;
+  optional newport.desktop.configuration.InstallStage failed_stage = 5;
+  optional double bytes_per_second = 6;
+}
+
+enum ConnectionStatus {
+  CONNECTION_STATUS_UNSPECIFIED = 0;
+  CONNECTION_STATUS_DISCONNECTED = 1;
+  CONNECTION_STATUS_CONNECTING = 2;
+  CONNECTION_STATUS_CONNECTED = 3;
+  CONNECTION_STATUS_RECONNECTING = 4;
+  CONNECTION_STATUS_ERROR = 5;
+}
+
+message ConnectionState {
+  optional newport.desktop.configuration.ConnectionStatus status = 1;
+  optional string error_message = 2;
+  optional uint32 reconnect_attempt = 3;
+}
+
+enum DestinationStatus {
+  DESTINATION_STATUS_UNSPECIFIED = 0;
+  DESTINATION_STATUS_CHECKING = 1;
+  DESTINATION_STATUS_REACHABLE = 2;
+  DESTINATION_STATUS_UNAVAILABLE = 3;
+  DESTINATION_STATUS_BLOCKED = 4;
+  DESTINATION_STATUS_UNKNOWN = 5;
+}
+
+message DestinationHealth {
+  optional uint32 local_port = 1;
+  optional uint32 remote_port = 2;
+  optional newport.desktop.configuration.DestinationStatus status = 3;
+  optional string message = 4;
+  optional uint64 checked_at = 5;
+}
+
+message DestinationHealthList {
+  repeated newport.desktop.configuration.DestinationHealth values = 1;
+}
+
+message TransportRow {
+  optional string id = 1;
+  newport.desktop.configuration.Transport value = 2;
+}
+
+message RuntimeRow {
+  optional string id = 1;
+  newport.desktop.configuration.RuntimeSnapshot value = 2;
+}
+
+message PermissionsRow {
+  optional string id = 1;
+  newport.desktop.configuration.PermissionsSnapshot value = 2;
+}
+
+message InstallRow {
+  optional string id = 1;
+  newport.desktop.configuration.InstallProgress value = 2;
+}
+
+message InstallationRow {
+  optional string id = 1;
+  newport.desktop.configuration.InstallationStatus value = 2;
+}
+
+message ConnectionRow {
+  optional string id = 1;
+  newport.desktop.configuration.ConnectionState value = 2;
+}
+
+message HealthRow {
+  optional string id = 1;
+  newport.desktop.configuration.DestinationHealthList value = 2;
+}
+
+message MessageRow {
+  optional string id = 1;
+  optional string value = 2;
+}
+
+message RevisionRow {
+  optional string id = 1;
+  optional uint64 value = 2;
+}
+
+message Runtime {
+  repeated newport.desktop.configuration.TransportRow agent_transport = 1;
+  repeated newport.desktop.configuration.RuntimeRow agent_runtime = 2;
+  repeated newport.desktop.configuration.PermissionsRow agent_permissions = 3;
+  repeated newport.desktop.configuration.InstallationRow agent_status = 4;
+  repeated newport.desktop.configuration.InstallRow agent_installation = 5;
+  repeated newport.desktop.configuration.ConnectionRow tunnels = 6;
+  repeated newport.desktop.configuration.HealthRow tunnel_health = 7;
+  repeated newport.desktop.configuration.ConnectionRow clipboard = 8;
+  repeated newport.desktop.configuration.MessageRow clipboard_messages = 9;
+  repeated newport.desktop.configuration.RevisionRow connection_revisions = 10;
+  repeated string awaiting_agent = 11;
+}
+
+message Snapshot {
+  optional string instance_id = 1;
+  optional uint64 revision = 2;
+  newport.desktop.configuration.Config config = 3;
+  newport.desktop.configuration.Runtime runtime = 4;
+  optional string load_error = 5;
+}
+
+message Tunnels {
+  repeated newport.desktop.configuration.Tunnel tunnels = 1;
+}
+
+message SaveServerArgs {
+  newport.desktop.configuration.Server server = 1;
+  newport.wire.Secret password = 2;
+}
+
+message DeleteServerArgs {
+  optional string server = 1;
+}
+
+message ForwardDiscoveredPortArgs {
+  optional string server = 1;
+  optional string address = 2;
+  optional uint32 port = 3;
+}
+
+message ForwardTunnelBatchArgs {
+  optional string server = 1;
+  repeated newport.desktop.configuration.Tunnel create = 2;
+  repeated newport.desktop.configuration.Tunnel connect = 3;
+  newport.desktop.configuration.ConnectionScope expected = 4;
+}
+
+message SaveTunnelArgs {
+  newport.desktop.configuration.Tunnel tunnel = 1;
+}
+
+message UpdateTunnelArgs {
+  newport.desktop.configuration.Tunnel tunnel = 1;
+  newport.desktop.configuration.Tunnel expected = 2;
+}
+
+message DeleteTunnelArgs {
+  optional string tunnel = 1;
+}
+
+message DeleteTunnelsArgs {
+  repeated newport.desktop.configuration.Tunnel expected = 1;
+}
+
+message SetTunnelConnectedArgs {
+  optional string tunnel = 1;
+  optional bool connected = 2;
+}
+
+message SetClipboardEnabledArgs {
+  optional string server = 1;
+  optional bool enabled = 2;
+  newport.desktop.configuration.ConnectionScope expected = 3;
+}
+
+message SetIntegrationEnabledArgs {
+  optional string server = 1;
+  optional newport.desktop.configuration.Feature feature = 2;
+  optional bool enabled = 3;
+  newport.desktop.configuration.ConnectionScope expected = 4;
+}
+
+message OpenTunnelArgs {
+  optional string tunnel = 1;
+  optional uint32 remote_port = 2;
+  newport.desktop.configuration.Tunnel expected = 3;
+  newport.desktop.configuration.ConnectionScope expected_connection = 4;
+}
+
+message OpenTerminalLinkArgs {
+  optional string terminal = 1;
+  optional string url = 2;
+}
+
+message Operation {
+  oneof value {
+    newport.desktop.configuration.SaveServerArgs save_server = 1;
+    newport.desktop.configuration.DeleteServerArgs delete_server = 2;
+    newport.desktop.configuration.ForwardDiscoveredPortArgs forward_discovered_port = 3;
+    newport.desktop.configuration.ForwardTunnelBatchArgs forward_tunnel_batch = 4;
+    newport.desktop.configuration.SaveTunnelArgs save_tunnel = 5;
+    newport.desktop.configuration.UpdateTunnelArgs update_tunnel = 6;
+    newport.desktop.configuration.DeleteTunnelArgs delete_tunnel = 7;
+    newport.desktop.configuration.DeleteTunnelsArgs delete_tunnels = 8;
+    newport.desktop.configuration.SetTunnelConnectedArgs set_tunnel_connected = 9;
+    newport.desktop.configuration.SetClipboardEnabledArgs set_clipboard_enabled = 10;
+    newport.desktop.configuration.SetIntegrationEnabledArgs set_integration_enabled = 11;
+    newport.desktop.configuration.OpenTunnelArgs open_tunnel = 12;
+    newport.desktop.configuration.OpenTerminalLinkArgs open_terminal_link = 13;
+    newport.wire.Present snapshot = 14;
+  }
+}
+
+message Reply {
+  oneof value {
+    newport.wire.Present save_server = 1;
+    newport.wire.Present delete_server = 2;
+    newport.wire.Present forward_discovered_port = 3;
+    newport.desktop.configuration.Tunnels forward_tunnel_batch = 4;
+    newport.wire.Present save_tunnel = 5;
+    newport.wire.Present update_tunnel = 6;
+    newport.wire.Present delete_tunnel = 7;
+    newport.wire.Present delete_tunnels = 8;
+    newport.wire.Present set_tunnel_connected = 9;
+    newport.wire.Present set_clipboard_enabled = 10;
+    newport.wire.Present set_integration_enabled = 11;
+    newport.wire.Present open_tunnel = 12;
+    newport.wire.Present open_terminal_link = 13;
+    newport.desktop.configuration.Snapshot snapshot = 14;
+  }
+}

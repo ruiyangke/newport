@@ -1,0 +1,1378 @@
+syntax = "proto3";
+
+package newport.git;
+
+import "newport/worker.proto";
+
+// Runtime admission selects this service; configure binds its durable client identity.
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  SIDE_HEAD_TO_INDEX = 1;
+  SIDE_INDEX_TO_WORKTREE = 2;
+  SIDE_HEAD_TO_WORKTREE = 3;
+}
+
+enum ResetMode {
+  RESET_MODE_UNSPECIFIED = 0;
+  RESET_MODE_SOFT = 1;
+  RESET_MODE_MIXED = 2;
+  RESET_MODE_HARD = 3;
+}
+
+enum DiscardSource {
+  DISCARD_SOURCE_UNSPECIFIED = 0;
+  DISCARD_SOURCE_INDEX = 1;
+  DISCARD_SOURCE_HEAD = 2;
+}
+
+enum ConflictSide {
+  CONFLICT_SIDE_UNSPECIFIED = 0;
+  CONFLICT_SIDE_BASE = 1;
+  CONFLICT_SIDE_OURS = 2;
+  CONFLICT_SIDE_THEIRS = 3;
+}
+
+enum DiffLineEncoding {
+  DIFF_LINE_ENCODING_UNSPECIFIED = 0;
+  DIFF_LINE_ENCODING_TUPLE_V1 = 1;
+}
+
+enum OperationState {
+  OPERATION_STATE_UNSPECIFIED = 0;
+  OPERATION_STATE_RUNNING = 1;
+  OPERATION_STATE_SUCCEEDED = 2;
+  OPERATION_STATE_FAILED = 3;
+  OPERATION_STATE_NEEDS_RESOLUTION = 4;
+  OPERATION_STATE_OUTCOME_UNKNOWN = 5;
+  OPERATION_STATE_REVIEWED_UNKNOWN = 6;
+}
+
+message Path { optional bytes data = 1; optional string display = 2; }
+
+message StatusFilter {
+  optional string text = 1;
+  optional string group = 2;
+}
+
+message Author {
+  optional string name = 1;
+  optional string email = 2;
+}
+
+message TagAnnotation {
+  optional string message = 1;
+  optional Author author = 2;
+}
+
+message HunkSelection {
+  repeated string ids = 1;
+  optional StringList lines = 2;
+  optional uint32 context_lines = 3;
+}
+
+message CommandLog {
+  optional string command = 1;
+  optional uint64 duration_ms = 2;
+  optional sint32 exit_code = 3;
+  optional string output = 4;
+  optional bool interrupted = 5;
+}
+
+message ObjectId {
+  optional string algorithm = 1;
+  optional string hex = 2;
+}
+
+message TagObjectId {
+  optional string format = 1;
+  optional string hex = 2;
+}
+
+message Head {
+  optional ObjectId oid = 1;
+  optional Path name = 2;
+  optional bool detached = 3;
+  optional bool unborn = 4;
+}
+
+message IntegrationState {
+  optional string kind = 1;
+  optional bool managed = 2;
+  optional bool can_continue = 3;
+  optional bool can_abort = 4;
+  optional bool can_skip = 5;
+}
+
+message RepositoryCapabilities {
+  optional bool read_only = 1;
+  optional bool working_tree = 2;
+}
+
+message Repository {
+  optional string repo_id = 1;
+  optional string common_repo_id = 2;
+  optional Path root = 3;
+  optional bool bare = 4;
+  optional string object_format = 5;
+  optional Head head = 6;
+  optional string operation_state = 7;
+  optional IntegrationState integration = 8;
+  optional RepositoryCapabilities capabilities = 9;
+}
+
+message GroupCounts {
+  optional uint64 staged = 1;
+  optional uint64 unstaged = 2;
+  optional uint64 untracked = 3;
+  optional uint64 conflicted = 4;
+}
+
+message Upstream {
+  optional Path remote = 1;
+  optional Path reference = 2;
+}
+
+message StatusSummary {
+  optional Head head = 1;
+  optional string operation_state = 2;
+  optional IntegrationState integration = 3;
+  optional uint64 ahead = 4;
+  optional uint64 behind = 5;
+  optional string basis = 6;
+  optional Path upstream_ref = 7;
+  optional Upstream upstream = 8;
+  optional bool truncated = 9;
+  optional uint64 total_entries = 10;
+  optional GroupCounts group_counts = 11;
+  optional uint64 matched_entries = 12;
+}
+
+message ConflictEntry {
+  optional uint32 mode = 1;
+  optional ObjectId oid = 2;
+  optional Path path = 3;
+}
+
+message Conflict {
+  optional ConflictEntry base = 1;
+  optional ConflictEntry ours = 2;
+  optional ConflictEntry theirs = 3;
+}
+
+message StatusEntry {
+  optional string entry_id = 1;
+  optional Path path = 2;
+  optional Path old_path = 3;
+  optional uint32 flags = 4;
+  optional bool staged = 5;
+  optional bool unstaged = 6;
+  optional bool untracked = 7;
+  optional bool conflicted = 8;
+  optional Conflict conflict = 9;
+}
+
+message ConfigurationEntry {
+  optional Path value = 1;
+  optional string level = 2;
+  optional uint64 include_depth = 3;
+}
+
+message TrackingConfiguration {
+  repeated ConfigurationEntry remote = 1;
+  repeated ConfigurationEntry merge = 2;
+}
+
+message Tracking {
+  optional string token = 1;
+  optional bool editable = 2;
+  optional TrackingConfiguration configuration = 3;
+}
+
+message Branch {
+  optional Path name = 1;
+  optional Path reference = 2;
+  optional ObjectId oid = 3;
+  optional bool remote = 4;
+  optional bool current = 5;
+  optional Path upstream = 6;
+  optional Tracking tracking = 7;
+}
+
+message TotalEntries {
+  optional uint64 total_entries = 1;
+}
+
+message Worktree {
+  optional Path name = 1;
+  optional string kind = 2;
+  optional Path path = 3;
+  optional Path git_dir = 4;
+  optional bool current = 5;
+  optional string state = 6;
+  optional Head head = 7;
+  optional bool locked = 8;
+  optional Path lock_reason = 9;
+  optional bool prunable = 10;
+}
+
+message WorktreeMetadata {
+  optional string list_token = 1;
+  optional uint64 total_entries = 2;
+  optional uint64 matching_entries = 3;
+  optional Worktree current = 4;
+  optional Worktree main = 5;
+}
+
+message Remote {
+  optional string name = 1;
+  optional string url = 2;
+  optional string push_url = 3;
+  optional string token = 4;
+}
+
+message RemoteAuthentication {
+  optional string ssh = 1;
+  optional string https = 2;
+}
+
+message RepositoryConfiguration {
+  optional bool fetch_prune = 1;
+  optional string user_name = 2;
+  optional string user_email = 3;
+  optional string token = 4;
+}
+
+message Remotes {
+  repeated Remote entries = 1;
+  optional RemoteAuthentication authentication = 2;
+  optional RepositoryConfiguration configuration = 3;
+}
+
+message RemoteName {
+  optional string name = 1;
+}
+
+message RemoteReference {
+  optional Path reference = 1;
+  optional string kind = 2;
+  optional ObjectId oid = 3;
+  optional Path symbolic_target = 4;
+}
+
+message RemoteReferenceMetadata {
+  optional string remote = 1;
+  optional string remote_token = 2;
+  optional bool for_push = 3;
+  optional string basis = 4;
+  optional bool truncated = 5;
+  optional uint64 total_entries = 6;
+}
+
+message Blob {
+  optional ObjectId oid = 1;
+  optional uint64 size = 2;
+  optional bytes bytes_b64 = 3;
+  optional bool truncated = 4;
+}
+
+message BlobFragment {
+  optional uint64 offset = 1;
+  optional bytes bytes_b64 = 2;
+}
+
+message BlobMetadata {
+  optional ObjectId oid = 1;
+  optional uint64 size = 2;
+}
+
+message Stash {
+  optional uint64 index = 1;
+  optional string oid = 2;
+  optional string previous_oid = 3;
+  optional string message = 4;
+  optional bool message_truncated = 5;
+  optional sint64 time = 6;
+}
+
+message StashMetadata {
+  optional string list_token = 1;
+  optional uint64 total_entries = 2;
+}
+
+message Commit {
+  optional ObjectId oid = 1;
+  repeated ObjectId parents = 2;
+  optional Path message = 3;
+  optional bool message_truncated = 4;
+  optional Author author = 5;
+  optional sint64 time = 6;
+  optional sint32 offset_minutes = 7;
+}
+
+message HistoryMetadata {
+  optional ObjectId resolved_revision = 1;
+  optional bool truncated = 2;
+}
+
+message Tagger {
+  optional string name = 1;
+  optional string email = 2;
+  optional sint64 time = 3;
+  optional sint32 offset_minutes = 4;
+}
+
+message Tag {
+  optional Path name = 1;
+  optional Path reference = 2;
+  optional Path symbolic_target = 3;
+  optional TagObjectId oid = 4;
+  optional bool annotated = 5;
+  optional bool details_omitted = 6;
+  optional string object_type = 7;
+  optional TagObjectId target_oid = 8;
+  optional TagObjectId peeled_oid = 9;
+  optional string peeled_type = 10;
+  optional Path message = 11;
+  optional bool message_truncated = 12;
+  optional Tagger tagger = 13;
+}
+
+message Delta {
+  optional Path old_path = 1;
+  optional Path new_path = 2;
+  optional ObjectId old_oid = 3;
+  optional ObjectId new_oid = 4;
+  optional uint32 old_mode = 5;
+  optional uint32 new_mode = 6;
+  optional string status = 7;
+}
+
+message DiffMetadata {
+  optional bool read_only = 1;
+  optional ObjectId commit_oid = 2;
+  optional ObjectId parent_oid = 3;
+  optional uint64 parent_index = 4;
+  optional ObjectIdList parents = 5;
+  optional string source_snapshot = 6;
+  optional string entry_id = 7;
+  optional Side side = 8;
+  optional uint32 context_lines = 9;
+  optional Path selected_path = 10;
+  optional bool truncated = 11;
+  optional uint64 total_files = 12;
+  optional uint64 total_units = 13;
+  optional bool has_omissions = 14;
+}
+
+message DiffLine {
+  optional string id = 1;
+  optional string origin = 2;
+  optional uint64 old_line = 3;
+  optional uint64 new_line = 4;
+  optional Path content = 5;
+}
+
+message DiffHunk {
+  optional string id = 1;
+  optional uint64 old_start = 2;
+  optional uint64 old_lines = 3;
+  optional uint64 new_start = 4;
+  optional uint64 new_lines = 5;
+  repeated DiffLine lines = 6;
+}
+
+message DiffFile {
+  optional Path old_path = 1;
+  optional Path new_path = 2;
+  optional ObjectId old_oid = 3;
+  optional ObjectId new_oid = 4;
+  optional uint32 old_mode = 5;
+  optional uint32 new_mode = 6;
+  optional string status = 7;
+  optional bool binary = 8;
+  optional uint64 additions = 9;
+  optional uint64 deletions = 10;
+  repeated DiffHunk hunks = 11;
+}
+
+message Diff {
+  repeated DiffFile files = 1;
+  optional bool read_only = 2;
+  optional ObjectId commit_oid = 3;
+  optional ObjectId parent_oid = 4;
+  optional uint64 parent_index = 5;
+  optional ObjectIdList parents = 6;
+  optional string source_snapshot = 7;
+  optional string entry_id = 8;
+  optional Side side = 9;
+  optional uint32 context_lines = 10;
+  optional Path selected_path = 11;
+  optional bool truncated = 12;
+  optional uint64 total_files = 13;
+  optional uint64 total_units = 14;
+  optional bool has_omissions = 15;
+}
+
+message LineFragment {
+  optional uint64 line_index = 1;
+  optional uint64 byte_offset = 2;
+  optional bool line_complete = 3;
+  optional string origin = 4;
+  optional uint64 old_line = 5;
+  optional uint64 new_line = 6;
+  optional bytes content_bytes_b64 = 7;
+  optional string id = 8;
+}
+
+message HunkFragment {
+  optional string id = 1;
+  optional uint64 index = 2;
+  optional uint64 old_start = 3;
+  optional uint64 old_lines = 4;
+  optional uint64 new_start = 5;
+  optional uint64 new_lines = 6;
+  optional uint64 total_lines = 7;
+  repeated LineFragment lines = 8;
+}
+
+message FileFragment {
+  optional Path old_path = 1;
+  optional Path new_path = 2;
+  optional ObjectId old_oid = 3;
+  optional ObjectId new_oid = 4;
+  optional uint32 old_mode = 5;
+  optional uint32 new_mode = 6;
+  optional string status = 7;
+  optional bool binary = 8;
+  optional uint64 additions = 9;
+  optional uint64 deletions = 10;
+  optional uint64 file_index = 11;
+  optional string omission_reason = 12;
+  repeated HunkFragment hunks = 13;
+}
+
+message Operation {
+  optional string operation_id = 1;
+  optional string repository = 2;
+  optional string payload_hash = 3;
+  optional OperationState state = 4;
+  optional uint32 seq = 5;
+  optional OperationResult result = 6;
+  optional Failure error = 7;
+}
+
+message Closed {
+  optional bool closed = 1;
+}
+
+message StreamComplete {
+  optional uint32 last_seq = 1;
+  optional uint64 bytes = 2;
+}
+
+message Refresh {
+  optional bool refresh_required = 1;
+}
+
+message Committed {
+  optional bool merge_completed = 1;
+  optional string commit_oid = 2;
+  optional string parent_oid = 3;
+  optional bool refresh_required = 4;
+}
+
+message Amended {
+  optional bool amended = 1;
+  optional string replaced_oid = 2;
+  optional string commit_oid = 3;
+  optional bool refresh_required = 4;
+}
+
+message TrackingChanged {
+  optional Tracking tracking = 1;
+  optional string upstream = 2;
+  optional bool refresh_required = 3;
+}
+
+message CheckedOut {
+  optional bool detached = 1;
+  optional string oid = 2;
+  optional bool refresh_required = 3;
+}
+
+message RemoteRenamed {
+  optional uint64 renamed_references = 1;
+  optional string token = 2;
+  optional bool refresh_required = 3;
+}
+
+message FastForwarded {
+  optional bool fast_forwarded = 1;
+  optional string oid = 2;
+  optional bool refresh_required = 3;
+}
+
+message LeaseMatched {
+  optional bool lease_matched = 1;
+  optional bool refresh_required = 2;
+}
+
+message RemoteDeleted {
+  optional bool deleted = 1;
+  optional bool lease_matched = 2;
+  optional string oid = 3;
+  optional string destination_tag = 4;
+  optional bool refresh_required = 5;
+}
+
+message TagCreated {
+  optional string oid = 1;
+  optional string target_oid = 2;
+  optional bool refresh_required = 3;
+}
+
+message Reset {
+  optional string previous_oid = 1;
+  optional string oid = 2;
+  optional bool refresh_required = 3;
+}
+
+message Discarded {
+  optional bool index_changed = 1;
+  optional bool refresh_required = 2;
+}
+
+message StashSaved {
+  optional string oid = 1;
+  optional bool saved = 2;
+  optional bool refresh_required = 3;
+}
+
+message StashApplied {
+  optional string oid = 1;
+  optional bool applied = 2;
+  optional bool dropped = 3;
+  optional bool needs_resolution = 4;
+  optional bool refresh_required = 5;
+}
+
+message StashDropped {
+  optional string oid = 1;
+  optional bool dropped = 2;
+  optional bool refresh_required = 3;
+}
+
+message NeedsResolution {
+  optional bool needs_resolution = 1;
+  optional bool refresh_required = 2;
+}
+
+message IntegrationCompleted {
+  optional bool needs_resolution = 1;
+  optional bool aborted = 2;
+  optional bool merge_completed = 3;
+  optional string integration_completed = 4;
+  optional string commit_oid = 5;
+  optional string oid = 6;
+  optional bool refresh_required = 7;
+}
+
+message WorktreeAdded {
+  optional string name = 1;
+  optional Path path = 2;
+  optional bool open_required = 3;
+  optional bool branch_created = 4;
+  optional bool refresh_required = 5;
+}
+
+message WorktreeRepaired {
+  optional bool changed = 1;
+  optional bool refresh_required = 2;
+}
+
+message WorktreeRegistrationChanged {
+  optional bool registration_only = 1;
+  optional bool refresh_required = 2;
+}
+
+message Initialized {
+  optional bool initialized = 1;
+  optional Path path = 2;
+  optional string initial_branch = 3;
+  optional bool bare = 4;
+  optional bool open_required = 5;
+}
+
+message Cloned {
+  optional bool cloned = 1;
+  optional Path path = 2;
+  optional bool bare = 3;
+  optional string oid = 4;
+  optional bool open_required = 5;
+}
+
+message Configure {
+  optional string id = 1;
+  optional string client_id = 2;
+  optional string client_version = 3;
+  optional bool command_logs = 4;
+}
+
+message Limits {
+  optional uint64 max_frame_bytes = 1;
+  optional uint64 max_chunk_bytes = 2;
+  optional uint32 max_inflight = 3;
+  optional uint32 max_page_items = 4;
+  optional uint32 stream_window = 5;
+  optional bool command_logs = 6;
+}
+
+message Capabilities {
+  repeated string methods = 1;
+  repeated string object_formats = 2;
+  repeated string features = 3;
+  repeated string actions = 4;
+}
+
+message Ready {
+  optional string id = 1;
+  optional Limits limits = 2;
+  optional Capabilities capabilities = 3;
+}
+
+message Call {
+  optional string id = 1;
+  optional Request request = 2;
+}
+
+message Begin {
+  optional string id = 1;
+  optional string stream_id = 2;
+  optional string snapshot = 3;
+}
+
+message Chunk {
+  optional string id = 1;
+  optional string stream_id = 2;
+  optional uint32 seq = 3;
+  optional bytes data = 4;
+}
+
+message Ack {
+  optional string stream_id = 1;
+  optional uint32 seq = 2;
+}
+
+message Log {
+  optional string id = 1;
+  optional CommandLog entry = 2;
+}
+
+message Failure {
+  optional string code = 1;
+  optional string message = 2;
+  optional string retry = 3;
+}
+
+message RequestClone {
+  optional string operation_id = 1;
+  optional string url = 2;
+  optional Path path = 3;
+  optional string branch = 4;
+  optional bool bare = 5;
+}
+
+message RequestInit {
+  optional string operation_id = 1;
+  optional Path path = 2;
+  optional string initial_branch = 3;
+}
+
+message RequestTag {
+  optional string repo_id = 1;
+  optional string oid = 2;
+}
+
+message RequestTags {
+  optional string repo_id = 1;
+  optional uint64 page_size = 2;
+  optional string cursor = 3;
+  optional uint64 message_bytes = 4;
+}
+
+message RequestStashes {
+  optional string repo_id = 1;
+  optional uint64 page_size = 2;
+  optional string cursor = 3;
+}
+
+message RequestBlobPage {
+  optional string repo_id = 1;
+  optional string oid = 2;
+  optional uint64 max_bytes = 3;
+  optional string cursor = 4;
+}
+
+message RequestBlob {
+  optional string repo_id = 1;
+  optional string oid = 2;
+}
+
+message RequestRemoteRefs {
+  optional string repo_id = 1;
+  optional string remote = 2;
+  optional string expected_token = 3;
+  optional bool for_push = 4;
+  optional string filter = 5;
+  optional uint64 page_size = 6;
+  optional string cursor = 7;
+}
+
+message RequestRemoteNames {
+  optional string repo_id = 1;
+  optional string filter = 2;
+  optional uint64 page_size = 3;
+  optional string cursor = 4;
+}
+
+message RequestRemote {
+  optional string repo_id = 1;
+  optional string name = 2;
+}
+
+message RequestRemotes {
+  optional string repo_id = 1;
+}
+
+message RequestStart {
+  optional string operation_id = 1;
+  optional string repo_id = 2;
+  optional string expected_snapshot = 3;
+  optional Action action = 4;
+}
+
+message RequestGet {
+  optional string operation_id = 1;
+}
+
+message RequestReview {
+  optional string operation_id = 1;
+}
+
+message RequestOpen {
+  optional Path path = 1;
+}
+
+message RequestClose {
+  optional string repo_id = 1;
+}
+
+message RequestStatusSummary {
+  optional string repo_id = 1;
+  optional Path path = 2;
+}
+
+message RequestStatus {
+  optional string repo_id = 1;
+  optional StatusFilter filter = 2;
+  optional uint64 page_size = 3;
+  optional string cursor = 4;
+}
+
+message RequestWorktrees {
+  optional string repo_id = 1;
+  optional uint64 page_size = 2;
+  optional string cursor = 3;
+  optional string filter = 4;
+  optional string branch = 5;
+  optional string name = 6;
+  optional string at_snapshot = 7;
+}
+
+message RequestBranches {
+  optional string repo_id = 1;
+  optional uint64 page_size = 2;
+  optional string cursor = 3;
+  optional string filter = 4;
+  optional string branch_kind = 5;
+}
+
+message RequestHistory {
+  optional string repo_id = 1;
+  optional uint64 page_size = 2;
+  optional string cursor = 3;
+  optional string revision = 4;
+  optional uint64 message_bytes = 5;
+}
+
+message RequestCommit {
+  optional string repo_id = 1;
+  optional string commit_oid = 2;
+}
+
+message RequestCommitFiles {
+  optional string repo_id = 1;
+  optional string commit_oid = 2;
+  optional uint64 parent_index = 3;
+  optional uint64 page_size = 4;
+  optional string cursor = 5;
+}
+
+message RequestCommitDiff {
+  optional Path path = 1;
+  optional string repo_id = 2;
+  optional string commit_oid = 3;
+  optional uint64 parent_index = 4;
+  optional uint32 context_lines = 5;
+}
+
+message RequestCommitDiffPage {
+  optional string repo_id = 1;
+  optional string commit_oid = 2;
+  optional Path path = 3;
+  optional uint64 parent_index = 4;
+  optional uint32 context_lines = 5;
+  optional uint64 page_size = 6;
+  optional uint64 max_bytes = 7;
+  optional string cursor = 8;
+  optional DiffLineEncoding line_encoding = 9;
+}
+
+message RequestDiffPage {
+  optional string repo_id = 1;
+  optional string snapshot = 2;
+  optional string entry_id = 3;
+  optional Side side = 4;
+  optional uint32 context_lines = 5;
+  optional uint64 page_size = 6;
+  optional uint64 max_bytes = 7;
+  optional string cursor = 8;
+  optional DiffLineEncoding line_encoding = 9;
+}
+
+message RequestDiff {
+  optional string repo_id = 1;
+  optional string snapshot = 2;
+  optional string entry_id = 3;
+  optional Side side = 4;
+  optional uint32 context_lines = 5;
+}
+
+message ActionConflictResolve {
+  repeated string entry_ids = 1;
+  optional ConflictSide side = 2;
+  optional string expected_oid = 3;
+}
+
+message ActionDiscard {
+  repeated string entry_ids = 1;
+  optional DiscardSource source = 2;
+  optional HunkSelection hunks = 3;
+}
+
+message ActionReset {
+  optional string target_oid = 1;
+  optional string expected_oid = 2;
+  optional ResetMode mode = 3;
+}
+
+message ActionRebase {
+  optional string upstream_oid = 1;
+  optional string onto_oid = 2;
+  optional Author committer = 3;
+}
+
+message ActionWorktreeRepair {
+  optional string name = 1;
+  optional Path path = 2;
+}
+
+message ActionWorktreeRemove {
+  optional string name = 1;
+}
+
+message ActionWorktreePrune {
+  optional string name = 1;
+}
+
+message ActionWorktreeAdd {
+  optional string name = 1;
+  optional Path path = 2;
+  optional string branch = 3;
+  optional string expected_oid = 4;
+  optional bool locked = 5;
+  optional bool new_branch = 6;
+}
+
+message ActionWorktreeLock {
+  optional string name = 1;
+  optional string reason = 2;
+}
+
+message ActionWorktreeUnlock {
+  optional string name = 1;
+}
+
+message ActionIntegrationSkip {
+}
+
+message ActionBranchSetUpstream {
+  optional string name = 1;
+  optional string expected_oid = 2;
+  optional string expected_token = 3;
+  optional string upstream = 4;
+}
+
+message ActionCherryPick {
+  optional string target_oid = 1;
+  optional uint32 mainline = 2;
+  optional Author author = 3;
+}
+
+message ActionRevert {
+  optional string target_oid = 1;
+  optional uint32 mainline = 2;
+  optional Author author = 3;
+}
+
+message ActionIntegrationContinue {
+  optional string message = 1;
+  optional Author author = 2;
+}
+
+message ActionIntegrationAbort {
+}
+
+message ActionTagDeleteRemote {
+  optional string remote = 1;
+  optional string expected_token = 2;
+  optional string name = 3;
+  optional string expected_oid = 4;
+}
+
+message ActionTagPush {
+  optional string remote = 1;
+  optional string expected_token = 2;
+  optional string name = 3;
+  optional string expected_oid = 4;
+}
+
+message ActionTagCreate {
+  optional string name = 1;
+  optional string target_oid = 2;
+  optional TagAnnotation annotation = 3;
+}
+
+message ActionTagDelete {
+  optional string name = 1;
+  optional string expected_oid = 2;
+}
+
+message ActionStashSave {
+  optional string message = 1;
+  optional bool include_untracked = 2;
+  optional bool keep_index = 3;
+  optional Author author = 4;
+}
+
+message ActionStashApply {
+  optional string oid = 1;
+  optional uint64 index = 2;
+  optional string expected_token = 3;
+  optional bool reinstate_index = 4;
+}
+
+message ActionStashPop {
+  optional string oid = 1;
+  optional uint64 index = 2;
+  optional string expected_token = 3;
+  optional bool reinstate_index = 4;
+}
+
+message ActionStashDrop {
+  optional string oid = 1;
+  optional uint64 index = 2;
+  optional string expected_token = 3;
+}
+
+message ActionMergeAbort {
+}
+
+message ActionMerge {
+  optional string target_oid = 1;
+}
+
+message ActionPullFastForward {
+  optional string remote = 1;
+  optional string expected_token = 2;
+  optional string remote_branch = 3;
+}
+
+message ActionFastForward {
+  optional string target_oid = 1;
+}
+
+message ActionRemoteAdd {
+  optional string name = 1;
+  optional string url = 2;
+}
+
+message ActionRemoteRename {
+  optional string name = 1;
+  optional string new_name = 2;
+  optional string expected_token = 3;
+}
+
+message ActionRemoteSetUrl {
+  optional string name = 1;
+  optional string url = 2;
+  optional string expected_token = 3;
+}
+
+message ActionRemoteRemove {
+  optional string name = 1;
+  optional string expected_token = 2;
+}
+
+message ActionConfigSet {
+  optional string expected_token = 1;
+  optional bool fetch_prune = 2;
+  optional string user_name = 3;
+  optional string user_email = 4;
+}
+
+message ActionFetch {
+  optional string remote = 1;
+  optional string expected_token = 2;
+  optional bool prune = 3;
+}
+
+message ActionBranchDeleteRemote {
+  optional string remote = 1;
+  optional string expected_token = 2;
+  optional string branch = 3;
+  optional string expected_oid = 4;
+}
+
+message ActionPushWithLease {
+  optional string remote = 1;
+  optional string expected_token = 2;
+  optional string branch = 3;
+  optional string expected_oid = 4;
+  optional string destination_branch = 5;
+  optional string expected_remote_oid = 6;
+}
+
+message ActionPush {
+  optional string remote = 1;
+  optional string expected_token = 2;
+  optional string branch = 3;
+  optional string expected_oid = 4;
+  optional string destination_branch = 5;
+}
+
+message ActionCheckout {
+  optional CheckoutTarget target = 1;
+}
+
+message ActionBranchCreate {
+  optional string name = 1;
+  optional string start_oid = 2;
+}
+
+message ActionBranchRename {
+  optional string name = 1;
+  optional string new_name = 2;
+  optional string expected_oid = 3;
+}
+
+message ActionBranchDelete {
+  optional string name = 1;
+  optional string expected_oid = 2;
+  optional bool force = 3;
+}
+
+message ActionAmend {
+  optional string expected_oid = 1;
+  optional string message = 2;
+  optional Author committer = 3;
+  optional Author author = 4;
+}
+
+message ActionCommit {
+  optional string message = 1;
+  optional Author author = 2;
+}
+
+message ActionStage {
+  repeated string entry_ids = 1;
+  optional HunkSelection hunks = 2;
+}
+
+message ActionUnstage {
+  repeated string entry_ids = 1;
+  optional HunkSelection hunks = 2;
+}
+
+message CheckoutTargetBranch {
+  optional string name = 1;
+  optional string expected_oid = 2;
+}
+
+message CheckoutTargetDetached {
+  optional string oid = 1;
+}
+
+message StatusEntryPage {
+  optional string snapshot = 1;
+  repeated StatusEntry entries = 2;
+  optional string next_cursor = 3;
+  optional StatusSummary metadata = 4;
+}
+
+message BranchPage {
+  optional string snapshot = 1;
+  repeated Branch entries = 2;
+  optional string next_cursor = 3;
+  optional TotalEntries metadata = 4;
+}
+
+message WorktreePage {
+  optional string snapshot = 1;
+  repeated Worktree entries = 2;
+  optional string next_cursor = 3;
+  optional WorktreeMetadata metadata = 4;
+}
+
+message RemoteNamePage {
+  optional string snapshot = 1;
+  repeated RemoteName entries = 2;
+  optional string next_cursor = 3;
+  optional TotalEntries metadata = 4;
+}
+
+message RemoteReferencePage {
+  optional string snapshot = 1;
+  repeated RemoteReference entries = 2;
+  optional string next_cursor = 3;
+  optional RemoteReferenceMetadata metadata = 4;
+}
+
+message BlobFragmentPage {
+  optional string snapshot = 1;
+  repeated BlobFragment entries = 2;
+  optional string next_cursor = 3;
+  optional BlobMetadata metadata = 4;
+}
+
+message StashPage {
+  optional string snapshot = 1;
+  repeated Stash entries = 2;
+  optional string next_cursor = 3;
+  optional StashMetadata metadata = 4;
+}
+
+message TagPage {
+  optional string snapshot = 1;
+  repeated Tag entries = 2;
+  optional string next_cursor = 3;
+  optional TotalEntries metadata = 4;
+}
+
+message CommitPage {
+  optional string snapshot = 1;
+  repeated Commit entries = 2;
+  optional string next_cursor = 3;
+  optional HistoryMetadata metadata = 4;
+}
+
+message DeltaPage {
+  optional string snapshot = 1;
+  repeated Delta entries = 2;
+  optional string next_cursor = 3;
+  optional DiffMetadata metadata = 4;
+}
+
+message FileFragmentPage {
+  optional string snapshot = 1;
+  repeated FileFragment entries = 2;
+  optional string next_cursor = 3;
+  optional DiffMetadata metadata = 4;
+}
+
+message StringList {
+  repeated string items = 1;
+}
+
+message ObjectIdList {
+  repeated ObjectId items = 1;
+}
+
+message Request {
+  oneof value {
+    RequestClone clone = 1;
+    RequestInit init = 2;
+    RequestTag tag = 3;
+    RequestTags tags = 4;
+    RequestStashes stashes = 5;
+    RequestBlobPage blob_page = 6;
+    RequestBlob blob = 7;
+    RequestRemoteRefs remote_refs = 8;
+    RequestRemoteNames remote_names = 9;
+    RequestRemote remote = 10;
+    RequestRemotes remotes = 11;
+    RequestStart start = 12;
+    RequestGet get = 13;
+    RequestReview review = 14;
+    RequestOpen open = 15;
+    RequestClose close = 16;
+    RequestStatusSummary status_summary = 17;
+    RequestStatus status = 18;
+    RequestWorktrees worktrees = 19;
+    RequestBranches branches = 20;
+    RequestHistory history = 21;
+    RequestCommit commit = 22;
+    RequestCommitFiles commit_files = 23;
+    RequestCommitDiff commit_diff = 24;
+    RequestCommitDiffPage commit_diff_page = 25;
+    RequestDiffPage diff_page = 26;
+    RequestDiff diff = 27;
+  }
+}
+
+message Action {
+  oneof value {
+    ActionConflictResolve conflict_resolve = 1;
+    ActionDiscard discard = 2;
+    ActionReset reset = 3;
+    ActionRebase rebase = 4;
+    ActionWorktreeRepair worktree_repair = 5;
+    ActionWorktreeRemove worktree_remove = 6;
+    ActionWorktreePrune worktree_prune = 7;
+    ActionWorktreeAdd worktree_add = 8;
+    ActionWorktreeLock worktree_lock = 9;
+    ActionWorktreeUnlock worktree_unlock = 10;
+    ActionIntegrationSkip integration_skip = 11;
+    ActionBranchSetUpstream branch_set_upstream = 12;
+    ActionCherryPick cherry_pick = 13;
+    ActionRevert revert = 14;
+    ActionIntegrationContinue integration_continue = 15;
+    ActionIntegrationAbort integration_abort = 16;
+    ActionTagDeleteRemote tag_delete_remote = 17;
+    ActionTagPush tag_push = 18;
+    ActionTagCreate tag_create = 19;
+    ActionTagDelete tag_delete = 20;
+    ActionStashSave stash_save = 21;
+    ActionStashApply stash_apply = 22;
+    ActionStashPop stash_pop = 23;
+    ActionStashDrop stash_drop = 24;
+    ActionMergeAbort merge_abort = 25;
+    ActionMerge merge = 26;
+    ActionPullFastForward pull_fast_forward = 27;
+    ActionFastForward fast_forward = 28;
+    ActionRemoteAdd remote_add = 29;
+    ActionRemoteRename remote_rename = 30;
+    ActionRemoteSetUrl remote_set_url = 31;
+    ActionRemoteRemove remote_remove = 32;
+    ActionConfigSet config_set = 33;
+    ActionFetch fetch = 34;
+    ActionBranchDeleteRemote branch_delete_remote = 35;
+    ActionPushWithLease push_with_lease = 36;
+    ActionPush push = 37;
+    ActionCheckout checkout = 38;
+    ActionBranchCreate branch_create = 39;
+    ActionBranchRename branch_rename = 40;
+    ActionBranchDelete branch_delete = 41;
+    ActionAmend amend = 42;
+    ActionCommit commit = 43;
+    ActionStage stage = 44;
+    ActionUnstage unstage = 45;
+  }
+}
+
+message CheckoutTarget {
+  oneof value {
+    CheckoutTargetBranch branch = 1;
+    CheckoutTargetDetached detached = 2;
+  }
+}
+
+message Reply {
+  oneof value {
+    Repository open = 1;
+    Closed close = 2;
+    StatusSummary status_summary = 3;
+    StatusEntryPage status = 4;
+    BranchPage branches = 5;
+    WorktreePage worktrees = 6;
+    Remotes remotes = 7;
+    Remote remote = 8;
+    RemoteNamePage remote_names = 9;
+    RemoteReferencePage remote_refs = 10;
+    Blob blob = 11;
+    BlobFragmentPage blob_page = 12;
+    StashPage stashes = 13;
+    TagPage tags = 14;
+    Tag tag = 15;
+    CommitPage history = 16;
+    Commit commit = 17;
+    DeltaPage commit_files = 18;
+    FileFragmentPage diff_page = 19;
+    FileFragmentPage commit_diff_page = 20;
+    Operation operation = 21;
+    StreamComplete stream_complete = 22;
+  }
+}
+
+message OperationResult {
+  oneof value {
+    Refresh refresh = 1;
+    Committed committed = 2;
+    Amended amended = 3;
+    TrackingChanged tracking_changed = 4;
+    CheckedOut checked_out = 5;
+    RemoteRenamed remote_renamed = 6;
+    FastForwarded fast_forwarded = 7;
+    LeaseMatched lease_matched = 8;
+    RemoteDeleted remote_deleted = 9;
+    TagCreated tag_created = 10;
+    Reset reset = 11;
+    Discarded discarded = 12;
+    StashSaved stash_saved = 13;
+    StashApplied stash_applied = 14;
+    StashDropped stash_dropped = 15;
+    NeedsResolution needs_resolution = 16;
+    IntegrationCompleted integration_completed = 17;
+    WorktreeAdded worktree_added = 18;
+    WorktreeRepaired worktree_repaired = 19;
+    WorktreeRegistrationChanged worktree_registration_changed = 20;
+    Initialized initialized = 21;
+    Cloned cloned = 22;
+  }
+}
+
+message Response {
+  optional string id = 1;
+  oneof result { Reply reply = 2; Failure error = 3; }
+}
+message ClientFrame {
+  oneof message {
+    Configure configure = 1;
+    Call call = 2;
+    string ping = 3;
+    Ack ack = 4;
+    newport.worker.ClientControl worker_control = 127;
+  }
+}
+message ServerFrame {
+  oneof message {
+    Ready ready = 17;
+    Response response = 18;
+    string pong = 19;
+    Begin begin = 20;
+    Chunk chunk = 21;
+    Log log = 22;
+    Failure failed = 23;
+    newport.worker.ServerControl worker_control = 127;
+  }
+}

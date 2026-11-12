@@ -1,0 +1,8 @@
+[Unit]
+Description=Newport user worker
+
+[Service]
+ExecStart=/bin/sh -c 'while :; do echo user tick; sleep 2; done'
+
+[Install]
+WantedBy=default.target

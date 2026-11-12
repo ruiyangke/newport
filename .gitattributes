@@ -1,0 +1,12 @@
+# Signed fixtures must remain byte-for-byte identical on every platform.
+/resources/test-fixtures/updater/* -text
+/crates/newport-release/tests/fixtures/*.key* -text
+
+# Preserve binary PDF fixtures. Patches apply to crates.io sources byte for byte,
+# so Git must not convert their line endings or whitespace on any platform.
+*.pdf binary
+/patches/*.patch -text -whitespace
+
+# Migration checksums and scripts sent to Linux must not depend on the host OS.
+*.sql text eol=lf
+*.sh text eol=lf

@@ -1,0 +1,59 @@
+syntax = "proto3";
+package newport.terminal;
+
+import "newport/wire.proto";
+import "newport/worker.proto";
+
+message Computer { string id = 1; string name = 2; }
+message Attached { string id = 1; string name = 2; bool active = 3; }
+message Exit {
+  oneof outcome { uint32 code = 1; uint32 signal = 2; }
+}
+message Holder {
+  string id = 1;
+  string socket = 2;
+  uint32 version = 3;
+  uint32 columns = 4;
+  uint32 rows = 5;
+  uint64 started = 6;
+  optional string name = 7;
+  optional string title = 8;
+  Computer creator = 9;
+  repeated Attached attached = 10;
+  Exit exited = 11;
+}
+message Start {
+  string id = 1;
+  uint32 columns = 2;
+  uint32 rows = 3;
+  string command = 4;
+  Computer creator = 5;
+  bool stable_display = 6;
+}
+message Rename { string id = 1; string name = 2; }
+message End { string id = 1; }
+message Started { string socket = 1; }
+message Listed { repeated Holder holders = 1; }
+message Renamed { bool renamed = 1; }
+message Ended { bool ended = 1; }
+
+message ClientFrame {
+  oneof message {
+    Start start = 1;
+    newport.wire.Present list = 2;
+    Rename rename = 3;
+    End end = 4;
+    newport.wire.Present watch = 5;
+    newport.worker.ClientControl worker_control = 127;
+  }
+}
+message ServerFrame {
+  oneof message {
+    Started started = 1;
+    Listed listed = 2;
+    Renamed renamed = 3;
+    Ended ended = 4;
+    newport.wire.Error error = 5;
+    newport.worker.ServerControl worker_control = 127;
+  }
+}

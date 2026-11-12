@@ -1,0 +1,32 @@
+syntax = "proto3";
+package newport.remote.catalogue;
+
+import "newport/wire.proto";
+import "newport/worker.proto";
+
+// Runtime admission selects catalogue discovery; it has no further input.
+message ClientFrame {
+  oneof message {
+    newport.worker.ClientControl worker_control = 127;
+  }
+}
+message ServerFrame {
+  oneof message {
+    Catalogue catalogue = 1;
+    newport.wire.Error error = 2;
+    newport.worker.ServerControl worker_control = 127;
+  }
+}
+message Catalogue { repeated Application apps = 1; }
+message Application {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  repeated string keywords = 4;
+  optional string icon = 5;
+  repeated DesktopAction actions = 6;
+}
+message DesktopAction {
+  string id = 1;
+  string name = 2;
+}

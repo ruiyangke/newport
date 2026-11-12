@@ -1,0 +1,7 @@
+tree-sitter-proto 0.6.0
+Upstream: https://github.com/coder3101/tree-sitter-proto
+License: MIT; the upstream LICENSE is distributed with tree-sitter-proto.
+
+Newport uncomments the HIGHLIGHTS_QUERY and INJECTIONS_QUERY constants in
+bindings/rust/lib.rs, which expose the queries the package already ships. All
+other published package files remain unchanged.

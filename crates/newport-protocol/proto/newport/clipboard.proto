@@ -1,0 +1,47 @@
+syntax = "proto3";
+package newport.clipboard;
+
+import "newport/wire.proto";
+
+// Worker admission credentials. Secret is omitted from Debug and wire traces.
+message Access { string path = 1; string runtime = 2; string worker = 3; newport.wire.Secret token = 4; }
+
+message NativeOrigin { string worker = 1; uint64 revision = 2; }
+message ExportOffer {
+  string runtime = 1;
+  int64 revision = 2;
+  NativeOrigin origin = 3;
+  repeated string formats = 4;
+  uint64 route_revision = 5;
+}
+message CopyLease { string id = 1; ExportOffer offer = 2; }
+message Chunk { bytes data = 1; bool eof = 2; }
+message Enable { uint32 version = 1; }
+message Read { uint64 id = 1; ExportOffer offer = 2; string format = 3; }
+message Cancel { uint64 id = 1; }
+message Commit { uint64 id = 1; ExportOffer offer = 2; }
+message Release { CopyLease copy = 1; }
+message ReadCopy { uint64 id = 1; CopyLease copy = 2; string format = 3; }
+message ExportControl {
+  oneof command {
+    Enable enable = 1;
+    newport.wire.Present disable = 2;
+    Read read = 3;
+    Cancel cancel = 4;
+    Commit commit = 5;
+    Release release = 6;
+    ReadCopy read_copy = 7;
+  }
+}
+message Offered { ExportOffer offer = 1; }
+message Data { uint64 id = 1; uint64 offset = 2; Chunk chunk = 3; }
+message Committed { uint64 id = 1; CopyLease copy = 2; }
+message CopyRevoked { string id = 1; }
+message ExportEvent {
+  oneof event {
+    Offered offered = 1;
+    Data data = 2;
+    Committed committed = 3;
+    CopyRevoked copy_revoked = 4;
+  }
+}

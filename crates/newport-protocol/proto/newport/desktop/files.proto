@@ -1,0 +1,223 @@
+syntax = "proto3";
+package newport.desktop.files;
+import "newport/desktop/configuration.proto";
+import "newport/wire.proto";
+
+enum EntryKind {
+  ENTRY_KIND_UNSPECIFIED = 0;
+  ENTRY_KIND_DIRECTORY = 1;
+  ENTRY_KIND_SYMLINK = 2;
+  ENTRY_KIND_FILE = 3;
+  ENTRY_KIND_OTHER = 4;
+}
+
+message Entry {
+  optional string name = 1;
+  optional string path = 2;
+  optional newport.desktop.files.EntryKind kind = 3;
+  optional uint64 size = 4;
+  optional uint32 modified = 5;
+  optional string permissions = 6;
+}
+
+message Listing {
+  optional string path = 1;
+  repeated newport.desktop.files.Entry entries = 2;
+}
+
+enum PreviewKind {
+  PREVIEW_KIND_UNSPECIFIED = 0;
+  PREVIEW_KIND_TEXT = 1;
+  PREVIEW_KIND_IMAGE = 2;
+}
+
+message Content {
+  oneof value {
+    bytes text = 1;
+    bytes binary = 2;
+  }
+}
+
+message Preview {
+  optional newport.desktop.files.PreviewKind kind = 1;
+  optional string mime = 2;
+  newport.desktop.files.Content content = 3;
+  optional bool truncated = 4;
+}
+
+enum PageReason {
+  PAGE_REASON_UNSPECIFIED = 0;
+  PAGE_REASON_SIZE = 1;
+  PAGE_REASON_LONG_LINES = 2;
+}
+
+message Page {
+  optional uint64 offset = 1;
+  optional uint64 next = 2;
+  optional uint64 size = 3;
+  optional newport.desktop.files.PageReason reason = 4;
+}
+
+message Document {
+  optional string path = 1;
+  optional bytes content = 2;
+  optional string revision = 3;
+  newport.desktop.files.Page page = 4;
+  optional bool cached = 5;
+}
+
+message Index {
+  repeated string paths = 1;
+  optional uint64 skipped = 2;
+}
+
+enum WatchMode {
+  WATCH_MODE_UNSPECIFIED = 0;
+  WATCH_MODE_NATIVE = 1;
+  WATCH_MODE_POLL = 2;
+}
+
+message WatchReply {
+  optional newport.desktop.files.WatchMode mode = 1;
+  optional string cursor = 2;
+  repeated string paths = 3;
+  optional bool reset = 4;
+}
+
+message TransferProgress {
+  optional string name = 1;
+  optional uint64 completed = 2;
+  optional uint64 total = 3;
+}
+
+message ProgressLookup {
+  newport.desktop.files.TransferProgress progress = 1;
+}
+
+message NativePath {
+  oneof value {
+    bytes unix = 1;
+    bytes windows = 2;
+  }
+}
+
+message TransferPath {
+  oneof value {
+    string remote = 1;
+    newport.desktop.files.NativePath local = 2;
+  }
+}
+
+message TransferResult {
+  newport.desktop.files.TransferPath path = 1;
+}
+
+message ListArgs {
+  optional string server = 1;
+  optional string operation = 2;
+  optional string path = 3;
+  newport.desktop.configuration.ConnectionScope expected = 4;
+  // Absence uses the source API default.
+  optional bool refresh = 5;
+  optional string project_root = 6;
+}
+
+message WatchArgs {
+  optional string server = 1;
+  optional string operation = 2;
+  newport.desktop.configuration.ConnectionScope expected = 3;
+  optional string root = 4;
+  optional string watch = 5;
+  repeated string directories = 6;
+  optional string cursor = 7;
+}
+
+message PreviewArgs {
+  optional string server = 1;
+  optional string operation = 2;
+  optional string path = 3;
+  newport.desktop.configuration.ConnectionScope expected = 4;
+}
+
+message ReadTextArgs {
+  optional string server = 1;
+  optional string operation = 2;
+  optional string root = 3;
+  optional string path = 4;
+  newport.desktop.configuration.ConnectionScope expected = 5;
+  optional string revision = 6;
+  optional uint64 offset = 7;
+  // Absence uses the source API default.
+  optional bool allow_cached = 8;
+}
+
+message ProjectIndexArgs {
+  optional string server = 1;
+  optional string operation = 2;
+  optional string root = 3;
+  newport.desktop.configuration.ConnectionScope expected = 4;
+}
+
+message WriteTextArgs {
+  optional string server = 1;
+  optional string operation = 2;
+  optional string root = 3;
+  optional string path = 4;
+  newport.desktop.configuration.ConnectionScope expected = 5;
+  optional bytes content = 6;
+  optional string revision = 7;
+}
+
+message CancelArgs {
+  optional string operation = 1;
+}
+
+message ProgressArgs {
+  optional string operation = 1;
+}
+
+message UploadArgs {
+  optional string server = 1;
+  optional string operation = 2;
+  optional string path = 3;
+  newport.desktop.files.NativePath local_path = 4;
+  newport.desktop.configuration.ConnectionScope expected = 5;
+}
+
+message DownloadArgs {
+  optional string server = 1;
+  optional string operation = 2;
+  optional string path = 3;
+  newport.desktop.files.NativePath local_path = 4;
+  newport.desktop.configuration.ConnectionScope expected = 5;
+}
+
+message Operation {
+  oneof value {
+    newport.desktop.files.ListArgs list = 1;
+    newport.desktop.files.WatchArgs watch = 2;
+    newport.desktop.files.PreviewArgs preview = 3;
+    newport.desktop.files.ReadTextArgs read_text = 4;
+    newport.desktop.files.ProjectIndexArgs project_index = 5;
+    newport.desktop.files.WriteTextArgs write_text = 6;
+    newport.desktop.files.CancelArgs cancel = 7;
+    newport.desktop.files.ProgressArgs progress = 8;
+    newport.desktop.files.UploadArgs upload = 9;
+    newport.desktop.files.DownloadArgs download = 10;
+  }
+}
+
+message Reply {
+  oneof value {
+    newport.desktop.files.Listing list = 1;
+    newport.desktop.files.WatchReply watch = 2;
+    newport.desktop.files.Preview preview = 3;
+    newport.desktop.files.Document read_text = 4;
+    newport.desktop.files.Index project_index = 5;
+    newport.desktop.files.Document write_text = 6;
+    newport.wire.Present cancel = 7;
+    newport.desktop.files.ProgressLookup progress = 8;
+    newport.desktop.files.TransferResult upload = 9;
+    newport.desktop.files.TransferResult download = 10;
+  }
+}

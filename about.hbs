@@ -1,0 +1,20 @@
+{{!-- One dependency graph's licenses as plain text; `cargo xtask notices` adds the headings. --}}
+Licenses, with the number of crates under each:
+{{#each overview}}
+  {{{name}}} ({{{id}}}): {{count}}
+{{/each}}
+{{#each licenses}}
+
+------------------------------------------------------------------------
+{{{name}}} ({{{id}}})
+
+Used by:
+{{#each used_by}}
+  {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} <{{{crate.repository}}}>{{/if}}
+{{#if crate.authors}}
+    Authors: {{#each crate.authors}}{{#unless @first}}, {{/unless}}{{{this}}}{{/each}}
+{{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

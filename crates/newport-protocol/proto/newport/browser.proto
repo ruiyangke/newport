@@ -1,0 +1,16 @@
+syntax = "proto3";
+package newport.browser;
+
+import "newport/wire.proto";
+
+message Hello { uint32 version = 1; }
+message Open { string url = 1; }
+message Opened { optional string warning = 1; }
+message ClientFrame { Open open = 1; }
+message ServerFrame {
+  oneof message {
+    Hello hello = 1;
+    Opened opened = 2;
+    newport.wire.Error error = 3;
+  }
+}

@@ -1,0 +1,100 @@
+syntax = "proto3";
+package newport.desktop.account;
+import "newport/wire.proto";
+
+enum Phase {
+  PHASE_UNSPECIFIED = 0;
+  PHASE_LOADING = 1;
+  PHASE_SIGNED_OUT = 2;
+  PHASE_WAITING = 3;
+  PHASE_SIGNED_IN = 4;
+}
+
+enum NoticeKind {
+  NOTICE_KIND_UNSPECIFIED = 0;
+  NOTICE_KIND_SUCCESS = 1;
+  NOTICE_KIND_INFO = 2;
+  NOTICE_KIND_WARNING = 3;
+  NOTICE_KIND_ERROR = 4;
+}
+
+enum NoticeAction {
+  NOTICE_ACTION_UNSPECIFIED = 0;
+  NOTICE_ACTION_MANAGE_COMPUTERS = 1;
+  NOTICE_ACTION_TRY_AGAIN = 2;
+}
+
+enum RefusalReason {
+  REFUSAL_REASON_UNSPECIFIED = 0;
+  REFUSAL_REASON_SIGNED_OUT = 1;
+  REFUSAL_REASON_TRIAL_ELSEWHERE = 2;
+  REFUSAL_REASON_FREE_SEAT = 3;
+  REFUSAL_REASON_FREE = 4;
+  REFUSAL_REASON_UNAVAILABLE = 5;
+  REFUSAL_REASON_CLOCK = 6;
+  REFUSAL_REASON_OFFLINE = 7;
+}
+
+message Notice {
+  optional uint64 id = 1;
+  optional newport.desktop.account.NoticeKind kind = 2;
+  optional string message = 3;
+  optional newport.desktop.account.NoticeAction action = 4;
+}
+
+message License {
+  optional string state = 1;
+  optional string plan = 2;
+  optional string seat = 3;
+  optional string valid_until = 4;
+  optional string renews_at = 5;
+  optional string ends_at = 6;
+  optional bool trial_used = 7;
+  optional string message = 8;
+  optional bool trial_used_here = 9;
+}
+
+message Status {
+  optional newport.desktop.account.Phase state = 1;
+  optional string email = 2;
+  optional string name = 3;
+  newport.desktop.account.License license = 4;
+  optional bool signing_out = 5;
+  newport.desktop.account.Notice notice = 6;
+  optional uint64 license_revision = 7;
+}
+
+message RemoteLicense {
+  newport.wire.Secret token = 1;
+  optional string machine = 2;
+  optional int64 trusted_time = 3;
+  optional int64 expires_at = 4;
+}
+
+message Operation {
+  oneof value {
+    newport.wire.Present status = 1;
+    newport.wire.Present sign_in = 2;
+    newport.wire.Present cancel_sign_in = 3;
+    newport.wire.Present sign_out = 4;
+    newport.wire.Present open_portal = 5;
+    newport.wire.Present open_billing = 6;
+    newport.wire.Present refresh = 7;
+    newport.wire.Present start_trial = 8;
+    newport.wire.Present remote_license = 9;
+  }
+}
+
+message Reply {
+  oneof value {
+    newport.desktop.account.Status status = 1;
+    newport.desktop.account.Status sign_in = 2;
+    newport.desktop.account.Status cancel_sign_in = 3;
+    newport.desktop.account.Status sign_out = 4;
+    newport.wire.Present open_portal = 5;
+    newport.wire.Present open_billing = 6;
+    newport.desktop.account.Status refresh = 7;
+    newport.desktop.account.Status start_trial = 8;
+    newport.desktop.account.RemoteLicense remote_license = 9;
+  }
+}

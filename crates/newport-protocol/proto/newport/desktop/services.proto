@@ -1,0 +1,47 @@
+syntax = "proto3";
+package newport.desktop.services;
+import "newport/monitor.proto";
+
+message SnapshotArgs {
+  optional string server = 1;
+  // Absence uses the source API default.
+  optional bool refresh = 2;
+}
+
+message LogsArgs {
+  optional string server = 1;
+  newport.monitor.ServicesLogsRequest request = 2;
+}
+
+message UnitFileArgs {
+  optional string server = 1;
+  optional string unit = 2;
+  optional newport.monitor.ServicesScope scope = 3;
+  // Absence uses the source API default.
+  optional bool refresh = 4;
+}
+
+message ActionArgs {
+  optional string server = 1;
+  optional string unit = 2;
+  optional newport.monitor.ServicesScope scope = 3;
+  optional newport.monitor.ServicesVerb verb = 4;
+}
+
+message Operation {
+  oneof value {
+    newport.desktop.services.SnapshotArgs snapshot = 1;
+    newport.desktop.services.LogsArgs logs = 2;
+    newport.desktop.services.UnitFileArgs unit_file = 3;
+    newport.desktop.services.ActionArgs action = 4;
+  }
+}
+
+message Reply {
+  oneof value {
+    newport.monitor.ServicesSnapshot snapshot = 1;
+    newport.monitor.ServicesLogs logs = 2;
+    newport.monitor.ServicesUnitFile unit_file = 3;
+    newport.monitor.ServicesActionReply action = 4;
+  }
+}

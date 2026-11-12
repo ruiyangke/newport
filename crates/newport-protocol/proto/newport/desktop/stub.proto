@@ -1,0 +1,291 @@
+syntax = "proto3";
+
+package newport.desktop.stub;
+
+message Empty {}
+
+message Point { optional sint32 x = 1; optional sint32 y = 2; }
+
+message Size { optional uint32 width = 1; optional uint32 height = 2; }
+
+message Position { optional double x = 1; optional double y = 2; }
+
+message Area { optional double x = 1; optional double y = 2; optional double width = 3; optional double height = 4; }
+
+enum LaunchReason { LAUNCH_REASON_UNSPECIFIED = 0; LAUNCH_REASON_USER = 1; LAUNCH_REASON_HOST = 2; }
+
+enum WindowKind { WINDOW_KIND_UNSPECIFIED = 0; WINDOW_KIND_NORMAL = 1; WINDOW_KIND_DIALOG = 2; WINDOW_KIND_MENU = 3; WINDOW_KIND_TOOLTIP = 4; }
+
+enum Decoration { DECORATION_UNSPECIFIED = 0; DECORATION_SERVER = 1; DECORATION_CLIENT = 2; DECORATION_NONE = 3; }
+
+enum Activate { ACTIVATE_UNSPECIFIED = 0; ACTIVATE_NO = 1; ACTIVATE_YES = 2; ACTIVATE_ATTENTION = 3; }
+
+message Actions {
+  optional bool close = 1;
+  optional bool minimize = 2;
+  optional bool maximize = 3;
+  optional bool resize = 4;
+  optional bool fullscreen = 5;
+}
+
+message WindowState {
+  optional uint64 window = 1;
+  optional uint64 generation = 2;
+  optional WindowKind kind = 3;
+  optional uint64 parent = 4;
+  optional bool modal = 5;
+  Point position = 6;
+  Size logical = 7;
+  Size pixels = 8;
+  optional bool apply_size = 9;
+  optional Decoration decoration = 10;
+  Actions actions = 11;
+  Size min = 12;
+  Size max = 13;
+  optional string title = 14;
+  optional Activate activate = 15;
+}
+
+message HostHello {
+  optional uint32 version = 1;
+  optional LaunchReason reason = 2;
+  optional string bundle_id = 3;
+}
+
+message HostPointer {
+  optional uint64 window = 1;
+  optional uint64 generation = 2;
+  optional double x = 3;
+  optional double y = 4;
+  optional uint32 modifiers = 5;
+}
+
+message HostButton {
+  optional uint64 window = 1;
+  optional uint64 generation = 2;
+  optional double x = 3;
+  optional double y = 4;
+  optional uint32 button = 5;
+  optional bool down = 6;
+  optional uint32 modifiers = 7;
+}
+
+message HostScroll {
+  optional uint64 window = 1;
+  optional uint64 generation = 2;
+  optional double x = 3;
+  optional double y = 4;
+  optional double dx = 5;
+  optional double dy = 6;
+  optional bool precise = 7;
+  optional uint64 phase = 8;
+  optional uint64 momentum = 9;
+  optional uint32 modifiers = 10;
+}
+
+message HostKey {
+  optional uint64 window = 1;
+  optional uint64 generation = 2;
+  optional uint32 code = 3;
+  optional string characters = 4;
+  optional string unmodified = 5;
+  optional uint32 modifiers = 6;
+  optional bool repeat = 7;
+}
+
+message HostKeyUp {
+  optional uint64 window = 1;
+  optional uint64 generation = 2;
+  optional uint32 code = 3;
+  optional uint32 modifiers = 4;
+}
+
+message HostModifiers {
+  optional uint64 window = 1;
+  optional uint64 generation = 2;
+  optional uint32 code = 3;
+  optional uint64 flags = 4;
+}
+
+message HostExit {
+  optional uint64 window = 1;
+  optional uint64 generation = 2;
+}
+
+message HostText {
+  optional uint64 window = 1;
+  optional uint64 generation = 2;
+  optional string text = 3;
+}
+
+message HostPreedit {
+  optional uint64 window = 1;
+  optional uint64 generation = 2;
+  optional string text = 3;
+  optional uint32 cursor = 4;
+}
+
+message HostFocus {
+  optional uint64 window = 1;
+  optional bool key = 2;
+}
+
+message HostResized {
+  optional uint64 window = 1;
+  Size logical = 2;
+}
+
+message HostCloseAsked {
+  optional uint64 window = 1;
+}
+
+message HostMinimized {
+  optional uint64 window = 1;
+  optional bool minimized = 2;
+}
+
+message HostFullscreen {
+  optional uint64 window = 1;
+  optional bool enabled = 2;
+}
+
+message HostPresented {
+  optional uint64 window = 1;
+  optional uint64 generation = 2;
+  optional uint32 index = 3;
+}
+
+message HostAppActive {
+  optional bool active = 1;
+}
+
+message HostDisplay {
+  optional uint64 window = 1;
+  optional double scale = 2;
+  Area work_area = 3;
+  Position content = 4;
+}
+
+message HostVisible {
+  optional uint64 window = 1;
+  optional bool visible = 2;
+}
+
+message HostFrame {
+ optional uint32 version = 1;
+ oneof payload {
+  HostHello hello = 2;
+  HostPointer pointer = 3;
+  HostButton button = 4;
+  HostScroll scroll = 5;
+  HostKey key = 6;
+  HostKeyUp key_up = 7;
+  HostModifiers modifiers = 8;
+  HostExit exit = 9;
+  HostText text = 10;
+  HostPreedit preedit = 11;
+  HostFocus focus = 12;
+  HostResized resized = 13;
+  HostCloseAsked close_asked = 14;
+  HostMinimized minimized = 15;
+  HostFullscreen fullscreen = 16;
+  HostPresented presented = 17;
+  HostAppActive app_active = 18;
+  Empty quit_asked = 19;
+  Empty reopen = 20;
+  HostDisplay display = 21;
+  HostVisible visible = 22;
+ }
+}
+
+message StubWelcome {
+  optional string name = 1;
+  optional string server = 2;
+}
+
+message StubWindow {
+  WindowState state = 1;
+  optional uint32 surfaces = 2;
+}
+
+message StubSurface {
+  optional uint64 window = 1;
+  optional uint64 generation = 2;
+  optional uint32 index = 3;
+}
+
+message StubPresentFrame {
+  optional uint64 window = 1;
+  optional uint64 generation = 2;
+  optional uint32 index = 3;
+}
+
+message StubTitle {
+  optional uint64 window = 1;
+  optional string title = 2;
+}
+
+message StubOperation {
+  optional uint64 window = 1;
+  OperationValue operation = 2;
+}
+
+message StubDestroy {
+  optional uint64 window = 1;
+}
+
+message StubQuitReply {
+  optional bool allow = 1;
+}
+
+message StubAlert {
+  optional string message = 1;
+  optional string detail = 2;
+}
+
+message StubTextContext {
+  optional uint64 window = 1;
+  optional bool editing = 2;
+  Point caret = 3;
+}
+
+message StubCursor {
+  optional uint64 window = 1;
+  optional uint32 cursor = 2;
+}
+
+message StubFrame {
+ optional uint32 version = 1;
+ oneof payload {
+  StubWelcome welcome = 2;
+  StubWindow window = 3;
+  StubSurface surface = 4;
+  StubPresentFrame frame = 5;
+  StubTitle title = 6;
+  StubOperation operation = 7;
+  StubDestroy destroy = 8;
+  StubQuitReply quit_reply = 9;
+  StubAlert alert = 10;
+  Empty quit = 11;
+  StubTextContext text_context = 12;
+  StubCursor cursor = 13;
+ }
+}
+
+message OperationZoom {
+  optional bool maximized = 1;
+}
+
+message OperationFullscreen {
+  optional bool enabled = 1;
+}
+
+message OperationValue {
+ oneof payload {
+  Empty move = 1;
+  Empty minimize = 2;
+  OperationZoom zoom = 3;
+  OperationFullscreen fullscreen = 4;
+  Empty activate = 5;
+ }
+}

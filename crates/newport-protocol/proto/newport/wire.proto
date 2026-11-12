@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+// Messages every Newport protocol may use.
+package newport.wire;
+
+// Why a request failed.
+message Error {
+  // busy, refused, too_large, not_found, unsupported, failed, or the
+  // protocol's own.
+  string code = 1;
+  // For people.
+  string message = 2;
+  Retry retry = 3;
+}
+
+// Whether the same request may succeed if sent again.
+enum Retry {
+  RETRY_UNKNOWN = 0;
+  RETRY_YES = 1;
+  RETRY_NO = 2;
+}
+
+// A feature with no parameters.
+message Present {}
+
+// A value redacted in Debug output and in traces.
+message Secret {
+  bytes value = 1;
+}

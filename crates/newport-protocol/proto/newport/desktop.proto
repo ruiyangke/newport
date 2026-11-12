@@ -1,0 +1,109 @@
+syntax = "proto3";
+package newport.desktop;
+import "newport/desktop/account.proto";
+import "newport/desktop/applications.proto";
+import "newport/desktop/common.proto";
+import "newport/desktop/configuration.proto";
+import "newport/desktop/connection.proto";
+import "newport/desktop/containers.proto";
+import "newport/desktop/events.proto";
+import "newport/desktop/files.proto";
+import "newport/desktop/git.proto";
+import "newport/desktop/host.proto";
+import "newport/desktop/metrics.proto";
+import "newport/desktop/preferences.proto";
+import "newport/desktop/services.proto";
+import "newport/desktop/stream.proto";
+import "newport/desktop/terminal.proto";
+import "newport/wire.proto";
+
+message Operation {
+  oneof value {
+    newport.desktop.account.Operation account = 16;
+    newport.desktop.connection.Operation connection = 17;
+    newport.desktop.configuration.Operation configuration = 18;
+    newport.desktop.files.Operation files = 19;
+    newport.desktop.metrics.Operation metrics = 20;
+    newport.desktop.services.Operation services = 21;
+    newport.desktop.containers.Operation containers = 22;
+    newport.desktop.preferences.Operation preferences = 23;
+    newport.desktop.git.Operation git = 24;
+    newport.desktop.applications.Operation applications = 25;
+    newport.desktop.host.Operation host = 26;
+    newport.desktop.events.Operation events = 27;
+    newport.desktop.terminal.Operation terminal = 28;
+    newport.desktop.stream.Operation stream = 29;
+  }
+}
+
+message Reply {
+  reserved 29;
+  oneof value {
+    newport.desktop.account.Reply account = 16;
+    newport.desktop.connection.Reply connection = 17;
+    newport.desktop.configuration.Reply configuration = 18;
+    newport.desktop.files.Reply files = 19;
+    newport.desktop.metrics.Reply metrics = 20;
+    newport.desktop.services.Reply services = 21;
+    newport.desktop.containers.Reply containers = 22;
+    newport.desktop.preferences.Reply preferences = 23;
+    newport.desktop.git.Reply git = 24;
+    newport.desktop.applications.Reply applications = 25;
+    newport.desktop.host.Reply host = 26;
+    newport.desktop.events.Reply events = 27;
+    newport.desktop.terminal.Reply terminal = 28;
+  }
+}
+
+message Request {
+  optional uint64 id = 1;
+  oneof operation {
+    newport.desktop.account.Operation account = 16;
+    newport.desktop.connection.Operation connection = 17;
+    newport.desktop.configuration.Operation configuration = 18;
+    newport.desktop.files.Operation files = 19;
+    newport.desktop.metrics.Operation metrics = 20;
+    newport.desktop.services.Operation services = 21;
+    newport.desktop.containers.Operation containers = 22;
+    newport.desktop.preferences.Operation preferences = 23;
+    newport.desktop.git.Operation git = 24;
+    newport.desktop.applications.Operation applications = 25;
+    newport.desktop.host.Operation host = 26;
+    newport.desktop.events.Operation events = 27;
+    newport.desktop.terminal.Operation terminal = 28;
+    newport.desktop.stream.Operation stream = 29;
+  }
+}
+
+message Outcome {
+  oneof value {
+    newport.desktop.Reply completed = 2;
+    newport.desktop.common.Failure failed = 3;
+    newport.desktop.stream.Opened opened = 4;
+  }
+}
+
+message Response {
+  optional uint64 id = 1;
+  oneof outcome {
+    newport.desktop.Reply completed = 2;
+    newport.desktop.common.Failure failed = 3;
+    newport.desktop.stream.Opened opened = 4;
+  }
+}
+
+message ClientMessage {
+  oneof value {
+    newport.desktop.common.Hello hello = 1;
+    newport.desktop.Request request = 2;
+  }
+}
+
+message ServerMessage {
+  oneof value {
+    newport.desktop.common.Ready ready = 1;
+    newport.wire.Error refused = 2;
+    newport.desktop.common.Progress progress = 3;
+    newport.desktop.Response response = 4;
+  }
+}

@@ -1,0 +1,119 @@
+# cargo-about's policy for the third-party notices every package ships
+# (`cargo xtask notices`). A crate whose license this list can't satisfy fails
+# packaging. Newport is AGPL-3.0-only, so only permissive licenses and MPL-2.0
+# are accepted: never a third party's GPL, LGPL or AGPL. Earlier entries win
+# when a crate offers a choice, and Apache-2.0 comes first because its full
+# text needs no copyright line from the crate.
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+]
+# Test and benchmark dependencies aren't shipped.
+ignore-dev-dependencies = true
+# Newport's own crates and the private Remote apps crates are unpublished and
+# aren't third-party; packaging checks no other crate is.
+private = { ignore = true }
+
+# These grammar crates leave their notices out of the published package, so
+# they come from the crate's repository at the commit it was published from.
+# The checksums fail the clarification when the text changes.
+
+[tree-sitter-cpp.clarify]
+license = "MIT"
+
+[[tree-sitter-cpp.clarify.git]]
+path = "LICENSE"
+checksum = "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+
+[tree-sitter-elixir.clarify]
+license = "Apache-2.0"
+
+[[tree-sitter-elixir.clarify.files]]
+path = "LICENSE"
+checksum = "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
+
+[[tree-sitter-elixir.clarify.git]]
+path = "NOTICE"
+checksum = "119588423fbaa46a6955a044fee5a23338c7de190d8c4651a94c6d0b98ca2cda"
+
+[tree-sitter-html.clarify]
+license = "MIT"
+
+[[tree-sitter-html.clarify.git]]
+path = "LICENSE"
+checksum = "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+
+[tree-sitter-java.clarify]
+license = "MIT"
+
+[[tree-sitter-java.clarify.git]]
+path = "LICENSE"
+checksum = "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7"
+
+[tree-sitter-json.clarify]
+license = "MIT"
+
+[[tree-sitter-json.clarify.git]]
+path = "LICENSE"
+checksum = "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+
+[tree-sitter-lua.clarify]
+license = "MIT"
+
+[[tree-sitter-lua.clarify.git]]
+path = "LICENSE.md"
+checksum = "9a32b02e4c917b1ce6b5e79d8ea81e25cefd7f27d89c7235f2afb262c06cf32e"
+
+[tree-sitter-make.clarify]
+license = "MIT"
+
+[[tree-sitter-make.clarify.git]]
+path = "LICENSE"
+checksum = "28eecdb75b6de2d9020603531461444bf54db827ee2fb345a8fcf4dbee7c2ad1"
+
+[tree-sitter-md.clarify]
+license = "MIT"
+
+[[tree-sitter-md.clarify.git]]
+path = "LICENSE"
+checksum = "52ec8a1bf8256511e2a92613e0bb41ffefba3897f16fa958d7bb28c466dd4804"
+
+[tree-sitter-ruby.clarify]
+license = "MIT"
+
+[[tree-sitter-ruby.clarify.git]]
+path = "LICENSE"
+checksum = "ee006f02a3d856df282e409be2a86e24a65bb573a98b9c28343771141351bb6b"
+
+[tree-sitter-toml-ng.clarify]
+license = "MIT"
+
+[[tree-sitter-toml-ng.clarify.git]]
+path = "LICENSE"
+checksum = "b727eee929bee836e8102cecf749a795b199f291b58c885bcd81cae727ac5a46"
+
+[tree-sitter-typescript.clarify]
+license = "MIT"
+
+[[tree-sitter-typescript.clarify.git]]
+path = "LICENSE"
+checksum = "49bf33cf78ef5897e4e161ce1517df7de1ae5042a65b6bcfd44401e0fc606559"
+
+[tree-sitter-zig.clarify]
+license = "MIT"
+
+[[tree-sitter-zig.clarify.git]]
+path = "LICENSE"
+checksum = "0eea8dc45e89deeb03c7799bbbc7b4688f365fb274562f4540ecfebdea82e727"

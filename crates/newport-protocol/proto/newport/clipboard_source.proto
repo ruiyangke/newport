@@ -1,0 +1,18 @@
+syntax = "proto3";
+package newport.clipboard.source;
+import "newport/wire.proto";
+import "newport/clipboard.proto";
+import "newport/integration.proto";
+message Hello { uint32 version = 1; }
+message Read { int64 revision = 1; string format = 2; }
+message ClientFrame {
+  oneof request { newport.wire.Present offer = 1; Read read = 2; }
+}
+message ServerFrame {
+  oneof response {
+    Hello hello = 1;
+    newport.integration.ClipboardOffer offer = 2;
+    newport.clipboard.Chunk chunk = 3;
+    newport.wire.Error error = 4;
+  }
+}

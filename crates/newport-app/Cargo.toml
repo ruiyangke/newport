@@ -1,0 +1,40 @@
+[package]
+name = "newport-app"
+version = "0.7.3"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+[[bin]]
+name = "newport"
+path = "src/main.rs"
+
+[dependencies]
+newport-protocol = { path = "../newport-protocol" }
+newport-backend = { path = "../newport-backend" }
+newport-client = { path = "../newport-client" }
+newport-domain = { path = "../newport-domain" }
+newport-platform = { path = "../newport-platform", features = ["tray", "updates", "pdf"] }
+newport-gpui = { path = "../newport-gpui" }
+gpui-kit = "=0.8.1"
+async-channel = "2"
+open = "5"
+serde_json = "1"
+semver = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "signal", "macros"] }
+tracing-subscriber = "0.3"
+uuid = "1"
+
+[dev-dependencies]
+newport-backend = { path = "../newport-backend", features = ["test-support"] }
+tempfile = "3"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+embed-resource = "3.0"
+serde_json = "1"

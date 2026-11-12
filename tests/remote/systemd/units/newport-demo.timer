@@ -1,0 +1,10 @@
+[Unit]
+Description=Newport demo schedule
+
+[Timer]
+OnActiveSec=1
+OnCalendar=hourly
+Unit=newport-tick.service
+
+[Install]
+WantedBy=timers.target

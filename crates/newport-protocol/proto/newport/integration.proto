@@ -1,0 +1,54 @@
+syntax = "proto3";
+package newport.integration;
+import "newport/wire.proto";
+import "newport/worker.proto";
+import "newport/runtime.proto";
+import "newport/clipboard.proto";
+
+message ClipboardOffer { int64 revision = 1; repeated string formats = 2; }
+message ClipboardRequest { uint64 id = 1; int64 revision = 2; string format = 3; }
+enum Encoding { ENCODING_RAW = 0; ENCODING_FAILED = 1; ENCODING_ZLIB = 2; }
+message ClipboardReply { uint64 id = 1; int64 revision = 2; Encoding encoding = 3; bool done = 4; bytes data = 5; }
+message BrowserRequest { uint64 id = 1; string url = 2; }
+message BrowserReply { uint64 id = 1; bool success = 2; optional string message = 3; }
+message Snapshot { bytes archive = 1; }
+message Acknowledged { string message = 1; }
+message Call {
+  uint64 id = 1;
+  oneof request {
+    newport.runtime.Permissions permissions = 2;
+    ClipboardOffer clipboard_offer = 3;
+    Snapshot snapshot = 4;
+    newport.wire.Present gui_notices = 5;
+    newport.wire.Present heartbeat = 6;
+    newport.clipboard.ExportControl export = 7;
+  }
+}
+message Response {
+  uint64 id = 1;
+  oneof reply {
+    Acknowledged acknowledged = 2;
+    newport.runtime.Applied permissions = 3;
+    newport.wire.Error error = 4;
+  }
+}
+message ClientFrame {
+  oneof message {
+    Call call = 1;
+    ClipboardReply clipboard = 2;
+    BrowserReply browser = 3;
+    newport.wire.Present quit = 4;
+    newport.worker.ClientControl worker_control = 127;
+  }
+}
+message ServerFrame {
+  oneof message {
+    Response response = 1;
+    ClipboardRequest clipboard_request = 2;
+    BrowserRequest browser = 3;
+    newport.wire.Present gui_notice = 4;
+    newport.clipboard.ExportEvent export = 5;
+    newport.wire.Error error = 6;
+    newport.worker.ServerControl worker_control = 127;
+  }
+}

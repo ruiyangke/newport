@@ -1,0 +1,100 @@
+syntax = "proto3";
+package newport.desktop.preferences;
+import "newport/git.proto";
+import "newport/wire.proto";
+
+enum Appearance {
+  APPEARANCE_UNSPECIFIED = 0;
+  APPEARANCE_SYSTEM = 1;
+  APPEARANCE_LIGHT = 2;
+  APPEARANCE_DARK = 3;
+}
+
+enum Codec {
+  CODEC_UNSPECIFIED = 0;
+  CODEC_AUTO = 1;
+  CODEC_LOSSLESS = 2;
+  CODEC_FAST = 3;
+}
+
+message WindowPatch {
+  optional float sidebar_width = 1;
+  optional bool sidebar_compact = 2;
+  optional newport.desktop.preferences.Appearance appearance = 3;
+  optional bool terminal_option_as_meta = 4;
+}
+
+message Project {
+  optional string id = 1;
+  optional string server = 2;
+  optional string name = 3;
+  newport.git.Path path = 4;
+}
+
+message Projects {
+  repeated newport.desktop.preferences.Project projects = 1;
+}
+
+message Settings {
+  optional bool audio = 1;
+  optional newport.desktop.preferences.Codec codec = 2;
+  optional uint32 fps_goal = 3;
+  optional bool hud = 4;
+  optional bool separate_apps = 5;
+}
+
+message Installed {
+  repeated string servers = 1;
+}
+
+message SetWindowArgs {
+  newport.desktop.preferences.WindowPatch patch = 1;
+}
+
+message ProjectsListArgs {
+  optional string server = 1;
+}
+
+message ProjectsSaveArgs {
+  newport.desktop.preferences.Project project = 1;
+}
+
+message ProjectsRemoveArgs {
+  optional string server = 1;
+  optional string project = 2;
+}
+
+message SettingsSaveArgs {
+  newport.desktop.preferences.Settings settings = 1;
+}
+
+message InstalledSaveArgs {
+  optional string server = 1;
+  optional bool installed = 2;
+}
+
+message Operation {
+  oneof value {
+    newport.desktop.preferences.SetWindowArgs set_window = 1;
+    newport.desktop.preferences.ProjectsListArgs projects_list = 2;
+    newport.desktop.preferences.ProjectsSaveArgs projects_save = 3;
+    newport.desktop.preferences.ProjectsRemoveArgs projects_remove = 4;
+    newport.wire.Present settings = 5;
+    newport.desktop.preferences.SettingsSaveArgs settings_save = 6;
+    newport.wire.Present installed = 7;
+    newport.desktop.preferences.InstalledSaveArgs installed_save = 8;
+  }
+}
+
+message Reply {
+  oneof value {
+    newport.wire.Present set_window = 1;
+    newport.desktop.preferences.Projects projects_list = 2;
+    newport.desktop.preferences.Project projects_save = 3;
+    newport.wire.Present projects_remove = 4;
+    newport.desktop.preferences.Settings settings = 5;
+    newport.desktop.preferences.Settings settings_save = 6;
+    newport.desktop.preferences.Installed installed = 7;
+    newport.desktop.preferences.Installed installed_save = 8;
+  }
+}

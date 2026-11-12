@@ -1,0 +1,69 @@
+syntax = "proto3";
+package newport.desktop.terminal;
+import "newport/terminal.proto";
+import "newport/wire.proto";
+
+message HeldShell {
+  optional string terminal = 1;
+  optional string name = 2;
+  optional string title = 3;
+  newport.terminal.Computer creator = 4;
+  repeated newport.terminal.Attached attached = 5;
+  optional uint64 started = 6;
+  optional bool exited = 7;
+}
+
+message ShellList {
+  repeated newport.desktop.terminal.HeldShell shells = 1;
+}
+
+message HeldShells {
+  optional string desktop = 1;
+  optional bool holds = 2;
+  newport.desktop.terminal.ShellList shells = 3;
+}
+
+message Renamed {
+  optional bool renamed = 1;
+}
+
+message Ended {
+  optional bool ended = 1;
+}
+
+message CloseArgs {
+  optional string session = 1;
+}
+
+message ListArgs {
+  optional string server = 1;
+}
+
+message RenameArgs {
+  optional string server = 1;
+  optional string terminal = 2;
+  optional string name = 3;
+}
+
+message EndArgs {
+  optional string server = 1;
+  optional string terminal = 2;
+}
+
+message Operation {
+  oneof value {
+    newport.desktop.terminal.CloseArgs close = 1;
+    newport.desktop.terminal.ListArgs list = 2;
+    newport.desktop.terminal.RenameArgs rename = 3;
+    newport.desktop.terminal.EndArgs end = 4;
+  }
+}
+
+message Reply {
+  oneof value {
+    newport.wire.Present close = 1;
+    newport.desktop.terminal.HeldShells list = 2;
+    newport.desktop.terminal.Renamed rename = 3;
+    newport.desktop.terminal.Ended end = 4;
+  }
+}

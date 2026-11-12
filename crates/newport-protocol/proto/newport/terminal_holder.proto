@@ -1,0 +1,47 @@
+syntax = "proto3";
+package newport.terminal.holder;
+import "newport/wire.proto";
+import "newport/terminal.proto";
+message Hello { uint32 version = 1; string terminal_id = 2; }
+message Size { uint32 columns = 1; uint32 rows = 2; }
+message Colors { uint32 foreground = 1; uint32 background = 2; uint32 cursor = 3; }
+message Attach {
+  uint32 version = 1;
+  Size size = 2;
+  bool control = 3;
+  bool opened = 4;
+  newport.terminal.Computer computer = 5;
+  Colors colors = 6;
+}
+message Input { bytes data = 1; }
+message Rename { string name = 1; }
+// The normalized name was persisted by this control connection.
+message Renamed { string name = 1; }
+message Attached { bool prompted = 1; }
+message Screen { bytes data = 1; }
+message FullSnapshot { bytes deflate = 1; }
+message Output { bytes data = 1; }
+message Active { bool active = 1; }
+message ClientFrame {
+  oneof message {
+    Attach attach = 1;
+    Input input = 2;
+    Size resize = 3;
+    newport.wire.Present end = 4;
+    Rename rename = 5;
+    newport.wire.Present activate = 6;
+  }
+}
+message ServerFrame {
+  oneof message {
+    Hello hello = 1;
+    Attached attached = 2;
+    Screen screen = 3;
+    FullSnapshot full = 4;
+    Output output = 5;
+    newport.terminal.Exit exit = 6;
+    Active active = 7;
+    newport.wire.Error error = 8;
+    Renamed renamed = 9;
+  }
+}

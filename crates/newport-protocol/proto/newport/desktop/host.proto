@@ -1,0 +1,73 @@
+syntax = "proto3";
+package newport.desktop.host;
+import "newport/wire.proto";
+
+message Startup {
+  optional bool enabled = 1;
+  optional bool available = 2;
+}
+
+message BuildStamp {
+  optional string commit = 1;
+  optional bool local = 2;
+  optional int64 built_at = 3;
+}
+
+enum UpdatePhase {
+  UPDATE_PHASE_UNSPECIFIED = 0;
+  UPDATE_PHASE_IDLE = 1;
+  UPDATE_PHASE_CHECKING = 2;
+  UPDATE_PHASE_DOWNLOADING = 3;
+  UPDATE_PHASE_READY = 4;
+  UPDATE_PHASE_INSTALLING = 5;
+  UPDATE_PHASE_CURRENT = 6;
+  UPDATE_PHASE_ERROR = 7;
+}
+
+message UpdateStatus {
+  optional bool enabled = 1;
+  optional string current_version = 2;
+  newport.desktop.host.BuildStamp build = 3;
+  optional newport.desktop.host.UpdatePhase phase = 4;
+  optional string version = 5;
+  optional uint64 downloaded = 6;
+  optional uint64 total = 7;
+  optional string error = 8;
+}
+
+message OpenRemoteAppArgs {
+  optional string id = 1;
+  optional string action = 2;
+}
+
+message SetLaunchAtLoginArgs {
+  optional bool enabled = 1;
+}
+
+message InstallUpdateArgs {
+  optional string confirmed_version = 1;
+}
+
+message Operation {
+  oneof value {
+    newport.wire.Present activate = 1;
+    newport.desktop.host.OpenRemoteAppArgs open_remote_app = 2;
+    newport.wire.Present startup_settings = 3;
+    newport.desktop.host.SetLaunchAtLoginArgs set_launch_at_login = 4;
+    newport.wire.Present update_status = 5;
+    newport.wire.Present check_for_updates = 6;
+    newport.desktop.host.InstallUpdateArgs install_update = 7;
+  }
+}
+
+message Reply {
+  oneof value {
+    newport.wire.Present activate = 1;
+    newport.wire.Present open_remote_app = 2;
+    newport.desktop.host.Startup startup_settings = 3;
+    newport.desktop.host.Startup set_launch_at_login = 4;
+    newport.desktop.host.UpdateStatus update_status = 5;
+    newport.wire.Present check_for_updates = 6;
+    newport.wire.Present install_update = 7;
+  }
+}

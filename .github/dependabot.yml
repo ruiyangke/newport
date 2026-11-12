@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # The workflows and the composite actions they use.
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/*
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

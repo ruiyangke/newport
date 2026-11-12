@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+// A protocol built on another crate's schema, and the well-known types
+// that wrap bytes and other messages.
+package wiretest.ext;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/wrappers.proto";
+import "wiretest/v1.proto";
+
+message Wrapped {
+  wiretest.v1.Chunk chunk = 1;
+  google.protobuf.BytesValue blob = 2;
+  google.protobuf.Any any = 3;
+}

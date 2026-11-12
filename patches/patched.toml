@@ -1,0 +1,12 @@
+# crates.io releases Newport patches: patches/<name>.patch applies to each,
+# and `cargo xtask` generates the result into patches/<name>/.
+
+# Per-channel flow control and close confirmations.
+[russh]
+version = "0.65.0"
+sha256 = "3bb77a4b259312b2abbc541bca1c13cb4e9b61c560a7fd894068c3b92e0c9dc3"
+
+# Exposes the grammar's own highlight and injection queries.
+[tree-sitter-proto]
+version = "0.6.0"
+sha256 = "9c93b6f1ed20de442e900eb636f2176af6063953dfaa9f76bf168dd3b490a3a1"

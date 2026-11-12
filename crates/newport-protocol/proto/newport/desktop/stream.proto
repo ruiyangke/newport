@@ -1,0 +1,194 @@
+syntax = "proto3";
+package newport.desktop.stream;
+import "newport/desktop/common.proto";
+import "newport/desktop/configuration.proto";
+import "newport/wire.proto";
+
+message TerminalOpenArgs {
+  optional string server = 1;
+  optional string session = 2;
+  optional uint32 columns = 3;
+  optional uint32 rows = 4;
+  // Absence uses the source API default.
+  optional bool persist = 5;
+  // Absence uses the source API default.
+  optional bool attach = 6;
+  optional bytes colors = 7;
+}
+
+message CommandOpenArgs {
+  optional string server = 1;
+  optional string command = 2;
+}
+
+message RemoteAppsOpenArgs {
+  optional string server = 1;
+  repeated string arguments = 2;
+}
+
+message LspOpenArgs {
+  optional string server = 1;
+  newport.desktop.configuration.ConnectionScope expected = 2;
+  optional string root = 3;
+  optional string server_name = 4;
+  optional bool envrc = 5;
+}
+
+message TerminalOpened {
+  optional uint32 version = 1;
+  optional string session = 2;
+}
+
+message CommandOpened {
+  optional uint32 version = 1;
+  optional string server = 2;
+}
+
+message RemoteAppsOpened {
+  optional uint32 version = 1;
+  optional string server = 2;
+  optional uint32 service_version = 3;
+}
+
+message LspOpened {
+  optional uint32 version = 1;
+  optional string server = 2;
+}
+
+message Opened {
+  oneof value {
+    newport.desktop.stream.TerminalOpened terminal = 1;
+    newport.desktop.stream.CommandOpened command = 2;
+    newport.desktop.stream.RemoteAppsOpened remote_apps = 3;
+    newport.desktop.stream.LspOpened lsp = 4;
+  }
+}
+
+enum Ending {
+  ENDING_UNSPECIFIED = 0;
+  ENDING_EXITED = 1;
+  ENDING_STOPPED = 2;
+  ENDING_REFUSED = 3;
+  ENDING_LOST = 4;
+}
+
+message CommandCompletion {
+  optional uint32 status = 1;
+  optional string signal = 2;
+  optional newport.desktop.stream.Ending ending = 3;
+  optional bytes stderr = 4;
+  newport.wire.Error error = 5;
+}
+
+message LspCompletion {
+  newport.wire.Error error = 1;
+}
+
+message Completion {
+  oneof value {
+    newport.desktop.stream.CommandCompletion command = 1;
+    newport.desktop.stream.LspCompletion lsp = 2;
+  }
+}
+
+message OpaqueClient {
+  oneof value {
+    bytes data = 1;
+    newport.wire.Present input_complete = 2;
+  }
+}
+
+message OpaqueServer {
+  oneof value {
+    bytes data = 1;
+    newport.desktop.stream.Completion completion = 2;
+  }
+}
+
+message Input {
+  optional uint64 epoch = 1;
+  optional bytes data = 2;
+}
+
+message Resize {
+  optional uint32 columns = 1;
+  optional uint32 rows = 2;
+}
+
+message Ack {
+  optional uint64 bytes = 1;
+}
+
+message TerminalClient {
+  oneof value {
+    newport.desktop.stream.Input input = 1;
+    newport.desktop.stream.Resize resize = 2;
+    newport.desktop.stream.Ack ack = 3;
+    newport.wire.Present end = 4;
+    newport.wire.Present activate = 5;
+  }
+}
+
+message Output {
+  optional bytes data = 1;
+}
+
+message Taken {
+  optional uint64 bytes = 1;
+}
+
+message Restore {
+  optional bytes state = 1;
+  optional bool prompted = 2;
+}
+
+message Reconnecting {
+  optional uint32 attempt = 1;
+  optional string message = 2;
+}
+
+message Exit {
+  optional uint32 code = 1;
+}
+
+message Active {
+  optional bool active = 1;
+}
+
+// A new tab's shell that Needle couldn't hold: an ordinary shell runs
+// instead, and ends when the connection does. `reason` is Needle's.
+message NotHeld {
+  optional string reason = 1;
+}
+
+message TerminalEvent {
+  oneof value {
+    newport.wire.Present ready = 1;
+    newport.wire.Present persistent = 2;
+    newport.desktop.stream.Reconnecting reconnecting = 3;
+    newport.desktop.stream.Exit exit = 4;
+    newport.desktop.common.Failure error = 5;
+    newport.wire.Present ended = 6;
+    newport.desktop.stream.Active active = 7;
+    newport.wire.Present display_lost = 8;
+    newport.desktop.stream.NotHeld not_held = 9;
+  }
+}
+
+message TerminalServer {
+  oneof value {
+    newport.desktop.stream.Output output = 1;
+    newport.desktop.stream.Taken taken = 2;
+    newport.desktop.stream.Restore restore = 3;
+    newport.desktop.stream.TerminalEvent event = 4;
+  }
+}
+
+message Operation {
+  oneof value {
+    newport.desktop.stream.TerminalOpenArgs terminal = 1;
+    newport.desktop.stream.CommandOpenArgs command = 2;
+    newport.desktop.stream.RemoteAppsOpenArgs remote_apps = 3;
+    newport.desktop.stream.LspOpenArgs lsp = 4;
+  }
+}

@@ -1,0 +1,256 @@
+syntax = "proto3";
+package newport.desktop.applications;
+import "newport/desktop/configuration.proto";
+import "newport/remote/catalogue.proto";
+import "newport/runtime.proto";
+import "newport/wire.proto";
+
+message Runtime {
+  optional string instance = 1;
+  optional string build_sha256 = 2;
+  optional uint64 transport_generation = 3;
+}
+
+message Identity {
+  newport.desktop.applications.Runtime runtime = 1;
+  optional string session = 2;
+  optional string worker = 3;
+  optional uint64 display_generation = 4;
+}
+
+message Command {
+  repeated string argv = 1;
+}
+
+message Desktop {
+  optional string id = 1;
+  repeated string uris = 2;
+  optional string action = 3;
+}
+
+message Target {
+  oneof value {
+    newport.desktop.applications.Command command = 1;
+    newport.desktop.applications.Desktop desktop = 2;
+  }
+}
+
+message Outcome {
+  oneof value {
+    newport.wire.Present accepted = 1;
+    string rejected = 2;
+    string unknown = 3;
+  }
+}
+
+message Application {
+  newport.desktop.applications.Identity display = 1;
+  optional uint64 request = 2;
+}
+
+enum State {
+  STATE_UNSPECIFIED = 0;
+  STATE_PENDING = 1;
+  STATE_OPENING = 2;
+  STATE_BACKGROUND = 3;
+  STATE_RUNNING = 4;
+  STATE_STOPPING = 5;
+  STATE_ENDED = 6;
+}
+
+message Launched {
+  newport.desktop.applications.Application application = 1;
+  newport.desktop.applications.Outcome outcome = 2;
+}
+
+message OptionalDetail {
+  optional string detail = 1;
+}
+
+message Ending {
+  oneof value {
+    string failed = 1;
+    newport.desktop.applications.OptionalDetail no_window = 2;
+    newport.wire.Present handed_off = 3;
+    newport.wire.Present display_stopped = 4;
+    newport.desktop.applications.OptionalDetail shown_elsewhere = 5;
+  }
+}
+
+message Observation {
+  newport.desktop.applications.Application application = 1;
+  optional newport.desktop.applications.State state = 2;
+  optional string error = 3;
+  newport.desktop.applications.Ending ending = 4;
+}
+
+message Observations {
+  repeated newport.desktop.applications.Observation observations = 1;
+}
+
+message Shown {
+  optional string app_id = 1;
+  optional uint32 windows = 2;
+}
+
+message ShownOn {
+  optional string computer = 1;
+  optional string session = 2;
+}
+
+message Display {
+  newport.desktop.applications.ShownOn shown_on = 1;
+  repeated newport.desktop.applications.Shown applications = 2;
+}
+
+message Stopped {
+  optional bool stopped = 1;
+}
+
+enum Requirement {
+  REQUIREMENT_UNSPECIFIED = 0;
+  REQUIREMENT_DBUS = 1;
+  REQUIREMENT_XWAYLAND = 2;
+  REQUIREMENT_FONTS = 3;
+  REQUIREMENT_GLES = 4;
+  REQUIREMENT_PORTAL = 5;
+  REQUIREMENT_AUDIO = 6;
+}
+
+enum Inactive {
+  INACTIVE_UNSPECIFIED = 0;
+  INACTIVE_ROOT = 1;
+  INACTIVE_STOPPED = 2;
+  INACTIVE_FAILED = 3;
+}
+
+message Finding {
+  oneof value {
+    newport.wire.Present missing = 1;
+    string outdated = 2;
+    newport.desktop.applications.Inactive inactive = 3;
+    newport.wire.Present unverified = 4;
+  }
+}
+
+message Gap {
+  optional newport.desktop.applications.Requirement requirement = 1;
+  newport.desktop.applications.Finding finding = 2;
+}
+
+enum Elevation {
+  ELEVATION_UNSPECIFIED = 0;
+  ELEVATION_ROOT = 1;
+  ELEVATION_SUDO = 2;
+  ELEVATION_DOAS = 3;
+  ELEVATION_UNAVAILABLE = 4;
+}
+
+enum Updater {
+  UPDATER_UNSPECIFIED = 0;
+  UPDATER_RPM_OSTREE = 1;
+  UPDATER_TRANSACTIONAL_UPDATE = 2;
+}
+
+message Host {
+  optional newport.desktop.applications.Elevation elevation = 1;
+  optional newport.desktop.applications.Updater updater = 2;
+  optional bool user_services = 3;
+}
+
+message LegacyAgent {
+  optional string revision = 1;
+  optional string agent = 2;
+  optional uint64 built_at = 3;
+}
+
+message SelectedRuntime {
+  optional string build_sha256 = 1;
+  optional newport.runtime.Product product = 2;
+}
+
+message Availability {
+  optional string agent = 1;
+  optional string legacy_agent = 2;
+  optional string legacy_revision = 3;
+  repeated newport.desktop.applications.LegacyAgent legacy_agents = 4;
+  optional string system = 5;
+  optional string architecture = 6;
+  repeated newport.desktop.applications.Gap gaps = 7;
+  newport.desktop.applications.Host host = 8;
+  optional string os_release = 9;
+  newport.desktop.configuration.Server expected_server = 10;
+  optional newport.runtime.Product bundled_variant = 11;
+  optional string bundled_revision = 12;
+  optional uint64 total = 13;
+  optional newport.runtime.Product installed_variant = 14;
+  optional string revision = 15;
+  optional newport.desktop.configuration.BuildRelation build_relation = 16;
+  optional string installation_error = 17;
+  newport.desktop.applications.SelectedRuntime selected_runtime = 18;
+  optional string agent_error = 19;
+  newport.desktop.configuration.UpdateOutcome automatic_update = 20;
+}
+
+message StatusArgs {
+  optional string server = 1;
+  // Absence uses the source API default.
+  optional bool refresh = 2;
+}
+
+message CatalogueArgs {
+  optional string server = 1;
+  // Absence uses the source API default.
+  optional bool refresh = 2;
+}
+
+message DisplayArgs {
+  optional string server = 1;
+}
+
+message LaunchArgs {
+  optional string server = 1;
+  newport.desktop.configuration.ConnectionScope expected = 2;
+  newport.desktop.applications.Target target = 3;
+}
+
+message ShowArgs {
+  optional string server = 1;
+  newport.desktop.configuration.ConnectionScope expected = 2;
+}
+
+message StatesArgs {
+  optional string server = 1;
+  newport.desktop.configuration.ConnectionScope expected = 2;
+  repeated newport.desktop.applications.Application applications = 3;
+}
+
+message StopArgs {
+  optional string server = 1;
+  newport.desktop.configuration.ConnectionScope expected = 2;
+  newport.desktop.applications.Application application = 3;
+}
+
+message Operation {
+  oneof value {
+    newport.desktop.applications.StatusArgs status = 1;
+    newport.desktop.applications.CatalogueArgs catalogue = 2;
+    newport.desktop.applications.DisplayArgs display = 3;
+    newport.desktop.applications.LaunchArgs launch = 4;
+    newport.desktop.applications.ShowArgs show = 5;
+    newport.desktop.applications.StatesArgs states = 6;
+    newport.desktop.applications.StopArgs stop = 7;
+  }
+}
+
+message Reply {
+  oneof value {
+    newport.desktop.applications.Availability status = 1;
+    newport.remote.catalogue.Catalogue catalogue = 2;
+    newport.desktop.applications.Display display = 3;
+    newport.desktop.applications.Launched launch = 4;
+    newport.wire.Present show = 5;
+    newport.desktop.applications.Observations states = 6;
+    newport.desktop.applications.Stopped stop = 7;
+  }
+}

@@ -1,0 +1,27 @@
+syntax = "proto3";
+package newport.clipboard.helper;
+import "newport/wire.proto";
+message Board { oneof kind { newport.wire.Present general = 1; string test = 2; } }
+message Hello { uint32 version = 1; Board board = 2; }
+message Publish { uint64 generation = 1; int64 expected_revision = 2; repeated string formats = 3; }
+message AttachFiles { uint64 generation = 1; int64 expected_revision = 2; string folder = 3; }
+message Generation { uint64 generation = 1; }
+message Data { uint64 generation = 1; uint64 id = 2; uint64 offset = 3; bool eof = 4; bytes data = 5; }
+message Demand { uint64 generation = 1; uint64 id = 2; }
+message ReadLocal { uint64 id = 1; int64 revision = 2; string format = 3; }
+message Id { uint64 id = 1; }
+message Ready { uint32 version = 1; }
+message Snapshot { int64 revision = 1; repeated string formats = 2; optional uint64 origin = 3; }
+message Published { uint64 generation = 1; int64 revision = 2; }
+message Revision { uint64 generation = 1; optional int64 revision = 2; }
+message Read { uint64 generation = 1; uint64 id = 2; string format = 3; }
+message LocalData { uint64 id = 1; int64 revision = 2; uint64 offset = 3; bool eof = 4; bytes data = 5; }
+message CommandFrame { oneof command {
+ Hello hello = 1; Publish publish = 2; AttachFiles attach_files = 3; Generation revoke = 4;
+ Data data = 5; Demand failed = 6; ReadLocal read_local = 7; Id cancel_local = 8; newport.wire.Present stop = 9;
+} }
+message EventFrame { oneof event {
+ Ready ready = 1; Snapshot snapshot = 2; Published published = 3; Revision attached = 4;
+ Generation rejected = 5; Revision revoked = 6; Read read = 7; Demand cancelled = 8;
+ LocalData local_data = 9; Id local_failed = 10;
+} }

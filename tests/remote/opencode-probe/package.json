@@ -1,0 +1,9 @@
+{
+  "name": "newport-opencode-clipboard-probe",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@opentui/core": "0.6.6",
+    "clipboardy": "4.0.0"
+  }
+}

@@ -1,0 +1,2 @@
+#!/bin/sh
+exec podman --remote --url unix:///var/run/docker.sock "$@"

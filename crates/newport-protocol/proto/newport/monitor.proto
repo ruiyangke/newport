@@ -1,0 +1,625 @@
+syntax = "proto3";
+package newport.monitor;
+
+import "newport/wire.proto";
+import "newport/worker.proto";
+import "newport/discovery.proto";
+
+message StringList { repeated string values = 1; }
+message Label { string key = 1; string value = 2; }
+
+message MetricsSnapshot {
+  string hostname = 1;
+  string os = 2;
+  string kernel = 3;
+  uint32 cores = 4;
+  double uptime = 5;
+  repeated double load = 6;
+  double cpu = 7;
+  repeated MetricsCore cpus = 8;
+  uint64 memory_total = 9;
+  uint64 memory_used = 10;
+  uint64 swap_total = 11;
+  uint64 swap_used = 12;
+  repeated MetricsDisk disks = 13;
+  repeated MetricsNetwork network = 14;
+  repeated MetricsProcess processes = 15;
+  uint32 process_count = 16;
+}
+
+message MetricsCore {
+  uint32 id = 1;
+  double usage = 2;
+  repeated double history = 3;
+}
+
+message MetricsDisk {
+  string mount = 1;
+  string device = 2;
+  uint64 total = 3;
+  uint64 used = 4;
+  sint64 available = 5;
+}
+
+message MetricsNetwork {
+  string name = 1;
+  uint64 received = 2;
+  uint64 sent = 3;
+}
+
+message MetricsProcess {
+  uint32 pid = 1;
+  string user = 2;
+  double cpu = 3;
+  uint64 memory = 4;
+  string state = 5;
+  string name = 6;
+  optional uint64 elapsed = 7;
+  optional string command = 8;
+}
+
+
+enum ServicesScope {
+  SERVICES_SCOPE_UNSPECIFIED = 0;
+  SERVICES_SCOPE_SYSTEM = 1;
+  SERVICES_SCOPE_USER = 2;
+}
+
+enum ServicesPrivilege {
+  SERVICES_PRIVILEGE_UNSPECIFIED = 0;
+  SERVICES_PRIVILEGE_ROOT = 1;
+  SERVICES_PRIVILEGE_SUDO = 2;
+  SERVICES_PRIVILEGE_PASSWORD = 3;
+  SERVICES_PRIVILEGE_NONE = 4;
+}
+
+enum ServicesVerb {
+  SERVICES_VERB_UNSPECIFIED = 0;
+  SERVICES_VERB_START = 1;
+  SERVICES_VERB_STOP = 2;
+  SERVICES_VERB_RESTART = 3;
+  SERVICES_VERB_RELOAD = 4;
+  SERVICES_VERB_ENABLE = 5;
+  SERVICES_VERB_DISABLE = 6;
+}
+
+enum ServicesPriority {
+  SERVICES_PRIORITY_UNSPECIFIED = 0;
+  SERVICES_PRIORITY_ERR = 1;
+  SERVICES_PRIORITY_WARNING = 2;
+}
+
+enum ServicesExitKind {
+  SERVICES_EXIT_KIND_UNSPECIFIED = 0;
+  SERVICES_EXIT_KIND_EXITED = 1;
+  SERVICES_EXIT_KIND_KILLED = 2;
+  SERVICES_EXIT_KIND_DUMPED = 3;
+}
+
+message ServicesLogsRequest {
+  ServicesScope scope = 1;
+  optional string unit = 2;
+  optional ServicesPriority priority = 3;
+  optional string cursor = 4;
+  optional uint32 lines = 5;
+}
+
+message ServicesService {
+  string name = 1;
+  ServicesScope scope = 2;
+  string description = 3;
+  string load = 4;
+  string active = 5;
+  string sub = 6;
+  optional string enabled = 7;
+  optional uint32 main_pid = 8;
+  optional sint64 since = 9;
+  optional uint64 memory = 10;
+  optional double cpu = 11;
+  optional uint64 restarts = 12;
+  optional string result = 13;
+  optional sint64 exit_code = 14;
+  optional ServicesExitKind exit_kind = 15;
+  optional string fragment = 16;
+  repeated string drop_ins = 17;
+  repeated string triggered_by = 18;
+  optional string user = 19;
+}
+
+message ServicesTimer {
+  string name = 1;
+  ServicesScope scope = 2;
+  string description = 3;
+  string active = 4;
+  optional sint64 next = 5;
+  optional sint64 last = 6;
+  optional string unit = 7;
+}
+
+message ServicesUserManager {
+  bool available = 1;
+  optional string reason = 2;
+}
+
+message ServicesSnapshot {
+  repeated ServicesService services = 1;
+  repeated ServicesTimer timers = 2;
+  ServicesUserManager user = 3;
+  ServicesPrivilege privilege = 4;
+}
+
+message ServicesEntry {
+  optional sint64 at = 1;
+  optional uint32 priority = 2;
+  optional uint32 pid = 3;
+  optional string identifier = 4;
+  string message = 5;
+}
+
+message ServicesLogs {
+  repeated ServicesEntry entries = 1;
+  optional string cursor = 2;
+}
+
+message ServicesUnitFile {
+  string text = 1;
+}
+
+message ServicesActionReply {
+  bool ok = 1;
+  optional bool needs_password = 2;
+  optional string command = 3;
+}
+
+enum ContainersContainerVerb {
+  CONTAINERS_CONTAINER_VERB_UNSPECIFIED = 0;
+  CONTAINERS_CONTAINER_VERB_START = 1;
+  CONTAINERS_CONTAINER_VERB_STOP = 2;
+  CONTAINERS_CONTAINER_VERB_RESTART = 3;
+  CONTAINERS_CONTAINER_VERB_PAUSE = 4;
+  CONTAINERS_CONTAINER_VERB_UNPAUSE = 5;
+}
+
+enum ContainersProjectVerb {
+  CONTAINERS_PROJECT_VERB_UNSPECIFIED = 0;
+  CONTAINERS_PROJECT_VERB_START = 1;
+  CONTAINERS_PROJECT_VERB_STOP = 2;
+  CONTAINERS_PROJECT_VERB_RESTART = 3;
+}
+
+enum ContainersPruneTarget {
+  CONTAINERS_PRUNE_TARGET_UNSPECIFIED = 0;
+  CONTAINERS_PRUNE_TARGET_CONTAINERS = 1;
+  CONTAINERS_PRUNE_TARGET_DANGLING_IMAGES = 2;
+  CONTAINERS_PRUNE_TARGET_UNUSED_IMAGES = 3;
+  CONTAINERS_PRUNE_TARGET_BUILD_CACHE = 4;
+  CONTAINERS_PRUNE_TARGET_VOLUMES = 5;
+}
+
+enum ContainersContainerState {
+  CONTAINERS_CONTAINER_STATE_UNSPECIFIED = 0;
+  CONTAINERS_CONTAINER_STATE_CREATED = 1;
+  CONTAINERS_CONTAINER_STATE_RUNNING = 2;
+  CONTAINERS_CONTAINER_STATE_PAUSED = 3;
+  CONTAINERS_CONTAINER_STATE_RESTARTING = 4;
+  CONTAINERS_CONTAINER_STATE_REMOVING = 5;
+  CONTAINERS_CONTAINER_STATE_EXITED = 6;
+  CONTAINERS_CONTAINER_STATE_DEAD = 7;
+}
+
+enum ContainersContainerHealth {
+  CONTAINERS_CONTAINER_HEALTH_UNSPECIFIED = 0;
+  CONTAINERS_CONTAINER_HEALTH_HEALTHY = 1;
+  CONTAINERS_CONTAINER_HEALTH_UNHEALTHY = 2;
+  CONTAINERS_CONTAINER_HEALTH_STARTING = 3;
+}
+
+enum ContainersPortProtocol {
+  CONTAINERS_PORT_PROTOCOL_UNSPECIFIED = 0;
+  CONTAINERS_PORT_PROTOCOL_TCP = 1;
+  CONTAINERS_PORT_PROTOCOL_UDP = 2;
+  CONTAINERS_PORT_PROTOCOL_SCTP = 3;
+}
+
+enum ContainersLogStream {
+  CONTAINERS_LOG_STREAM_UNSPECIFIED = 0;
+  CONTAINERS_LOG_STREAM_STDOUT = 1;
+  CONTAINERS_LOG_STREAM_STDERR = 2;
+}
+
+enum ContainersDiskPart {
+  CONTAINERS_DISK_PART_UNSPECIFIED = 0;
+  CONTAINERS_DISK_PART_QUICK = 1;
+  CONTAINERS_DISK_PART_VOLUMES = 2;
+}
+
+message ContainersEngineInfo {
+  string version = 1;
+  string api_version = 2;
+  string os = 3;
+  bool rootless = 4;
+  bool podman = 5;
+}
+
+message ContainersContainerPort {
+  optional string ip = 1;
+  optional uint32 host_port = 2;
+  uint32 container_port = 3;
+  ContainersPortProtocol protocol = 4;
+}
+
+message ContainersComposeLabels {
+  string project = 1;
+  string service = 2;
+  bool oneoff = 3;
+  optional uint64 number = 4;
+  optional string working_dir = 5;
+  optional string config_files = 6;
+}
+
+message ContainersContainer {
+  string id = 1;
+  string name = 2;
+  string image = 3;
+  string image_id = 4;
+  string command = 5;
+  ContainersContainerState state = 6;
+  string status = 7;
+  optional ContainersContainerHealth health = 8;
+  optional sint64 exit_code = 9;
+  bool oom_killed = 10;
+  optional string error = 11;
+  uint64 restart_count = 12;
+  optional string restart_policy = 13;
+  sint64 created = 14;
+  optional sint64 started_at = 15;
+  optional sint64 finished_at = 16;
+  repeated ContainersContainerPort ports = 17;
+  ContainersComposeLabels compose = 18;
+  optional double cpu = 19;
+  optional uint64 memory = 20;
+  optional uint64 memory_limit = 21;
+}
+
+message ContainersContainersSnapshot {
+  ContainersEngineInfo engine = 1;
+  repeated ContainersContainer containers = 2;
+  bool truncated = 3;
+}
+
+message ContainersEnvVar {
+  string name = 1;
+  string value = 2;
+}
+
+message ContainersMount {
+  string kind = 1;
+  optional string source = 2;
+  string destination = 3;
+  optional string mode = 4;
+  bool rw = 5;
+  optional string name = 6;
+}
+
+message ContainersNetwork {
+  string name = 1;
+  optional string ip_address = 2;
+  repeated string aliases = 3;
+}
+
+message ContainersHealthcheck {
+  repeated string test = 1;
+  optional uint64 interval = 2;
+}
+
+message ContainersHealthResult {
+  sint64 at = 1;
+  sint64 exit_code = 2;
+  string output = 3;
+}
+
+message ContainersContainerInspect {
+  string id = 1;
+  string name = 2;
+  string image = 3;
+  sint64 created = 4;
+  StringList entrypoint = 5;
+  StringList cmd = 6;
+  optional string working_dir = 7;
+  optional string user = 8;
+  optional string hostname = 9;
+  repeated ContainersEnvVar env = 10;
+  repeated ContainersMount mounts = 11;
+  repeated ContainersNetwork networks = 12;
+  optional string restart_policy = 13;
+  repeated Label labels = 14;
+  ContainersHealthcheck healthcheck = 15;
+  repeated ContainersHealthResult last_health = 16;
+}
+
+message ContainersContainerLogEntry {
+  optional sint64 at = 1;
+  ContainersLogStream stream = 2;
+  string message = 3;
+  optional string container = 4;
+}
+
+message ContainersContainerLogPage {
+  repeated ContainersContainerLogEntry entries = 1;
+  optional string cursor = 2;
+}
+
+message ContainersDockerImage {
+  string id = 1;
+  repeated string tags = 2;
+  uint64 size = 3;
+  optional uint64 shared_size = 4;
+  sint64 created = 5;
+  uint64 containers = 6;
+  bool dangling = 7;
+}
+
+message ContainersDockerVolume {
+  string name = 1;
+  string driver = 2;
+  optional uint64 size = 3;
+  optional uint64 ref_count = 4;
+  bool anonymous = 5;
+  optional string compose = 6;
+}
+
+message ContainersDiskTotals {
+  uint64 count = 1;
+  uint64 size = 2;
+  uint64 reclaimable = 3;
+}
+
+message ContainersDockerTotals {
+  ContainersDiskTotals images = 1;
+  ContainersDiskTotals containers = 2;
+  ContainersDiskTotals volumes = 3;
+  ContainersDiskTotals build_cache = 4;
+}
+
+message ContainersDockerDisk {
+  repeated ContainersDockerImage images = 1;
+  repeated ContainersDockerVolume volumes = 2;
+  ContainersDockerTotals totals = 3;
+  bool volumes_measured = 4;
+}
+
+message ContainersPruned {
+  uint64 removed = 1;
+  uint64 reclaimed = 2;
+}
+
+message ContainersDone {
+  bool ok = 1;
+}
+
+message ContainersRemoved {
+  uint64 removed = 1;
+}
+
+enum ComposeCliKind {
+  COMPOSE_CLI_KIND_UNSPECIFIED = 0;
+  COMPOSE_CLI_KIND_PLUGIN = 1;
+  COMPOSE_CLI_KIND_STANDALONE = 2;
+  COMPOSE_CLI_KIND_PODMAN = 3;
+}
+
+enum ComposeState {
+  COMPOSE_STATE_UNSPECIFIED = 0;
+  COMPOSE_STATE_RUNNING = 1;
+  COMPOSE_STATE_SUCCEEDED = 2;
+  COMPOSE_STATE_FAILED = 3;
+  COMPOSE_STATE_CANCELLED = 4;
+}
+
+message ComposeCli {
+  ComposeCliKind kind = 1;
+  string version = 2;
+}
+
+message ComposeFile {
+  string path = 1;
+  optional string text = 2;
+  optional string error = 3;
+}
+
+message ComposeService {
+  string name = 1;
+  optional string image = 2;
+  bool build = 3;
+  repeated string profiles = 4;
+}
+
+message ComposeProject {
+  ComposeCli cli = 1;
+  optional string cli_error = 2;
+  optional string working_dir = 3;
+  repeated string config_files = 4;
+  repeated ComposeFile files = 5;
+  ComposeServiceList services = 6;
+  optional string config_error = 7;
+}
+
+message ComposeStarted {
+  string job = 1;
+}
+
+message ComposeJob {
+  string job = 1;
+  string project = 2;
+  string command = 3;
+  ComposeState state = 4;
+  optional sint32 exit_code = 5;
+  sint64 started_at = 6;
+  optional sint64 finished_at = 7;
+  string output = 8;
+  uint64 offset = 9;
+}
+
+message ComposeJobs {
+  repeated ComposeJob jobs = 1;
+}
+
+message ComposeDone {
+  bool ok = 1;
+}
+
+message WatchRequest {
+  string watch = 1;
+  string root = 2;
+  repeated string directories = 3;
+  optional string cursor = 4;
+}
+
+message WatchReply {
+  optional string cursor = 1;
+  repeated string paths = 2;
+  bool reset = 3;
+}
+
+message DisplayState {
+  bool running = 1;
+  DisplayViewer viewer = 2;
+}
+
+message DisplayViewer {
+  string session = 1;
+  optional string computer = 2;
+}
+
+message ServicesUnit { ServicesScope scope = 1; string unit = 2; }
+message ServicesAction { ServicesScope scope = 1; string unit = 2; ServicesVerb verb = 3; }
+message ServicesRequest {
+  oneof operation {
+    newport.wire.Present snapshot = 1;
+    ServicesLogsRequest logs = 2;
+    ServicesUnit unit = 3;
+    ServicesAction action = 4;
+  }
+}
+message ServicesReply {
+  oneof result {
+    ServicesSnapshot snapshot = 1;
+    ServicesLogs logs = 2;
+    ServicesUnitFile unit = 3;
+    ServicesActionReply action = 4;
+  }
+}
+message ContainersTarget { string container = 1; }
+message ContainersLogsRequest {
+  oneof target { string container = 1; string project = 2; }
+  optional string cursor = 3;
+  optional uint32 lines = 4;
+}
+message ContainersAction { string container = 1; ContainersContainerVerb verb = 2; }
+message ContainersProjectAction { string project = 1; ContainersProjectVerb verb = 2; repeated string expected_ids = 3; }
+message ContainersRemove { repeated string containers = 1; }
+message ContainersDiskRequest { optional ContainersDiskPart part = 1; }
+message ContainersPrune { ContainersPruneTarget what = 1; }
+message ContainersRequest {
+  oneof operation {
+    newport.wire.Present snapshot = 1;
+    ContainersTarget inspect = 2;
+    ContainersLogsRequest logs = 3;
+    ContainersAction action = 4;
+    ContainersProjectAction project_action = 5;
+    ContainersRemove remove = 6;
+    ContainersDiskRequest disk = 7;
+    ContainersPrune prune = 8;
+  }
+}
+message ContainersReply {
+  oneof result {
+    ContainersContainersSnapshot snapshot = 1;
+    ContainersContainerInspect inspect = 2;
+    ContainersContainerLogPage logs = 3;
+    ContainersDone action = 4;
+    ContainersDone project_action = 5;
+    ContainersRemoved removed = 6;
+    ContainersDockerDisk disk = 7;
+    ContainersPruned pruned = 8;
+  }
+}
+message ComposeUp { repeated string services = 1; bool build = 2; bool pull = 3; bool force_recreate = 4; }
+message ComposeDown { bool volumes = 1; bool remove_orphans = 2; }
+message ComposePull { repeated string services = 1; }
+message ComposeBuild { repeated string services = 1; bool no_cache = 2; }
+message ComposeScale { string service = 1; uint32 replicas = 2; }
+message ComposeAction {
+  oneof operation {
+    ComposeUp up = 1;
+    ComposeDown down = 2;
+    ComposePull pull = 3;
+    ComposeBuild build = 4;
+    ComposeScale scale = 5;
+  }
+}
+message ComposeProjectRequest { string project = 1; }
+message ComposeRun { string project = 1; ComposeAction action = 2; }
+message ComposeJobRequest { string job = 1; uint64 offset = 2; }
+message ComposeCancel { string job = 1; }
+message ComposeRequest {
+  oneof operation {
+    ComposeProjectRequest project = 1;
+    ComposeRun run = 2;
+    ComposeJobRequest job = 3;
+    ComposeCancel cancel = 4;
+    newport.wire.Present jobs = 5;
+  }
+}
+message ComposeReply {
+  oneof result {
+    ComposeProject project = 1;
+    ComposeStarted started = 2;
+    ComposeJob job = 3;
+    ComposeDone cancelled = 4;
+    ComposeJobs jobs = 5;
+  }
+}
+message Call {
+  reserved 7;
+  reserved "ports";
+  uint64 id = 1;
+  oneof request {
+    newport.wire.Present metrics = 2;
+    newport.wire.Present stable_display = 3;
+    ServicesRequest services = 4;
+    ContainersRequest containers = 5;
+    ComposeRequest compose = 6;
+    newport.discovery.Request discovery = 9;
+    WatchRequest file_watch = 8;
+  }
+}
+message Response {
+  reserved 7;
+  reserved "ports";
+  uint64 id = 1;
+  oneof reply {
+    MetricsSnapshot metrics = 2;
+    DisplayState stable_display = 3;
+    ServicesReply services = 4;
+    ContainersReply containers = 5;
+    ComposeReply compose = 6;
+    newport.discovery.Snapshot discovery = 10;
+    WatchReply file_watch = 8;
+    newport.wire.Error error = 9;
+  }
+}
+message ClientFrame {
+  oneof message {
+    Call call = 1;
+    newport.worker.ClientControl worker_control = 127;
+  }
+}
+message ServerFrame {
+  oneof message {
+    Response response = 1;
+    newport.worker.ServerControl worker_control = 127;
+  }
+}
+
+message ComposeServiceList { repeated ComposeService values = 1; }
